@@ -1,0 +1,249 @@
+#!/bin/bash
+# Absolute path to this script, e.g. /home/user/bin/foo.sh
+SCRIPT=$(readlink -f "$0")
+# Absolute path this script is in, thus /home/user/bin
+SCRIPTPATH=$(dirname "$SCRIPT")
+cd $SCRIPTPATH
+args=("$@")
+
+
+# Header
+echo
+echo
+COLUMNS=$(tput cols) 
+title="||  MOBS encoder ||" 
+printf "%*s\n" $(((${#title}+$COLUMNS)/2)) "$title"
+title="june 2018" 
+printf "%*s\n" $(((${#title}+$COLUMNS)/2)) "$title"
+title="email : t.balenbois@gmail.com" 
+printf "%*s\n" $(((${#title}+$COLUMNS)/2)) "$title"
+
+echo
+echo
+
+
+# Machine specification
+unameOut="$(uname -s)"
+case "${unameOut}" in
+	Linux*)	base="home"
+	;;
+	Darwin*)	base="users"
+	;;
+	*)	base="home"
+	;;
+esac
+
+
+POSITIONAL=()
+while [[ $# -gt 0 ]]
+do
+key="$1"
+
+case $key in
+    -v|--version)
+    VERSION="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    -f|--filter)
+    FILTERTYPE="$2"
+    shift # past argument
+    shift # past value
+    ;;
+esac
+done
+set -- "${POSITIONAL[@]}" # restore positional parameters
+
+
+
+# Depending on version called, loads correct python script
+username=$USER
+json="/$base/$username/Dropbox/Kteam/PrgMatlab/OnlinePlaceDecoding/python/client_secret.json"
+modules="/$base/$username/Dropbox/Kteam/PrgMatlab/OnlinePlaceDecoding/python"
+prjpath="/$base/$username/Dropbox/Kteam/PrgMatlab/OnlinePlaceDecoding"
+
+script_path="encodeByUnit.py"
+# Input and help
+echo Hello dear MOBSter ! Welcome to the encoder.
+
+echo What is the full path to your Mouse''s xml, as /path/to/file.xml ?
+read xml_path
+if [[ $xml_path == "test" ]]; then
+	# xml_path="/home/$username/Documents/dataset/test_set/ERC-Mouse-743-01062018-Hab.xml"
+	echo test set not active at the moment, I am sorry for everything
+	echo type 'help' to get a description of what the encoder needs.
+	exit 0
+elif [[ $xml_path == "help" ]]; then
+	echo
+	echo What the encoder needs is fourfold :
+	echo
+	echo --- First, the .clu files.
+	echo --- Second, the .spk and .res files.
+	echo --- Third, the behavRessources.mat containing variables Xtsd, Ytsd, and Vtsd.
+	echo --- Fourth, the xml file of this recording, the path of which you should give me. Other files must be in the same directory.
+	echo
+	echo If you just want to test the encoder on a test set, just type test !
+	echo Good luck !
+	echo
+	exit 0
+fi
+
+
+
+
+if [[ `echo $xml_path | cut -c ${#xml_path}` == \' ]]; then
+	temp=${#xml_path}
+	temp=`expr ${#xml_path} - 1`
+	xml_path=`echo $xml_path | cut -c-$temp`
+fi
+if [[ `echo $xml_path | cut -c 1` == \' ]]; then
+	xml_path=`echo $xml_path | cut -c2-${#xml_path}`
+fi
+path=$(dirname "${xml_path}")
+path="$path/"
+jsonPath="${xml_path::-3}json"
+
+
+
+
+
+# If some files are missing, run some matlab code to generate them
+log=mlog.out
+if [ ! -f "$path""behavResources.mat" ] || [ ! -f "$path""$log" ]
+then
+
+	rm -f $path$log
+	echo
+	echo MATLAB is now exporting behavior data, please see $log for more infos.
+cat <<EOF | matlab -nodesktop -nosplash -nodisplay /> $path$log
+	cd $prjpath
+	LoadPATHencoder $username;
+	cd $path;
+	export_spikes;
+	exit
+EOF
+
+	matlabExitCatch=$?
+	if test $matlabExitCatch -ne 0; then
+		echo
+		echo Matlab was unable to extract data from "$path""behavResources.mat", does this file exist ?
+		exit 1
+	fi
+	touch $path$log
+	echo Behavior data exported.
+fi
+
+
+# From log file, extract some behavioural metadata (number of groups, start and stop time)
+file=$path$log
+while IFS= read -r line
+do
+
+	if [[ `echo $line | cut -c-8` == 'n_groups' ]]; then
+		n_tetrodes=`echo $line | cut -c12-`
+
+	elif [[ `echo $line | cut -c-8` == 'end_time' ]]; then
+		size=${#line}
+		end=$(( $size-4 ))
+		begin=12
+		stop_time=`echo $line | cut -c$begin-$end`
+
+	elif [[ `echo $line | cut -c-10` == 'start_time'  ]]; then
+		size=${#line}
+		end=$(( $size-4 ))
+		begin=14
+		start_time=`echo $line | cut -c$begin-$end`
+	fi
+
+done < $file
+
+
+
+
+
+
+echo
+echo beginning of tracking at  $start_time sec
+echo end of tracking at        $stop_time sec
+echo For fine tuning of parameters, you should check the HEADER of "$script_path"
+echo
+
+
+
+
+
+# Check which library has to be installed, if any
+if command -v python3 &>/dev/null;then
+	echo python3 is installed.
+else
+	echo
+	echo Please install python3 !
+	echo 
+	exit 0
+fi
+
+importList="numpy tensorflow matplotlib scipy sklearn json struct bisect tables tqdm"
+librariesToInstall=""
+for lib in $importList; do
+	python3 -c "import $lib"
+	if test $? -eq 1; then
+		librariesToInstall="$librariesToInstall""$lib "
+	else
+		echo $lib is installed.
+	fi
+done
+
+if [ "$librariesToInstall" == "" ]
+then
+	echo Everything is installed.
+else
+	echo 
+	echo Please install the following with pip3: "$librariesToInstall"
+	exit 1
+fi
+
+
+if [ "$FILTERTYPE" = "external" ]
+then
+	echo using external filter
+else
+	echo filtering data ourselves
+	FILTERTYPE=internal
+fi
+
+python3 $script_path $path $stop_time $start_time $modules $json $xml_path $FILTERTYPE
+exitcatch=$?
+if test $exitcatch -ne 0; then
+	if test $exitcatch -eq 1; then
+		echo
+		echo Encoding failed. Script used was $script_path
+		exit 1
+	elif test $exitcatch -eq 2; then
+		echo
+		echo Encoding succeeded. However, results have not been sent to the google server. Not a big deal.
+		exit 0
+	elif test $exitcatch -eq 3; then
+		echo
+		echo Encoding seems to have succed, but we\'ll not be plotting anything.
+		exit 0
+	elif test $exitcatch -eq 4; then
+		echo
+		echo We\'re unable to load "$xml_path", does this file exist ?
+		exit 1
+	elif test $exitcatch -eq 5; then
+		echo 
+		echo Dimensions of speed and positions in behaviour data do not match.
+		exit 1
+	else
+		echo
+		echo Something unforeseen has happened. We think encoding has failed. Script used was $script_path
+		exit 1
+	fi
+fi
+
+echo
+echo
+echo Encoding over.
+
+
+/$base/$username/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
