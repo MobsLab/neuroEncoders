@@ -232,100 +232,100 @@ class spikeNet:
 
 
 
-# ### Training model
-# with tf.Graph().as_default():
+### Training model
+with tf.Graph().as_default():
 
-# 	print()
-# 	print('TRAINING')
+	print()
+	print('TRAINING')
 
-# 	dataIterator, trainingTensors, dataPlaceholders = datasetMaker.makeDataset(params, training=True)
-# 	with tf.device(device_name):
-# 		spkParserNet = []
-# 		allFeatures = []
+	dataIterator, trainingTensors, dataPlaceholders = datasetMaker.makeDataset(params, training=True)
+	with tf.device(device_name):
+		spkParserNet = []
+		allFeatures = []
 
-# 		# CNN plus dense on every group indepedently
-# 		for group in range(params.nGroups):
-# 			spkParserNet.append(spikeNet(nChannels=params.nChannels, device=device_name, nFeatures=params.nFeatures))
+		# CNN plus dense on every group indepedently
+		for group in range(params.nGroups):
+			spkParserNet.append(spikeNet(nChannels=params.nChannels, device=device_name, nFeatures=params.nFeatures))
 
-# 			x = spkParserNet[group].apply(trainingTensors[2*group+2])
-# 			x = tf.reshape(tf.matmul(trainingTensors[2*group+3], x), [-1, params.batch_size, spkParserNet[group].nFeatures])
-# 			# x = spkParserNet[group].apply(tf.tensordot(trainingTensors[2*group+3], trainingTensors[2*group+2], axes=[[1],[0]]))
-# 			# x = tf.reshape(x, [-1, params.batch_size, spkParserNet[group].nFeatures])
-# 			allFeatures.append( x )
-# 		allFeatures = tf.tuple(allFeatures)
-# 		allFeatures = tf.concat(allFeatures, axis=2)
+			x = spkParserNet[group].apply(trainingTensors[2*group+2])
+			x = tf.reshape(tf.matmul(trainingTensors[2*group+3], x), [-1, params.batch_size, spkParserNet[group].nFeatures])
+			# x = spkParserNet[group].apply(tf.tensordot(trainingTensors[2*group+3], trainingTensors[2*group+2], axes=[[1],[0]]))
+			# x = tf.reshape(x, [-1, params.batch_size, spkParserNet[group].nFeatures])
+			allFeatures.append( x )
+		allFeatures = tf.tuple(allFeatures)
+		allFeatures = tf.concat(allFeatures, axis=2)
 
-# 		# LSTM on the concatenated outputs of previous graphs
-# 		if device_name=="/gpu:0":
-# 			lstm = tf.contrib.cudnn_rnn.CudnnLSTM(params.lstmLayers, params.lstmSize, dropout=params.lstmDropout)
-# 			outputs, finalState = lstm(allFeatures, training=True)
-# 		else:
-# 			lstm = [layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
-# 			lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
-# 			outputs, finalState = tf.nn.dynamic_rnn(
-# 				lstm, 
-# 				allFeatures, 
-# 				dtype=tf.float32, 
-# 				time_major=params.timeMajor, 
-# 				sequence_length=trainingTensors[1])
+		# LSTM on the concatenated outputs of previous graphs
+		if device_name=="/gpu:0":
+			lstm = tf.contrib.cudnn_rnn.CudnnLSTM(params.lstmLayers, params.lstmSize, dropout=params.lstmDropout)
+			outputs, finalState = lstm(allFeatures, training=True)
+		else:
+			lstm = [layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
+			lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
+			outputs, finalState = tf.nn.dynamic_rnn(
+				lstm, 
+				allFeatures, 
+				dtype=tf.float32, 
+				time_major=params.timeMajor, 
+				sequence_length=trainingTensors[1])
 
-# 	# dense to extract regression on output and loss
-# 	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
-# 	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
-# 	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
+	# dense to extract regression on output and loss
+	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
+	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
+	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
 
-# 	output = last_relevant(outputs, trainingTensors[1], timeMajor=params.timeMajor)
-# 	outputLoss = denseLoss2(denseLoss1(output))[:,0]
-# 	outputPos = denseOutput(output)
+	output = last_relevant(outputs, trainingTensors[1], timeMajor=params.timeMajor)
+	outputLoss = denseLoss2(denseLoss1(output))[:,0]
+	outputPos = denseOutput(output)
 
-# 	lossPos =  tf.losses.mean_squared_error(outputPos, trainingTensors[0], reduction=tf.losses.Reduction.NONE)
-# 	lossPos =  tf.reduce_mean(lossPos, axis=1)
-# 	lossLoss = tf.losses.mean_squared_error(outputLoss, lossPos)
-# 	lossPos  = tf.reduce_mean(lossPos)
+	lossPos =  tf.losses.mean_squared_error(outputPos, trainingTensors[0], reduction=tf.losses.Reduction.NONE)
+	lossPos =  tf.reduce_mean(lossPos, axis=1)
+	lossLoss = tf.losses.mean_squared_error(outputLoss, lossPos)
+	lossPos  = tf.reduce_mean(lossPos)
 
-# 	optimizers = []
-# 	for lr in range(len(params.learningRates)):
-# 		optimizers.append(tf.train.RMSPropOptimizer(params.learningRates[lr]).minimize(lossPos + lossLoss))
-# 	saver = tf.train.Saver()
+	optimizers = []
+	for lr in range(len(params.learningRates)):
+		optimizers.append(tf.train.RMSPropOptimizer(params.learningRates[lr]).minimize(lossPos + lossLoss))
+	saver = tf.train.Saver()
 
 
 
-# 	### Training and testing
-# 	trainLosses = []
-# 	with tf.Session() as sess:
+	### Training and testing
+	trainLosses = []
+	with tf.Session() as sess:
 
-# 		# initialize variables and input framework
-# 		sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
-# 		sess.run(dataIterator.initializer, 
-# 			feed_dict={dataPlaceholders['groups']:GRP_train, 
-# 			dataPlaceholders['timeStamps']:SPT_train, 
-# 			dataPlaceholders['spikes']:SPK_train, 
-# 			dataPlaceholders['positions']:POS_train / np.max(POS_train)})
+		# initialize variables and input framework
+		sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
+		sess.run(dataIterator.initializer, 
+			feed_dict={dataPlaceholders['groups']:GRP_train, 
+			dataPlaceholders['timeStamps']:SPT_train, 
+			dataPlaceholders['spikes']:SPK_train, 
+			dataPlaceholders['positions']:POS_train / np.max(POS_train)})
 
-# 		### training
-# 		epoch_loss = 0
-# 		epoch_loss2 = 0
-# 		loopSize = 50
-# 		t = trange(params.nSteps, desc='Bar desc', leave=True)
-# 		for i in t:
+		### training
+		epoch_loss = 0
+		epoch_loss2 = 0
+		loopSize = 50
+		t = trange(params.nSteps, desc='Bar desc', leave=True)
+		for i in t:
 
-# 			for lr in range(len(params.learningRates)):
-# 				if (i < (lr+1) * params.nSteps / len(params.learningRates)) and (i >= lr * params.nSteps / len(params.learningRates)):
-# 					_, c, c2 = sess.run([optimizers[lr], lossPos, lossLoss])
-# 					break
-# 				if lr==len(params.learningRates)-1:
-# 					print('not run:',i)
-# 			t.set_description("loss: %f" % c)
-# 			t.refresh()
-# 			epoch_loss += c
-# 			epoch_loss2 += c2
+			for lr in range(len(params.learningRates)):
+				if (i < (lr+1) * params.nSteps / len(params.learningRates)) and (i >= lr * params.nSteps / len(params.learningRates)):
+					_, c, c2 = sess.run([optimizers[lr], lossPos, lossLoss])
+					break
+				if lr==len(params.learningRates)-1:
+					print('not run:',i)
+			t.set_description("loss: %f" % c)
+			t.refresh()
+			epoch_loss += c
+			epoch_loss2 += c2
 			
-# 			if i%loopSize==0 and (i != 0):
-# 				trainLosses.append(np.array([epoch_loss/loopSize, epoch_loss2/loopSize]))
-# 				epoch_loss=0
-# 				epoch_loss2=0
+			if i%loopSize==0 and (i != 0):
+				trainLosses.append(np.array([epoch_loss/loopSize, epoch_loss2/loopSize]))
+				epoch_loss=0
+				epoch_loss2=0
 
-# 		saver.save(sess, projectPath.folder + '_graphForRnn')
+		saver.save(sess, projectPath.folder + '_graphForRnn')
 
 
 
@@ -440,124 +440,124 @@ class spikeNet:
 
 
 
-# ### Back compatibility converting before inferring
-# variables = []
-# with tf.Graph().as_default(), tf.device("/cpu:0"):
+### Back compatibility converting before inferring
+variables = []
+with tf.Graph().as_default(), tf.device("/cpu:0"):
 
 
-# 	# one CNN network per group of electrode
-# 	embeddings = []
-# 	for group in range(params.nGroups):
-# 		with tf.variable_scope("group"+str(group)+"-encoder"):
-# 			x = tf.placeholder(tf.float32, shape=[None, params.nChannels, 32], name="x")
-# 			realSpikes = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
-# 			nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
-# 			completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(realSpikes))[:,0,:], [1,0], name="completion")
-# 			x = tf.boolean_mask(x, realSpikes)
-# 		newSpikeNet = spikeNet(nChannels=params.nChannels, device="/cpu:0", nFeatures=params.nFeatures)
-# 		x = newSpikeNet.apply(x)
-# 		x = tf.matmul(completionTensor, x)
-# 		# x = tf.pad(x, [[0,0],[group*params.nFeatures, (params.nGroups-group-1)*params.nFeatures]], "CONSTANT")
+	# one CNN network per group of electrode
+	embeddings = []
+	for group in range(params.nGroups):
+		with tf.variable_scope("group"+str(group)+"-encoder"):
+			x = tf.placeholder(tf.float32, shape=[None, params.nChannels, 32], name="x")
+			realSpikes = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
+			nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
+			completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(realSpikes))[:,0,:], [1,0], name="completion")
+			x = tf.boolean_mask(x, realSpikes)
+		newSpikeNet = spikeNet(nChannels=params.nChannels, device="/cpu:0", nFeatures=params.nFeatures)
+		x = newSpikeNet.apply(x)
+		x = tf.matmul(completionTensor, x)
+		# x = tf.pad(x, [[0,0],[group*params.nFeatures, (params.nGroups-group-1)*params.nFeatures]], "CONSTANT")
 
-# 		embeddings.append(x)
-# 		variables += newSpikeNet.variables()
-# 	fullEmbedding = tf.concat(embeddings, axis=1)
-# 	# fullEmbedding = tf.concat(embeddings, axis=0)
+		embeddings.append(x)
+		variables += newSpikeNet.variables()
+	fullEmbedding = tf.concat(embeddings, axis=1)
+	# fullEmbedding = tf.concat(embeddings, axis=0)
 
 	
-# 	# LSTM on concatenated outputs
-# 	with tf.variable_scope("cudnn_lstm"):
-# 		lstm = tf.nn.rnn_cell.MultiRNNCell(
-# 			[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
-# 		outputs, finalState = tf.nn.dynamic_rnn(
-# 			lstm, 
-# 			tf.expand_dims(fullEmbedding, axis=1), 
-# 			dtype=tf.float32, 
-# 			time_major=params.timeMajor)
-# 		variables += lstm.variables
+	# LSTM on concatenated outputs
+	with tf.variable_scope("cudnn_lstm"):
+		lstm = tf.nn.rnn_cell.MultiRNNCell(
+			[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
+		outputs, finalState = tf.nn.dynamic_rnn(
+			lstm, 
+			tf.expand_dims(fullEmbedding, axis=1), 
+			dtype=tf.float32, 
+			time_major=params.timeMajor)
+		variables += lstm.variables
 
-# 	# Final position decoder
-# 	output = tf.cond(tf.shape(outputs)[0]>0, lambda: outputs[-1,:,:], lambda: outputs)
-# 	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
-# 	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
-# 	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
+	# Final position decoder
+	output = tf.cond(tf.shape(outputs)[0]>0, lambda: outputs[-1,:,:], lambda: outputs)
+	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
+	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
+	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
 
-# 	x = denseOutput(tf.reshape(output, [-1,params.lstmSize]))
-# 	y = denseLoss2(denseLoss1(tf.reshape(output, [-1,params.lstmSize])))
-# 	variables += denseOutput.variables
-# 	variables += denseLoss1.variables
-# 	variables += denseLoss2.variables
+	x = denseOutput(tf.reshape(output, [-1,params.lstmSize]))
+	y = denseLoss2(denseLoss1(tf.reshape(output, [-1,params.lstmSize])))
+	variables += denseOutput.variables
+	variables += denseLoss1.variables
+	variables += denseLoss2.variables
 
-# 	with tf.variable_scope("bayesianDecoder"):
-# 		position = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(x, [2]), lambda: tf.constant([0,0], dtype=tf.float32)), name="positionGuessed")
-# 		loss     = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(y, [1]), lambda: tf.constant([0], dtype=tf.float32)), name="standardDeviation")
-# 		fakeProba= tf.constant(np.zeros([45,45]), dtype=tf.float32, name="positionProba")		
+	with tf.variable_scope("bayesianDecoder"):
+		position = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(x, [2]), lambda: tf.constant([0,0], dtype=tf.float32)), name="positionGuessed")
+		loss     = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(y, [1]), lambda: tf.constant([0], dtype=tf.float32)), name="standardDeviation")
+		fakeProba= tf.constant(np.zeros([45,45]), dtype=tf.float32, name="positionProba")		
 	
-# 	subGraphToRestore = tf.train.Saver({v.op.name: v for v in variables})
+	subGraphToRestore = tf.train.Saver({v.op.name: v for v in variables})
 
-# 	### Converting
-# 	graphToSave = tf.train.Saver()
-# 	with tf.Session() as sess:
-# 		subGraphToRestore.restore(sess, projectPath.folder + '_graphForRnn')
-# 		graphToSave.save(sess, projectPath.folder + '_graphDecoder')
+	### Converting
+	graphToSave = tf.train.Saver()
+	with tf.Session() as sess:
+		subGraphToRestore.restore(sess, projectPath.folder + '_graphForRnn')
+		graphToSave.save(sess, projectPath.folder + '_graphDecoder')
 
 
 
-# ### Loading and inferring
-# tf.contrib.rnn
-# with tf.Graph().as_default(), tf.device("/cpu:0"):
-# 	saver = tf.train.import_meta_graph(projectPath.folder + '_graphDecoder.meta')
+### Loading and inferring
+tf.contrib.rnn
+with tf.Graph().as_default(), tf.device("/cpu:0"):
+	saver = tf.train.import_meta_graph(projectPath.folder + '_graphDecoder.meta')
 
-# 	def getSpikes(bin, group):
-# 		binStart = SPT_test[0] + bin*params.windowLength
-# 		return SPK_test[
-# 			np.logical_and(
-# 				np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength),
-# 				GRP_test==group)]
-# 	def getSpikesWithBlanks(bin, group):
-# 		binStart = SPT_test[0] + bin*params.windowLength
-# 		spikes = SPK_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]
-# 		groups = GRP_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]==group
-# 		for spk in range(spikes.shape[0]):
-# 			spikes[spk,:,:] *= groups[spk]
-# 		return spikes
+	def getSpikes(bin, group):
+		binStart = SPT_test[0] + bin*params.windowLength
+		return SPK_test[
+			np.logical_and(
+				np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength),
+				GRP_test==group)]
+	def getSpikesWithBlanks(bin, group):
+		binStart = SPT_test[0] + bin*params.windowLength
+		spikes = SPK_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]
+		groups = GRP_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]==group
+		for spk in range(spikes.shape[0]):
+			spikes[spk,:,:] *= groups[spk]
+		return spikes
 
-# 	with tf.Session() as sess:
-# 		saver.restore(sess, projectPath.folder + '_graphDecoder')
+	with tf.Session() as sess:
+		saver.restore(sess, projectPath.folder + '_graphDecoder')
 
-# 		testOutput = []
-# 		for bin in trange(int((SPT_test[-1]-SPT_test[0])//params.windowLength)-1):
-# 			testOutput.append(np.concatenate(
-# 				sess.run(
-# 					[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
-# 					 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")], 
-# 					{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):getSpikesWithBlanks(bin, group)
-# 						for group in range(params.nGroups)}), 
-# 				axis=0))
+		testOutput = []
+		for bin in trange(int((SPT_test[-1]-SPT_test[0])//params.windowLength)-1):
+			testOutput.append(np.concatenate(
+				sess.run(
+					[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
+					 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")], 
+					{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):getSpikesWithBlanks(bin, group)
+						for group in range(params.nGroups)}), 
+				axis=0))
 
-# 	testOutput = np.array(testOutput)
+	testOutput = np.array(testOutput)
 
-# 	pos = []
-# 	spd = []
-# 	n = 0
-# 	bin_stop = SPT_test[0]
-# 	while True:
-# 		bin_stop = bin_stop + params.windowLength
-# 		if bin_stop > SPT_test[-1]:
-# 			break
-# 		idx=n
-# 		while SPT_test[n] < bin_stop:
-# 			n += 1
-# 		pos.append(np.mean(POS_test[idx:n,:], axis=0))
-# 		spd.append(np.mean(SPD_test[idx:n,:]))
-# 	pos.pop()
-# 	spd.pop()
-# 	pos = np.array(pos) / np.max(POS_train)
-# 	spd = np.array(spd)
+	pos = []
+	spd = []
+	n = 0
+	bin_stop = SPT_test[0]
+	while True:
+		bin_stop = bin_stop + params.windowLength
+		if bin_stop > SPT_test[-1]:
+			break
+		idx=n
+		while SPT_test[n] < bin_stop:
+			n += 1
+		pos.append(np.mean(POS_test[idx:n,:], axis=0))
+		spd.append(np.mean(SPD_test[idx:n,:]))
+	pos.pop()
+	spd.pop()
+	pos = np.array(pos) / np.max(POS_train)
+	spd = np.array(spd)
 
-# 	fileName = projectPath.folder + '_resultsForRnn_temp'
-# 	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
-# 	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
+	fileName = projectPath.folder + '_resultsForRnn_temp'
+	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
+	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
 
 
 
@@ -570,19 +570,17 @@ outjsonStr = {};
 outjsonStr['encodingPrefix'] = projectPath.folder + '_graphDecoder'
 outjsonStr['mousePort'] = 0
 
-outjsonStr['nGroups'] = params.nGroups
+outjsonStr['nGroups'] = int(params.nGroups)
 idx=0
 for group in range(len(spikeDetector.list_channels)):
     if os.path.isfile(projectPath.xml[:len(projectPath.xml)-3] + 'clu.' + str(group+1)):
         outjsonStr['group'+str(group-idx)]={}
         outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
         for chnl in range(len(spikeDetector.list_channels[group])):
-            outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=spikeDetector.list_channels[group][chnl]
-            outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=rawSpikes['thresholds'][group][chnl]
+            outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
+            outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
     else:
         idx+=1
-
-outjsonStr['windowHalfLength'] = windowHalfLength
 
 outjsonStr['nStimConditions'] = 1
 outjsonStr['stimCondition0'] = {}
@@ -593,6 +591,8 @@ outjsonStr['stimCondition0']['lowerY'] = 0.0
 outjsonStr['stimCondition0']['higherY'] = 0.0
 outjsonStr['stimCondition0']['lowerDev'] = 0.0
 outjsonStr['stimCondition0']['higherDev'] = 0.0
+
+print(outjsonStr)
 
 outjson = json.dumps(outjsonStr, indent=4)
 with open(projectPath.json,"w") as json_file:
