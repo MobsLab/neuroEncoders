@@ -252,12 +252,14 @@ if [[ $encoderType == fromUnits ]]; then
 	echo Encoding over.
 
 
-	/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
 elif [[ $encoderType == full ]]; then
 	python3 $script_path_full $device $xml_path
 	python3 $script_path_print_full $path
-
-	echo
-	echo
-	echo Encoding over.
 fi
+
+
+
+/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
+echo
+echo
+echo Encoding over.
