@@ -2,10 +2,6 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import sys
-# import gspread
-# import oauth2client.service_account #import ServiceAccountCredentials
-# scope = ['https://spreadsheets.google.com/feeds']
-# creds = oauth2client.service_account.ServiceAccountCredentials.from_json_keyfile_name(sys.argv[5], scope)
 
 print()
 
@@ -18,7 +14,7 @@ import json
 import xml.etree.ElementTree as ET
 list_channels = []
 try:
-    tree = ET.parse(sys.argv[6])
+    tree = ET.parse(sys.argv[4])
 except:
     sys.exit(4)
 root = tree.getroot()
@@ -101,95 +97,13 @@ def timedelta_to_ms(timedelta):
     ms = ms + 1000*timedelta.seconds
     ms = ms + timedelta.microseconds/1000
     return ms
-    
-def clear_clusters(Cluster_selection, clusters):
-    return [np.multiply(clusters[tetrode],Cluster_selection[tetrode])
-            for tetrode in range(len(Cluster_selection))]
-
-def cleanProbas(probas):
-    for i in range(len(probas)):
-        temp = probas[i,:,:]
-        temp[temp<np.max(temp/3)] = 0
-        probas[i,:,:] = temp
-
-def translatePosition(grpR, grpC, Bins):
-    Rsize = np.mean(Bins[0][1:Bins[0].size] - Bins[0][0:Bins[0].size-1])
-    Csize = np.mean(Bins[1][1:Bins[1].size] - Bins[1][0:Bins[1].size-1])
-
-    RPos = np.array([Bins[0][0] + grpR[n]*Rsize for n in range(len(grpR))])
-    CPos = np.array([Bins[1][0] + grpC[n]*Csize for n in range(len(grpC))])
-
-    return RPos, CPos
-
-def next_col(sheet):
-    str_list = list(filter(None, sheet.row_values(1)))
-    return (len(str_list)+1)
-    
-def next_row(sheet):
-    str_list = list(filter(None, sheet.col_values(1)))
-    return (len(str_list)+1)
-
-def save_data(sheet, data):
-    cell_list = sheet.range(1, next_col(sheet), 1+len(data), next_col(sheet))
-    idx = 0
-    for cell in cell_list:
-        if idx == 0:
-            cell.value = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
-        else:
-            cell.value = data[idx-1]
-        idx = idx +1
-    sheet.update_cells(cell_list)
-    
-def write_log(sheet, dict):
-    nxrow = next_row(sheet)
-    data = {}
-    idx = 0
-    past_keys = sheet.col_values(1)
-    for i in range(len(past_keys)):
-        if i==0:
-            continue
-        else:
-            if past_keys[i] in dict.keys():
-                data[str(idx)] = dict[past_keys[i]]
-            else:
-                data[str(idx)] = None
-            idx = idx + 1
-    for key in dict.keys():
-        if key in past_keys:
-            continue
-        else:
-            sheet.update_cell(next_row(sheet),1,key)
-            data[str(idx)] = dict[key]
-            idx = idx + 1
-    
-    cell_list = sheet.range(1, next_col(sheet), 1+len(data), next_col(sheet))
-    idx = 0
-    for cell in cell_list:
-        if idx == 0:
-            cell.value = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
-        else:
-            cell.value = data[str(idx-1)]
-        idx = idx +1
-    sheet.update_cells(cell_list)
-
-def save_learning(sheet, data, log):
-    save_data(sheet.worksheet("Data"), data)
-    write_log(sheet.worksheet("Log"), log)
-
-
-
-
-
-
-
-
 
 
 
 
 ### Header
 
-xml_path = sys.argv[6]
+xml_path = sys.argv[4]
 prefix_results = sys.argv[1] + "mobsEncoding_" + datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
 try:
     os.makedirs(prefix_results)
@@ -205,7 +119,7 @@ masking_factor = 20
 start_time = int(float(sys.argv[3]))
 stop_time = int(float(sys.argv[2]))
 learning_time = 90*(stop_time-start_time)//100
-nSteps = 200#00
+nSteps = 20000
 time_bin = 0.036   # in seconds
 
 
@@ -239,7 +153,7 @@ log_entry = {'prefix': prefix_results,
 
 
 ### Learning
-filterType = sys.argv[7]
+filterType = sys.argv[5]
 if filterType=='external':
     useOpenEphysFilter=True
 else:
@@ -270,31 +184,23 @@ if not os.path.isfile(projectPath.folder+'_rawSpikes.npy'):
 else:
     rawSpikes = np.load(projectPath.folder+'_rawSpikes.npy', allow_pickle=True).item()
 
-from unitClassifier import unitClassifier
+from unitClassifier import bayesianDecoder
 clu_path = xml_path[:len(xml_path)-3]
-Data = unitClassifier.build_maps(
+Data = bayesianDecoder.build_maps(
     clu_path, list_channels, rawSpikes,
     start_time, start_time + learning_time, stop_time,
     speed_cut, samplingRate,
     masking_factor, 'gaussian', bandwidth)
 
-
-# Data = modules['mobsNN'].extract_data(clu_path, list_channels, start_time, start_time + learning_time, stop_time,
-#                                         speed_cut, samplingRate, 
-#                                         masking_factor, 'gaussian', bandwidth)
 np.save(NN_dir+'_data.npy', Data)
 
 
 
+from unitClassifier import unitClassifier
 efficiencies = unitClassifier.build_position_decoder(Data, NN_dir, nSteps)
 
 print('efficiencies : ', efficiencies)
 log_entry.update({'efficiencies' : str(efficiencies)})
-
-
-
-
-
 
 
 
@@ -361,9 +267,6 @@ Results = np.load(NN_dir+'_simDecoding.npz')
 Occupation = Results['Occupation']
 position_proba = Results['position_proba']
 position = Results['position'].tolist()
-# Occupation = Results['arr_0']
-# position_proba = Results['arr_1']
-# position = Results['arr_2'].tolist()
 OccupationG = Occupation>(np.amax(Occupation)/masking_factor)
 
 
@@ -450,7 +353,7 @@ outjsonStr['stimCondition0']['lowerDev'] = 0.0
 outjsonStr['stimCondition0']['higherDev'] = 0.0
 
 outjson = json.dumps(outjsonStr, indent=4)
-with open(sys.argv[6][:len(sys.argv[6])-4]+'.json',"w") as json_file:
+with open(sys.argv[4][:len(sys.argv[4])-4]+'.json',"w") as json_file:
     json_file.write(outjson)
 
 
@@ -503,7 +406,7 @@ ax1.errorbar(
 ax1.legend(loc="upper right", fontsize=25)
 ax1.tick_params(axis="x", labelsize=20)
 ax1.tick_params(axis="y", labelsize=20)
-# plt.savefig(NN_dir+'_stdFig.png', bbox_inches='tight')
+plt.savefig(NN_dir+'_stdFig.png', bbox_inches='tight')
 # plt.savefig(os.path.expanduser('~/Dropbox/Mobs_member/Thibault/Poster Chicago Thibault/bayesError.png'), bbox_inches='tight')
 plt.show()
 
@@ -623,17 +526,3 @@ def updatefig(frame, *args):
 # if len(frame_selection)<len(position_proba)/4:
 #     ani.save(NN_dir+'_Movie.mp4')
 # fig.show()
-
-
-
-
-
-# try:
-#     client = gspread.authorize(creds)
-#     spreadsheet = client.open_by_key('1Wj7GgzwttypnX9zqIKleYa_zgkAQ4hf1122JWU5FDic')
-#     save_learning(spreadsheet, Selected_errors, log_entry)
-#     print("Results and log saved.")
-# except:
-#     print('not sending to google server.')
-#     sys.exit(2)
-
