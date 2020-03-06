@@ -211,7 +211,7 @@ else
 	FILTERTYPE=internal
 fi
 
-python3 $script_path $path $stop_time $start_time $modules $json $xml_path $FILTERTYPE
+python3 $script_path $path $stop_time $start_time $xml_path $FILTERTYPE
 exitcatch=$?
 if test $exitcatch -ne 0; then
 	if test $exitcatch -eq 1; then
