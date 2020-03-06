@@ -6,9 +6,10 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 cd $SCRIPTPATH
 args=("$@")
 
-usage="./neuroEncoder full|fromUnits [-f | --filter]"
+usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu]"
 
 # Parsing arguments
+device=cpu
 encoderType=none
 POSITIONAL=()
 while [[ $# -gt 0 ]]
@@ -32,6 +33,10 @@ case $key in
 	encoderType=fromUnits
 	shift
 	;;
+	-g|--gpu)
+	device=gpu
+	shift
+	;;
 esac
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
@@ -46,7 +51,7 @@ fi
 echo
 echo
 COLUMNS=$(tput cols) 
-title="||  neuro encoder by MOBS ||" 
+title="|| neuroEncoder by MOBS ||" 
 printf "%*s\n" $(((${#title}+$COLUMNS)/2)) "$title"
 title="march 2020" 
 printf "%*s\n" $(((${#title}+$COLUMNS)/2)) "$title"
@@ -61,7 +66,10 @@ echo
 username=$USER
 prjpath="/$HOME/Dropbox/Kteam/PrgMatlab/OnlinePlaceDecoding"
 
-script_path="encodeByUnit.py"
+script_path_from_units="encodeByUnit.py"
+script_path_full="fullEncoder.py"
+script_path_print_full="./fullEncoder/printResults.py"
+
 # Input and help
 echo Hello dear MOBSter ! Welcome to the encoder.
 
@@ -171,7 +179,6 @@ done < $file
 echo
 echo beginning of tracking at  $start_time sec
 echo end of tracking at        $stop_time sec
-echo For fine tuning of parameters, you should check the HEADER of "$script_path"
 echo
 
 
@@ -209,40 +216,48 @@ else
 fi
 
 
-
-python3 $script_path $path $stop_time $start_time $xml_path $FILTERTYPE
-exitcatch=$?
-if test $exitcatch -ne 0; then
-	if test $exitcatch -eq 1; then
-		echo
-		echo Encoding failed. Script used was $script_path
-		exit 1
-	elif test $exitcatch -eq 2; then
-		echo
-		echo Encoding succeeded. However, results have not been sent to the server. Not a big deal.
-		exit 0
-	elif test $exitcatch -eq 3; then
-		echo
-		echo Encoding seems to have succed, but we\'ll not be plotting anything.
-		exit 0
-	elif test $exitcatch -eq 4; then
-		echo
-		echo We\'re unable to load "$xml_path", does this file exist ?
-		exit 1
-	elif test $exitcatch -eq 5; then
-		echo 
-		echo Dimensions of speed and positions in behaviour data do not match.
-		exit 1
-	else
-		echo
-		echo Something unforeseen has happened. We think encoding has failed. Script used was $script_path
-		exit 1
+if [[ $encoderType == fromUnits ]]; then
+	python3 $script_path_from_units $path $stop_time $start_time $xml_path $FILTERTYPE
+	exitcatch=$?
+	if test $exitcatch -ne 0; then
+		if test $exitcatch -eq 1; then
+			echo
+			echo Encoding failed. Script used was $script_path_from_units
+			exit 1
+		elif test $exitcatch -eq 2; then
+			echo
+			echo Encoding succeeded. However, results have not been sent to the server. Not a big deal.
+			exit 0
+		elif test $exitcatch -eq 3; then
+			echo
+			echo Encoding seems to have succed, but we\'ll not be plotting anything.
+			exit 0
+		elif test $exitcatch -eq 4; then
+			echo
+			echo We\'re unable to load "$xml_path", does this file exist ?
+			exit 1
+		elif test $exitcatch -eq 5; then
+			echo 
+			echo Dimensions of speed and positions in behaviour data do not match.
+			exit 1
+		else
+			echo
+			echo Something unforeseen has happened. We think encoding has failed. Script used was $script_path_from_units
+			exit 1
+		fi
 	fi
+
+	echo
+	echo
+	echo Encoding over.
+
+
+	/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
+elif [[ $encoderType == full ]]; then
+	python3 $script_path_full $device $xml_path
+	python3 $script_path_print_full $path
+
+	echo
+	echo
+	echo Encoding over.
 fi
-
-echo
-echo
-echo Encoding over.
-
-
-/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
