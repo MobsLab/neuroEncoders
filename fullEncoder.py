@@ -43,7 +43,13 @@ projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
 
 
 ### Data
-spikeDetector = rawDataParser.SpikeDetector(projectPath)
+filterType = sys.argv[5]
+if filterType=='external':
+    useOpenEphysFilter=True
+else:
+    useOpenEphysFilter=False
+print('using external filter:', useOpenEphysFilter)
+spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
 if not os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
 	
 

@@ -247,13 +247,9 @@ if [[ $encoderType == fromUnits ]]; then
 		fi
 	fi
 
-	echo
-	echo
-	echo Encoding over.
-
 
 elif [[ $encoderType == full ]]; then
-	python3 $script_path_full $device $xml_path
+	python3 $script_path_full $device $xml_path $FILTERTYPE
 	python3 $script_path_print_full $path
 fi
 
