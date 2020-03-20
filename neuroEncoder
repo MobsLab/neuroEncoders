@@ -37,6 +37,11 @@ case $key in
 	device=gpu
 	shift
 	;;
+	-p|--path)
+	xml_path="$2"
+	shift
+	shift
+	;;
 esac
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
@@ -73,26 +78,28 @@ script_path_print_full="./fullEncoder/printResults.py"
 # Input and help
 echo Hello dear MOBSter ! Welcome to the encoder.
 
-echo What is the full path to your Mouse''s xml, as /path/to/file.xml ?
-read xml_path
-if [[ $xml_path == "test" ]]; then
-	# xml_path="/home/$username/Documents/dataset/test_set/ERC-Mouse-743-01062018-Hab.xml"
-	echo test set not active at the moment, sorry
-	echo type 'help' to get a description of what the encoder needs.
-	exit 0
-elif [[ $xml_path == "help" ]]; then
-	echo
-	echo What the encoder needs is fourfold :
-	echo
-	echo --- First, the .clu files.
-	echo --- Second, the .spk and .res files.
-	echo --- Third, the behavRessources.mat containing variables Xtsd, Ytsd, and Vtsd.
-	echo --- Fourth, the xml file of this recording, the path of which you should give me. Other files must be in the same directory.
-	echo
-	echo If you just want to test the encoder on a test set, just type test !
-	echo Good luck !
-	echo
-	exit 0
+if [[ $xml_path == "" ]]; then
+	echo What is the full path to your Mouse''s xml, as /path/to/file.xml ?
+	read xml_path
+	if [[ $xml_path == "test" ]]; then
+		# xml_path="/home/$username/Documents/dataset/test_set/ERC-Mouse-743-01062018-Hab.xml"
+		echo test set not active at the moment, sorry
+		echo type 'help' to get a description of what the encoder needs.
+		exit 0
+	elif [[ $xml_path == "help" ]]; then
+		echo
+		echo What the encoder needs is fourfold :
+		echo
+		echo --- First, the .clu files.
+		echo --- Second, the .spk and .res files.
+		echo --- Third, the behavRessources.mat containing variables Xtsd, Ytsd, and Vtsd.
+		echo --- Fourth, the xml file of this recording, the path of which you should give me. Other files must be in the same directory.
+		echo
+		echo If you just want to test the encoder on a test set, just type test !
+		echo Good luck !
+		echo
+		exit 0
+	fi
 fi
 
 
