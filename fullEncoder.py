@@ -43,7 +43,7 @@ projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
 
 
 ### Data
-filterType = sys.argv[5]
+filterType = sys.argv[3]
 if filterType=='external':
     useOpenEphysFilter=True
 else:
