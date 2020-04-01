@@ -6,7 +6,7 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 cd $SCRIPTPATH
 args=("$@")
 
-usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu]"
+usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu] [-p | --path <path/to/xml>]"
 
 # Parsing arguments
 device=cpu
@@ -257,7 +257,9 @@ if [[ $encoderType == fromUnits ]]; then
 
 elif [[ $encoderType == full ]]; then
 	python3 $script_path_full $device $xml_path $FILTERTYPE
-	python3 $script_path_print_full $path
+	if test $? -eq 0; then
+		python3 $script_path_print_full $path
+	fi
 fi
 
 
