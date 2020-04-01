@@ -472,9 +472,13 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 
 	
 	# LSTM on concatenated outputs
-	with tf.variable_scope("cudnn_lstm"):
-		lstm = tf.nn.rnn_cell.MultiRNNCell(
-			[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
+	if device_name=="/gpu:0":
+		with tf.variable_scope("cudnn_lstm"):
+			lstm = tf.nn.rnn_cell.MultiRNNCell(
+				[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
+	else:
+		lstm = [layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
+		lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
 		outputs, finalState = tf.nn.dynamic_rnn(
 			lstm, 
 			tf.expand_dims(fullEmbedding, axis=1), 
