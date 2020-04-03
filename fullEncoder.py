@@ -103,8 +103,6 @@ else:
 
 
 
-
-
 ### Params
 class Params:
 	def __init__(self):
@@ -238,30 +236,81 @@ class spikeNet:
 
 
 
+
+
+def getTrainingSpikesWithBlanks():
+	totalLength = SPT_train[-1] - SPT_train[0]
+	nBins = int(totalLength // params.windowLength) - 1
+	binStartTime = [SPT_train[0] + (i*params.windowLength) for i in range(nBins)]
+
+	while True:
+		np.random.shuffle(binStartTime)
+		for binStart in binStartTime:
+			allSpikes=[]
+			sel = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength)
+			length = np.array([np.sum(sel)])
+			for group in range(params.nGroups):
+				spikes = SPK_train[sel]
+				groups = GRP_train[sel]==group
+				for spk in range(spikes.shape[0]):
+					spikes[spk,:,:] *= groups[spk]
+
+				spikes = np.pad(spikes, ((0, params.maxLength-spikes.shape[0]),(0,0),(0,0)), 'constant', constant_values=0)
+				allSpikes.append(spikes)
+			pos = POS_train[SPT_train>binStart][0,:]
+			yield allSpikes, pos.reshape([1,2])/np.max(POS_train), length
+
+def batch(gen):
+	while True:
+		binSpk = []
+		binPos = []
+		binLen = []
+		for _ in range(params.batch_size):
+			spk, pos, length = next(gen)
+			binSpk.append(spk)
+			binPos.append(pos)
+			binLen.append(length)
+		spk = np.stack(binSpk, axis=0)
+		pos = np.stack(binPos, axis=0)
+		length = np.stack(binLen, axis=0)
+		print(spk.shape)
+		print(pos.shape)
+		print(length.shape)
+		bbbb
+		yield spk, pos, length
+
+
 ### Training model
 with tf.Graph().as_default():
 
 	print()
 	print('TRAINING')
 
-	dataIterator, trainingTensors, dataPlaceholders = datasetMaker.makeDataset(params, training=True)
+	# dataIterator, trainingTensors, dataPlaceholders = datasetMaker.makeDataset(params, training=True)
 	with tf.device(device_name):
 		spkParserNet = []
 		allFeatures = []
 
 		# CNN plus dense on every group indepedently
 		for group in range(params.nGroups):
-			spkParserNet.append(spikeNet(nChannels=params.nChannels, device=device_name, nFeatures=params.nFeatures))
+			with tf.variable_scope("group"+str(group)+"-encoder"):
+				x = tf.placeholder(tf.float32, shape=[params.maxLength, params.batch_size, params.nChannels, 32], name="x")
+				x = x.reshape([-1, params.nChannels[group], 32])
+				realSpikes = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
+				nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
+				completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(realSpikes))[:,0,:], [1,0], name="completion")
+				x = tf.boolean_mask(x, realSpikes)
 
-			x = spkParserNet[group].apply(trainingTensors[2*group+2])
-			x = tf.reshape(tf.matmul(trainingTensors[2*group+3], x), [-1, params.batch_size, spkParserNet[group].nFeatures])
-			# x = spkParserNet[group].apply(tf.tensordot(trainingTensors[2*group+3], trainingTensors[2*group+2], axes=[[1],[0]]))
-			# x = tf.reshape(x, [-1, params.batch_size, spkParserNet[group].nFeatures])
-			allFeatures.append( x )
+			newSpikeNet = spikeNet(nChannels=params.nChannels, device="/cpu:0", nFeatures=params.nFeatures)
+			x = newSpikeNet.apply(x)
+			x = tf.matmul(completionTensor, x)
+			allFeatures.append(x)
 		allFeatures = tf.tuple(allFeatures)
-		allFeatures = tf.concat(allFeatures, axis=2)
+		allFeatures = tf.concat(allFeatures, axis=1)
+		# allFeatures = tf.concat(allFeatures, axis=2)
 
 		# LSTM on the concatenated outputs of previous graphs
+		lengthPH = tf.placeholder(tf.int32, shape=[None], name="length")
 		if device_name=="/gpu:0":
 			lstm = tf.contrib.cudnn_rnn.CudnnLSTM(params.lstmLayers, params.lstmSize, dropout=params.lstmDropout)
 			outputs, finalState = lstm(allFeatures, training=True)
@@ -270,21 +319,24 @@ with tf.Graph().as_default():
 			lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
 			outputs, finalState = tf.nn.dynamic_rnn(
 				lstm, 
-				allFeatures, 
+				tf.expand_dims(allFeatures, axis=1), 
 				dtype=tf.float32, 
-				time_major=params.timeMajor, 
-				sequence_length=trainingTensors[1])
+				time_major=params.timeMajor,
+				sequence_length=lengthPH)
+				# sequence_length=trainingTensors[1])
 
 	# dense to extract regression on output and loss
 	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
 	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
 	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
 
-	output = last_relevant(outputs, trainingTensors[1], timeMajor=params.timeMajor)
+	# output = last_relevant(outputs, trainingTensors[1], timeMajor=params.timeMajor)
+	output = last_relevant(outputs, lengthPH, timeMajor=params.timeMajor)
 	outputLoss = denseLoss2(denseLoss1(output))[:,0]
 	outputPos = denseOutput(output)
 
-	lossPos =  tf.losses.mean_squared_error(outputPos, trainingTensors[0], reduction=tf.losses.Reduction.NONE)
+	posPH = tf.placeholder(tf.float32, shape=[None, 2], name="pos")
+	lossPos =  tf.losses.mean_squared_error(outputPos, posPH, reduction=tf.losses.Reduction.NONE)
 	lossPos =  tf.reduce_mean(lossPos, axis=1)
 	lossLoss = tf.losses.mean_squared_error(outputLoss, lossPos)
 	lossPos  = tf.reduce_mean(lossPos)
@@ -298,15 +350,16 @@ with tf.Graph().as_default():
 
 	### Training and testing
 	trainLosses = []
+	batchGen = getTrainingSpikesWithBlanks()
 	with tf.Session() as sess:
 
 		# initialize variables and input framework
 		sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
-		sess.run(dataIterator.initializer, 
-			feed_dict={dataPlaceholders['groups']:GRP_train, 
-			dataPlaceholders['timeStamps']:SPT_train, 
-			dataPlaceholders['spikes']:SPK_train, 
-			dataPlaceholders['positions']:POS_train / np.max(POS_train)})
+		# sess.run(dataIterator.initializer, 
+		# 	feed_dict={dataPlaceholders['groups']:GRP_train, 
+		# 	dataPlaceholders['timeStamps']:SPT_train, 
+		# 	dataPlaceholders['spikes']:SPK_train, 
+		# 	dataPlaceholders['positions']:POS_train / np.max(POS_train)})
 
 		### training
 		epoch_loss = 0
@@ -317,7 +370,12 @@ with tf.Graph().as_default():
 
 			for lr in range(len(params.learningRates)):
 				if (i < (lr+1) * params.nSteps / len(params.learningRates)) and (i >= lr * params.nSteps / len(params.learningRates)):
-					_, c, c2 = sess.run([optimizers[lr], lossPos, lossLoss])
+					spk, position, length = next(batchGen)
+					fDct = {tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):spk[group] for group in range(params.nGroups)}
+					fDct.update({posPH: position, lengthPH: length})
+					_, c, c2 = sess.run(
+						[optimizers[lr], lossPos, lossLoss], 
+						feed_dict=fDct)
 					break
 				if lr==len(params.learningRates)-1:
 					print('not run:',i)
