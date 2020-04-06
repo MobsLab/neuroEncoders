@@ -158,6 +158,11 @@ class SpikeDetector:
         self.lateSpikes = self.emptyData()
         self.lastBuffer = False
 
+    def nGroups(self):
+        return len(self.list_channels)
+    def numChannelsPerGroup(self):
+        return [len(self.list_channels[n]) for n in range(self.nGroups())]
+
     def emptyData(self):
         return {'group':[], 'time':[], 'spike':[], 'position':[], 'speed':[]}
 
