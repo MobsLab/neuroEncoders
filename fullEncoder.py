@@ -32,6 +32,7 @@ class xmlPath():
 		self.dat = path[:-3] + 'dat'
 		self.fil = path[:-3] + 'fil'
 		self.json = path[:-3] + 'json'
+		self.tfrec = self.folder + 'dataset.tfrec'
 
 from importData import rawDataParser
 from fullEncoder import datasetMaker
@@ -288,9 +289,42 @@ def getTrainingSpikesWithBlanks():
 				spikes = np.pad(np.stack(spikes, axis=0), ((0, params.maxLength-spikes.shape[0]),(0,0),(0,0)), 'constant', constant_values=0)
 				allSpikes.append(spikes)
 			pos = POS_train[SPT_train>binStart][0,:]
-			yield tuple(allSpikes) + (pos/np.max(POS_train), length)
+			yield (pos/np.max(POS_train), length) + tuple(allSpikes)
 
 
+def serialize(pos, length, *spikes):
+	feat = {
+		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
+		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length]))}
+	for g in range(params.nGroups):
+		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
+
+	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
+	return example_proto.SerializeToString()
+
+if not os.path.isfile(projectPath.tfrec):
+	dataset = tf.data.Dataset.from_generator(getTrainingSpikesWithBlanks,
+		output_types = (tf.float64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
+		output_shapes = (tf.TensorShape([2]), tf.TensorShape([])) + tuple(tf.TensorShape([params.maxLength, params.nChannels[g], 32]) for g in range(params.nGroups)))
+	iter = dataset.make_initializable_iterator()
+	el = iter.get_next()
+	with tf.Session() as sess:
+		sess.run(iter.initializer)
+		print('saving new dataset')
+		with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
+			totalLength = SPT_train[-1] - SPT_train[0]
+			nBins = int(totalLength // params.windowLength) - 1
+
+			for _ in tqdm(range(params.nSteps)):
+				example = sess.run(el)
+				writer.write(serialize(*tuple(example)))
+
+feat_desc = {"pos": tf.io.FixedLenFeature([2], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64)}
+for g in range(params.nGroups):
+	feat_desc.update({"group"+str(g): tf.io.FixedLenFeature([params.maxLength, params.nChannels[g], 32], tf.float32)})
+
+def parse_serialized_example(ex_proto):
+	return tf.io.parse_example(ex_proto, feat_desc)
 
 ### Training model
 with tf.Graph().as_default():
@@ -298,21 +332,11 @@ with tf.Graph().as_default():
 	print()
 	print('TRAINING')
 
-	# spikesPH = [tf.placeholder(tf.float32, [None, params.nChannels[g], 32]) for g in range(params.nGroups)]
-	# posPH = tf.placeholder(tf.float64, [None, 2])
-	# dataset = tf.data.Dataset.from_generator(
-	# 	dataGenerator,
-	# 	output_types = tuple(tf.float32 for _ in range(params.nGroups)) + (tf.float64, tf.int64),
-	# 	output_shapes = tuple(tf.TensorShape([params.maxLength, params.nChannels[g], 32]) for g in range(params.nGroups)) + (tf.TensorShape([2]), tf.TensorShape([])),
-	# 	args = (posPH,) + tuple(spikesPH[g] for g in range(params.nGroups)))
-	dataset = tf.data.Dataset.from_generator(
-		getTrainingSpikesWithBlanks, 
-		output_types = tuple(tf.float32 for _ in range(params.nGroups)) + (tf.float64, tf.int64),
-		output_shapes = tuple(tf.TensorShape([params.maxLength, params.nChannels[g], 32]) for g in range(params.nGroups)) + (tf.TensorShape([2]), tf.TensorShape([])))
+	dataset = tf.data.TFRecordDataset(projectPath.tfrec)
 	dataset = dataset.batch(params.batch_size)
+	dataset = dataset.map(parse_serialized_example)
 	iter = dataset.make_initializable_iterator()
-	el = iter.get_next()
-	spikesIter, posIter, lengthIter =  el[:params.nGroups], el[params.nGroups], el[params.nGroups+1]
+	iterators = iter.get_next()
 
 
 	with tf.device(device_name):
@@ -322,7 +346,7 @@ with tf.Graph().as_default():
 		# CNN plus dense on every group indepedently
 		for group in range(params.nGroups):
 			with tf.variable_scope("group"+str(group)+"-encoder"):
-				x = tf.transpose(spikesIter[group], [1,0,2,3])
+				x = tf.transpose(iterators["group"+str(group)], [1,0,2,3])
 				x = tf.reshape(x, [-1, params.nChannels[group], 32])
 				realSpikes = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
 				nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
@@ -349,18 +373,18 @@ with tf.Graph().as_default():
 				allFeatures, 
 				dtype=tf.float32, 
 				time_major=params.timeMajor,
-				sequence_length=lengthIter)
+				sequence_length=iterators["length"])
 
 	# dense to extract regression on output and loss
 	denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
 	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
 	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
 
-	output = last_relevant(outputs, lengthIter, timeMajor=params.timeMajor)
+	output = last_relevant(outputs, iterators["length"], timeMajor=params.timeMajor)
 	outputLoss = denseLoss2(denseLoss1(output))[:,0]
 	outputPos = denseOutput(output)
 
-	lossPos =  tf.losses.mean_squared_error(outputPos, posIter, reduction=tf.losses.Reduction.NONE)
+	lossPos =  tf.losses.mean_squared_error(outputPos, iterators["pos"], reduction=tf.losses.Reduction.NONE)
 	lossPos =  tf.reduce_mean(lossPos, axis=1)
 	lossLoss = tf.losses.mean_squared_error(outputLoss, lossPos)
 	lossPos  = tf.reduce_mean(lossPos)
