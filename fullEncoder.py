@@ -241,31 +241,6 @@ class spikeNet:
 
 
 
-# xTraining = []
-# for g in range(params.nGroups):
-# 	xTraining.append(SPK_train.copy())
-# 	for spk in range(len(SPK_train)):
-# 		if GRP_train[spk]!=g:
-# 			xTraining[g][spk] = np.zeros([params.nChannels[g], 32])
-# 	xTraining[g] = np.stack(xTraining[g], axis=0)
-
-def dataGenerator(pos, *spikes):
-	totalLength = SPT_train[-1] - SPT_train[0]
-	nBins = int(totalLength // params.windowLength) - 1
-	binStartTime = [SPT_train[0] + (i*params.windowLength) for i in range(nBins)]
-
-	while True:
-		np.random.shuffle(binStartTime)
-		for binStart in binStartTime:
-			allSpikes=[]
-			sel = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength)
-			length = np.sum(sel)
-			for group in range(params.nGroups):
-				spk = spikes[group][sel]
-				spk = np.pad(spk, ((0, params.maxLength-spk.shape[0]),(0,0),(0,0)), 'constant', constant_values=0)
-				allSpikes.append(spk)
-			pos = POS_train[SPT_train>binStart][0,:]
-			yield tuple(allSpikes) + (pos/np.max(POS_train), length)
 
 
 def getTrainingSpikesWithBlanks():
@@ -275,13 +250,15 @@ def getTrainingSpikesWithBlanks():
 	maxPos = np.max(POS_train)
 
 	selection = np.zeros([len(binStartTime), 2], dtype=int)
-	for idx in tqdm(range(len(binStartTime))):
+	selection[0,0] = np.where(SPT_train>binStartTime[0])[0][0]
+	selection[0,1] = np.logical_and(SPT_train>binStartTime[0], SPT_train<binStartTime[0]+params.windowLength).sum()
+	for idx in range(1, len(binStartTime)-1):
 		binStart = binStartTime[idx]
-		if idx == 0:
-			selection[idx,0] = np.where(SPT_train>binStart)[0][0]
-		else:
-			selection[idx,0] = selection[idx-1,0] + selection[idx-1,1]
-		selection[idx,1] = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength).sum()
+		selection[idx,0] = selection[idx-1,0] + selection[idx-1,1]
+		n=0
+		while SPT_train[selection[idx,0]+n] < binStart+params.windowLength:
+			n += 1
+		selection[idx,1] = n
 
 
 	while True:
@@ -293,7 +270,11 @@ def getTrainingSpikesWithBlanks():
 			groups = GRP_train[selection[idx,0]: selection[idx,0]+length]
 			spikes = SPK_train[selection[idx,0]: selection[idx,0]+length]
 			for group in range(params.nGroups):
-				allSpikes.append(spikes[np.where(groups==group)])
+				s = list(spikes[np.where(groups==group)])
+				if s == []:
+					allSpikes.append(np.zeros([0, params.nChannels[group], 32]))
+				else:
+					allSpikes.append(np.stack(spikes[np.where(groups==group)], axis=0))
 			yield (pos, groups, length) + tuple(allSpikes)
 
 
@@ -309,13 +290,6 @@ def serialize(pos, groups, length, *spikes):
 	return example_proto.SerializeToString()
 
 if not os.path.isfile(projectPath.tfrec):
-	# dataset = tf.data.Dataset.from_generator(getTrainingSpikesWithBlanks,
-	# 	output_types = (tf.float64, tf.int64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
-	# 	output_shapes = (tf.TensorShape([2]), tf.TensorShape([None]), tf.TensorShape([])) + tuple(tf.TensorShape([None, params.nChannels[g], 32]) for g in range(params.nGroups)))
-	# iter = dataset.make_initializable_iterator()
-	# el = iter.get_next()
-	# with tf.Session() as sess:
-		# sess.run(iter.initializer)
 	gen = getTrainingSpikesWithBlanks()
 	print('saving new dataset')
 	with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
@@ -323,7 +297,6 @@ if not os.path.isfile(projectPath.tfrec):
 		nBins = int(totalLength // params.windowLength) - 1
 
 		for _ in tqdm(range(params.nSteps*params.batch_size)):
-			# example = sess.run(el)
 			example = next(gen)
 			writer.write(serialize(*tuple(example)))
 
@@ -333,7 +306,6 @@ for g in range(params.nGroups):
 
 def parse_serialized_example(batch, ex_proto):
 	tensors = tf.io.parse_example(ex_proto, feat_desc)
-	# tensors = tf.io.parse_single_example(ex_proto, feat_desc)
 	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
 	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
 	for g in range(params.nGroups):
@@ -359,13 +331,6 @@ with tf.Graph().as_default():
 	dataset = dataset.map(lambda *vals: parse_serialized_example(batch, *vals))
 	iter = dataset.make_initializable_iterator()
 	iterators = iter.get_next()
-	# with tf.Session() as sess:
-	# 	sess.run(iter.initializer)
-	# 	temp = sess.run(iterators)
-	# 	print("groups",temp["groups"].shape)
-	# 	for g in range(params.nGroups):
-	# 		print("group"+str(g), temp["group"+str(g)].shape, np.sum(temp["groups"]==g))
-	# bbbbb
 
 
 	with tf.device(device_name):
@@ -471,104 +436,6 @@ with tf.Graph().as_default():
 
 
 
-# ### Inferring model
-# variables=[]
-# with tf.Graph().as_default():
-# 	print()
-# 	print()
-# 	print('INFERRING')
-# 	inferSpkNet = []
-# 	dataIterator, testingTensors, dataPlaceholders = datasetMaker.makeDataset(params, training=False)
-	
-# 	with tf.device("/cpu:0"):
-# 		inferringFeedDict = []
-# 		embeddings = []
-
-# 		# CNN and dense for each group
-# 		for group in range(params.nGroups):
-# 			inferSpkNet.append(spikeNet(nChannels=params.nChannels, device="/cpu:0", nFeatures=params.nFeatures))
-
-# 			out = inferSpkNet[group].apply(testingTensors[2*group+2])
-# 			embeddings.append(tf.matmul(testingTensors[2*group+3], out))
-# 			variables += inferSpkNet[group].variables()
-# 		embeddings = tf.tuple(embeddings)
-# 		fullEmbedding = tf.concat(embeddings, axis=1)
-		
-# 		# LSTM on concatenated outputs
-# 		with tf.variable_scope("cudnn_lstm"):
-# 			lstm = tf.nn.rnn_cell.MultiRNNCell(
-# 				[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
-# 			outputs, finalState = tf.nn.dynamic_rnn(
-# 				lstm, 
-# 				tf.expand_dims(fullEmbedding, axis=1), 
-# 				dtype=tf.float32, 
-# 				time_major=params.timeMajor, 
-# 				sequence_length=tf.expand_dims(testingTensors[1],0))
-# 			variables += lstm.variables
-		
-# 		output = last_relevant(outputs, testingTensors[1], timeMajor=params.timeMajor)
-# 		denseOutput = tf.layers.Dense(params.dim_output, activation = None, name="pos")
-# 		denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
-# 		denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
-
-# 		position = tf.reshape(denseOutput(tf.reshape(output, [-1,params.lstmSize])), [2])
-# 		loss     = tf.reshape(denseLoss2(denseLoss1(tf.reshape(output, [-1,params.lstmSize]))), [1])
-# 		variables += denseOutput.variables
-# 		variables += denseLoss1.variables
-# 		variables += denseLoss2.variables
-		
-# 		subGraphToRestore = tf.train.Saver({v.op.name: v for v in variables})
-
-		
-
-
-# 	### Inferring
-# 	with tf.Session() as sess:
-
-# 		# Restoring variables and initialize input framework
-# 		subGraphToRestore.restore(sess, projectPath.folder + '_graphForRnn')
-# 		sess.run(dataIterator.initializer, 
-# 			feed_dict={dataPlaceholders['groups']:GRP_test, 
-# 			dataPlaceholders['timeStamps']:SPT_test, 
-# 			dataPlaceholders['spikes']:SPK_test, 
-# 			dataPlaceholders['positions']:POS_test / np.max(POS_train)})
-
-# 		# inferring
-# 		testOutput = []
-# 		for bin in trange(int((SPT_test[-1]-SPT_test[0])//params.windowLength)-1):
-# 			testOutput.append(np.concatenate(sess.run([position, loss]), axis=0))
-	
-# 	testOutput = np.array(testOutput)
-
-# 	pos = []
-# 	spd = []
-# 	n = 0
-# 	bin_stop = SPT_test[0]
-# 	while True:
-# 		bin_stop = bin_stop + params.windowLength
-# 		if bin_stop > SPT_test[-1]:
-# 			break
-# 		idx=n
-# 		while SPT_test[n] < bin_stop:
-# 			n += 1
-# 		pos.append(np.mean(POS_test[idx:n,:], axis=0))
-# 		spd.append(np.mean(SPD_test[idx:n,:]))
-# 	pos.pop()
-# 	spd.pop()
-# 	pos = np.array(pos) / np.max(POS_train)
-# 	spd = np.array(spd)
-	
-
-# 	fileName = projectPath.folder + '_resultsForRnn_temp'
-# 	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
-# 	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
-
-
-
-
-
-
-
 
 
 
@@ -590,12 +457,10 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 		newSpikeNet = spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
 		x = newSpikeNet.apply(x)
 		x = tf.matmul(completionTensor, x)
-		# x = tf.pad(x, [[0,0],[group*params.nFeatures, (params.nGroups-group-1)*params.nFeatures]], "CONSTANT")
 
 		embeddings.append(x)
 		variables += newSpikeNet.variables()
 	fullEmbedding = tf.concat(embeddings, axis=1)
-	# fullEmbedding = tf.concat(embeddings, axis=0)
 
 	
 	# LSTM on concatenated outputs
@@ -693,8 +558,8 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 	spd = np.array(spd)
 
 	fileName = projectPath.folder + '_resultsForRnn_temp'
-	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
-	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
+	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
+	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
 
 
 
