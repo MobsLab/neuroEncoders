@@ -272,19 +272,29 @@ def getTrainingSpikesWithBlanks():
 	totalLength = SPT_train[-1] - SPT_train[0]
 	nBins = int(totalLength // params.windowLength) - 1
 	binStartTime = [SPT_train[0] + (i*params.windowLength) for i in range(nBins)]
+	maxPos = np.max(POS_train)
+
+	selection = np.zeros([len(binStartTime), 2], dtype=int)
+	for idx in tqdm(range(len(binStartTime))):
+		binStart = binStartTime[idx]
+		if idx == 0:
+			selection[idx,0] = np.where(SPT_train>binStart)[0][0]
+		else:
+			selection[idx,0] = selection[idx-1,0] + selection[idx-1,1]
+		selection[idx,1] = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength).sum()
+
 
 	while True:
-		np.random.shuffle(binStartTime)
-		for binStart in binStartTime:
+		np.random.shuffle(selection)
+		for idx in range(selection.shape[0]):
 			allSpikes=[]
-			sel = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength)
-			length = np.sum(sel)
-			groups = GRP_train[sel]
+			pos = POS_train[selection[idx, 0], :] / maxPos
+			length = selection[idx,1]
+			groups = GRP_train[selection[idx,0]: selection[idx,0]+length]
+			spikes = SPK_train[selection[idx,0]: selection[idx,0]+length]
 			for group in range(params.nGroups):
-				spikes = SPK_train[sel]
 				allSpikes.append(spikes[np.where(groups==group)])
-			pos = POS_train[SPT_train>binStart][0,:]
-			yield (pos/np.max(POS_train), groups, length) + tuple(allSpikes)
+			yield (pos, groups, length) + tuple(allSpikes)
 
 
 def serialize(pos, groups, length, *spikes):
@@ -299,21 +309,23 @@ def serialize(pos, groups, length, *spikes):
 	return example_proto.SerializeToString()
 
 if not os.path.isfile(projectPath.tfrec):
-	dataset = tf.data.Dataset.from_generator(getTrainingSpikesWithBlanks,
-		output_types = (tf.float64, tf.int64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
-		output_shapes = (tf.TensorShape([2]), tf.TensorShape([None]), tf.TensorShape([])) + tuple(tf.TensorShape([None, params.nChannels[g], 32]) for g in range(params.nGroups)))
-	iter = dataset.make_initializable_iterator()
-	el = iter.get_next()
-	with tf.Session() as sess:
-		sess.run(iter.initializer)
-		print('saving new dataset')
-		with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
-			totalLength = SPT_train[-1] - SPT_train[0]
-			nBins = int(totalLength // params.windowLength) - 1
+	# dataset = tf.data.Dataset.from_generator(getTrainingSpikesWithBlanks,
+	# 	output_types = (tf.float64, tf.int64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
+	# 	output_shapes = (tf.TensorShape([2]), tf.TensorShape([None]), tf.TensorShape([])) + tuple(tf.TensorShape([None, params.nChannels[g], 32]) for g in range(params.nGroups)))
+	# iter = dataset.make_initializable_iterator()
+	# el = iter.get_next()
+	# with tf.Session() as sess:
+		# sess.run(iter.initializer)
+	gen = getTrainingSpikesWithBlanks()
+	print('saving new dataset')
+	with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
+		totalLength = SPT_train[-1] - SPT_train[0]
+		nBins = int(totalLength // params.windowLength) - 1
 
-			for _ in tqdm(range(params.nSteps*params.batch_size)):
-				example = sess.run(el)
-				writer.write(serialize(*tuple(example)))
+		for _ in tqdm(range(params.nSteps*params.batch_size)):
+			# example = sess.run(el)
+			example = next(gen)
+			writer.write(serialize(*tuple(example)))
 
 feat_desc = {"pos": tf.io.FixedLenFeature([2], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64), "groups": tf.io.VarLenFeature(tf.int64)}
 for g in range(params.nGroups):
