@@ -50,15 +50,12 @@ for bin in range(nBins):
         if Error[n]<=edges[bin+1] and Error[n]>edges[bin]:
             temp.append(n)
     histIdx.append(temp)
-for h in range(len(histIdx)):
-    if len(histIdx[h])==0:
-        histIdx[h] = [histIdx[h-1][-1]+1]
-        err=np.array([
-    [np.median(testOutput[histIdx[n],2])-np.percentile(testOutput[histIdx[n],2],30) for n in range(nBins)],
-    [np.percentile(testOutput[histIdx[n],2],70)-np.median(testOutput[histIdx[n],2]) for n in range(nBins)]])
+err=np.array([
+    [np.median(testOutput[histIdx[n],2])-np.percentile(testOutput[histIdx[n],2],30) for n in range(nBins) if len(histIdx[n])>10],
+    [np.percentile(testOutput[histIdx[n],2],70)-np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10]])
 plt.errorbar(
-    [(edges[n+1]+edges[n])/2 for n in range(nBins)],
-    [np.median(testOutput[histIdx[n],2]) for n in range(nBins)], c='xkcd:cherry red', 
+    [(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10],
+    [np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10], c='xkcd:cherry red', 
     yerr = err, 
     label=r'$median \pm 20 percentile$',
     linewidth=3)
