@@ -38,7 +38,7 @@ from importData import rawDataParser
 from fullEncoder import datasetMaker
 
 
-
+trainLosses = None
 projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
 
 
@@ -243,7 +243,7 @@ class spikeNet:
 
 
 
-def getTrainingSpikesWithBlanks():
+def getTrainingSpikes():
 	totalLength = SPT_train[-1] - SPT_train[0]
 	nBins = int(totalLength // params.windowLength) - 1
 	binStartTime = [SPT_train[0] + (i*params.windowLength) for i in range(nBins)]
@@ -290,7 +290,7 @@ def serialize(pos, groups, length, *spikes):
 	return example_proto.SerializeToString()
 
 if not os.path.isfile(projectPath.tfrec):
-	gen = getTrainingSpikesWithBlanks()
+	gen = getTrainingSpikes()
 	print('saving new dataset')
 	with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
 		totalLength = SPT_train[-1] - SPT_train[0]
@@ -395,9 +395,6 @@ with tf.Graph().as_default():
 
 		# initialize variables and input framework
 		sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
-		# fd = {spikesPH[g]: xTraining[g] for g in range(params.nGroups)}
-		# fd.update({posPH: POS_train})
-		# sess.run(iter.initializer, feed_dict=fd)
 		sess.run(iter.initializer)
 
 		### training
@@ -424,6 +421,10 @@ with tf.Graph().as_default():
 				epoch_loss2=0
 
 		saver.save(sess, projectPath.folder + '_graphForRnn')
+
+
+
+
 
 
 
@@ -521,7 +522,10 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 		spikes = SPK_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]
 		groups = GRP_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]==group
 		for spk in range(spikes.shape[0]):
-			spikes[spk,:,:] *= groups[spk]
+			if not groups[spk]:
+				spikes[spk] = np.zeros([params.nChannels[group], 32])
+		if list(spikes) != []:
+			spikes = np.stack(list(spikes), axis=0)
 		return spikes
 
 	with tf.Session() as sess:
@@ -558,7 +562,8 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 	spd = np.array(spd)
 
 	fileName = projectPath.folder + '_resultsForRnn_temp'
-	# np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=[])
+	if trainLosses==None:
+		trainLosses = []
 	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
 
 
