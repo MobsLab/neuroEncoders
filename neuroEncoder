@@ -268,9 +268,9 @@ elif [[ $encoderType == full ]]; then
 fi
 
 
-if [[ $makeJson == 1 ]]; then
-	/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
-fi
+# if [[ $makeJson == 1 ]]; then
+# 	/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
+# fi
 echo
 echo
 echo Encoding over.

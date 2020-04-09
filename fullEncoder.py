@@ -279,23 +279,19 @@ def getTrainingSpikesWithBlanks():
 			allSpikes=[]
 			sel = np.logical_and(SPT_train>binStart, SPT_train<binStart+params.windowLength)
 			length = np.sum(sel)
+			groups = GRP_train[sel]
 			for group in range(params.nGroups):
 				spikes = SPK_train[sel]
-				groups = GRP_train[sel]==group
-				for spk in range(spikes.shape[0]):
-					if not groups[spk]:
-						spikes[spk] = np.zeros([params.nChannels[group], 32])
-
-				spikes = np.pad(np.stack(spikes, axis=0), ((0, params.maxLength-spikes.shape[0]),(0,0),(0,0)), 'constant', constant_values=0)
-				allSpikes.append(spikes)
+				allSpikes.append(spikes[np.where(groups==group)])
 			pos = POS_train[SPT_train>binStart][0,:]
-			yield (pos/np.max(POS_train), length) + tuple(allSpikes)
+			yield (pos/np.max(POS_train), groups, length) + tuple(allSpikes)
 
 
-def serialize(pos, length, *spikes):
+def serialize(pos, groups, length, *spikes):
 	feat = {
 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
-		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length]))}
+		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
+		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))}
 	for g in range(params.nGroups):
 		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
 
@@ -304,8 +300,8 @@ def serialize(pos, length, *spikes):
 
 if not os.path.isfile(projectPath.tfrec):
 	dataset = tf.data.Dataset.from_generator(getTrainingSpikesWithBlanks,
-		output_types = (tf.float64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
-		output_shapes = (tf.TensorShape([2]), tf.TensorShape([])) + tuple(tf.TensorShape([params.maxLength, params.nChannels[g], 32]) for g in range(params.nGroups)))
+		output_types = (tf.float64, tf.int64, tf.int64) + tuple(tf.float32 for _ in range(params.nGroups)),
+		output_shapes = (tf.TensorShape([2]), tf.TensorShape([None]), tf.TensorShape([])) + tuple(tf.TensorShape([None, params.nChannels[g], 32]) for g in range(params.nGroups)))
 	iter = dataset.make_initializable_iterator()
 	el = iter.get_next()
 	with tf.Session() as sess:
@@ -315,16 +311,29 @@ if not os.path.isfile(projectPath.tfrec):
 			totalLength = SPT_train[-1] - SPT_train[0]
 			nBins = int(totalLength // params.windowLength) - 1
 
-			for _ in tqdm(range(params.nSteps)):
+			for _ in tqdm(range(params.nSteps*params.batch_size)):
 				example = sess.run(el)
 				writer.write(serialize(*tuple(example)))
 
-feat_desc = {"pos": tf.io.FixedLenFeature([2], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64)}
+feat_desc = {"pos": tf.io.FixedLenFeature([2], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64), "groups": tf.io.VarLenFeature(tf.int64)}
 for g in range(params.nGroups):
-	feat_desc.update({"group"+str(g): tf.io.FixedLenFeature([params.maxLength, params.nChannels[g], 32], tf.float32)})
+	feat_desc.update({"group"+str(g): tf.io.VarLenFeature(tf.float32)})
 
-def parse_serialized_example(ex_proto):
-	return tf.io.parse_example(ex_proto, feat_desc)
+def parse_serialized_example(batch, ex_proto):
+	tensors = tf.io.parse_example(ex_proto, feat_desc)
+	# tensors = tf.io.parse_single_example(ex_proto, feat_desc)
+	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
+	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+	for g in range(params.nGroups):
+		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
+		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
+		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [batch, -1, params.nChannels[g], 32])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
+		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
+		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
+	return tensors
 
 ### Training model
 with tf.Graph().as_default():
@@ -332,11 +341,19 @@ with tf.Graph().as_default():
 	print()
 	print('TRAINING')
 
+	batch = params.batch_size
 	dataset = tf.data.TFRecordDataset(projectPath.tfrec)
-	dataset = dataset.batch(params.batch_size)
-	dataset = dataset.map(parse_serialized_example)
+	dataset = dataset.batch(batch)
+	dataset = dataset.map(lambda *vals: parse_serialized_example(batch, *vals))
 	iter = dataset.make_initializable_iterator()
 	iterators = iter.get_next()
+	# with tf.Session() as sess:
+	# 	sess.run(iter.initializer)
+	# 	temp = sess.run(iterators)
+	# 	print("groups",temp["groups"].shape)
+	# 	for g in range(params.nGroups):
+	# 		print("group"+str(g), temp["group"+str(g)].shape, np.sum(temp["groups"]==g))
+	# bbbbb
 
 
 	with tf.device(device_name):
@@ -346,17 +363,16 @@ with tf.Graph().as_default():
 		# CNN plus dense on every group indepedently
 		for group in range(params.nGroups):
 			with tf.variable_scope("group"+str(group)+"-encoder"):
-				x = tf.transpose(iterators["group"+str(group)], [1,0,2,3])
-				x = tf.reshape(x, [-1, params.nChannels[group], 32])
-				realSpikes = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
-				nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
-				completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(realSpikes))[:,0,:], [1,0], name="completion")
-				x = tf.boolean_mask(x, realSpikes)
+				x = iterators["group"+str(group)]
+				idMatrix = tf.eye(tf.shape(iterators["groups"])[0])
+				completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(tf.equal(iterators["groups"], group)))[:,0,:], [1,0], name="completion")
 
 			newSpikeNet = spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
 			x = newSpikeNet.apply(x)
 			x = tf.matmul(completionTensor, x)
-			x = tf.reshape(x, [params.maxLength, params.batch_size, params.nFeatures])
+			x = tf.reshape(x, [params.batch_size, -1, params.nFeatures])
+			if params.timeMajor:
+				x = tf.transpose(x, [1,0,2])
 			allFeatures.append(x)
 		allFeatures = tf.tuple(allFeatures)
 		allFeatures = tf.concat(allFeatures, axis=2)
@@ -701,7 +717,7 @@ outjsonStr['stimCondition0']['higherY'] = 0.0
 outjsonStr['stimCondition0']['lowerDev'] = 0.0
 outjsonStr['stimCondition0']['higherDev'] = 0.0
 
-print(outjsonStr)
+# print(outjsonStr)
 
 outjson = json.dumps(outjsonStr, indent=4)
 with open(projectPath.json,"w") as json_file:
