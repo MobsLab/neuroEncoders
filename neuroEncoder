@@ -130,7 +130,7 @@ jsonPath="${xml_path::-3}json"
 
 # If some files are missing, run some matlab code to generate them
 log=mlog.out
-if [ ! -f "$path""behavResources.mat" ] || [ ! -f "$path""$log" ]
+if [ ! -f "$path""nnBehavior.mat" ] || [ ! -f "$path""$log" ]
 then
 
 	rm -f $path$log
