@@ -139,8 +139,8 @@ class SpikeDetector:
 
         if not os.path.exists(self.path.xml):
             raise ValueError('this file does not exist: '+ self.path.xml)
-        # if not os.path.exists(self.path.dat):
-        #     raise ValueError('this file does not exist: '+ self.path.dat)
+        if not os.path.exists(self.path.dat):
+            raise ValueError('this file does not exist: '+ self.path.dat)
         
         self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
         self.position, self.speed, self.position_time = get_position(self.path.folder)
