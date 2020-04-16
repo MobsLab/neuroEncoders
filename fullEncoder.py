@@ -443,6 +443,7 @@ with tf.Graph().as_default():
 
 ### Back compatibility converting before inferring
 variables = []
+print("Cleaning graph.")
 with tf.Graph().as_default(), tf.device("/cpu:0"):
 
 
@@ -507,6 +508,8 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 
 
 ### Loading and inferring
+print()
+print("INFERRING")
 tf.contrib.rnn
 with tf.Graph().as_default(), tf.device("/cpu:0"):
 	saver = tf.train.import_meta_graph(projectPath.folder + '_graphDecoder.meta')
@@ -526,6 +529,8 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 				spikes[spk] = np.zeros([params.nChannels[group], 32])
 		if list(spikes) != []:
 			spikes = np.stack(list(spikes), axis=0)
+		else:
+			spikes = np.zeros([0, params.nChannels[group], 32])
 		return spikes
 
 	with tf.Session() as sess:
