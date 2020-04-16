@@ -37,16 +37,19 @@ maxPos = 253.92
 xError = np.abs(testOutput[:,0] - Y_test[:,0])
 yError = np.abs(testOutput[:,1] - Y_test[:,1])
 Error = np.array([np.sqrt(xError[n]**2 + yError[n]**2) for n in range(len(xError))])
+selNoNans = ~np.isnan(Error)
 fig = plt.figure(figsize=(8,8))
-xy = np.vstack([Error, testOutput[:,2]])
+xy = np.vstack([Error[selNoNans], testOutput[selNoNans,2]])
 z = gaussian_kde(xy)(xy)
-plt.scatter(Error, testOutput[:,2], c=z, s=10)
+plt.scatter(Error[selNoNans], testOutput[selNoNans,2], c=z, s=10)
 nBins = 20
-_, edges = np.histogram(Error, nBins)
+_, edges = np.histogram(Error[selNoNans], nBins)
 histIdx = []
 for bin in range(nBins):
     temp=[]
     for n in range(len(Error)):
+        if not selNoNans[n]:
+            continue
         if Error[n]<=edges[bin+1] and Error[n]>edges[bin]:
             temp.append(n)
     histIdx.append(temp)
@@ -60,7 +63,7 @@ plt.errorbar(
     label=r'$median \pm 20 percentile$',
     linewidth=3)
 x_new = np.linspace(np.min(Error), np.max(Error), num=len(Error))
-coefs = poly.polyfit(Error, testOutput[:,2], 2)
+coefs = poly.polyfit(Error[selNoNans], testOutput[selNoNans,2], 2)
 ffit = poly.polyval(x_new, coefs)
 plt.plot(x_new, ffit, 'k', linewidth=3)
 ax = fig.axes[0]
