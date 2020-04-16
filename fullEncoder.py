@@ -569,7 +569,8 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 	fileName = projectPath.folder + '_resultsForRnn_temp'
 	if trainLosses==None:
 		trainLosses = []
-	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, testOutput=testOutput, trainLosses=trainLosses)
+	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, inferring=testOutput, trainLosses=trainLosses)
+	scipy.io.savemat(os.path.expanduser(projectPath.folder + 'inferring.mat'), np.load(os.path.expanduser(fileName)))
 
 
 
