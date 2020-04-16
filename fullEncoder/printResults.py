@@ -18,7 +18,7 @@ file = folder + '_resultsForRnn_temp.npz'
 # fileName = folder + '_resultsForRnn_' + datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
 
 results = np.load(os.path.expanduser(file))
-Y_test = results['pos']
+pos = results['pos']
 speed = results['spd']
 testOutput = results['testOutput']
 trainLosses = results['trainLosses']
@@ -34,8 +34,8 @@ maxPos = 253.92
 
 
 # ERROR & STD
-xError = np.abs(testOutput[:,0] - Y_test[:,0])
-yError = np.abs(testOutput[:,1] - Y_test[:,1])
+xError = np.abs(testOutput[:,0] - pos[:,0])
+yError = np.abs(testOutput[:,1] - pos[:,1])
 Error = np.array([np.sqrt(xError[n]**2 + yError[n]**2) for n in range(len(xError))])
 selNoNans = ~np.isnan(Error)
 fig = plt.figure(figsize=(8,8))
@@ -107,14 +107,14 @@ fig, ax = plt.subplots(figsize=(15,9))
 ax1 = plt.subplot2grid((2,1),(0,0))
 # ax1.plot(testOutput[:,0], label='guessed X')
 ax1.plot(np.where(selection)[0], testOutput[selection,0], label='guessed X selection')
-ax1.plot(Y_test[:,0], label='true X', color='xkcd:dark pink')
+ax1.plot(pos[:,0], label='true X', color='xkcd:dark pink')
 ax1.legend()
 ax1.set_title('position X')
 
 ax2 = plt.subplot2grid((2,1),(1,0), sharex=ax1)
 # ax2.plot(testOutput[:,1], label='guessed Y')
 ax2.plot(np.where(selection)[0], testOutput[selection,1], label='guessed Y selection')
-ax2.plot(Y_test[:,1], label='true Y', color='xkcd:dark pink')
+ax2.plot(pos[:,1], label='true Y', color='xkcd:dark pink')
 ax2.legend()
 ax2.set_title('position Y')
 
@@ -126,7 +126,7 @@ plt.show(block=block)
 # # Movie
 # fig, ax = plt.subplots(figsize=(10,10))
 # ax1 = plt.subplot2grid((1,1),(0,0))
-# im2, = ax1.plot([Y_test[0,1]*maxPos],[Y_test[0,0]*maxPos],marker='o', markersize=15, color="red")
+# im2, = ax1.plot([pos[0,1]*maxPos],[pos[0,0]*maxPos],marker='o', markersize=15, color="red")
 # im2b, = ax1.plot([testOutput[0,1]*maxPos],[testOutput[0,0]*maxPos],marker='P', markersize=15, color="green")
 
 # im3 = ax1.plot([125,170,170,215,215,210,60,45,45,90,90], [35,70,110,210,225,250,250,225,210,110,35], color="red")
@@ -140,7 +140,7 @@ plt.show(block=block)
 # def updatefig(frame, *args):
 #     reduced_frame = frame % len(frames)
 #     selected_frame = frames[reduced_frame]
-#     im2.set_data([Y_test[selected_frame,1]*maxPos],[Y_test[selected_frame,0]*maxPos])
+#     im2.set_data([pos[selected_frame,1]*maxPos],[pos[selected_frame,0]*maxPos])
 #     im2b.set_data([testOutput[selected_frame,1]*maxPos],[testOutput[selected_frame,0]*maxPos])
 #     return im2,im2b
 
@@ -153,5 +153,5 @@ plt.show(block=block)
 
 
 
-# np.savez(os.path.expanduser(fileName), Y_test, speed, testOutput, trainLosses)
+# np.savez(os.path.expanduser(fileName), pos, speed, testOutput, trainLosses)
 # print('Results saved at:', fileName)
