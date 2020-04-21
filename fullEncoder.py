@@ -32,85 +32,15 @@ class xmlPath():
 		self.dat = path[:-3] + 'dat'
 		self.fil = path[:-3] + 'fil'
 		self.json = path[:-3] + 'json'
-		self.tfrec = self.folder + 'dataset.tfrec'
-
-from importData import rawDataParser
-from fullEncoder import datasetMaker
-
-
-trainLosses = None
-projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
-
-
-
-### Data
-filterType = sys.argv[3]
-if filterType=='external':
-    useOpenEphysFilter=True
-else:
-    useOpenEphysFilter=False
-print('using external filter:', useOpenEphysFilter)
-spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
-if not os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
-	
-
-	allGroups = []
-	allSpTime = []
-	allSpikes = []
-	allSpkPos = []
-	allSpkSpd = []
-
-	for spikes in spikeDetector.getSpikes():
-		if len(spikes['time'])==0:
-			continue
-		for grp,time,spk,pos,spd in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position'],spikes['speed']), key=lambda x:x[1]):
-			allGroups.append(grp)
-			allSpTime.append(time)
-			allSpikes.append(spk)
-			allSpkPos.append(pos)
-			allSpkSpd.append(spd)
-		
-	GRP_data = np.array(allGroups)
-	SPT_data = np.array(allSpTime)
-	SPK_data = np.array(allSpikes)
-	POS_data = np.array(allSpkPos)
-	SPD_data = np.array(allSpkSpd)
-	print('data parsed.')
-
-
-	SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test = train_test_split(
-		SPT_data, GRP_data, SPK_data, POS_data, SPD_data, test_size=0.1, shuffle=False, random_state=42)
-	np.savez(projectPath.folder + '_rawSpikesForRnn', 
-		SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test)
-else:
-	try:
-		print(loaded)
-	except NameError:
-		print('loading data')
-		Results = np.load(projectPath.folder + '_rawSpikesForRnn.npz', allow_pickle=True)
-		SPT_train = Results['arr_0']
-		SPT_test = Results['arr_1']
-		GRP_train = Results['arr_2']
-		GRP_test = Results['arr_3']
-		SPK_train = Results['arr_4']
-		SPK_test = Results['arr_5']
-		POS_train = Results['arr_6']
-		POS_test = Results['arr_7']
-		SPD_train = Results['arr_8']
-		SPD_test = Results['arr_9']
-		loaded='data loaded'
-		print(loaded)
-
-
-
+		self.tfrec = self.folder + 'trainingDataset.tfrec'
+		self.testTfrec = self.folder + 'testingDataset.tfrec'
 
 ### Params
 class Params:
-	def __init__(self):
-		self.nGroups = np.max(GRP_train) + 1
-		self.dim_output = POS_train.shape[1]
-		self.nChannels = spikeDetector.numChannelsPerGroup()
-		self.length = len(SPK_train)
+	def __init__(self, detector, dim_output):
+		self.nGroups = detector.nGroups()
+		self.dim_output = dim_output
+		self.nChannels = detector.numChannelsPerGroup()
 
 		self.nSteps = 10000
 		self.nFeatures = 128
@@ -127,99 +57,97 @@ class Params:
 		self.lossActivation = None
 
 
-		# Figure out what will be the maximum length of a spike sequence for our windowLength
-		self.maxLength = max(self.getMaxLength(SPT_train), self.getMaxLength(SPT_test))
+from importData import rawDataParser
+from fullEncoder import datasetMaker, nnUtils
 
-	def getMaxLength(self, data):
-		maxLength = 0
-		n = 0
-		bin_stop = data[0]
-		while True:
-			bin_stop = bin_stop + self.windowLength
-			if bin_stop > data[-1]:
-				maxLength = max(maxLength, len(data)-idx)
-				break
-			idx=n
-			while data[n] < bin_stop:
-				n += 1
-			maxLength = max(maxLength, n-idx)
-		return maxLength
 
-params = Params()
+trainLosses = None
+projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
 
 
 
+### Data
+filterType = sys.argv[3]
+if filterType=='external':
+    useOpenEphysFilter=True
+else:
+    useOpenEphysFilter=False
+print('using external filter:', useOpenEphysFilter)
+spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
+params = Params(spikeDetector, 2)
+if (not os.path.isfile(projectPath.tfrec)) or (not os.path.isfile(projectPath.testTfrec)):
+	if not os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
+
+		allGroups = []
+		allSpTime = []
+		allSpikes = []
+		allSpkPos = []
+		allSpkSpd = []
+
+		for spikes in spikeDetector.getSpikes():
+			if len(spikes['time'])==0:
+				continue
+			for grp,time,spk,pos,spd in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position'],spikes['speed']), key=lambda x:x[1]):
+				allGroups.append(grp)
+				allSpTime.append(time)
+				allSpikes.append(spk)
+				allSpkPos.append(pos)
+				allSpkSpd.append(spd)
+			
+		GRP_data = np.array(allGroups)
+		SPT_data = np.array(allSpTime)
+		SPK_data = np.array(allSpikes)
+		POS_data = np.array(allSpkPos)
+		SPD_data = np.array(allSpkSpd)
+		print('data parsed.')
+
+
+		SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test = train_test_split(
+			SPT_data, GRP_data, SPK_data, POS_data, SPD_data, test_size=0.1, shuffle=False, random_state=42)
+		np.savez(projectPath.folder + '_rawSpikesForRnn', 
+			SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test)
+	else:
+		try:
+			print(loaded)
+		except NameError:
+			print('loading data')
+			Results = np.load(projectPath.folder + '_rawSpikesForRnn.npz', allow_pickle=True)
+			SPT_train = Results['arr_0']
+			SPT_test = Results['arr_1']
+			GRP_train = Results['arr_2']
+			GRP_test = Results['arr_3']
+			SPK_train = Results['arr_4']
+			SPK_test = Results['arr_5']
+			POS_train = Results['arr_6']
+			POS_test = Results['arr_7']
+			SPD_train = Results['arr_8']
+			SPD_test = Results['arr_9']
+			loaded='data loaded'
+			print(loaded)
 
 
 
 
+	if not os.path.isfile(projectPath.tfrec):
+		gen = nnUtils.getTrainingSpikes(params, SPT_train, POS_train, GRP_train, SPK_train, maxPos = spikeDetector.maxPos())
+		print('building training dataset')
+		with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
+			totalLength = SPT_train[-1] - SPT_train[0]
+			nBins = int(totalLength // params.windowLength) - 1
+			for _ in tqdm(range(nBins)):
+				example = next(gen)
+				writer.write(nnUtils.serialize(params, *tuple(example)))
 
+	if not os.path.isfile(projectPath.testTfrec):
+		gen = nnUtils.getTrainingSpikes(params, SPT_test, POS_test, GRP_test, SPK_test, maxPos = spikeDetector.maxPos())
+		print('building testing dataset')
+		with tf.python_io.TFRecordWriter(projectPath.testTfrec) as writer:
+			totalLength = SPT_test[-1] - SPT_test[0]
+			nBins = int(totalLength // params.windowLength) - 1
 
-
-
-def last_relevant(output, length, timeMajor=False):
-	''' Used to select the right output of 
-		tf.rnn.dynamic_rnn for sequences of variable sizes '''
-	if timeMajor:
-		output = tf.transpose(output, [1,0,2])
-	batch_size = tf.shape(output)[0]
-	max_length = tf.shape(output)[1]
-	out_size = int(output.get_shape()[2])
-	index = tf.nn.relu(tf.range(0, batch_size) * max_length + tf.cast(length - 1, tf.int32))
-	flat = tf.reshape(output, [-1, out_size])
-	relevant = tf.gather(flat, index)
-	return relevant
-
-
-
-
-def layerLSTM(lstmSize, dropout=0.0):
-	cell = tf.contrib.rnn.LSTMBlockCell(lstmSize)
-	return tf.nn.rnn_cell.DropoutWrapper(cell, input_keep_prob=1.0, output_keep_prob=1.0, state_keep_prob=1-dropout)
-
-class spikeNet:
-	def __init__(self, nChannels=4, device="/cpu:0", nFeatures=128):
-		self.nFeatures = nFeatures
-		self.nChannels = nChannels
-		self.device = device
-		with tf.device(self.device):
-			self.convLayer1 = tf.layers.Conv2D(8, [2,3], padding='SAME')
-			self.convLayer2 = tf.layers.Conv2D(16, [2,3], padding='SAME')
-			self.convLayer3 = tf.layers.Conv2D(32, [2,3], padding='SAME')
-
-			self.maxPoolLayer1 = tf.layers.MaxPooling2D([1,2], [1,2], padding='SAME')
-			self.maxPoolLayer2 = tf.layers.MaxPooling2D([1,2], [1,2], padding='SAME')
-			self.maxPoolLayer3 = tf.layers.MaxPooling2D([1,2], [1,2], padding='SAME')
-
-			self.dropoutLayer = tf.layers.Dropout(0.5)
-			self.denseLayer1 = tf.layers.Dense(self.nFeatures, activation='relu')
-			self.denseLayer2 = tf.layers.Dense(self.nFeatures, activation='relu')
-			self.denseLayer3 = tf.layers.Dense(self.nFeatures, activation='relu')
-
-	def __call__(self, input):
-		return self.apply(input)
-
-	def apply(self, input):
-		with tf.device(self.device):
-			x = tf.expand_dims(input, axis=3)
-			x = self.convLayer1(x)
-			x = self.maxPoolLayer1(x)
-			x = self.convLayer2(x)
-			x = self.maxPoolLayer2(x)
-			x = self.convLayer3(x)
-			x = self.maxPoolLayer3(x)
-
-			x = tf.reshape(x, [-1, self.nChannels*4*32])
-			x = self.denseLayer1(x)
-			x = self.dropoutLayer(x)
-			x = self.denseLayer2(x)
-			x = self.denseLayer3(x)
-		return x
-
-	def variables(self):
-		return self.convLayer1.variables + self.convLayer2.variables + self.convLayer3.variables + \
-			self.maxPoolLayer1.variables + self.maxPoolLayer2.variables + self.maxPoolLayer3.variables + \
-			self.denseLayer1.variables + self.denseLayer2.variables + self.denseLayer3.variables
+			for _ in tqdm(range(nBins)):
+				example = next(gen)
+				writer.write(nnUtils.serialize(params, *tuple(example)))
 
 
 
@@ -237,87 +165,11 @@ class spikeNet:
 
 
 
+	
 
-
-
-
-
-
-def getTrainingSpikes():
-	totalLength = SPT_train[-1] - SPT_train[0]
-	nBins = int(totalLength // params.windowLength) - 1
-	binStartTime = [SPT_train[0] + (i*params.windowLength) for i in range(nBins)]
-	maxPos = np.max(POS_train)
-
-	selection = np.zeros([len(binStartTime), 2], dtype=int)
-	selection[0,0] = np.where(SPT_train>binStartTime[0])[0][0]
-	selection[0,1] = np.logical_and(SPT_train>binStartTime[0], SPT_train<binStartTime[0]+params.windowLength).sum()
-	for idx in range(1, len(binStartTime)-1):
-		binStart = binStartTime[idx]
-		selection[idx,0] = selection[idx-1,0] + selection[idx-1,1]
-		n=0
-		while SPT_train[selection[idx,0]+n] < binStart+params.windowLength:
-			n += 1
-		selection[idx,1] = n
-
-
-	while True:
-		np.random.shuffle(selection)
-		for idx in range(selection.shape[0]):
-			allSpikes=[]
-			pos = POS_train[selection[idx, 0], :] / maxPos
-			length = selection[idx,1]
-			groups = GRP_train[selection[idx,0]: selection[idx,0]+length]
-			spikes = SPK_train[selection[idx,0]: selection[idx,0]+length]
-			for group in range(params.nGroups):
-				s = list(spikes[np.where(groups==group)])
-				if s == []:
-					allSpikes.append(np.zeros([0, params.nChannels[group], 32]))
-				else:
-					allSpikes.append(np.stack(spikes[np.where(groups==group)], axis=0))
-			yield (pos, groups, length) + tuple(allSpikes)
-
-
-def serialize(pos, groups, length, *spikes):
-	feat = {
-		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
-		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
-		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))}
-	for g in range(params.nGroups):
-		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
-
-	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
-	return example_proto.SerializeToString()
-
-if not os.path.isfile(projectPath.tfrec):
-	gen = getTrainingSpikes()
-	print('saving new dataset')
-	with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
-		totalLength = SPT_train[-1] - SPT_train[0]
-		nBins = int(totalLength // params.windowLength) - 1
-
-		for _ in tqdm(range(params.nSteps*params.batch_size)):
-			example = next(gen)
-			writer.write(serialize(*tuple(example)))
-
-feat_desc = {"pos": tf.io.FixedLenFeature([2], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64), "groups": tf.io.VarLenFeature(tf.int64)}
+feat_desc = {"pos": tf.io.FixedLenFeature([params.dim_output], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64), "groups": tf.io.VarLenFeature(tf.int64)}
 for g in range(params.nGroups):
 	feat_desc.update({"group"+str(g): tf.io.VarLenFeature(tf.float32)})
-
-def parse_serialized_example(batch, ex_proto):
-	tensors = tf.io.parse_example(ex_proto, feat_desc)
-	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
-	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
-	for g in range(params.nGroups):
-		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
-		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
-		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
-		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
-		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [batch, -1, params.nChannels[g], 32])
-		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
-		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
-		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
-	return tensors
 
 ### Training model
 with tf.Graph().as_default():
@@ -325,10 +177,9 @@ with tf.Graph().as_default():
 	print()
 	print('TRAINING')
 
-	batch = params.batch_size
 	dataset = tf.data.TFRecordDataset(projectPath.tfrec).shuffle(params.nSteps).repeat()
-	dataset = dataset.batch(batch)
-	dataset = dataset.map(lambda *vals: parse_serialized_example(batch, *vals))
+	dataset = dataset.batch(params.batch_size)
+	dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(params, feat_desc, *vals, batched=True))
 	iter = dataset.make_initializable_iterator()
 	iterators = iter.get_next()
 
@@ -344,7 +195,7 @@ with tf.Graph().as_default():
 				idMatrix = tf.eye(tf.shape(iterators["groups"])[0])
 				completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(tf.equal(iterators["groups"], group)))[:,0,:], [1,0], name="completion")
 
-			newSpikeNet = spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
+			newSpikeNet = nnUtils.spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
 			x = newSpikeNet.apply(x)
 			x = tf.matmul(completionTensor, x)
 			x = tf.reshape(x, [params.batch_size, -1, params.nFeatures])
@@ -352,14 +203,14 @@ with tf.Graph().as_default():
 				x = tf.transpose(x, [1,0,2])
 			allFeatures.append(x)
 		allFeatures = tf.tuple(allFeatures)
-		allFeatures = tf.concat(allFeatures, axis=2)
+		allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
 
 		# LSTM on the concatenated outputs of previous graphs
 		if device_name=="/gpu:0":
 			lstm = tf.contrib.cudnn_rnn.CudnnLSTM(params.lstmLayers, params.lstmSize, dropout=params.lstmDropout)
 			outputs, finalState = lstm(allFeatures, training=True)
 		else:
-			lstm = [layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
+			lstm = [nnUtils.layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
 			lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
 			outputs, finalState = tf.nn.dynamic_rnn(
 				lstm, 
@@ -373,7 +224,7 @@ with tf.Graph().as_default():
 	denseLoss1  = tf.layers.Dense(params.lstmSize, activation = tf.nn.relu, name="loss1")
 	denseLoss2  = tf.layers.Dense(1, activation = params.lossActivation, name="loss2")
 
-	output = last_relevant(outputs, iterators["length"], timeMajor=params.timeMajor)
+	output = nnUtils.last_relevant(outputs, iterators["length"], timeMajor=params.timeMajor)
 	outputLoss = denseLoss2(denseLoss1(output))[:,0]
 	outputPos = denseOutput(output)
 
@@ -420,18 +271,7 @@ with tf.Graph().as_default():
 				epoch_loss=0
 				epoch_loss2=0
 
-		saver.save(sess, projectPath.folder + '_graphForRnn')
-
-
-
-
-
-
-
-
-
-
-
+		saver.save(sess, projectPath.folder + '_graphDecoder')
 
 
 
@@ -456,13 +296,13 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 			nSpikesTot = tf.shape(x)[0]; idMatrix = tf.eye(nSpikesTot)
 			completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(realSpikes))[:,0,:], [1,0], name="completion")
 			x = tf.boolean_mask(x, realSpikes)
-		newSpikeNet = spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
+		newSpikeNet = nnUtils.spikeNet(nChannels=params.nChannels[group], device="/cpu:0", nFeatures=params.nFeatures)
 		x = newSpikeNet.apply(x)
 		x = tf.matmul(completionTensor, x)
 
 		embeddings.append(x)
 		variables += newSpikeNet.variables()
-	fullEmbedding = tf.concat(embeddings, axis=1)
+	fullEmbedding = tf.concat(embeddings, axis=1, name="concat2")
 
 	
 	# LSTM on concatenated outputs
@@ -471,7 +311,7 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 			lstm = tf.nn.rnn_cell.MultiRNNCell(
 				[tf.contrib.cudnn_rnn.CudnnCompatibleLSTMCell(params.lstmSize) for _ in range(params.lstmLayers)])
 	else:
-		lstm = [layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
+		lstm = [nnUtils.layerLSTM(params.lstmSize, dropout=params.lstmDropout) for _ in range(params.lstmLayers)]
 		lstm = tf.nn.rnn_cell.MultiRNNCell(lstm)
 		outputs, finalState = tf.nn.dynamic_rnn(
 			lstm, 
@@ -502,69 +342,66 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 	### Converting
 	graphToSave = tf.train.Saver()
 	with tf.Session() as sess:
-		subGraphToRestore.restore(sess, projectPath.folder + '_graphForRnn')
+		subGraphToRestore.restore(sess, projectPath.folder + '_graphDecoder')
 		graphToSave.save(sess, projectPath.folder + '_graphDecoder')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
 ### Loading and inferring
 print()
 print("INFERRING")
+
 tf.contrib.rnn
 with tf.Graph().as_default(), tf.device("/cpu:0"):
+
+	dataset = tf.data.TFRecordDataset(projectPath.testTfrec)
+	cnt     = dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1)
+	dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(params, feat_desc, *vals))
+	iter    = dataset.make_initializable_iterator()
+	spikes  = iter.get_next()
+	for group in range(params.nGroups):
+		idMatrix = tf.eye(tf.shape(spikes["groups"])[0])
+		completionTensor = tf.transpose(tf.gather(idMatrix, tf.where(tf.equal(spikes["groups"], group)))[:,0,:], [1,0], name="completion")
+		spikes["group"+str(group)] = tf.tensordot(completionTensor, spikes["group"+str(group)], axes=[[1],[0]])
+
+
 	saver = tf.train.import_meta_graph(projectPath.folder + '_graphDecoder.meta')
 
-	def getSpikes(bin, group):
-		binStart = SPT_test[0] + bin*params.windowLength
-		return SPK_test[
-			np.logical_and(
-				np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength),
-				GRP_test==group)]
-	def getSpikesWithBlanks(bin, group):
-		binStart = SPT_test[0] + bin*params.windowLength
-		spikes = SPK_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]
-		groups = GRP_test[np.logical_and(SPT_test>binStart, SPT_test<binStart+params.windowLength)]==group
-		for spk in range(spikes.shape[0]):
-			if not groups[spk]:
-				spikes[spk] = np.zeros([params.nChannels[group], 32])
-		if list(spikes) != []:
-			spikes = np.stack(list(spikes), axis=0)
-		else:
-			spikes = np.zeros([0, params.nChannels[group], 32])
-		return spikes
 
 	with tf.Session() as sess:
 		saver.restore(sess, projectPath.folder + '_graphDecoder')
 
+		pos = []
+		spd = []
 		testOutput = []
-		for bin in trange(int((SPT_test[-1]-SPT_test[0])//params.windowLength)-1):
+		sess.run(iter.initializer)
+		for b in trange(cnt.eval()):
+			tmp = sess.run(spikes)
+			pos.append(tmp["pos"])
 			testOutput.append(np.concatenate(
 				sess.run(
 					[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
 					 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")], 
-					{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):getSpikesWithBlanks(bin, group)
+					{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):tmp["group"+str(group)]
 						for group in range(params.nGroups)}), 
 				axis=0))
+		pos = np.array(pos)
 
 	testOutput = np.array(testOutput)
-
-	pos = []
-	spd = []
-	n = 0
-	bin_stop = SPT_test[0]
-	while True:
-		bin_stop = bin_stop + params.windowLength
-		if bin_stop > SPT_test[-1]:
-			break
-		idx=n
-		while SPT_test[n] < bin_stop:
-			n += 1
-		pos.append(np.mean(POS_test[idx:n,:], axis=0))
-		spd.append(np.mean(SPD_test[idx:n,:]))
-	pos.pop()
-	spd.pop()
-	pos = np.array(pos) / np.max(POS_train)
-	spd = np.array(spd)
 
 	fileName = projectPath.folder + '_resultsForRnn_temp'
 	if trainLosses==None:
