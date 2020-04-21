@@ -326,7 +326,7 @@ with tf.Graph().as_default():
 	print('TRAINING')
 
 	batch = params.batch_size
-	dataset = tf.data.TFRecordDataset(projectPath.tfrec)
+	dataset = tf.data.TFRecordDataset(projectPath.tfrec).shuffle(params.nSteps).repeat()
 	dataset = dataset.batch(batch)
 	dataset = dataset.map(lambda *vals: parse_serialized_example(batch, *vals))
 	iter = dataset.make_initializable_iterator()
@@ -570,7 +570,9 @@ with tf.Graph().as_default(), tf.device("/cpu:0"):
 	if trainLosses==None:
 		trainLosses = []
 	np.savez(os.path.expanduser(fileName), pos=pos, spd=spd, inferring=testOutput, trainLosses=trainLosses)
-	scipy.io.savemat(os.path.expanduser(projectPath.folder + 'inferring.mat'), np.load(os.path.expanduser(fileName)))
+
+	import scipy.io
+	scipy.io.savemat(os.path.expanduser(projectPath.folder + 'inferring.mat'), np.load(os.path.expanduser(fileName+'.npz')))
 
 
 
