@@ -25,20 +25,21 @@ lossSelection = .2
 maxPos = 1#253.92
 
 
-fig, ax = plt.subplots(figsize=(8,8))
-colors = ['tab:red','tab:blue']
-ln1 = plt.semilogy(trainLosses[:,0], label="position loss", color = colors[0]) 
-ax.tick_params(axis='y', labelcolor=colors[0])
-ax2 = ax.twinx()
-ln2 = plt.semilogy(trainLosses[:,1], label="error loss", color = colors[1]) 
-ax2.tick_params(axis='y', labelcolor=colors[1])
-lns = ln1+ln2
-labs = [l.get_label() for l in lns]
-plt.legend(lns, labs, loc="upper right")
-ax.set_xlabel("training step")
-fig.tight_layout()
-plt.savefig(os.path.expanduser(folder+'_lossFig.png'), bbox_inches='tight')
-# plt.show(block=block)
+if trainLosses!=[]:
+    fig, ax = plt.subplots(figsize=(8,8))
+    colors = ['tab:red','tab:blue']
+    ln1 = plt.semilogy(trainLosses[:,0], label="position loss", color = colors[0]) 
+    ax.tick_params(axis='y', labelcolor=colors[0])
+    ax2 = ax.twinx()
+    ln2 = plt.semilogy(trainLosses[:,1], label="error loss", color = colors[1]) 
+    ax2.tick_params(axis='y', labelcolor=colors[1])
+    lns = ln1+ln2
+    labs = [l.get_label() for l in lns]
+    plt.legend(lns, labs, loc="upper right")
+    ax.set_xlabel("training step")
+    fig.tight_layout()
+    plt.savefig(os.path.expanduser(folder+'_lossFig.png'), bbox_inches='tight')
+    # plt.show(block=block)
 
 
 # ERROR & STD
