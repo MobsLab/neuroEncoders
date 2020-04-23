@@ -14,8 +14,6 @@ from scipy.stats import gaussian_kde
 findFolder = lambda path: path if path[-1]=='/' or len(path)==1 else findFolder(path[:-1])
 folder = findFolder(sys.argv[1])
 file = folder + '_resultsForRnn_temp.npz'
-# file = folder + '_resultsForRnn_2019-11-19_aligned.npz'
-# fileName = folder + '_resultsForRnn_' + datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
 
 results = np.load(os.path.expanduser(file))
 pos = results['pos']
@@ -24,12 +22,22 @@ testOutput = results['inferring']
 trainLosses = results['trainLosses']
 block=True
 lossSelection = .2
-maxPos = 253.92
+maxPos = 1#253.92
 
 
-# fig = plt.figure(figsize=(8,8))
-# plt.plot(trainLosses[:,0]) 
-# plt.plot(trainLosses[:,1]) 
+fig, ax = plt.subplots(figsize=(8,8))
+colors = ['tab:red','tab:blue']
+ln1 = plt.semilogy(trainLosses[:,0], label="position loss", color = colors[0]) 
+ax.tick_params(axis='y', labelcolor=colors[0])
+ax2 = ax.twinx()
+ln2 = plt.semilogy(trainLosses[:,1], label="error loss", color = colors[1]) 
+ax2.tick_params(axis='y', labelcolor=colors[1])
+lns = ln1+ln2
+labs = [l.get_label() for l in lns]
+plt.legend(lns, labs, loc="upper right")
+ax.set_xlabel("training step")
+fig.tight_layout()
+plt.savefig(os.path.expanduser(folder+'_lossFig.png'), bbox_inches='tight')
 # plt.show(block=block)
 
 
@@ -62,42 +70,34 @@ plt.errorbar(
     yerr = err, 
     label=r'$median \pm 20 percentile$',
     linewidth=3)
-x_new = np.linspace(np.min(Error), np.max(Error), num=len(Error))
-coefs = poly.polyfit(Error[selNoNans], testOutput[selNoNans,2], 2)
+x_new = np.linspace(np.min([(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10]), np.max([(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10]), num=len(Error))
+coefs = poly.polyfit(
+    [(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10], 
+    [np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10], 
+    2)
+# coefs = poly.polyfit(Error[selNoNans], testOutput[selNoNans,2], 2)
 ffit = poly.polyval(x_new, coefs)
 plt.plot(x_new, ffit, 'k', linewidth=3)
 ax = fig.axes[0]
 ax.set_ylabel('evaluated loss')
 ax.set_xlabel('decoding error')
 plt.savefig(os.path.expanduser(folder+'_errorFig.png'), bbox_inches='tight')
-plt.show(block=block)
+# plt.show(block=block)
 
 
-
-
-print('mean error is:', np.nanmean(Error)*maxPos)
-tri = np.argsort(testOutput[:,2])
-Selected_errors = np.array([ 
-        np.nanmean(Error[ tri[0:1*len(tri)//10] ]), 
-        np.nanmean(Error[ tri[1*len(tri)//10:2*len(tri)//10] ]),
-        np.nanmean(Error[ tri[2*len(tri)//10:3*len(tri)//10] ]),
-        np.nanmean(Error[ tri[3*len(tri)//10:4*len(tri)//10] ]),
-        np.nanmean(Error[ tri[4*len(tri)//10:5*len(tri)//10] ]),
-        np.nanmean(Error[ tri[5*len(tri)//10:6*len(tri)//10] ]),
-        np.nanmean(Error[ tri[6*len(tri)//10:7*len(tri)//10] ]),
-        np.nanmean(Error[ tri[7*len(tri)//10:8*len(tri)//10] ]),
-        np.nanmean(Error[ tri[8*len(tri)//10:9*len(tri)//10] ]),
-        np.nanmean(Error[ tri[9*len(tri)//10:len(tri)]       ]) ]) * maxPos
-print("----Selected errors----")
-print(Selected_errors)
 
 
 temp = testOutput[:,2]
 temp2 = temp.argsort()
-thresh = temp[temp2[int(len(temp2)*lossSelection)]]
+thresh = np.max(ffit)/3
+# thresh = temp[temp2[int(len(temp2)*lossSelection)]]
 selection = testOutput[:,2]<thresh
 frames = np.where(selection)[0]
+print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")
 
+
+
+print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
 
 
 
