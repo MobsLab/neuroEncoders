@@ -6,10 +6,11 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 cd $SCRIPTPATH
 args=("$@")
 
-usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu] [-p | --path <path/to/xml>]"
+usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu] [-p | --path <path/to/xml>] [-t | --target <nameOfTsdTarget>]"
 
 # Parsing arguments
 device=cpu
+target=\"pos\"
 encoderType=none
 POSITIONAL=()
 while [[ $# -gt 0 ]]
@@ -39,6 +40,11 @@ case $key in
 	;;
 	-p|--path)
 	xml_path="$2"
+	shift
+	shift
+	;;
+	-t|--target)
+	target=\"$2\"
 	shift
 	shift
 	;;
@@ -140,7 +146,7 @@ cat <<EOF | matlab -nodesktop -nosplash -nodisplay /> $path$log
 	cd $prjpath
 	LoadPATHencoder $username;
 	cd $path;
-	export_spikes;
+	export_spikes($target);
 	exit
 EOF
 
@@ -150,7 +156,11 @@ EOF
 		echo Matlab was unable to extract data from "$path""behavResources.mat", does this file exist ?
 		exit 1
 	fi
-	touch $path$log
+fi
+if [ ! -f "$path""nnBehavior.mat" ] || [ ! -f "$path""$log" ]; then
+	echo A problem happened while extracting matlab tsd.
+	exit 1
+else
 	echo Behavior data exported.
 fi
 

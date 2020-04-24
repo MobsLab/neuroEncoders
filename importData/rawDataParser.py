@@ -60,13 +60,11 @@ def get_position(folder):
     print('extracting position.')
     with tables.open_file(folder + 'nnBehavior.mat') as f:
         positions = f.root.behavior.positions
-        speed = f.root.behavior.speed
         position_time = f.root.behavior.position_time
         positions = np.swapaxes(positions[:,:],1,0)
-        speed = np.swapaxes(speed[:,:],1,0)
         position_time = np.swapaxes(position_time[:,:],1,0)
 
-    return positions, speed, position_time
+    return positions, position_time
 
 
 
@@ -143,7 +141,7 @@ class SpikeDetector:
         #     raise ValueError('this file does not exist: '+ self.path.dat)
         
         self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
-        self.position, self.speed, self.position_time = get_position(self.path.folder)
+        self.position, self.position_time = get_position(self.path.folder)
 
         if useOpenEphysFilter:
             self.filter = openEphysFilter(self.path.fil, self.list_channels, self.nChannels)
@@ -165,8 +163,11 @@ class SpikeDetector:
     def maxPos(self):
         return np.max(self.position)
 
+    def dim_output(self):
+        return self.position.shape[1]
+
     def emptyData(self):
-        return {'group':[], 'time':[], 'spike':[], 'position':[], 'speed':[]}
+        return {'group':[], 'time':[], 'spike':[], 'position':[]}
 
     def __del__(self):
         try:
@@ -305,7 +306,6 @@ class SpikeDetector:
                             lateSpikes['time'].    append((self.pbar.n * BUFFERSIZE + spl) / self.samplingRate)
                             lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
                             lateSpikes['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
-                            lateSpikes['speed'].   append( self.speed[np.argmin(np.abs(self.position_time-time))] )
 
                         else:
                             spike = filteredBuffer[spl-15:spl+17, :].copy()
@@ -314,7 +314,6 @@ class SpikeDetector:
                                 spikesFound['time'].    append(time)
                                 spikesFound['spike'].   append( np.array(spike).reshape([32,len(self.list_channels[group])]).transpose() )
                                 spikesFound['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
-                                spikesFound['speed'].   append( self.speed[np.argmin(np.abs(self.position_time-time))] )
 
 
                     spl += 15

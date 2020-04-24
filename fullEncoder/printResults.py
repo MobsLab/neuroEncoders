@@ -17,12 +17,15 @@ file = folder + '_resultsForRnn_temp.npz'
 
 results = np.load(os.path.expanduser(file))
 pos = results['pos']
-speed = results['spd']
-testOutput = results['inferring']
+inferring = results['inferring']
 trainLosses = results['trainLosses']
 block=True
 lossSelection = .2
 maxPos = 1#253.92
+dim_output = pos.shape[1]
+assert(pos.shape[1] == inferring.shape[1]-1)
+
+
 
 
 if trainLosses!=[]:
@@ -43,14 +46,12 @@ if trainLosses!=[]:
 
 
 # ERROR & STD
-xError = np.abs(testOutput[:,0] - pos[:,0])
-yError = np.abs(testOutput[:,1] - pos[:,1])
-Error = np.array([np.sqrt(xError[n]**2 + yError[n]**2) for n in range(len(xError))])
+Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
 selNoNans = ~np.isnan(Error)
 fig = plt.figure(figsize=(8,8))
-xy = np.vstack([Error[selNoNans], testOutput[selNoNans,2]])
+xy = np.vstack([Error[selNoNans], inferring[selNoNans,dim_output]])
 z = gaussian_kde(xy)(xy)
-plt.scatter(Error[selNoNans], testOutput[selNoNans,2], c=z, s=10)
+plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10)
 nBins = 20
 _, edges = np.histogram(Error[selNoNans], nBins)
 histIdx = []
@@ -63,20 +64,20 @@ for bin in range(nBins):
             temp.append(n)
     histIdx.append(temp)
 err=np.array([
-    [np.median(testOutput[histIdx[n],2])-np.percentile(testOutput[histIdx[n],2],30) for n in range(nBins) if len(histIdx[n])>10],
-    [np.percentile(testOutput[histIdx[n],2],70)-np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10]])
+    [np.median(inferring[histIdx[n],dim_output])-np.percentile(inferring[histIdx[n],dim_output],30) for n in range(nBins) if len(histIdx[n])>10],
+    [np.percentile(inferring[histIdx[n],dim_output],70)-np.median(inferring[histIdx[n],dim_output]) for n in range(nBins) if len(histIdx[n])>10]])
 plt.errorbar(
     [(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10],
-    [np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10], c='xkcd:cherry red', 
+    [np.median(inferring[histIdx[n],dim_output]) for n in range(nBins) if len(histIdx[n])>10], c='xkcd:cherry red', 
     yerr = err, 
     label=r'$median \pm 20 percentile$',
     linewidth=3)
 x_new = np.linspace(np.min([(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10]), np.max([(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10]), num=len(Error))
 coefs = poly.polyfit(
     [(edges[n+1]+edges[n])/2 for n in range(nBins) if len(histIdx[n])>10], 
-    [np.median(testOutput[histIdx[n],2]) for n in range(nBins) if len(histIdx[n])>10], 
+    [np.median(inferring[histIdx[n],dim_output]) for n in range(nBins) if len(histIdx[n])>10], 
     2)
-# coefs = poly.polyfit(Error[selNoNans], testOutput[selNoNans,2], 2)
+# coefs = poly.polyfit(Error[selNoNans], inferring[selNoNans,dim_output], 2)
 ffit = poly.polyval(x_new, coefs)
 plt.plot(x_new, ffit, 'k', linewidth=3)
 ax = fig.axes[0]
@@ -88,11 +89,11 @@ plt.savefig(os.path.expanduser(folder+'_errorFig.png'), bbox_inches='tight')
 
 
 
-temp = testOutput[:,2]
+temp = inferring[:,dim_output]
 temp2 = temp.argsort()
 thresh = np.max(ffit)/3
 # thresh = temp[temp2[int(len(temp2)*lossSelection)]]
-selection = testOutput[:,2]<thresh
+selection = inferring[:,dim_output]<thresh
 frames = np.where(selection)[0]
 print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")
 
@@ -105,30 +106,27 @@ print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(E
 
 # Overview
 fig, ax = plt.subplots(figsize=(15,9))
-ax1 = plt.subplot2grid((2,1),(0,0))
-# ax1.plot(testOutput[:,0], label='guessed X')
-ax1.plot(np.where(selection)[0], testOutput[selection,0], label='guessed X selection')
-ax1.plot(pos[:,0], label='true X', color='xkcd:dark pink')
-ax1.legend()
-ax1.set_title('position X')
-
-ax2 = plt.subplot2grid((2,1),(1,0), sharex=ax1)
-# ax2.plot(testOutput[:,1], label='guessed Y')
-ax2.plot(np.where(selection)[0], testOutput[selection,1], label='guessed Y selection')
-ax2.plot(pos[:,1], label='true Y', color='xkcd:dark pink')
-ax2.legend()
-ax2.set_title('position Y')
-
+for dim in range(dim_output):
+    if dim > 0:
+        ax1 = plt.subplot2grid((dim_output,1),(dim,0), sharex=ax1)
+    else:
+        ax1 = plt.subplot2grid((dim_output,1),(dim,0))
+    # ax1.plot(inferring[:,dim], label='guessed '+str(dim))
+    ax1.plot(np.where(selection)[0], inferring[selection,dim], label='guessed dim'+str(dim)+' selection')
+    ax1.plot(pos[:,dim], label='true dim'+str(dim), color='xkcd:dark pink')
+    ax1.legend()
+    ax1.set_title('position '+str(dim))
 # plt.text(0,0,fileName)
 plt.savefig(os.path.expanduser(folder+'_overviewFig.png'), bbox_inches='tight')
 plt.show(block=block)
+
 
 
 # # Movie
 # fig, ax = plt.subplots(figsize=(10,10))
 # ax1 = plt.subplot2grid((1,1),(0,0))
 # im2, = ax1.plot([pos[0,1]*maxPos],[pos[0,0]*maxPos],marker='o', markersize=15, color="red")
-# im2b, = ax1.plot([testOutput[0,1]*maxPos],[testOutput[0,0]*maxPos],marker='P', markersize=15, color="green")
+# im2b, = ax1.plot([inferring[0,1]*maxPos],[inferring[0,0]*maxPos],marker='P', markersize=15, color="green")
 
 # im3 = ax1.plot([125,170,170,215,215,210,60,45,45,90,90], [35,70,110,210,225,250,250,225,210,110,35], color="red")
 # im4 = ax1.plot([125,125,115,90,90,115,125], [100,215,225,220,185,100,100], color="red")
@@ -142,7 +140,7 @@ plt.show(block=block)
 #     reduced_frame = frame % len(frames)
 #     selected_frame = frames[reduced_frame]
 #     im2.set_data([pos[selected_frame,1]*maxPos],[pos[selected_frame,0]*maxPos])
-#     im2b.set_data([testOutput[selected_frame,1]*maxPos],[testOutput[selected_frame,0]*maxPos])
+#     im2b.set_data([inferring[selected_frame,1]*maxPos],[inferring[selected_frame,0]*maxPos])
 #     return im2,im2b
 
 # save_len = len(frames)
@@ -154,5 +152,5 @@ plt.show(block=block)
 
 
 
-# np.savez(os.path.expanduser(fileName), pos, speed, testOutput, trainLosses)
+# np.savez(os.path.expanduser(fileName), pos, speed, inferring, trainLosses)
 # print('Results saved at:', fileName)

@@ -24,14 +24,14 @@ else:
 
 
 
-class xmlPath():
-	def __init__(self, path):
-		self.xml = path
+class Project():
+	def __init__(self, xmlPath):
+		self.xml = xmlPath
 		findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
 		self.folder = findFolder(self.xml)
-		self.dat = path[:-3] + 'dat'
-		self.fil = path[:-3] + 'fil'
-		self.json = path[:-3] + 'json'
+		self.dat = xmlPath[:-3] + 'dat'
+		self.fil = xmlPath[:-3] + 'fil'
+		self.json = xmlPath[:-3] + 'json'
 		self.tfrec = self.folder + 'trainingDataset.tfrec'
 		self.testTfrec = self.folder + 'testingDataset.tfrec'
 
@@ -39,7 +39,7 @@ class xmlPath():
 class Params:
 	def __init__(self, detector, dim_output):
 		self.nGroups = detector.nGroups()
-		self.dim_output = dim_output
+		self.dim_output = detector.dim_output()
 		self.nChannels = detector.numChannelsPerGroup()
 
 		self.nSteps = 10000
@@ -62,7 +62,7 @@ from fullEncoder import datasetMaker, nnUtils, nnTraining
 
 
 trainLosses = []
-projectPath = xmlPath(os.path.expanduser(sys.argv[2]))
+projectPath = Project(os.path.expanduser(sys.argv[2]))
 
 
 
@@ -82,30 +82,27 @@ if (not os.path.isfile(projectPath.tfrec)) or (not os.path.isfile(projectPath.te
 		allSpTime = []
 		allSpikes = []
 		allSpkPos = []
-		allSpkSpd = []
 
 		for spikes in spikeDetector.getSpikes():
 			if len(spikes['time'])==0:
 				continue
-			for grp,time,spk,pos,spd in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position'],spikes['speed']), key=lambda x:x[1]):
+			for grp,time,spk,pos in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position']), key=lambda x:x[1]):
 				allGroups.append(grp)
 				allSpTime.append(time)
 				allSpikes.append(spk)
 				allSpkPos.append(pos)
-				allSpkSpd.append(spd)
 			
 		GRP_data = np.array(allGroups)
 		SPT_data = np.array(allSpTime)
 		SPK_data = np.array(allSpikes)
 		POS_data = np.array(allSpkPos)
-		SPD_data = np.array(allSpkSpd)
 		print('data parsed.')
 
 
-		SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test = train_test_split(
-			SPT_data, GRP_data, SPK_data, POS_data, SPD_data, test_size=0.1, shuffle=False, random_state=42)
+		SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test = train_test_split(
+			SPT_data, GRP_data, SPK_data, POS_data, test_size=0.1, shuffle=False, random_state=42)
 		np.savez(projectPath.folder + '_rawSpikesForRnn', 
-			SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test, SPD_train, SPD_test)
+			SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test)
 	else:
 		try:
 			print(loaded)
@@ -120,8 +117,6 @@ if (not os.path.isfile(projectPath.tfrec)) or (not os.path.isfile(projectPath.te
 			SPK_test = Results['arr_5']
 			POS_train = Results['arr_6']
 			POS_test = Results['arr_7']
-			SPD_train = Results['arr_8']
-			SPD_test = Results['arr_9']
 			loaded='data loaded'
 			print(loaded)
 
