@@ -6,12 +6,13 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 cd $SCRIPTPATH
 args=("$@")
 
-usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu] [-p | --path <path/to/xml>] [-t | --target <nameOfTsdTarget>]"
+usage="./neuroEncoder full|fromUnits [-f | --filter] [-g | --gpu] [-p | --path <path/to/xml>] [-t | --target <nameOfTsdTarget>] [-w | --window <windowLength>]"
 
 # Parsing arguments
 device=cpu
 target=\"pos\"
 encoderType=none
+window=0.036
 POSITIONAL=()
 while [[ $# -gt 0 ]]
 do
@@ -45,6 +46,11 @@ case $key in
 	;;
 	-t|--target)
 	target=\"$2\"
+	shift
+	shift
+	;;
+	-w|--window)
+	window=$2
 	shift
 	shift
 	;;
@@ -268,7 +274,7 @@ if [[ $encoderType == fromUnits ]]; then
 
 
 elif [[ $encoderType == full ]]; then
-	python3 $script_path_full $device $xml_path $FILTERTYPE
+	python3 $script_path_full $device $xml_path $FILTERTYPE $window
 	if test $? -eq 0; then
 		makeJson=1
 		python3 $script_path_print_full $path
