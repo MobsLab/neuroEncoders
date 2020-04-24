@@ -176,8 +176,16 @@ class Trainer():
 			variables += denseLoss2.variables
 
 			with tf.variable_scope("bayesianDecoder"):
-				position = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(x, [2]), lambda: tf.constant([0,0], dtype=tf.float32)), name="positionGuessed")
-				loss     = tf.identity(tf.cond(tf.shape(outputs)[0]>0, lambda: tf.reshape(y, [1]), lambda: tf.constant([0], dtype=tf.float32)), name="standardDeviation")
+				position = tf.identity(
+					tf.cond(
+						tf.shape(outputs)[0]>0, 
+						lambda: tf.reshape(x, [self.params.dim_output]), 
+						lambda: tf.constant(np.zeros([self.params.dim_output]), dtype=tf.float32)), name="positionGuessed")
+				loss     = tf.identity(
+					tf.cond(
+						tf.shape(outputs)[0]>0, 
+						lambda: tf.reshape(y, [1]), 
+						lambda: tf.constant([0], dtype=tf.float32)), name="standardDeviation")
 				fakeProba= tf.constant(np.zeros([45,45]), dtype=tf.float32, name="positionProba")		
 			
 			subGraphToRestore = tf.train.Saver({v.op.name: v for v in variables})
@@ -223,7 +231,6 @@ class Trainer():
 				saver.restore(sess, self.projectPath.folder + '_graphDecoder')
 
 				pos = []
-				spd = []
 				testOutput = []
 				sess.run(iter.initializer)
 				for b in trange(cnt.eval()):
@@ -238,4 +245,4 @@ class Trainer():
 						axis=0))
 				pos = np.array(pos)
 
-		return {"inferring":np.array(testOutput), "pos":pos, "spd":spd}
+		return {"inferring":np.array(testOutput), "pos":pos}
