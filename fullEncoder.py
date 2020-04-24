@@ -42,13 +42,13 @@ class Params:
 		self.dim_output = detector.dim_output()
 		self.nChannels = detector.numChannelsPerGroup()
 
-		self.nSteps = 10000
+		self.nSteps = int(10000 * 0.036 / float(sys.argv[4]))
 		self.nFeatures = 128
 		self.lstmLayers = 3
 		self.lstmSize = 128
 		self.lstmDropout = 0.3
 
-		self.windowLength = 0.036 # in seconds, as all things should be
+		self.windowLength = float(sys.argv[4]) # in seconds, as all things should be
 		self.batch_size = 52
 		self.timeMajor = True
 
