@@ -91,8 +91,8 @@ plt.savefig(os.path.expanduser(folder+'_errorFig.png'), bbox_inches='tight')
 
 temp = inferring[:,dim_output]
 temp2 = temp.argsort()
-thresh = np.max(ffit)/3
-# thresh = temp[temp2[int(len(temp2)*lossSelection)]]
+# thresh = np.max(ffit)/3
+thresh = temp[temp2[int(len(temp2)*lossSelection)]]
 selection = inferring[:,dim_output]<thresh
 frames = np.where(selection)[0]
 print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")

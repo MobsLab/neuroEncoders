@@ -21,7 +21,7 @@ class Trainer():
 			print()
 			print('TRAINING')
 
-			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec).shuffle(self.params.nSteps).repeat()
+			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["train"]).shuffle(self.params.nSteps).repeat()
 			dataset = dataset.batch(self.params.batch_size)
 			dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(self.params, self.feat_desc, *vals, batched=True))
 			iter = dataset.make_initializable_iterator()
@@ -213,7 +213,7 @@ class Trainer():
 		tf.contrib.rnn
 		with tf.Graph().as_default(), tf.device("/cpu:0"):
 
-			dataset = tf.data.TFRecordDataset(self.projectPath.testTfrec)
+			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
 			cnt     = dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1)
 			dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(self.params, self.feat_desc, *vals))
 			iter    = dataset.make_initializable_iterator()

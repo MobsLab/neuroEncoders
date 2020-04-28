@@ -32,8 +32,10 @@ class Project():
 		self.dat = xmlPath[:-3] + 'dat'
 		self.fil = xmlPath[:-3] + 'fil'
 		self.json = xmlPath[:-3] + 'json'
-		self.tfrec = self.folder + 'trainingDataset.tfrec'
-		self.testTfrec = self.folder + 'testingDataset.tfrec'
+		self.tfrec = {
+			"raw": self.folder + 'rawDataset.tfrec', 
+			"train": self.folder + 'trainingDataset.tfrec', 
+			"test": self.folder + 'testingDataset.tfrec'}
 
 ### Params
 class Params:
@@ -42,7 +44,7 @@ class Params:
 		self.dim_output = detector.dim_output()
 		self.nChannels = detector.numChannelsPerGroup()
 
-		self.nSteps = int(10000 * 0.036 / float(sys.argv[4]))
+		self.nSteps = 100#int(10000 * 0.036 / float(sys.argv[4]))
 		self.nFeatures = 128
 		self.lstmLayers = 3
 		self.lstmSize = 128
@@ -75,7 +77,7 @@ else:
 print('using external filter:', useOpenEphysFilter)
 spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
 params = Params(spikeDetector, 2)
-if (not os.path.isfile(projectPath.tfrec)) or (not os.path.isfile(projectPath.testTfrec)):
+if (not os.path.isfile(projectPath.tfrec["train"])) or (not os.path.isfile(projectPath.tfrec["test"])):
 	if not os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
 
 		allGroups = []
@@ -123,20 +125,20 @@ if (not os.path.isfile(projectPath.tfrec)) or (not os.path.isfile(projectPath.te
 
 
 
-	if not os.path.isfile(projectPath.tfrec):
+	if not os.path.isfile(projectPath.tfrec["train"]):
 		gen = nnUtils.getTrainingSpikes(params, SPT_train, POS_train, GRP_train, SPK_train, maxPos = spikeDetector.maxPos())
 		print('building training dataset')
-		with tf.python_io.TFRecordWriter(projectPath.tfrec) as writer:
+		with tf.python_io.TFRecordWriter(projectPath.tfrec["train"]) as writer:
 			totalLength = SPT_train[-1] - SPT_train[0]
 			nBins = int(totalLength // params.windowLength) - 1
 			for _ in tqdm(range(nBins)):
 				example = next(gen)
 				writer.write(nnUtils.serialize(params, *tuple(example)))
 
-	if not os.path.isfile(projectPath.testTfrec):
+	if not os.path.isfile(projectPath.tfrec["test"]):
 		gen = nnUtils.getTrainingSpikes(params, SPT_test, POS_test, GRP_test, SPK_test, maxPos = spikeDetector.maxPos())
 		print('building testing dataset')
-		with tf.python_io.TFRecordWriter(projectPath.testTfrec) as writer:
+		with tf.python_io.TFRecordWriter(projectPath.tfrec["test"]) as writer:
 			totalLength = SPT_test[-1] - SPT_test[0]
 			nBins = int(totalLength // params.windowLength) - 1
 
