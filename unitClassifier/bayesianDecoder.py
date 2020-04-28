@@ -201,7 +201,7 @@ def rateFunctions(clu_path, group, nChannels,
 
 def rateFunctionsFromSpikes(clu_path, group, nChannels, rawSpikes,
 	start_time, stop_time, end_time, 
-	positions, position_time, speed, speed_cut, 
+	positions, position_time, 
 	Occupation_inverse, edges, bandwidth, kernel, samplingRate):
 	learning_time = stop_time - start_time
 	
@@ -247,7 +247,6 @@ def rateFunctionsFromSpikes(clu_path, group, nChannels, rawSpikes,
 
 	spikes_temp     =          np.array(rawSpikes['spikes'])[trainingTimeSelection]
 	labels_temp     =          np.array(rawSpikes['labels'])[trainingTimeSelection]
-	spike_speed     =          np.array(rawSpikes['speeds'])[trainingTimeSelection]
 	spike_positions =       np.array(rawSpikes['positions'])[trainingTimeSelection]
 
 
@@ -260,7 +259,7 @@ def rateFunctionsFromSpikes(clu_path, group, nChannels, rawSpikes,
 
 
 	### MARGINAL RATE FUNCTION
-	selected_positions = spike_positions[np.where(spike_speed[:,0] > speed_cut)]
+	selected_positions = spike_positions
 	_, _, MRF = kde2D(selected_positions[:,0], selected_positions[:,1], bandwidth, edges=edges, kernel=kernel)
 	MRF[MRF==0] = np.min(MRF[MRF!=0])
 	MRF         = MRF/np.sum(MRF)
@@ -272,7 +271,7 @@ def rateFunctionsFromSpikes(clu_path, group, nChannels, rawSpikes,
 		Local_rate_functions = p.starmap( 
 			rateFunction, 
 			((label, labels_temp, 
-			spike_positions, spike_speed, speed_cut, 
+			spike_positions, 
 			bandwidth, edges, kernel, Occupation_inverse, learning_time) for label in range(np.shape(labels_temp)[1])))
 
 
@@ -280,10 +279,8 @@ def rateFunctionsFromSpikes(clu_path, group, nChannels, rawSpikes,
 	return [nClusters, MRF, Local_rate_functions, spikes, rawSpikes['times'], labels]
 
 
-def rateFunction(label, labels, spike_positions, spike_speed, speed_cut, bandwidth, edges, kernel, Occupation_inverse, learning_time):
-	selected_positions = spike_positions[np.where(np.logical_and( 
-		spike_speed[:,0] > speed_cut, 
-		labels[:,label] == 1))]
+def rateFunction(label, labels, spike_positions, bandwidth, edges, kernel, Occupation_inverse, learning_time):
+	selected_positions = spike_positions[np.where(labels[:,label] == 1)]
 	if np.shape(selected_positions)[0]!=0:
 		_, _, LRF = kde2D(selected_positions[:,0], selected_positions[:,1], bandwidth, edges=edges, kernel=kernel)
 		LRF[LRF==0] = np.min(LRF[LRF!=0])
@@ -302,10 +299,8 @@ def build_maps(clu_path, list_channels, rawSpikes,
 	
 	with tables.open_file(os.path.dirname(clu_path) + '/nnBehavior.mat') as f:
 		positions = f.root.behavior.positions
-		speed = f.root.behavior.speed
 		position_time = f.root.behavior.position_time
 		positions = np.swapaxes(positions[:,:],1,0)
-		speed = np.swapaxes(speed[:,:],1,0)
 		position_time = np.swapaxes(position_time[:,:],1,0)
 	if stop_time == None:
 		stop_time = position_time[-1]
@@ -314,16 +309,8 @@ def build_maps(clu_path, list_channels, rawSpikes,
 
 
 	### GLOBAL OCCUPATION
-	if np.shape(speed)[0] != np.shape(positions)[0]:
-		if np.shape(speed)[0] == np.shape(positions)[0] - 1:
-			speed.append(speed[-1])
-		elif np.shape(speed)[0] == np.shape(positions)[0] + 1:
-			speed = speed[:-1]
-		else:
-			sys.exit(5)
 	selected_positions = positions[np.where(np.logical_and.reduce( 
-		[speed[:,0] > speed_cut, 
-		position_time[:,0] > start_time, 
+		[position_time[:,0] > start_time, 
 		position_time[:,0] < stop_time]))]
 	xEdges, yEdges, Occupation = kde2D(selected_positions[:,0], selected_positions[:,1], bandwidth, kernel=kernel)
 	Occupation[Occupation==0] = np.min(Occupation[Occupation!=0])  # We want to avoid having zeros
@@ -366,7 +353,7 @@ def build_maps(clu_path, list_channels, rawSpikes,
 			Results = p.starmap(rateFunctionsFromSpikes, 
 				((clu_path, group, len(list_channels[group]), selectGroupInDict(rawSpikes, group),
 				start_time, stop_time, end_time,
-				positions, position_time, speed, speed_cut,
+				positions, position_time,
 				Occupation_inverse, [xEdges, yEdges], bandwidth, kernel,
 				samplingRate) for group in pool))
 
@@ -392,7 +379,7 @@ def build_maps(clu_path, list_channels, rawSpikes,
 			Rate_functions.append(Results[group][2])
 	
 	return {'nGroups':nGroups - undone_tetrodes, 'nClusters':totNClusters, 'clustersPerGroup':clustersPerGroup, 'channelsPerGroup':channelsPerGroup, 
-				'positions':positions, 'position_time':position_time, 'speed':speed,  
+				'positions':positions, 'position_time':position_time,  
 				'spikes_all':spikes_all, 'spikes_time':spikes_time, 'labels_all':labels_all,
 				'spikes_train':spikes_train, 'spikes_test':spikes_test, 'labels_train':labels_train, 'labels_test':labels_test, 
 				'Occupation':Occupation, 'Mask':mask, 

@@ -169,15 +169,13 @@ if not os.path.isfile(projectPath.folder+'_rawSpikes.npy'):
     rawSpikes['times'] = [[]for grp in range(len(list_channels))]
     rawSpikes['spikes'] = [[]for grp in range(len(list_channels))]
     rawSpikes['positions'] = [[]for grp in range(len(list_channels))]
-    rawSpikes['speeds'] = [[]for grp in range(len(list_channels))]
     for spikes in spikeDetector.getSpikes():
         if len(spikes['time'])==0:
             continue
-        for grp,time,spk,pos,spd in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position'],spikes['speed']), key=lambda x:x[1]):
+        for grp,time,spk,pos in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position']), key=lambda x:x[1]):
             rawSpikes['times'][grp].append(time)
             rawSpikes['spikes'][grp].append(spk)
             rawSpikes['positions'][grp].append(pos)
-            rawSpikes['speeds'][grp].append(spd)
 
     rawSpikes['thresholds'] = spikeDetector.getThresholds()
     np.save(projectPath.folder+'_rawSpikes.npy', rawSpikes)
