@@ -32,19 +32,33 @@ class Project():
 		self.dat = xmlPath[:-3] + 'dat'
 		self.fil = xmlPath[:-3] + 'fil'
 		self.json = xmlPath[:-3] + 'json'
+
 		self.tfrec = {
-			"raw": self.folder + 'rawDataset.tfrec', 
-			"train": self.folder + 'trainingDataset.tfrec', 
-			"test": self.folder + 'testingDataset.tfrec'}
+			"train": self.folder + 'dataset/trainingDataset.tfrec', 
+			"test": self.folder + 'dataset/testingDataset.tfrec'}
+
+		self.graph = self.folder + 'graph/decoder'
+		self.graphMeta = self.folder + 'graph/decoder.meta'
+
+		self.resultsNpz = self.folder + 'results/inferring.npz'
+		self.resultsMat = self.folder + 'results/inferring.mat'
+
+		if not os.path.isdir(self.folder + 'dataset'):
+			os.makedirs(self.folder + 'dataset')
+		if not os.path.isdir(self.folder + 'graph'):
+			os.makedirs(self.folder + 'graph')
+		if not os.path.isdir(self.folder + 'results'):
+			os.makedirs(self.folder + 'results')
 
 ### Params
 class Params:
-	def __init__(self, detector, dim_output):
+	def __init__(self, detector):
 		self.nGroups = detector.nGroups()
 		self.dim_output = detector.dim_output()
 		self.nChannels = detector.numChannelsPerGroup()
+		self.length = 0
 
-		self.nSteps = 100#int(10000 * 0.036 / float(sys.argv[4]))
+		self.nSteps = int(10000 * 0.036 / float(sys.argv[4]))
 		self.nFeatures = 128
 		self.lstmLayers = 3
 		self.lstmSize = 128
@@ -75,76 +89,26 @@ if filterType=='external':
 else:
     useOpenEphysFilter=False
 print('using external filter:', useOpenEphysFilter)
+
 spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
-params = Params(spikeDetector, 2)
-if (not os.path.isfile(projectPath.tfrec["train"])) or (not os.path.isfile(projectPath.tfrec["test"])):
-	if not os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
+params = Params(spikeDetector)
 
-		allGroups = []
-		allSpTime = []
-		allSpikes = []
-		allSpkPos = []
+if (not os.path.isfile(projectPath.tfrec["train"])) or \
+	(not os.path.isfile(projectPath.tfrec["test"])):
 
-		for spikes in spikeDetector.getSpikes():
-			if len(spikes['time'])==0:
+	spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
+	spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
+	with tf.python_io.TFRecordWriter(projectPath.tfrec["train"]) as writerTrain, tf.python_io.TFRecordWriter(projectPath.tfrec["test"]) as writerTest:
+		for example in spikeSequenceGen:
+			train = example[0]
+			if train == None:
 				continue
-			for grp,time,spk,pos in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position']), key=lambda x:x[1]):
-				allGroups.append(grp)
-				allSpTime.append(time)
-				allSpikes.append(spk)
-				allSpkPos.append(pos)
-			
-		GRP_data = np.array(allGroups)
-		SPT_data = np.array(allSpTime)
-		SPK_data = np.array(allSpikes)
-		POS_data = np.array(allSpkPos)
-		print('data parsed.')
-
-
-		SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test = train_test_split(
-			SPT_data, GRP_data, SPK_data, POS_data, test_size=0.1, shuffle=False, random_state=42)
-		np.savez(projectPath.folder + '_rawSpikesForRnn', 
-			SPT_train, SPT_test, GRP_train, GRP_test, SPK_train, SPK_test, POS_train, POS_test)
-	else:
-		try:
-			print(loaded)
-		except NameError:
-			print('loading data')
-			Results = np.load(projectPath.folder + '_rawSpikesForRnn.npz', allow_pickle=True)
-			SPT_train = Results['arr_0']
-			SPT_test = Results['arr_1']
-			GRP_train = Results['arr_2']
-			GRP_test = Results['arr_3']
-			SPK_train = Results['arr_4']
-			SPK_test = Results['arr_5']
-			POS_train = Results['arr_6']
-			POS_test = Results['arr_7']
-			loaded='data loaded'
-			print(loaded)
-
-
-
-
-	if not os.path.isfile(projectPath.tfrec["train"]):
-		gen = nnUtils.getTrainingSpikes(params, SPT_train, POS_train, GRP_train, SPK_train, maxPos = spikeDetector.maxPos())
-		print('building training dataset')
-		with tf.python_io.TFRecordWriter(projectPath.tfrec["train"]) as writer:
-			totalLength = SPT_train[-1] - SPT_train[0]
-			nBins = int(totalLength // params.windowLength) - 1
-			for _ in tqdm(range(nBins)):
-				example = next(gen)
-				writer.write(nnUtils.serialize(params, *tuple(example)))
-
-	if not os.path.isfile(projectPath.tfrec["test"]):
-		gen = nnUtils.getTrainingSpikes(params, SPT_test, POS_test, GRP_test, SPK_test, maxPos = spikeDetector.maxPos())
-		print('building testing dataset')
-		with tf.python_io.TFRecordWriter(projectPath.tfrec["test"]) as writer:
-			totalLength = SPT_test[-1] - SPT_test[0]
-			nBins = int(totalLength // params.windowLength) - 1
-
-			for _ in tqdm(range(nBins)):
-				example = next(gen)
-				writer.write(nnUtils.serialize(params, *tuple(example)))
+			else:
+				if train:
+					w = writerTrain
+				else:
+					w = writerTest
+				w.write(nnUtils.serializeSpikeSequence(params, *tuple(example[1:])))
 
 
 
@@ -156,15 +120,14 @@ outputs = trainer.test()
 
 
 # Saving files
-fileName = projectPath.folder + '_resultsForRnn_temp'
-np.savez(os.path.expanduser(fileName), trainLosses=trainLosses, **outputs)
+np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
 
 import scipy.io
-scipy.io.savemat(os.path.expanduser(projectPath.folder + 'inferring.mat'), np.load(os.path.expanduser(fileName+'.npz')))
+scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz))
 
 import json
 outjsonStr = {};
-outjsonStr['encodingPrefix'] = projectPath.folder + '_graphDecoder'
+outjsonStr['encodingPrefix'] = projectPath.graph
 outjsonStr['mousePort'] = 0
 
 outjsonStr['nGroups'] = int(params.nGroups)

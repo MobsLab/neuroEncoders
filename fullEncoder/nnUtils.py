@@ -1,5 +1,7 @@
+import os
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 def last_relevant(output, length, timeMajor=False):
 	''' Used to select the right output of 
@@ -67,7 +69,122 @@ class spikeNet:
 
 
 
-def getTrainingSpikes(params, spkTime, spkPos, spkGroups, spkSpikes, maxPos=None):
+
+def getSpikeSequences(params, generator):
+	windowStart = None
+
+	length = 0
+	groups = []
+	allSpikes = [[] for _ in range(params.nGroups)]
+	for train, grp, time, spike, pos in generator:
+		if windowStart == None:
+			windowStart = time
+
+		if time > windowStart + params.windowLength:
+			allSpikes = [np.zeros([0, params.nChannels[g], 32]) if allSpikes[g]==[] else np.stack(allSpikes[g], axis=0) for g in range(params.nGroups)]
+			yield (train, pos, groups, length) + tuple(allSpikes)
+			length = 0
+			groups = []
+			allSpikes = [[] for _ in range(params.nGroups)]
+			windowStart += params.windowLength
+			while time > windowStart + params.windowLength:
+				yield (train, pos, [], 0) + tuple(np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups))
+				windowStart += params.windowLength
+
+		groups.append(grp)
+		allSpikes[grp].append(spike)
+		length += 1
+
+
+
+
+
+def serializeSpikeSequence(params, pos, groups, length, *spikes):
+	feat = {
+		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
+		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
+		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))}
+	for g in range(params.nGroups):
+		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
+
+	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
+	return example_proto.SerializeToString()
+
+# def serializeSingleSpike(params, grp, time, spk, pos):
+# 	feat = {
+# 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)),
+# 		"grp": tf.train.Feature(int64_list = tf.train.Int64List(value=[grp])),
+# 		"time": tf.train.Feature(float_list = tf.train.FloatList(value=[time]))}
+# 	for g in range(params.nGroups):
+# 		feat.update({"group"+str(g): tf.train.Feature(float_list = 
+# 			tf.train.FloatList(value=spk.ravel() if g==grp else np.zeros([0, params.nChannels[g], 32]).ravel()))})
+
+# 	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
+# 	return example_proto.SerializeToString()
+
+
+
+
+def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
+	if batched:
+		tensors = tf.io.parse_example(ex_proto, feat_desc)
+	else:
+		tensors = tf.io.parse_single_example(ex_proto, feat_desc)
+
+	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
+	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+	for g in range(params.nGroups):
+		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
+		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
+		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
+		if batched:
+			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, -1, params.nChannels[g], 32])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
+		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
+		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
+	return tensors
+
+
+
+def spikeGenerator(projectPath, spikeDetector, maxPos=1):
+	if os.path.isfile(projectPath.folder+'_rawSpikesForRnn.npz'):
+		try:
+			print(loaded)
+		except NameError:
+			print('loading data')
+			Results = np.load(projectPath.folder + '_rawSpikesForRnn.npz', allow_pickle=True)
+			SPT_train = Results['arr_0']
+			SPT_test = Results['arr_1']
+			GRP_train = Results['arr_2']
+			GRP_test = Results['arr_3']
+			SPK_train = Results['arr_4']
+			SPK_test = Results['arr_5']
+			POS_train = Results['arr_6']
+			POS_test = Results['arr_7']
+			loaded='data loaded'
+			print(loaded)
+		def genFromOld():
+			pbar = tqdm(total=len(GRP_train)+len(GRP_test))
+			for args in zip(GRP_train, SPT_train, SPK_train, POS_train/maxPos):
+				yield (True,)+args
+				pbar.update(1)
+			for args in zip(GRP_test, SPT_test, SPK_test, POS_test/maxPos):
+				yield (False,)+args
+				pbar.update(1)
+			pbar.close()
+		return genFromOld
+	else:
+		def genFromDet():
+			for spikes in spikeDetector.getSpikes():
+				if len(spikes['time'])==0:
+					continue
+				for args in sorted(zip(spikes["train"],spikes['group'],spikes['time'],spikes['spike'],spikes['position']/maxPos), key=lambda x:x[2]):
+					yield args
+		return genFromDet
+
+
+def getSpikeSequencesOld(params, spkTime, spkPos, spkGroups, spkSpikes, maxPos=None):
 	totalLength = spkTime[-1] - spkTime[0]
 	nBins = int(totalLength // params.windowLength) - 1
 	binStartTime = [spkTime[0] + (i*params.windowLength) for i in range(nBins)]
@@ -99,41 +216,3 @@ def getTrainingSpikes(params, spkTime, spkPos, spkGroups, spkSpikes, maxPos=None
 			else:
 				allSpikes.append(np.stack(spikes[np.where(groups==group)], axis=0))
 		yield (pos, groups, length) + tuple(allSpikes)
-
-
-
-
-def serialize(params, pos, groups, length, *spikes):
-	feat = {
-		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
-		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
-		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))}
-	for g in range(params.nGroups):
-		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
-
-	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
-	return example_proto.SerializeToString()
-
-
-
-
-
-def parse_serialized_example(params, feat_desc, ex_proto, batched=False):
-	if batched:
-		tensors = tf.io.parse_example(ex_proto, feat_desc)
-	else:
-		tensors = tf.io.parse_single_example(ex_proto, feat_desc)
-
-	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
-	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
-	for g in range(params.nGroups):
-		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
-		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
-		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
-		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
-		if batched:
-			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, -1, params.nChannels[g], 32])
-		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
-		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
-		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
-	return tensors
