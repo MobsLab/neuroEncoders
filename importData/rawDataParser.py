@@ -142,6 +142,14 @@ class SpikeDetector:
         
         self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
         self.position, self.position_time = get_position(self.path.folder)
+        self.epochs = {
+            "train": [self.position_time[0, 0], self.position_time[len(self.position_time)*9//10, 0]],
+            "test":  [self.position_time[len(self.position_time)*9//10, 0], self.position_time[-1, 0]]
+        }
+        self.startTime = min(self.epochs["train"] + self.epochs["test"])
+        self.stopTime  = max(self.epochs["train"] + self.epochs["test"])
+        self.train     = self.isTrainingExample(self.startTime)
+
 
         if useOpenEphysFilter:
             self.filter = openEphysFilter(self.path.fil, self.list_channels, self.nChannels)
@@ -167,7 +175,16 @@ class SpikeDetector:
         return self.position.shape[1]
 
     def emptyData(self):
-        return {'group':[], 'time':[], 'spike':[], 'position':[]}
+        return {'group':[], 'time':[], 'spike':[], 'position':[], 'train':[]}
+
+    def isTrainingExample(self, time):
+        for e in range(len(self.epochs['train'])//2):
+            if time >= self.epochs['train'][2*e] and time < self.epochs['train'][2*e+1]:
+                return True
+        for e in range(len(self.epochs['test'])//2):
+            if time >= self.epochs['test'][2*e] and time < self.epochs['test'][2*e+1]:
+                return False
+        return None
 
     def __del__(self):
         try:
@@ -262,6 +279,8 @@ class SpikeDetector:
                 self.lateSpikes[key] += res[1][key]
         
         self.pbar.update(1)
+        if spikesFound['time'] != [] and max(spikesFound["time"]) > self.stopTime:
+            self.lastBuffer = True
         return spikesFound
 
 
@@ -296,9 +315,10 @@ class SpikeDetector:
                     else:
                         spl = spl + np.argmin(filteredBuffer[spl:spl+15, chnl])
                     time = (self.pbar.n * BUFFERSIZE + spl) / self.samplingRate
+                    self.train = self.isTrainingExample(time)
                     
                     # Do nothing unless after behaviour data has started
-                    if time > self.position_time[0]:
+                    if time > self.startTime:
 
                         # That's a late spike, we'll have to wait till next buffer
                         if spl > BUFFERSIZE - 18:
@@ -306,6 +326,7 @@ class SpikeDetector:
                             lateSpikes['time'].    append((self.pbar.n * BUFFERSIZE + spl) / self.samplingRate)
                             lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
                             lateSpikes['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
+                            lateSpikes['train'].   append(self.train)
 
                         else:
                             spike = filteredBuffer[spl-15:spl+17, :].copy()
@@ -314,6 +335,7 @@ class SpikeDetector:
                                 spikesFound['time'].    append(time)
                                 spikesFound['spike'].   append( np.array(spike).reshape([32,len(self.list_channels[group])]).transpose() )
                                 spikesFound['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
+                                spikesFound['train'].   append(self.train)
 
 
                     spl += 15

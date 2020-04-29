@@ -13,7 +13,7 @@ from scipy.stats import gaussian_kde
 
 findFolder = lambda path: path if path[-1]=='/' or len(path)==1 else findFolder(path[:-1])
 folder = findFolder(sys.argv[1])
-file = folder + '_resultsForRnn_temp.npz'
+file = folder + 'results/inferring.npz'
 
 results = np.load(os.path.expanduser(file))
 pos = results['pos']
@@ -41,7 +41,7 @@ if trainLosses!=[]:
     plt.legend(lns, labs, loc="upper right")
     ax.set_xlabel("training step")
     fig.tight_layout()
-    plt.savefig(os.path.expanduser(folder+'_lossFig.png'), bbox_inches='tight')
+    plt.savefig(os.path.expanduser(folder+'results/lossFig.png'), bbox_inches='tight')
     # plt.show(block=block)
 
 
@@ -83,7 +83,7 @@ plt.plot(x_new, ffit, 'k', linewidth=3)
 ax = fig.axes[0]
 ax.set_ylabel('evaluated loss')
 ax.set_xlabel('decoding error')
-plt.savefig(os.path.expanduser(folder+'_errorFig.png'), bbox_inches='tight')
+plt.savefig(os.path.expanduser(folder+'results/errorFig.png'), bbox_inches='tight')
 # plt.show(block=block)
 
 
@@ -117,7 +117,7 @@ for dim in range(dim_output):
     ax1.legend()
     ax1.set_title('position '+str(dim))
 # plt.text(0,0,fileName)
-plt.savefig(os.path.expanduser(folder+'_overviewFig.png'), bbox_inches='tight')
+plt.savefig(os.path.expanduser(folder+'results/overviewFig.png'), bbox_inches='tight')
 plt.show(block=block)
 
 

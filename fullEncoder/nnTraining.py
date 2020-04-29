@@ -23,10 +23,15 @@ class Trainer():
 
 			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["train"]).shuffle(self.params.nSteps).repeat()
 			dataset = dataset.batch(self.params.batch_size)
-			dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(self.params, self.feat_desc, *vals, batched=True))
+			dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals, batched=True))
 			iter = dataset.make_initializable_iterator()
 			iterators = iter.get_next()
-
+			# with tf.Session() as sess:
+			# 	sess.run(iter.initializer)
+			# 	temp = sess.run(iterators)
+			# 	for k,v in temp.items():
+			# 		print(k, v.shape)
+			# 	bbb
 
 			with tf.device(self.device_name):
 				spkParserNet = []
@@ -115,7 +120,7 @@ class Trainer():
 						epoch_loss=0
 						epoch_loss2=0
 
-				saver.save(sess, self.projectPath.folder + '_graphDecoder')
+				saver.save(sess, self.projectPath.graph)
 		return np.array(trainLosses)
 
 
@@ -193,8 +198,8 @@ class Trainer():
 			### Converting
 			graphToSave = tf.train.Saver()
 			with tf.Session() as sess:
-				subGraphToRestore.restore(sess, self.projectPath.folder + '_graphDecoder')
-				graphToSave.save(sess, self.projectPath.folder + '_graphDecoder')
+				subGraphToRestore.restore(sess, self.projectPath.graph)
+				graphToSave.save(sess, self.projectPath.graph)
 
 
 
@@ -215,7 +220,7 @@ class Trainer():
 
 			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
 			cnt     = dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1)
-			dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_example(self.params, self.feat_desc, *vals))
+			dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals))
 			iter    = dataset.make_initializable_iterator()
 			spikes  = iter.get_next()
 			for group in range(self.params.nGroups):
@@ -224,11 +229,11 @@ class Trainer():
 				spikes["group"+str(group)] = tf.tensordot(completionTensor, spikes["group"+str(group)], axes=[[1],[0]])
 
 
-			saver = tf.train.import_meta_graph(self.projectPath.folder + '_graphDecoder.meta')
+			saver = tf.train.import_meta_graph(self.projectPath.graphMeta)
 
 
 			with tf.Session() as sess:
-				saver.restore(sess, self.projectPath.folder + '_graphDecoder')
+				saver.restore(sess, self.projectPath.graph)
 
 				pos = []
 				testOutput = []
