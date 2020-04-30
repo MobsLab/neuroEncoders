@@ -469,58 +469,58 @@ plt.show(block=True)
 
 
 
-# # # MOVIE
-fig, ax = plt.subplots(figsize=(50,30))
-best_bins = np.argsort(Selected_errors)
-# frame_selection = range(len(Standdev))
-frame_selection = np.union1d(
-    np.where(np.logical_and(Standdev[:] >= std_bins[best_bins[0]],
-                            Standdev[:] < std_bins[best_bins[0]+1]))[0],
-    np.where(np.logical_and(Standdev[:] >= std_bins[best_bins[1]],
-                            Standdev[:] < std_bins[best_bins[1]+1]))[0])
+# # # # MOVIE
+# fig, ax = plt.subplots(figsize=(50,30))
+# best_bins = np.argsort(Selected_errors)
+# # frame_selection = range(len(Standdev))
+# frame_selection = np.union1d(
+#     np.where(np.logical_and(Standdev[:] >= std_bins[best_bins[0]],
+#                             Standdev[:] < std_bins[best_bins[0]+1]))[0],
+#     np.where(np.logical_and(Standdev[:] >= std_bins[best_bins[1]],
+#                             Standdev[:] < std_bins[best_bins[1]+1]))[0])
 
-ax1 = plt.subplot2grid((2,2),(0,1), rowspan=2)
-im1 = ax1.imshow(position_proba[0][:,:], animated=True, extent=[Bins[1][0],Bins[1][-1],Bins[0][-1],Bins[0][0]])
-# im1 = ax1.imshow(position_proba[0][:,:], norm=LogNorm(vmin=0.00001, vmax=1), animated=True, extent=[Bins[1][0],Bins[1][-1],Bins[0][-1],Bins[0][0]])
+# ax1 = plt.subplot2grid((2,2),(0,1), rowspan=2)
+# im1 = ax1.imshow(position_proba[0][:,:], animated=True, extent=[Bins[1][0],Bins[1][-1],Bins[0][-1],Bins[0][0]])
+# # im1 = ax1.imshow(position_proba[0][:,:], norm=LogNorm(vmin=0.00001, vmax=1), animated=True, extent=[Bins[1][0],Bins[1][-1],Bins[0][-1],Bins[0][0]])
 
-im2, = ax1.plot([position[0][1]],[position[0][0]],marker='o', markersize=15, color="red")
-im2b, = ax1.plot([Y_guessed[0]],[X_guessed[0]],marker='P', markersize=15, color="green")
-im3 = ax1.contour(Bins[1], Bins[0], OccupationG)
-cmap = fig.colorbar(im1, ax=ax1)
+# im2, = ax1.plot([position[0][1]],[position[0][0]],marker='o', markersize=15, color="red")
+# im2b, = ax1.plot([Y_guessed[0]],[X_guessed[0]],marker='P', markersize=15, color="green")
+# im3 = ax1.contour(Bins[1], Bins[0], OccupationG)
+# cmap = fig.colorbar(im1, ax=ax1)
 
-# X
-ax2 = plt.subplot2grid((2,2),(0,0))
-plot11 = ax2.plot(X_true, linewidth=2, color='r')
-plot12 = ax2.plot(X_guessed, linewidth=1, color='b')
-plot14 = ax2.plot(frame_selection, [X_guessed[frame_selection[n]] for n in range(len(frame_selection))], 'ko', markersize=10)
-# plot12b = ax2.plot(X_maxlik, linewidth=1, color='y')
-paint1 = ax2.fill_between(range(len(X_true)) , np.subtract(X_guessed,X_standdev) , np.add(X_guessed,X_standdev))
-plot13 = ax2.axvline(linewidth=3, color='k')
-plt.xlim(-200,200)
+# # X
+# ax2 = plt.subplot2grid((2,2),(0,0))
+# plot11 = ax2.plot(X_true, linewidth=2, color='r')
+# plot12 = ax2.plot(X_guessed, linewidth=1, color='b')
+# plot14 = ax2.plot(frame_selection, [X_guessed[frame_selection[n]] for n in range(len(frame_selection))], 'ko', markersize=10)
+# # plot12b = ax2.plot(X_maxlik, linewidth=1, color='y')
+# paint1 = ax2.fill_between(range(len(X_true)) , np.subtract(X_guessed,X_standdev) , np.add(X_guessed,X_standdev))
+# plot13 = ax2.axvline(linewidth=3, color='k')
+# plt.xlim(-200,200)
 
-# Y
-ax3 = plt.subplot2grid((2,2),(1,0), sharex=ax2, sharey=ax2)
-plot21 = ax3.plot(Y_true, linewidth=2, color='r')
-plot22 = ax3.plot(Y_guessed, linewidth=1, color='b')
-plot24 = ax3.plot(frame_selection, [Y_guessed[frame_selection[n]] for n in range(len(frame_selection))], 'ko', markersize=10)
-# plot22b = ax3.plot(Y_maxlik, linewidth=1, color='y')
-paint2 = ax3.fill_between(range(len(Y_true)) , np.subtract(Y_guessed,Y_standdev) , np.add(Y_guessed,Y_standdev))
-plot23 = ax3.axvline(linewidth=3, color='k')
-plt.xlim(-200,200)
+# # Y
+# ax3 = plt.subplot2grid((2,2),(1,0), sharex=ax2, sharey=ax2)
+# plot21 = ax3.plot(Y_true, linewidth=2, color='r')
+# plot22 = ax3.plot(Y_guessed, linewidth=1, color='b')
+# plot24 = ax3.plot(frame_selection, [Y_guessed[frame_selection[n]] for n in range(len(frame_selection))], 'ko', markersize=10)
+# # plot22b = ax3.plot(Y_maxlik, linewidth=1, color='y')
+# paint2 = ax3.fill_between(range(len(Y_true)) , np.subtract(Y_guessed,Y_standdev) , np.add(Y_guessed,Y_standdev))
+# plot23 = ax3.axvline(linewidth=3, color='k')
+# plt.xlim(-200,200)
 
-def updatefig(frame, *args):
-    global position_proba, position, OccupationG, frame_selection, X_guessed, Y_guessed
-    reduced_frame = frame % len(frame_selection)
-    selected_frame = frame_selection[reduced_frame]
-    im1.set_array(position_proba[selected_frame][:,:])
-    im2.set_data([position[selected_frame][1]],[position[selected_frame][0]])
-    im2b.set_data([Y_guessed[selected_frame]],[X_guessed[selected_frame]])
-    plt.xlim(-200+selected_frame,200+selected_frame)
-    plot13.set_xdata(selected_frame)
-    plot23.set_xdata(selected_frame)
-    return im1,im3,im2,im2b, plot11, plot12, plot13, plot14, plot21, plot22, plot23, plot24#, plot12b, plot22b
+# def updatefig(frame, *args):
+#     global position_proba, position, OccupationG, frame_selection, X_guessed, Y_guessed
+#     reduced_frame = frame % len(frame_selection)
+#     selected_frame = frame_selection[reduced_frame]
+#     im1.set_array(position_proba[selected_frame][:,:])
+#     im2.set_data([position[selected_frame][1]],[position[selected_frame][0]])
+#     im2b.set_data([Y_guessed[selected_frame]],[X_guessed[selected_frame]])
+#     plt.xlim(-200+selected_frame,200+selected_frame)
+#     plot13.set_xdata(selected_frame)
+#     plot23.set_xdata(selected_frame)
+#     return im1,im3,im2,im2b, plot11, plot12, plot13, plot14, plot21, plot22, plot23, plot24#, plot12b, plot22b
 
-# ani = animation.FuncAnimation(fig,updatefig,interval=100, save_count=len(frame_selection))
-# if len(frame_selection)<len(position_proba)/4:
-#     ani.save(NN_dir+'_Movie.mp4')
-# fig.show()
+# # ani = animation.FuncAnimation(fig,updatefig,interval=100, save_count=len(frame_selection))
+# # if len(frame_selection)<len(position_proba)/4:
+# #     ani.save(NN_dir+'_Movie.mp4')
+# # fig.show()
