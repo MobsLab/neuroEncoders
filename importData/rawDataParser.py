@@ -64,7 +64,10 @@ def get_position(folder):
         positions = np.swapaxes(positions[:,:],1,0)
         position_time = np.swapaxes(position_time[:,:],1,0)
 
-    return positions, position_time
+        trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
+        testEpochs = np.array(f.root.behavior.testEpochs).flatten()
+
+    return positions, position_time, list(trainEpochs), list(testEpochs)
 
 
 
@@ -141,10 +144,10 @@ class SpikeDetector:
         #     raise ValueError('this file does not exist: '+ self.path.dat)
         
         self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
-        self.position, self.position_time = get_position(self.path.folder)
+        self.position, self.position_time, *epochs = get_position(self.path.folder)
         self.epochs = {
-            "train": [self.position_time[0, 0], self.position_time[len(self.position_time)*9//10, 0]],
-            "test":  [self.position_time[len(self.position_time)*9//10, 0], self.position_time[-1, 0]]
+            "train": epochs[0],
+            "test":  epochs[1]
         }
         self.startTime = min(self.epochs["train"] + self.epochs["test"])
         self.stopTime  = max(self.epochs["train"] + self.epochs["test"])

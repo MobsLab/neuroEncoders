@@ -61,6 +61,8 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 if [[ $encoderType == none ]]; then
 	echo "usage : $usage"
 	exit 1
+elif [[ $encoderType == fromUnits ]]; then
+	target=\"pos\"
 fi
 
 
