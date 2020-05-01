@@ -74,6 +74,7 @@ def getSpikeSequences(params, generator):
 	windowStart = None
 
 	length = 0
+	times = []
 	groups = []
 	allSpikes = [[] for _ in range(params.nGroups)]
 	for train, grp, time, spike, pos in generator:
@@ -81,16 +82,23 @@ def getSpikeSequences(params, generator):
 			windowStart = time
 
 		if time > windowStart + params.windowLength:
-			allSpikes = [np.zeros([0, params.nChannels[g], 32]) if allSpikes[g]==[] else np.stack(allSpikes[g], axis=0) for g in range(params.nGroups)]
-			yield (train, pos, groups, length) + tuple(allSpikes)
+			allSpikes = [np.zeros([0, params.nChannels[g], 32]) \
+				if allSpikes[g]==[] else np.stack(allSpikes[g], axis=0) \
+				for g in range(params.nGroups)]
+			res = {"train": train, "pos": pos, "groups": groups, "length": length, "times": times}
+			res.update({"spikes"+str(g): allSpikes[g] for g in range(params.nGroups)})
+			yield res
 			length = 0
 			groups = []
 			allSpikes = [[] for _ in range(params.nGroups)]
 			windowStart += params.windowLength
 			while time > windowStart + params.windowLength:
-				yield (train, pos, [], 0) + tuple(np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups))
+				res = {"train": train, "pos": pos, "groups": [], "length": 0, "times": []}
+				res.update({"spikes"+str(g): np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups)})
+				yield res
 				windowStart += params.windowLength
 
+		times.append(time)
 		groups.append(grp)
 		allSpikes[grp].append(spike)
 		length += 1
@@ -103,24 +111,21 @@ def serializeSpikeSequence(params, pos, groups, length, *spikes):
 	feat = {
 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
 		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
-		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))}
+		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))
+	}
 	for g in range(params.nGroups):
 		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
 
 	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
 	return example_proto.SerializeToString()
 
-# def serializeSingleSpike(params, grp, time, spk, pos):
-# 	feat = {
-# 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)),
-# 		"grp": tf.train.Feature(int64_list = tf.train.Int64List(value=[grp])),
-# 		"time": tf.train.Feature(float_list = tf.train.FloatList(value=[time]))}
-# 	for g in range(params.nGroups):
-# 		feat.update({"group"+str(g): tf.train.Feature(float_list = 
-# 			tf.train.FloatList(value=spk.ravel() if g==grp else np.zeros([0, params.nChannels[g], 32]).ravel()))})
-
-# 	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
-# 	return example_proto.SerializeToString()
+def serializeSingleSpike(params, clu, spike):
+	feat = {
+		"clu": tf.train.Feature(int64_list = tf.train.Int64List(value=[clu])),
+		"spike": tf.train.Feature(float_list = tf.train.FloatList(value=spike.ravel()))
+	}
+	example_proto = tf.train.Example(features = tf.train.Features(feature = feat))
+	return example_proto.SerializeToString()
 
 
 
@@ -141,7 +146,8 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 		if batched:
 			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, -1, params.nChannels[g], 32])
 		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
-		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
+		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(
+			tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
 		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
 	return tensors
 
@@ -184,35 +190,12 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		return genFromDet
 
 
-def getSpikeSequencesOld(params, spkTime, spkPos, spkGroups, spkSpikes, maxPos=None):
-	totalLength = spkTime[-1] - spkTime[0]
-	nBins = int(totalLength // params.windowLength) - 1
-	binStartTime = [spkTime[0] + (i*params.windowLength) for i in range(nBins)]
-	if maxPos == None:
-		maxPos = np.max(spkPos)
+class ClusterReader():
+	def __init__(self, cluReader, resReader, samplingRate):
+		self.cluReader = cluReader
+		self.resReader = resReader
+		self.samplingRate = samplingRate
 
-	selection = np.zeros([len(binStartTime), 2], dtype=int)
-	selection[0,0] = np.where(spkTime>binStartTime[0])[0][0]
-	selection[0,1] = np.logical_and(spkTime>binStartTime[0], spkTime<binStartTime[0]+params.windowLength).sum()
-	for idx in range(1, len(binStartTime)-1):
-		binStart = binStartTime[idx]
-		selection[idx,0] = selection[idx-1,0] + selection[idx-1,1]
-		n=0
-		while spkTime[selection[idx,0]+n] < binStart+params.windowLength:
-			n += 1
-		selection[idx,1] = n
-
-
-	for idx in range(selection.shape[0]):
-		allSpikes=[]
-		pos = spkPos[selection[idx, 0], :] / maxPos
-		length = selection[idx,1]
-		groups = spkGroups[selection[idx,0]: selection[idx,0]+length]
-		spikes = spkSpikes[selection[idx,0]: selection[idx,0]+length]
-		for group in range(params.nGroups):
-			s = list(spikes[np.where(groups==group)])
-			if s == []:
-				allSpikes.append(np.zeros([0, params.nChannels[group], 32]))
-			else:
-				allSpikes.append(np.stack(spikes[np.where(groups==group)], axis=0))
-		yield (pos, groups, length) + tuple(allSpikes)
+	def getNext(self):
+		self.clu = int(self.cluReader.readline())
+		self.res = int(self.resReader.readline())/self.samplingRate

@@ -26,12 +26,6 @@ class Trainer():
 			dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals, batched=True))
 			iter = dataset.make_initializable_iterator()
 			iterators = iter.get_next()
-			# with tf.Session() as sess:
-			# 	sess.run(iter.initializer)
-			# 	temp = sess.run(iterators)
-			# 	for k,v in temp.items():
-			# 		print(k, v.shape)
-			# 	bbb
 
 			with tf.device(self.device_name):
 				spkParserNet = []
