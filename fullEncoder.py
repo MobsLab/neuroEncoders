@@ -1,14 +1,9 @@
 import sys
 import os.path
-import datetime
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_score
 import tensorflow as tf
 import numpy as np
-from tqdm import tqdm
-from tqdm import trange
-import matplotlib as mpl
-import matplotlib.pyplot as plt
+from contextlib import ExitStack
+
 print(flush=True)
 if len(sys.argv)>1 and sys.argv[1]=="gpu":
 	device_name = "/gpu:0"
@@ -20,7 +15,8 @@ else:
 	raise ValueError('didn\'t understand arguments calling scripts '+sys.argv[0])
 
 
-
+# fullFlowMode = False
+fullFlowMode = True
 
 
 
@@ -29,9 +25,10 @@ class Project():
 		self.xml = xmlPath
 		findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
 		self.folder = findFolder(self.xml)
-		self.dat = xmlPath[:-3] + 'dat'
-		self.fil = xmlPath[:-3] + 'fil'
-		self.json = xmlPath[:-3] + 'json'
+		self.baseName = xmlPath[:-4]
+		self.dat = self.baseName + '.dat'
+		self.fil = self.baseName + '.fil'
+		self.json = self.baseName + '.json'
 
 		self.tfrec = {
 			"train": self.folder + 'dataset/trainingDataset.tfrec', 
@@ -50,6 +47,12 @@ class Project():
 		if not os.path.isdir(self.folder + 'results'):
 			os.makedirs(self.folder + 'results')
 
+	def clu(self, g):
+		return self.baseName + ".clu." + str(g+1)
+
+	def res(self, g):
+		return self.baseName + ".res." + str(g+1)
+
 ### Params
 class Params:
 	def __init__(self, detector):
@@ -58,13 +61,15 @@ class Params:
 		self.nChannels = detector.numChannelsPerGroup()
 		self.length = 0
 
+		self.windowLength = float(sys.argv[4]) # in seconds, as all things should be
+		self.validCluWindow = 0.0003
+
 		self.nSteps = int(10000 * 0.036 / float(sys.argv[4]))
 		self.nFeatures = 128
 		self.lstmLayers = 3
 		self.lstmSize = 128
 		self.lstmDropout = 0.3
 
-		self.windowLength = float(sys.argv[4]) # in seconds, as all things should be
 		self.batch_size = 52
 		self.timeMajor = True
 
@@ -93,30 +98,66 @@ print('using external filter:', useOpenEphysFilter)
 spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
 params = Params(spikeDetector)
 
-if (not os.path.isfile(projectPath.tfrec["train"])) or \
-	(not os.path.isfile(projectPath.tfrec["test"])):
+if not os.path.isfile(projectPath.tfrec["test"]):
 
 	spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
 	spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
-	with tf.python_io.TFRecordWriter(projectPath.tfrec["train"]) as writerTrain, tf.python_io.TFRecordWriter(projectPath.tfrec["test"]) as writerTest:
+	readers = {}
+	writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
+	if fullFlowMode:
+		writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
+	else:
+		readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
+		readers.update({"res"+str(g): open(projectPath.res(g), 'r') for g in range(params.nGroups)})
+		writers.update({"trainGroup"+str(g): tf.python_io.TFRecordWriter(projectPath.tfrec["train"]+"."+str(g)) for g in range(params.nGroups)})
+
+	with ExitStack() as stack:
+		for k,v in writers.items():
+			writers[k] = stack.enter_context(v)
+		for k,v in readers.items():
+			readers[k] = stack.enter_context(v)
+
+		if not fullFlowMode:
+			nClusters = [int(readers["clu"+str(g)].readline()) for g in range(params.nGroups)]
+			params.nClusters = nClusters
+			clusterReaders = [nnUtils.ClusterReader(readers["clu"+str(g)], readers["res"+str(g)], spikeDetector.samplingRate) \
+				for g in range(params.nGroups)]
+			[clusterReaders[g].getNext() for g in range(params.nGroups)]
+
 		for example in spikeSequenceGen:
-			train = example[0]
-			if train == None:
+			if example["train"] == None:
 				continue
-			else:
-				if train:
-					w = writerTrain
+			if example["train"]:
+				if fullFlowMode:
+					writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
+						params, 
+						*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
 				else:
-					w = writerTest
-				w.write(nnUtils.serializeSpikeSequence(params, *tuple(example[1:])))
+					for spk in range(example["length"]):
+						group = example["groups"][spk]
+						while clusterReaders[group].res < example["times"][spk] - params.validCluWindow:
+							clusterReaders[group].getNext()
+						if clusterReaders[group].res > example["times"][spk] + params.validCluWindow:
+							continue
+						writers["trainGroup"+str(group)].write(nnUtils.serializeSingleSpike(
+							params,
+							clusterReaders[group].clu,
+							example["spikes"+str(group)][(np.array(example["groups"])==group)[:spk+1].sum()-1]))
+
+			else:
+				writers["testSequences"].write(nnUtils.serializeSpikeSequence(
+					params, 
+					*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
 
 
-# Training, testing, and preparing network for online setup
-trainer = nnTraining.Trainer(projectPath, params, device_name=device_name)
-trainLosses = trainer.train()
-trainer.convert()
-outputs = trainer.test()
+if fullFlowMode:
+	# Training, testing, and preparing network for online setup
+	trainer = nnTraining.Trainer(projectPath, params, device_name=device_name)
+	trainLosses = trainer.train()
+	trainer.convert()
+	outputs = trainer.test()
+bbb
 
 
 # Saving files
