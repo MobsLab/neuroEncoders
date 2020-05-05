@@ -6,7 +6,7 @@ from tqdm import trange
 
 
 class Trainer():
-	def __init__(self, projectPath, params, device_name="/cpu:0"):
+	def __init__(self, projectPath, params, spikeDetector, device_name="/cpu:0"):
 		self.projectPath = projectPath
 		self.params = params
 		self.device_name = device_name
@@ -115,6 +115,7 @@ class Trainer():
 						epoch_loss2=0
 
 				saver.save(sess, self.projectPath.graph)
+		self.convert()
 		return np.array(trainLosses)
 
 

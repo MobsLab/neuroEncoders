@@ -134,7 +134,7 @@ class INTANFilter:
 
 class SpikeDetector:
     '''A processor class to go through raw data to filter and extract spikes. Synchronizes with position.'''
-    def __init__(self, path, useOpenEphysFilter=False):
+    def __init__(self, path, useOpenEphysFilter):
 
         self.path = path
 
@@ -151,7 +151,6 @@ class SpikeDetector:
         }
         self.startTime = min(self.epochs["train"] + self.epochs["test"])
         self.stopTime  = max(self.epochs["train"] + self.epochs["test"])
-        self.train     = self.isTrainingExample(self.startTime)
 
 
         if useOpenEphysFilter:
@@ -166,6 +165,7 @@ class SpikeDetector:
         self.endOfLastBuffer = []
         self.lateSpikes = self.emptyData()
         self.lastBuffer = False
+        self.firstBuffer = True
 
     def nGroups(self):
         return len(self.list_channels)
@@ -173,6 +173,16 @@ class SpikeDetector:
         return [len(self.list_channels[n]) for n in range(self.nGroups())]
     def maxPos(self):
         return np.max(self.position)
+    def learningTime(self):
+        return sum([self.epochs["train"][2*n+1]-self.epochs["train"][2*n] for n in range(len(self.epochs["train"])//2)])
+    def trainingPositions(self):
+        selected = [False for _ in range(len(self.position_time))]
+        for idx in range(len(self.position_time)):
+            for e in range(len(self.epochs['train'])//2):
+                if self.position_time[idx] >= self.epochs['train'][2*e] and self.position_time[idx] < self.epochs['train'][2*e+1]:
+                    selected[idx] = True
+        return self.position[np.where(selected)]/self.maxPos()
+
 
     def dim_output(self):
         return self.position.shape[1]
@@ -270,8 +280,9 @@ class SpikeDetector:
 
         ### copy end of previous buffer
         if self.endOfLastBuffer != []:
+            self.firstBuffer = False
             self.filteredSignal = np.concatenate([self.endOfLastBuffer, self.filteredSignal], axis=0)
-            self.endOfLastBuffer = filteredSignal[-15:,:]
+        self.endOfLastBuffer = self.filteredSignal[-15:,:]
 
 
         for group in range(len(self.list_channels)):
@@ -317,19 +328,23 @@ class SpikeDetector:
                         spl = spl + np.argmax(filteredBuffer[spl:spl+15, chnl])
                     else:
                         spl = spl + np.argmin(filteredBuffer[spl:spl+15, chnl])
-                    time = (self.pbar.n * BUFFERSIZE + spl) / self.samplingRate
-                    self.train = self.isTrainingExample(time)
+
+                    if self.firstBuffer:
+                        time = (self.pbar.n * BUFFERSIZE + spl) / self.samplingRate
+                    else:
+                        time = (self.pbar.n * BUFFERSIZE + spl - 15) / self.samplingRate
+                    train = self.isTrainingExample(time)
                     
                     # Do nothing unless after behaviour data has started
                     if time > self.startTime:
 
                         # That's a late spike, we'll have to wait till next buffer
-                        if spl > BUFFERSIZE - 18:
+                        if spl > BUFFERSIZE - 18 + 15:
                             lateSpikes['group'].   append(group)
-                            lateSpikes['time'].    append((self.pbar.n * BUFFERSIZE + spl) / self.samplingRate)
+                            lateSpikes['time'].    append(time)
                             lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
                             lateSpikes['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
-                            lateSpikes['train'].   append(self.train)
+                            lateSpikes['train'].   append(train)
 
                         else:
                             spike = filteredBuffer[spl-15:spl+17, :].copy()
@@ -338,7 +353,7 @@ class SpikeDetector:
                                 spikesFound['time'].    append(time)
                                 spikesFound['spike'].   append( np.array(spike).reshape([32,len(self.list_channels[group])]).transpose() )
                                 spikesFound['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
-                                spikesFound['train'].   append(self.train)
+                                spikesFound['train'].   append(train)
 
 
                     spl += 15
