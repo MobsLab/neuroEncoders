@@ -279,7 +279,7 @@ elif [[ $encoderType == full ]]; then
 	python3 $script_path_full $device $xml_path $FILTERTYPE $window
 	if test $? -eq 0; then
 		makeJson=1
-		python3 $script_path_print_full $path
+		python3 $(readlink -f $script_path_print_full) $path
 	else
 		makeJson=0
 	fi

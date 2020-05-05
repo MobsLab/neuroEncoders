@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
@@ -90,6 +91,7 @@ def getSpikeSequences(params, generator):
 			yield res
 			length = 0
 			groups = []
+			times = []
 			allSpikes = [[] for _ in range(params.nGroups)]
 			windowStart += params.windowLength
 			while time > windowStart + params.windowLength:
@@ -151,6 +153,13 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
 	return tensors
 
+def parseSerializedSpike(params, feat_desc, ex_proto, batched=False):
+	if batched:
+		tensors = tf.io.parse_example(ex_proto, feat_desc)
+	else:
+		tensors = tf.io.parse_single_example(ex_proto, feat_desc)
+	return tensors
+
 
 
 def spikeGenerator(projectPath, spikeDetector, maxPos=1):
@@ -190,12 +199,4 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		return genFromDet
 
 
-class ClusterReader():
-	def __init__(self, cluReader, resReader, samplingRate):
-		self.cluReader = cluReader
-		self.resReader = resReader
-		self.samplingRate = samplingRate
 
-	def getNext(self):
-		self.clu = int(self.cluReader.readline())
-		self.res = int(self.resReader.readline())/self.samplingRate

@@ -23,6 +23,7 @@ block=True
 lossSelection = .2
 maxPos = 1#253.92
 dim_output = pos.shape[1]
+print(pos.shape, inferring.shape)
 assert(pos.shape[1] == inferring.shape[1]-1)
 
 
@@ -45,13 +46,65 @@ if trainLosses!=[]:
     # plt.show(block=block)
 
 
-# ERROR & STD
+
+
+temp = inferring[:,dim_output]
+temp2 = temp.argsort()
+# thresh = np.max(ffit)/3
+thresh = temp[temp2[int(len(temp2)*lossSelection)]]
+selection = inferring[:,dim_output]<thresh
+frames = np.where(selection)[0]
+print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")
+
+
+
+
+
+# One place works ?
 Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
+fig, ax = plt.subplots(figsize=(15,9))
+if dim_output==2:
+    from matplotlib.widgets import Slider
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    fig.tight_layout(pad=3.0)
+    ax = plt.subplot2grid((1,2),(0,0))
+    s = plt.scatter(pos[selection,0],pos[selection,1], c=Error[selection], s=10)
+    plt.axis('scaled')
+    rangey = ax.get_ylim()[1] - ax.get_ylim()[0]
+    rangex = ax.get_xlim()[1] - ax.get_xlim()[0]
+    crange = max(rangex, rangey)
+    plt.clim(0, crange)
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cbar = plt.colorbar(cax=cax)
+    cbar.set_label('decoding error' , rotation=270)
+    ax.set_title('decoding error depending of mouse position')
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    def update(val):
+        l.set_ydata([val, val])
+        selection = inferring[:,dim_output]<val
+        s.set_offsets(pos[selection,:])
+        s.set_array(Error[selection])
+        sel2 = selection[selNoNans]
+        scatt.set_array(np.array([1 if sel2[n] else 0.2 for n in range(len(selNoNans))]))
+        fig.canvas.draw_idle()
+    axcolor = 'lightgoldenrodyellow'
+    axfreq = plt.axes([0.1, 0.15, 0.25, 0.03], facecolor=axcolor)
+    slider = Slider(axfreq, 'selection', np.min(inferring[:,dim_output]), np.max(inferring[:,dim_output]), valinit=thresh, valstep=(np.max(inferring[:,dim_output]) - np.max(inferring[:,dim_output]))/100)
+    slider.on_changed(update)
+    oldAx=ax
+    ax = plt.subplot2grid((1,2),(0,1))
+else:
+    fig, ax = plt.subplots(figsize=(8,8))
+# ERROR & STD
 selNoNans = ~np.isnan(Error)
-fig = plt.figure(figsize=(8,8))
-xy = np.vstack([Error[selNoNans], inferring[selNoNans,dim_output]])
-z = gaussian_kde(xy)(xy)
-plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10)
+# xy = np.vstack([Error[selNoNans], inferring[selNoNans,dim_output]])
+# z = gaussian_kde(xy)(xy)
+sel2 = selection[selNoNans]
+z = [1 if sel2[n] else 0.2 for n in range(len(selNoNans))]
+scatt = plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10, cmap=plt.cm.get_cmap('Greys'), vmin=0, vmax=1)
+# plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10)
 nBins = 20
 _, edges = np.histogram(Error[selNoNans], nBins)
 histIdx = []
@@ -80,29 +133,15 @@ coefs = poly.polyfit(
 # coefs = poly.polyfit(Error[selNoNans], inferring[selNoNans,dim_output], 2)
 ffit = poly.polyval(x_new, coefs)
 plt.plot(x_new, ffit, 'k', linewidth=3)
-ax = fig.axes[0]
+l = plt.axhline(thresh, c='k')
 ax.set_ylabel('evaluated loss')
 ax.set_xlabel('decoding error')
+ax.set_title('decoding error vs. evaluated loss')
 plt.savefig(os.path.expanduser(folder+'results/errorFig.png'), bbox_inches='tight')
 # plt.show(block=block)
 
 
-
-
-temp = inferring[:,dim_output]
-temp2 = temp.argsort()
-# thresh = np.max(ffit)/3
-thresh = temp[temp2[int(len(temp2)*lossSelection)]]
-selection = inferring[:,dim_output]<thresh
-frames = np.where(selection)[0]
-print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")
-
-
-
 print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
-
-
-
 
 # Overview
 fig, ax = plt.subplots(figsize=(15,9))
@@ -154,3 +193,9 @@ plt.show(block=block)
 
 # np.savez(os.path.expanduser(fileName), pos, speed, inferring, trainLosses)
 # print('Results saved at:', fileName)
+
+import stat
+with open(folder + "results/reDrawFigures", 'w') as f:
+    f.write("gnome-terminal -- " + sys.executable + " " + "".join([sys.argv[n]+" " for n in range(len(sys.argv))]))
+st = os.stat(folder + "results/reDrawFigures")
+os.chmod(folder + "results/reDrawFigures", st.st_mode | stat.S_IEXEC)
