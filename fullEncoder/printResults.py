@@ -19,14 +19,18 @@ results = np.load(os.path.expanduser(file))
 pos = results['pos']
 inferring = results['inferring']
 trainLosses = results['trainLosses']
+probaMaps = results["probaMaps"]
 block=True
 lossSelection = .2
 maxPos = 1#253.92
 dim_output = pos.shape[1]
-print(pos.shape, inferring.shape)
 assert(pos.shape[1] == inferring.shape[1]-1)
 
-
+import stat
+with open(folder + "results/reDrawFigures", 'w') as f:
+    f.write(sys.executable + " " + "".join([sys.argv[n]+" " for n in range(len(sys.argv))]))
+st = os.stat(folder + "results/reDrawFigures")
+os.chmod(folder + "results/reDrawFigures", st.st_mode | stat.S_IEXEC)
 
 
 if trainLosses!=[]:
@@ -57,11 +61,33 @@ frames = np.where(selection)[0]
 print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",thresh,")")
 
 
+Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
+print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
+
+
+
+
+
+# Overview
+fig, ax = plt.subplots(figsize=(15,9))
+for dim in range(dim_output):
+    if dim > 0:
+        ax1 = plt.subplot2grid((dim_output,1),(dim,0), sharex=ax1)
+    else:
+        ax1 = plt.subplot2grid((dim_output,1),(dim,0))
+    # ax1.plot(inferring[:,dim], label='guessed '+str(dim))
+    ax1.plot(np.where(selection)[0], inferring[selection,dim], label='guessed dim'+str(dim)+' selection')
+    ax1.plot(pos[:,dim], label='true dim'+str(dim), color='xkcd:dark pink')
+    ax1.legend()
+    ax1.set_title('position '+str(dim))
+# plt.text(0,0,fileName)
+plt.savefig(os.path.expanduser(folder+'results/overviewFig.png'), bbox_inches='tight')
+# plt.show(block=block)
+
 
 
 
 # One place works ?
-Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
 fig, ax = plt.subplots(figsize=(15,9))
 if dim_output==2:
     from matplotlib.widgets import Slider
@@ -91,7 +117,11 @@ if dim_output==2:
         fig.canvas.draw_idle()
     axcolor = 'lightgoldenrodyellow'
     axfreq = plt.axes([0.1, 0.15, 0.25, 0.03], facecolor=axcolor)
-    slider = Slider(axfreq, 'selection', np.min(inferring[:,dim_output]), np.max(inferring[:,dim_output]), valinit=thresh, valstep=(np.max(inferring[:,dim_output]) - np.max(inferring[:,dim_output]))/100)
+    slider = Slider(
+        axfreq, 'selection', 
+        np.nanmin(inferring[np.isfinite(inferring[:,dim_output]),dim_output]), np.nanmax(inferring[np.isfinite(inferring[:,dim_output]),dim_output]), 
+        valinit=thresh, 
+        valstep=(np.nanmax(inferring[np.isfinite(inferring[:,dim_output]),dim_output]) - np.nanmax(inferring[np.isfinite(inferring[:,dim_output]),dim_output]))/100)
     slider.on_changed(update)
     oldAx=ax
     ax = plt.subplot2grid((1,2),(0,1))
@@ -102,7 +132,7 @@ selNoNans = ~np.isnan(Error)
 # xy = np.vstack([Error[selNoNans], inferring[selNoNans,dim_output]])
 # z = gaussian_kde(xy)(xy)
 sel2 = selection[selNoNans]
-z = [1 if sel2[n] else 0.2 for n in range(len(selNoNans))]
+z = [1 if sel2[n] else 0.2 for n in range(len(sel2))]
 scatt = plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10, cmap=plt.cm.get_cmap('Greys'), vmin=0, vmax=1)
 # plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10)
 nBins = 20
@@ -138,26 +168,8 @@ ax.set_ylabel('evaluated loss')
 ax.set_xlabel('decoding error')
 ax.set_title('decoding error vs. evaluated loss')
 plt.savefig(os.path.expanduser(folder+'results/errorFig.png'), bbox_inches='tight')
-# plt.show(block=block)
-
-
-print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
-
-# Overview
-fig, ax = plt.subplots(figsize=(15,9))
-for dim in range(dim_output):
-    if dim > 0:
-        ax1 = plt.subplot2grid((dim_output,1),(dim,0), sharex=ax1)
-    else:
-        ax1 = plt.subplot2grid((dim_output,1),(dim,0))
-    # ax1.plot(inferring[:,dim], label='guessed '+str(dim))
-    ax1.plot(np.where(selection)[0], inferring[selection,dim], label='guessed dim'+str(dim)+' selection')
-    ax1.plot(pos[:,dim], label='true dim'+str(dim), color='xkcd:dark pink')
-    ax1.legend()
-    ax1.set_title('position '+str(dim))
-# plt.text(0,0,fileName)
-plt.savefig(os.path.expanduser(folder+'results/overviewFig.png'), bbox_inches='tight')
 plt.show(block=block)
+
 
 
 
@@ -194,8 +206,3 @@ plt.show(block=block)
 # np.savez(os.path.expanduser(fileName), pos, speed, inferring, trainLosses)
 # print('Results saved at:', fileName)
 
-import stat
-with open(folder + "results/reDrawFigures", 'w') as f:
-    f.write("gnome-terminal -- " + sys.executable + " " + "".join([sys.argv[n]+" " for n in range(len(sys.argv))]))
-st = os.stat(folder + "results/reDrawFigures")
-os.chmod(folder + "results/reDrawFigures", st.st_mode | stat.S_IEXEC)

@@ -57,7 +57,6 @@ def get_position(folder):
 
     if not os.path.exists(folder + 'nnBehavior.mat'):
         raise ValueError('this file does not exist :'+folder+'nnBehavior.mat')
-    print('extracting position.')
     with tables.open_file(folder + 'nnBehavior.mat') as f:
         positions = f.root.behavior.positions
         position_time = f.root.behavior.position_time
