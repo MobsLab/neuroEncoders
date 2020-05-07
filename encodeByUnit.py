@@ -105,10 +105,10 @@ def timedelta_to_ms(timedelta):
 
 xml_path = sys.argv[4]
 prefix_results = sys.argv[1] + "mobsEncoding_" + datetime.datetime.now().strftime("%Y-%m-%d_%H:%M")
-try:
-    os.makedirs(prefix_results)
-except:
-    pass
+# try:
+#     os.makedirs(prefix_results)
+# except:
+#     pass
 NN_dir = prefix_results + '/'
 
 n_tetrodes = len(list_channels) # max number !
@@ -161,37 +161,38 @@ else:
 print('using external filter:', useOpenEphysFilter)
 
 
-projectPath = xmlPath(xml_path)
-if not os.path.isfile(projectPath.folder+'_rawSpikes.npy'):
-    from importData import rawDataParser
-    spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
-    rawSpikes = {}
-    rawSpikes['times'] = [[]for grp in range(len(list_channels))]
-    rawSpikes['spikes'] = [[]for grp in range(len(list_channels))]
-    rawSpikes['positions'] = [[]for grp in range(len(list_channels))]
-    for spikes in spikeDetector.getSpikes():
-        if len(spikes['time'])==0:
-            continue
-        for grp,time,spk,pos in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position']), key=lambda x:x[1]):
-            rawSpikes['times'][grp].append(time)
-            rawSpikes['spikes'][grp].append(spk)
-            rawSpikes['positions'][grp].append(pos)
+# projectPath = xmlPath(xml_path)
+# if not os.path.isfile(projectPath.folder+'_rawSpikes.npy'):
+#     from importData import rawDataParser
+#     spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
+#     rawSpikes = {}
+#     rawSpikes['times'] = [[]for grp in range(len(list_channels))]
+#     rawSpikes['spikes'] = [[]for grp in range(len(list_channels))]
+#     rawSpikes['positions'] = [[]for grp in range(len(list_channels))]
+#     for spikes in spikeDetector.getSpikes():
+#         if len(spikes['time'])==0:
+#             continue
+#         for grp,time,spk,pos in sorted(zip(spikes['group'],spikes['time'],spikes['spike'],spikes['position']), key=lambda x:x[1]):
+#             rawSpikes['times'][grp].append(time)
+#             rawSpikes['spikes'][grp].append(spk)
+#             rawSpikes['positions'][grp].append(pos)
 
-    rawSpikes['thresholds'] = spikeDetector.getThresholds()
-    np.save(projectPath.folder+'_rawSpikes.npy', rawSpikes)
-else:
-    rawSpikes = np.load(projectPath.folder+'_rawSpikes.npy', allow_pickle=True).item()
+#     rawSpikes['thresholds'] = spikeDetector.getThresholds()
+#     np.save(projectPath.folder+'_rawSpikes.npy', rawSpikes)
+# else:
+#     rawSpikes = np.load(projectPath.folder+'_rawSpikes.npy', allow_pickle=True).item()
 
-from unitClassifier import bayesianDecoder
-clu_path = xml_path[:len(xml_path)-3]
-Data = bayesianDecoder.build_maps(
-    clu_path, list_channels, rawSpikes,
-    start_time, start_time + learning_time, stop_time,
-    speed_cut, samplingRate,
-    masking_factor, 'gaussian', bandwidth)
+# from unitClassifier import bayesianDecoder
+# clu_path = xml_path[:len(xml_path)-3]
+# Data = bayesianDecoder.build_maps(
+#     clu_path, list_channels, rawSpikes,
+#     start_time, start_time + learning_time, stop_time,
+#     speed_cut, samplingRate,
+#     masking_factor, 'gaussian', bandwidth)
 
-np.save(NN_dir+'_data.npy', Data)
-
+# np.save(NN_dir+'_data.npy', Data)
+NN_dir = '/home/thibault/Documents/dataset/Mouse-797units/mobsEncoding_2020-05-07_18:44/'
+Data = np.load(NN_dir+'_data.npy', allow_pickle=True).item()
 
 
 from unitClassifier import unitClassifier

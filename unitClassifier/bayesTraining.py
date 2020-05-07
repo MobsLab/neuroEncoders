@@ -146,6 +146,7 @@ class Trainer():
 	def train(self):
 		print()
 		print('TRAINING')
+
 		xEdges, yEdges, mask = self.computeSpikeDensities()
 
 		# Buid and train deep learning network
@@ -160,64 +161,61 @@ class Trainer():
 		allRateMaps = np.array(allRateMaps)
 
 
-		# # yTensors = []
-		# # probasTensors = []
-		# for group in range(self.params.nGroups):
-		# 	MOBSgraph = tf.Graph()
-		# 	with MOBSgraph.as_default():
-		# 		with tf.variable_scope("group"+str(group)+"-encoder"):
-		# 			feat_desc = {
-		# 				"clu": tf.io.FixedLenFeature([], tf.int64),
-		# 				"spike": tf.io.FixedLenFeature([self.params.nChannels[group], 32], tf.float32)
-		# 			}
-		# 			dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["train"]+"."+str(group))
-		# 			cnt.append( dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1) )
-		# 			dataset = dataset.shuffle(10000).batch(self.params.batch_size).repeat()
-		# 			dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.params, feat_desc, *vals, batched=True))
-		# 			iter    = dataset.make_one_shot_iterator()
-		# 			spikes  = iter.get_next()
+		for group in range(self.params.nGroups):
+			MOBSgraph = tf.Graph()
+			with MOBSgraph.as_default():
+				with tf.variable_scope("group"+str(group)+"-encoder"):
+					feat_desc = {
+						"clu": tf.io.FixedLenFeature([], tf.int64),
+						"spike": tf.io.FixedLenFeature([self.params.nChannels[group], 32], tf.float32)
+					}
+					dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["train"]+"."+str(group))
+					cnt.append( dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1) )
+					dataset = dataset.shuffle(10000).batch(self.params.batch_size).repeat()
+					dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.params, feat_desc, *vals, batched=True))
+					iter    = dataset.make_one_shot_iterator()
+					spikes  = iter.get_next()
 
-		# 			# x                   = tf.placeholder(tf.float32, shape=[None, self.params.nChannels[group], 32],      name='x')
-		# 			# y                   = tf.placeholder(tf.float32, shape=[None, self.params.nClusters[group]],          name='y')
-		# 			# ySparse             = tf.placeholder(tf.int32,   shape=[None],                                   name='ySparse')
-		# 			x                   = tf.identity(spikes["spike"], name='x')
-		# 			ySparse             = tf.identity(spikes["clu"],   name="ySparse")
-		# 			# realSpikes          = tf.math.logical_not(tf.equal(tf.reduce_sum(x, [1,2]), tf.constant(0.)))
-		# 			# x                   = tf.identity(tf.boolean_mask(x, realSpikes), name='onlySpikes')
+					x                   = tf.identity(spikes["spike"], name='x')
+					ySparse             = tf.identity(spikes["clu"],   name="ySparse")
+					zeros = tf.constant(np.zeros([self.params.nChannels[group], 32]), tf.float32)
+					nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(tf.cast(tf.equal(
+						x, zeros), tf.int32), axis=[1,2]), 32*self.params.nChannels[group]))
+					x = tf.gather(x, tf.where(nonZeros))[:,0,:,:]
 
-		# 		spikeEncoder, ops = encoder(x, self.params.nClusters[group], self.params.nChannels[group], size=200)
-		# 		convolutions.append(ops)
+				spikeEncoder, ops = encoder(x, self.params.nClusters[group], self.params.nChannels[group], size=200)
+				convolutions.append(ops)
 
-		# 		with tf.variable_scope("group"+str(group)+"-evaluator"):
+				with tf.variable_scope("group"+str(group)+"-evaluator"):
 
-		# 			probas              = tf.nn.softmax(spikeEncoder, name='probas')
-		# 			sumProbas           = tf.reduce_sum(probas, axis=0, name='sumProbas')
-		# 			# yTensors.append(tf.reduce_sum(y, axis=0))
+					probas              = tf.nn.softmax(spikeEncoder, name='probas')
+					sumProbas           = tf.reduce_sum(probas, axis=0, name='sumProbas')
 
-		# 			guesses             = tf.argmax(spikeEncoder,1, name='guesses')
-		# 			good_guesses        = tf.equal(ySparse, guesses)
-		# 			accuracy            = tf.reduce_mean(tf.cast(good_guesses, tf.float32), name='accuracy')
-		# 			# confusion_matrix    = tf.confusion_matrix(tf.argmax(y,1), guesses, name='confusion')
+					guesses             = tf.argmax(spikeEncoder,1, name='guesses')
+					good_guesses        = tf.equal(ySparse, guesses)
+					accuracy            = tf.reduce_mean(tf.cast(good_guesses, tf.float32), name='accuracy')
+					# confusion_matrix    = tf.confusion_matrix(tf.argmax(y,1), guesses, name='confusion')
 
-		# 			### Classic cross entropy training
-		# 			cross_entropy       = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=ySparse, logits=spikeEncoder))
-		# 			crossTrain          = tf.train.AdamOptimizer(0.00004).minimize(cross_entropy, name='trainer')
+					### Classic cross entropy training
+					cross_entropy       = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=ySparse, logits=spikeEncoder))
+					crossTrain          = tf.train.AdamOptimizer(0.00004).minimize(cross_entropy, name='trainer')
 
-		# 		saver = tf.train.Saver()
-		# 		with tf.Session() as sess:
-		# 			print('Learning clusters of group '+str(group+1))
-		# 			acc = 0
-		# 			n = cnt[group].eval()
-		# 			t = trange(self.params.nEpochs*(n//self.params.batch_size))
-		# 			sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
-		# 			for i in t:
-		# 				_, a = sess.run([crossTrain, accuracy])
-		# 				acc += a
-		# 				if i%50==0:
-		# 					t.set_description("acc: %f" % (acc/50))
-		# 					t.refresh()
-		# 					acc = 0
-		# 			saver.save(sess, self.projectPath.graph+"."+str(group))
+				saver = tf.train.Saver()
+				with tf.Session() as sess:
+					print('Learning clusters of group '+str(group+1))
+					acc = 0
+					n = cnt[group].eval()
+					t = trange(self.params.nEpochs*(n//self.params.batch_size))
+					sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
+					for i in t:
+						_, a = sess.run([crossTrain, accuracy])
+						acc += a
+						if i%50==0:
+							t.set_description("acc: %f" % (acc/50))
+							t.refresh()
+							acc = 0
+					print()
+					saver.save(sess, self.projectPath.graph+"."+str(group))
 		
 		with tf.Graph().as_default():
 			savers = []
@@ -226,14 +224,14 @@ class Trainer():
 					savers.append( 
 						tf.train.import_meta_graph(
 							self.projectPath.graph+"."+str(g)+".meta",
-							input_map={"group"+str(g)+"-encoder/x:0": tf.placeholder(tf.float32, shape=[None, self.params.nChannels[g], 32], name="x")}) )
+							input_map={
+							"group"+str(g)+"-encoder/x:0": tf.placeholder(tf.float32, shape=[None, self.params.nChannels[g], 32], name="x"),
+							"group"+str(g)+"-encoder/ySparse": tf.placeholder(tf.int64, shape=[None], name="ySparse")}) )
 			probasTensors = [tf.get_default_graph().get_tensor_by_name("group"+str(g)+"-encoder/group"+str(g)+"-evaluator/sumProbas:0") \
 				for g in range(self.params.nGroups)]
 			with tf.variable_scope("bayesianDecoder"):
 
-				# binTime                     = tf.placeholder(tf.float32, shape=[1], name='binTime')
 				binTime                     = tf.constant([self.params.windowLength], dtype=tf.float32, shape=[1])
-				# allProbas                   = tf.reshape(tf.concat(yTensors, 0), [1, Data['nClusters']], name='allProbas');
 				allProbas                   = tf.reshape(tf.concat(probasTensors, 0), [1, sum(self.params.nClusters)], name='allProbas');
 
 				# Place map stats
@@ -321,9 +319,6 @@ class Trainer():
 							{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):tmp["group"+str(group)]
 								for group in range(self.params.nGroups)}) 
 					inferring.append(np.concatenate([temp[1],temp[2]], axis=0))
-					probaMaps.append(temp[0])
-					# plt.imshow(temp[0])
-					# plt.show()
 						
 				pos = np.array(pos)
 
