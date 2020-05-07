@@ -58,7 +58,7 @@ class Params:
 		### from units encoder params
 		self.validCluWindow = 0.0005
 		self.kernel = 'epanechnikov'
-		self.bandwidth = 3.5
+		self.bandwidth = 0.1
 		self.masking = 20
 
 		### full encoder params
@@ -83,6 +83,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	from unitClassifier import bayesUtils, bayesTraining
 
 
+	groupsDone = []
 	trainLosses = []
 	projectPath = Project(os.path.expanduser(xmlPath))
 	spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
@@ -90,6 +91,8 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 
 	# Create data files if not present
 	if not os.path.isfile(projectPath.tfrec["test"]):
+		print()
+		print("BUILDING DATASET")
 
 		# setup data readers and writers meta data
 		spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
@@ -131,16 +134,22 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 						# If decoding from units, we need to find a sorted spike with corresponding timestamp
 						for spk in range(example["length"]):
 							group = example["groups"][spk]
+							if group in groupsDone:
+								continue
 							while clusterReaders[group].res < example["times"][spk] - params.validCluWindow:
 								clusterReaders[group].getNext()
 							if clusterReaders[group].res > example["times"][spk] + params.validCluWindow:
-								continue
-							clusterPositions[group]["clu"+str(clusterReaders[group].clu)].append(example["pos"])
+								clu = 0
+							else:
+								clu = clusterReaders[group].clu
+							clusterPositions[group]["clu"+str(clu)].append(example["pos"])
 							writers["trainGroup"+str(group)].write(nnUtils.serializeSingleSpike(
 								params,
-								clusterReaders[group].clu,
+								clu,
 								example["spikes"+str(group)][(np.array(example["groups"])==group)[:spk+1].sum()-1]))
 							clusterReaders[group].getNext()
+							if clusterReaders[group].clu == -1:
+								groupsDone.append(group)
 
 				else:
 					writers["testSequences"].write(nnUtils.serializeSpikeSequence(

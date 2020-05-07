@@ -186,7 +186,7 @@ class Trainer():
 						tf.shape(outputs)[0]>0, 
 						lambda: tf.reshape(y, [1]), 
 						lambda: tf.constant([0], dtype=tf.float32)), name="standardDeviation")
-				fakeProba= tf.constant(np.zeros([45,45]), dtype=tf.float32, name="positionProba")		
+				fakeProba= tf.constant(np.ones([50,50]), dtype=tf.float32, name="positionProba")		
 			
 			subGraphToRestore = tf.train.Saver({v.op.name: v for v in variables})
 
@@ -231,18 +231,21 @@ class Trainer():
 				saver.restore(sess, self.projectPath.graph)
 
 				pos = []
-				testOutput = []
+				inferring = []
+				probaMaps = []
 				sess.run(iter.initializer)
 				for b in trange(cnt.eval()):
 					tmp = sess.run(spikes)
 					pos.append(tmp["pos"])
-					testOutput.append(np.concatenate(
-						sess.run(
-							[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
+					temp = sess.run(
+							[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionProba:0"), 
+							 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
 							 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")], 
 							{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):tmp["group"+str(group)]
 								for group in range(self.params.nGroups)}), 
-						axis=0))
+					inferring.append(np.concatenate([temp[1],temp[2]], axis=0))
+					probaMaps.append(temp[0])
+						
 				pos = np.array(pos)
 
-		return {"inferring":np.array(testOutput), "pos":pos}
+		return {"inferring":np.array(inferring), "pos":pos, "probaMaps":np.array(probaMaps)}
