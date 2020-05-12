@@ -12,8 +12,8 @@ class ClusterReader():
 			self.clu = int(self.cluReader.readline())
 			self.res = float(self.resReader.readline())/self.samplingRate
 		except ValueError:
-			self.clu = -1
-			self.res = 0
+			self.clu = 0
+			self.res = float("inf")
 
 
 def kde2D(x, y, bandwidth, xbins=50j, ybins=50j, **kwargs):

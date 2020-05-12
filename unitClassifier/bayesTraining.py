@@ -250,10 +250,10 @@ class Trainer():
 
 				termPoisson                 = tf.exp(allWeights_reduced, name='termPoisson')
 				positionProba_flat          = tf.multiply( termPoisson, occMask_flat, name='positionProbaFlat')
-				positionProba               = tf.reshape(positionProba_flat / tf.reduce_sum(positionProba_flat), [50,50], name='positionProba')
+				positionProba               = tf.cast(tf.reshape(positionProba_flat / tf.reduce_sum(positionProba_flat), [50,50]), tf.float32, name='positionProba')
 
-				xBins                       = tf.constant(np.array(xEdges[:,0]), shape=[50], name='xBins')
-				yBins                       = tf.constant(np.array(yEdges[0,:]), shape=[50], name='yBins')
+				xBins                       = tf.constant(np.array(xEdges[:,0]), shape=[50], name='xBins', dtype=tf.float32)
+				yBins                       = tf.constant(np.array(yEdges[0,:]), shape=[50], name='yBins', dtype=tf.float32)
 				xProba                      = tf.reduce_sum(positionProba, axis=1, name='xProba')
 				yProba                      = tf.reduce_sum(positionProba, axis=0, name='yProba')
 				xGuessed                    = tf.reduce_sum(tf.multiply(xProba, xBins)) / tf.reduce_sum(xProba)

@@ -241,7 +241,6 @@ else
 fi
 
 
-makeJson=1
 if [[ $encoderType == fromUnits ]]; then
 	python3 $script_path_from_units $path $stop_time $start_time $xml_path $FILTERTYPE
 	exitcatch=$?
@@ -278,17 +277,11 @@ if [[ $encoderType == fromUnits ]]; then
 elif [[ $encoderType == full ]]; then
 	python3 $script_path_full $device $xml_path $FILTERTYPE $window
 	if test $? -eq 0; then
-		makeJson=1
 		python3 $(readlink -f $script_path_print_full) $path
-	else
-		makeJson=0
+		./createOpenEphysTemplateFromJson.sh $jsonPath
 	fi
 fi
 
-
-# if [[ $makeJson == 1 ]]; then
-# 	/$HOME/Dropbox/Kteam/intanMobsSource/open-ephys-plugins/OnlineDecoding/PositionDecoder/createOpenEphysTemplateFromJson.sh $jsonPath
-# fi
 echo
 echo
 echo Encoding over.

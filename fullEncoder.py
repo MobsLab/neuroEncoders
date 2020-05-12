@@ -42,7 +42,7 @@ class Project():
 	def pos(self, g):
 		return self.folder + "dataset/pos." + str(g+1) + ".npz"
 
-### Params
+
 class Params:
 	def __init__(self, detector):
 		self.nGroups = detector.nGroups()
@@ -155,8 +155,8 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 
 
 
+	# Training, testing, and preparing network for online setup
 	if fullFlowMode:
-		# Training, testing, and preparing network for online setup
 		trainer = nnTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
 		trainLosses = trainer.train()
 		outputs = trainer.test()
@@ -181,14 +181,11 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	outjsonStr['nGroups'] = int(params.nGroups)
 	idx=0
 	for group in range(len(spikeDetector.list_channels)):
-	    if os.path.isfile(projectPath.xml[:len(projectPath.xml)-3] + 'clu.' + str(group+1)):
-	        outjsonStr['group'+str(group-idx)]={}
-	        outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
-	        for chnl in range(len(spikeDetector.list_channels[group])):
-	            outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
-	            outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
-	    else:
-	        idx+=1
+		outjsonStr['group'+str(group-idx)]={}
+		outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
+		for chnl in range(len(spikeDetector.list_channels[group])):
+			outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
+			outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
 
 	outjsonStr['nStimConditions'] = 1
 	outjsonStr['stimCondition0'] = {}
@@ -199,8 +196,6 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	outjsonStr['stimCondition0']['higherY'] = 0.0
 	outjsonStr['stimCondition0']['lowerDev'] = 0.0
 	outjsonStr['stimCondition0']['higherDev'] = 0.0
-
-	# print(outjsonStr)
 
 	outjson = json.dumps(outjsonStr, indent=4)
 	with open(projectPath.json,"w") as json_file:
