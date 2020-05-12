@@ -6,7 +6,7 @@ Usage :
 ```
 "full" mode extracts spikes from a .dat or a .fil file, and creates a neural network graph from the spikes to the position. "fromUnits" mode loads units from .clu and .res files and creates a neural net to classify them correctly, using then a bayesian decoder to get to the position.
 
-The option ```-p <path>``` allows you to specify the path to the .xml of your dataset (if not present, the script will ask it from you). The script assumes that the .dat is in the same folder as this .xml (and with the same name !). The position is taken from the variables Xtsd and Ytsd of the behavResources.mat file (in the same folder as the other files).
+The option ```-p <path>``` allows you to specify the path to the .xml of your dataset (if not present, the script will ask it from you). The script assumes that the .dat is in the same folder as this .xml (and with the same name !). The position is taken from the variables Xtsd and Ytsd of the behavResources.mat file (in the same folder as the other files), unless the option -t or --target is used.
 
 If you wish to decode something else than position, you can use the option ```--target <nameOfTsd>``` to specify the name of tsd object inside the behavResources.mat file. If specified, the data from this object will be used as target for the decoding.
 
@@ -22,4 +22,4 @@ You need to have python3 installed and all the packages in "requirements.txt". T
 sudo apt-get install python3 python3-dev python3-pip python3-venv python3-tk
 pip3 install -r requirements.txt
 ```
-It is advised to use a virtual environment, you can learn how to do that on google (it's not mandatory). The version of tensorflow in requirements.txt is not the gpu version. If you feel confortable enough to install the gpu version, you can use : https://medium.com/better-programming/install-tensorflow-1-13-on-ubuntu-18-04-with-gpu-support-239b36d29070 but you have to NOT install the cpu version first (which would happen if you use the pip3 command shown previously).
+It is advised to use a virtual environment, you can easily google how to do that (it's not mandatory). The version of tensorflow in requirements.txt is not the gpu version. If you feel confortable enough to install the gpu version, you can use : https://medium.com/better-programming/install-tensorflow-1-13-on-ubuntu-18-04-with-gpu-support-239b36d29070 but you have to NOT install the cpu version first (which would happen if you use the pip3 command shown previously).

@@ -242,7 +242,7 @@ class Trainer():
 							 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"), 
 							 tf.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")], 
 							{tf.get_default_graph().get_tensor_by_name("group"+str(group)+"-encoder/x:0"):tmp["group"+str(group)]
-								for group in range(self.params.nGroups)}), 
+								for group in range(self.params.nGroups)}) 
 					inferring.append(np.concatenate([temp[1],temp[2]], axis=0))
 					probaMaps.append(temp[0])
 						
