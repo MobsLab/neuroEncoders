@@ -176,6 +176,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	import json
 	outjsonStr = {};
 	outjsonStr['encodingPrefix'] = projectPath.graph
+	outjsonStr['defaultFilter'] = not useOpenEphysFilter
 	outjsonStr['mousePort'] = 0
 
 	outjsonStr['nGroups'] = int(params.nGroups)
