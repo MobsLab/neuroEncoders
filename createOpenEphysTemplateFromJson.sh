@@ -1,4 +1,10 @@
 #!/bin/bash
+# Absolute path to this script, e.g. /home/user/bin/foo.sh
+SCRIPT=$(readlink -f "$0")
+# Absolute path this script is in, thus /home/user/bin
+SCRIPTPATH=$(dirname "$SCRIPT")
+cd $SCRIPTPATH
+args=("$@")
 
 # sudo apt-get install jq
 # sudo apt-get install xmlstarlet
@@ -25,7 +31,7 @@ done
 
 destPath=`dirname $pathToJson`
 pathToXml=$destPath/openEphysLoadFile.xml
-cp $HOME/Dropbox/Kteam/intanMobsSource/open-ephys-install/openEphysLoadExample.xml $pathToXml
+cp $SCRIPTPATH/openEphysLoadExample.xml $pathToXml
 
 
 xmlstarlet ed -L -s /SETTINGS/SIGNALCHAIN -t elem -n PROCESSOR -v "" $pathToXml
