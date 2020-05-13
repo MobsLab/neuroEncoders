@@ -31,7 +31,13 @@ done
 
 destPath=`dirname $pathToJson`
 pathToXml=$destPath/openEphysLoadFile.xml
-cp $SCRIPTPATH/openEphysLoadExample.xml $pathToXml
+
+defaultFilter=`jq ".defaultFilter" $pathToJson`
+if [[ $defaultFilter == "true" ]];then
+	cp $SCRIPTPATH/openEphysLoadExampleDefaultFilter.xml $pathToXml
+else
+	cp $SCRIPTPATH/openEphysLoadExample.xml $pathToXml
+fi
 
 
 xmlstarlet ed -L -s /SETTINGS/SIGNALCHAIN -t elem -n PROCESSOR -v "" $pathToXml
