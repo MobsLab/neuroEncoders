@@ -8,6 +8,11 @@ from contextlib import ExitStack
 
 class Project():
 	def __init__(self, xmlPath):
+		if xmlPath[-3:] != "xml":
+			if os.path.isfile(xmlPath[:-3]+"xml"):
+				xmlPath = xmlPath[:-3]+"xml"
+			else:
+				raise ValueError("the path "+xmlPath+" doesn't match a .xml file")
 		self.xml = xmlPath
 		findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
 		self.folder = findFolder(self.xml)
@@ -77,7 +82,6 @@ class Params:
 
 
 def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
-
 	from importData import rawDataParser
 	from fullEncoder import nnUtils, nnTraining
 	from unitClassifier import bayesUtils, bayesTraining
