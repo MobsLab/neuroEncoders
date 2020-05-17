@@ -63,6 +63,7 @@ print("total windows:",len(temp2),"| selected windows:",len(frames), "(thresh",t
 
 Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
 print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
+sys.stdout.write("threshold value: "+str(thresh)+"\r"); sys.stdout.flush()
 
 
 
@@ -108,6 +109,7 @@ if dim_output==2:
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     def update(val):
+        sys.stdout.write("threshold value: "+str(val)+"\r"); sys.stdout.flush()
         l.set_ydata([val, val])
         selection = inferring[:,dim_output]<val
         s.set_offsets(pos[selection,:])
@@ -169,7 +171,7 @@ ax.set_xlabel('decoding error')
 ax.set_title('decoding error vs. evaluated loss')
 plt.savefig(os.path.expanduser(folder+'results/errorFig.png'), bbox_inches='tight')
 plt.show(block=block)
-
+print()
 
 
 
