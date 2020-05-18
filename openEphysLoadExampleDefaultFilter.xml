@@ -15,7 +15,7 @@
       <EDITOR isCollapsed="0" displayName="Rhythm FPGA" SampleRate="15" SampleRateString="20.0 kS/s"
               LowCut="0.10000000149011611938" HighCut="7500" AUXsOn="0" ADCsOn="0"
               AudioOutputL="-1" AudioOutputR="-1" NoiseSlicer="0" TTLFastSettle="1"
-              DAC_TTL="0" DAC_HPF="1" DSPOffset="1" DSPCutoffFreq="7194031228.2071533203"
+              DAC_TTL="0" DAC_HPF="1" DSPOffset="1" DSPCutoffFreq="0.1"
               save_impedance_measurements="0" auto_measure_impedances="0" LEDs="1"
               ClockDivideRatio="1">
       </EDITOR>
