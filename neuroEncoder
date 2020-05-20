@@ -173,77 +173,8 @@ else
 fi
 
 
-# From log file, extract some behavioural metadata (number of groups, start and stop time)
-file=$path$log
-while IFS= read -r line
-do
 
-	if [[ `echo $line | cut -c-8` == 'n_groups' ]]; then
-		n_tetrodes=`echo $line | cut -c12-`
-
-	elif [[ `echo $line | cut -c-8` == 'end_time' ]]; then
-		size=${#line}
-		end=$(( $size-4 ))
-		begin=12
-		stop_time=`echo $line | cut -c$begin-$end`
-
-	elif [[ `echo $line | cut -c-10` == 'start_time'  ]]; then
-		size=${#line}
-		end=$(( $size-4 ))
-		begin=14
-		start_time=`echo $line | cut -c$begin-$end`
-	fi
-
-done < $file
-
-
-
-
-
-
-echo
-echo beginning of tracking at  $start_time sec
-echo end of tracking at        $stop_time sec
-echo
-
-
-
-if [[ $encoderType == fromUnits ]]; then
-	python3 $script_path_from_units $path $stop_time $start_time $xml_path $FILTERTYPE
-	exitcatch=$?
-	if test $exitcatch -ne 0; then
-		makeJson=0
-		if test $exitcatch -eq 1; then
-			echo
-			echo Encoding failed. Script used was $script_path_from_units
-			exit 1
-		elif test $exitcatch -eq 2; then
-			echo
-			echo Encoding succeeded. However, results have not been sent to the server. Not a big deal.
-			exit 0
-		elif test $exitcatch -eq 3; then
-			echo
-			echo Encoding seems to have succed, but we\'ll not be plotting anything.
-			exit 0
-		elif test $exitcatch -eq 4; then
-			echo
-			echo We\'re unable to load "$xml_path", does this file exist ?
-			exit 1
-		elif test $exitcatch -eq 5; then
-			echo 
-			echo Dimensions of speed and positions in behaviour data do not match.
-			exit 1
-		else
-			echo
-			echo Something unforeseen has happened. We think encoding has failed. Script used was $script_path_from_units
-			exit 1
-		fi
-	fi
-
-
-elif [[ $encoderType == full ]]; then
-	env/bin/python3 $script_path_full $device $xml_path $FILTERTYPE $window
-fi
+env/bin/python3 $script_path_full $encoderType $xml_path -d $device -f -w $window
 
 echo
 echo

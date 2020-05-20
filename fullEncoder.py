@@ -56,7 +56,6 @@ class Params:
 		self.length = 0
 
 		self.nSteps = int(10000 * 0.036 / windowSize)
-		self.nSteps = 100
 		self.nEpochs = 10
 		self.learningTime = detector.learningTime()
 		self.windowLength = windowSize # in seconds, as all things should be
@@ -82,7 +81,7 @@ class Params:
 
 
 
-def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
+def main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode):
 	from importData import rawDataParser
 	from fullEncoder import nnUtils, nnTraining
 	from unitClassifier import bayesUtils, bayesTraining
@@ -101,7 +100,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 		spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
 		readers = {}
 		writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
-		if fullFlowMode:
+		if mode=="full":
 			writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
 		else:
 			readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
@@ -115,7 +114,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 			for k,v in readers.items():
 				readers[k] = stack.enter_context(v)
 
-			if not fullFlowMode:
+			if mode=="fromUnits":
 				nClusters = [int(readers["clu"+str(g)].readline()) for g in range(params.nGroups)]
 				params.nClusters = nClusters
 				clusterPositions = [{"clu"+str(n):[] for n in range(params.nClusters[g])} for g in range(params.nGroups)]
@@ -128,7 +127,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 				if example["train"] == None:
 					continue
 				if example["train"]:
-					if fullFlowMode:
+					if mode=="full":
 						writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
 							params, 
 							*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
@@ -152,7 +151,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 						params, 
 						*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
-		if not fullFlowMode:
+		if mode=="fromUnits":
 			for g in range(params.nGroups):
 				for c in range(params.nClusters[g]):
 					clusterPositions[g]["clu"+str(c)] = np.array(clusterPositions[g]["clu"+str(c)])
@@ -161,7 +160,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 
 
 	# Training, testing, and preparing network for online setup
-	if fullFlowMode:
+	if mode=="full":
 		trainer = nnTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
 		trainLosses = trainer.train()
 		outputs = trainer.test()
@@ -214,26 +213,35 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	printResults.printResults(projectPath.folder)
 
 if __name__=="__main__":
-	print(flush=True)
-	if len(sys.argv)>1 and sys.argv[1]=="gpu":
+	print()
+	import argparse
+	parser = argparse.ArgumentParser(description="Creating and training an agent to decode high level features from electrophysiology data")
+	subparsers = parser.add_subparsers(dest='mode', title='modes', description='all existing modes of encoding', help='selects an encoding mode')
+	for cmd in ['full', 'fromUnits']:
+		p = subparsers.add_parser(cmd)
+		p.add_argument('path', type=str, help="path to xml file")
+		p.add_argument('-d','--device', type=str, help="select device for training from <cpu | gpu>. Default: cpu", default="cpu")
+		p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
+		p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
+	args = parser.parse_args()
+
+	if args.device=="gpu":
 		device_name = "/gpu:0"
-		print('MOBS FULL FLOW ENCODER: DEVICE GPU', flush=True)
-	elif len(sys.argv)==1 or sys.argv[1]=="cpu":
+	elif args.device=="cpu":
 		device_name = "/cpu:0"
-		print('MOBS FULL FLOW ENCODER: DEVICE CPU', flush=True)
 	else:
-		raise ValueError('didn\'t understand arguments calling scripts '+sys.argv[0])
+		raise ValueError('didn\'t understand specified device '+args.device)
+	print('NEUROENCODER: DEVICE', device_name)
 
-	filterType = sys.argv[3]
-	if filterType=='external':
-	    useOpenEphysFilter=True
-	else:
-	    useOpenEphysFilter=False
-	print('using external filter:', useOpenEphysFilter)
+	xmlPath = args.path
+	print('NEUROENCODER: PATH', xmlPath)
 
-	windowSize = float(sys.argv[4])
-	xmlPath = sys.argv[2]
+	useOpenEphysFilter = not args.filter
+	print('NEUROENCODER: FILTERING', not useOpenEphysFilter)
 
-	fullFlowMode = True
+	windowSize = args.window
+	print('NEUROENCODER: WINDOW', windowSize)
 
-	main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode)
+	mode = args.mode
+
+	main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode)
