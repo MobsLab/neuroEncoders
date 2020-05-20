@@ -17,9 +17,7 @@ By default, the script also uses data from a .fil file to get the spikes. If you
 If tensorflow is installed with gpu version, you can add the option -g or --gpu so the script runs in gpu mode. The data isn't straightforward to load, so the gpu acceleration is not always great on a regular workstation.
 
 # Installation
-You need to have python3 installed and all the packages in "requirements.txt". To do this easily on an ubuntu machine:
+CPU not supported for installation for now
 ```
-sudo apt-get install python3 python3-dev python3-pip python3-venv python3-tk
-pip3 install -r requirements.txt
+sudo ./install.sh
 ```
-It is advised to use a virtual environment, you can easily google how to do that (it's not mandatory). The version of tensorflow in requirements.txt is not the gpu version. If you feel confortable enough to install the gpu version, you can use : https://medium.com/better-programming/install-tensorflow-1-13-on-ubuntu-18-04-with-gpu-support-239b36d29070 but you have to NOT install the cpu version first (which would happen if you use the pip3 command shown previously).
