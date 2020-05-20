@@ -277,7 +277,6 @@ if [[ $encoderType == fromUnits ]]; then
 elif [[ $encoderType == full ]]; then
 	env/bin/python3 $script_path_full $device $xml_path $FILTERTYPE $window
 	if test $? -eq 0; then
-		env/bin/python3 $(readlink -f $script_path_print_full) $path
 		./createOpenEphysTemplateFromJson.sh $jsonPath
 	fi
 fi
