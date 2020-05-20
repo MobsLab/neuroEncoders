@@ -207,6 +207,9 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	with open(projectPath.json,"w") as json_file:
 	    json_file.write(outjson)
 
+	import subprocess
+	subprocess.run(["./createOpenEphysTemplateFromJson.sh", projectPath.json])
+
 	from fullEncoder import printResults
 	printResults.printResults(projectPath.folder)
 
