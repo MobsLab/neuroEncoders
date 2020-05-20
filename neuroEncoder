@@ -210,35 +210,35 @@ echo
 
 
 
-# Check which library has to be installed, if any
-if command -v python3 &>/dev/null;then
-	echo python3 is installed.
-else
-	echo
-	echo Please install python3 !
-	echo 
-	exit 0
-fi
+## Check which library has to be installed, if any
+#if command -v python3 &>/dev/null;then
+#	echo python3 is installed.
+#else
+#	echo
+#	echo Please install python3 !
+#	echo 
+#	exit 0
+#fi
 
-importList="numpy tensorflow matplotlib scipy sklearn json struct bisect tables tqdm"
-librariesToInstall=""
-for lib in $importList; do
-	python3 -c "import $lib"
-	if test $? -eq 1; then
-		librariesToInstall="$librariesToInstall""$lib "
-	else
-		echo $lib is installed.
-	fi
-done
+#importList="numpy tensorflow matplotlib scipy sklearn json struct bisect tables tqdm"
+#librariesToInstall=""
+#for lib in $importList; do
+#	python3 -c "import $lib"
+#	if test $? -eq 1; then
+#		librariesToInstall="$librariesToInstall""$lib "
+#	else
+#		echo $lib is installed.
+#	fi
+#done
 
-if [ "$librariesToInstall" == "" ]
-then
-	echo Everything is installed.
-else
-	echo 
-	echo Please install the following with pip3: "$librariesToInstall"
-	exit 1
-fi
+#if [ "$librariesToInstall" == "" ]
+#then
+#	echo Everything is installed.
+#else
+#	echo 
+#	echo Please install the following with pip3: "$librariesToInstall"
+#	exit 1
+#fi
 
 
 if [[ $encoderType == fromUnits ]]; then
@@ -275,9 +275,9 @@ if [[ $encoderType == fromUnits ]]; then
 
 
 elif [[ $encoderType == full ]]; then
-	python3 $script_path_full $device $xml_path $FILTERTYPE $window
+	env/bin/python3 $script_path_full $device $xml_path $FILTERTYPE $window
 	if test $? -eq 0; then
-		python3 $(readlink -f $script_path_print_full) $path
+		env/bin/python3 $(readlink -f $script_path_print_full) $path
 		./createOpenEphysTemplateFromJson.sh $jsonPath
 	fi
 fi
