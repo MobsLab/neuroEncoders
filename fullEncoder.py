@@ -223,7 +223,11 @@ if __name__=="__main__":
 		p.add_argument('-d','--device', type=str, help="select device for training from <cpu | gpu>. Default: cpu", default="cpu")
 		p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
 		p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
+		p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
 	args = parser.parse_args()
+
+	import subprocess
+	subprocess.run(["./getTsdFeature.sh", args.path, "\""+args.target+"\""])
 
 	if args.device=="gpu":
 		device_name = "/gpu:0"
