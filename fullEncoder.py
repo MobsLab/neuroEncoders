@@ -56,6 +56,7 @@ class Params:
 		self.length = 0
 
 		self.nSteps = int(10000 * 0.036 / windowSize)
+		self.nSteps = 100
 		self.nEpochs = 10
 		self.learningTime = detector.learningTime()
 		self.windowLength = windowSize # in seconds, as all things should be
@@ -206,7 +207,8 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, fullFlowMode):
 	with open(projectPath.json,"w") as json_file:
 	    json_file.write(outjson)
 
-
+	from fullEncoder import printResults
+	printResults.printResults(projectPath.folder)
 
 if __name__=="__main__":
 	print(flush=True)
