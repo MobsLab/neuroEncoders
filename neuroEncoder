@@ -12,26 +12,34 @@ from contextlib import ExitStack
 
 
 class Project():
-	def __init__(self, xmlPath):
+	def __init__(self, xmlPath, datPath='', jsonPath=None):
 		if xmlPath[-3:] != "xml":
 			if os.path.isfile(xmlPath[:-3]+"xml"):
 				xmlPath = xmlPath[:-3]+"xml"
 			else:
 				raise ValueError("the path "+xmlPath+" doesn't match a .xml file")
 		self.xml = xmlPath
-		findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
-		self.folder = findFolder(self.xml)
 		self.baseName = xmlPath[:-4]
-		self.dat = self.baseName + '.dat'
-		self.fil = self.baseName + '.fil'
-		self.json = self.baseName + '.json'
+		if datPath == '':
+			self.dat = self.baseName + '.dat'
+		else:
+			self.dat = datPath
+		findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
+		self.folder = findFolder(self.dat)
+		self.fil = self.dat[:-4] + '.fil'
+		if jsonPath == None:
+			self.json = self.baseName + '.json'
+			self.graph = self.folder + 'graph/decoder'
+			self.graphMeta = self.folder + 'graph/decoder.meta'
+		else:
+			print('using file:',jsonPath)
+			self.json = jsonPath
+			self.thresholds, self.graph = self.getThresholdsAndGraph()
+			self.graphMeta = self.graph + '.meta'
 
 		self.tfrec = {
 			"train": self.folder + 'dataset/trainingDataset.tfrec', 
 			"test": self.folder + 'dataset/testingDataset.tfrec'}
-
-		self.graph = self.folder + 'graph/decoder'
-		self.graphMeta = self.folder + 'graph/decoder.meta'
 
 		self.resultsNpz = self.folder + 'results/inferring.npz'
 		self.resultsMat = self.folder + 'results/inferring.mat'
@@ -52,9 +60,17 @@ class Project():
 	def pos(self, g):
 		return self.folder + "dataset/pos." + str(g+1) + ".npz"
 
+	def getThresholdsAndGraph(self):
+		import json
+		with open(self.json, 'r') as f:
+			info = json.loads(f.read())
+		return [[-info[d][f] for f in ['threshold'+str(c) for c in range(info[d]['nChannels'])]] \
+				for d in ['group'+str(g) for g in range(info['nGroups'])]], \
+			info['encodingPrefix']
+
 
 class Params:
-	def __init__(self, detector):
+	def __init__(self, detector, windowSize):
 		self.nGroups = detector.nGroups()
 		self.dim_output = detector.dim_output()
 		self.nChannels = detector.numChannelsPerGroup()
@@ -86,16 +102,38 @@ class Params:
 
 
 
-def main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode):
+def main(args):
 	from importData import rawDataParser
 	from fullEncoder import nnUtils, nnTraining
 	from unitClassifier import bayesUtils, bayesTraining
+	from decoder import decodeTraining
 
+	if args.mode=="decode":
+		jsonPath = os.path.expanduser(args.jsonPath)
+	else:
+		jsonPath = None
+	if args.gpu:
+		device_name = "/gpu:0"
+	else:
+		device_name = "/cpu:0"
+	print('NEUROENCODER: DEVICE', device_name)
+	xmlPath = args.path.strip('\'')
+	datPath = args.dat
+	print('NEUROENCODER: PATH', xmlPath)
+	useOpenEphysFilter = not args.filter
+	print('NEUROENCODER: FILTERING', not useOpenEphysFilter)
+	windowSize = args.window
+	print('NEUROENCODER: WINDOW', windowSize)
+	mode = args.mode
+	print('NEUROENCODER: MODE', mode)
+	print()
 
 	trainLosses = []
-	projectPath = Project(os.path.expanduser(xmlPath))
-	spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter)
-	params = Params(spikeDetector)
+	projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=jsonPath)
+	spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
+	params = Params(spikeDetector, windowSize)
+	if mode == "decode":
+		spikeDetector.setThresholds(projectPath.thresholds)
 
 	# Create data files if not present
 	if not os.path.isfile(projectPath.tfrec["test"]):
@@ -107,7 +145,7 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode):
 		writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
 		if mode=="full":
 			writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
-		else:
+		elif mode=="fromUnits":
 			readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
 			readers.update({"res"+str(g): open(projectPath.res(g), 'r') for g in range(params.nGroups)})
 			writers.update({"trainGroup"+str(g): tf.python_io.TFRecordWriter(projectPath.tfrec["train"]+"."+str(g)) for g in range(params.nGroups)})
@@ -163,15 +201,17 @@ def main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode):
 				np.savez(projectPath.pos(g), **clusterPositions[g])
 
 
-
 	# Training, testing, and preparing network for online setup
 	if mode=="full":
 		trainer = nnTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
 		trainLosses = trainer.train()
 		outputs = trainer.test()
-	else:
+	elif mode=="fromUnits":
 		trainer = bayesTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
 		trainLosses = trainer.train()
+		outputs = trainer.test()
+	elif mode=="decode":
+		trainer = decodeTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
 		outputs = trainer.test()
 
 
@@ -221,10 +261,13 @@ if __name__=="__main__":
 	import argparse
 	parser = argparse.ArgumentParser(description="Creating and training an agent to decode high level features from electrophysiology data")
 	subparsers = parser.add_subparsers(dest='mode', title='modes', description='all existing modes of encoding', help='selects an encoding mode')
-	for cmd in ['full', 'fromUnits']:
+	for cmd in ['full', 'fromUnits', 'decode']:
 		p = subparsers.add_parser(cmd)
 		p.add_argument('path', type=str, help="path to xml file")
-		p.add_argument('-d','--device', type=str, help="select device for training from <cpu | gpu>. Default: cpu", default="cpu")
+		if cmd == 'decode':
+			p.add_argument('jsonPath', type=str, help="path to json file")
+		p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
+		p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
 		p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
 		p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
 		p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
@@ -241,27 +284,7 @@ if __name__=="__main__":
 	subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')), "\""+args.target+"\""])
 	print()
 
-	if args.device=="gpu":
-		device_name = "/gpu:0"
-	elif args.device=="cpu":
-		device_name = "/cpu:0"
-	else:
-		raise ValueError('didn\'t understand specified device '+args.device)
-	print('NEUROENCODER: DEVICE', device_name)
-
-	xmlPath = args.path.strip('\'')
-	print('NEUROENCODER: PATH', xmlPath)
-
-	useOpenEphysFilter = not args.filter
-	print('NEUROENCODER: FILTERING', not useOpenEphysFilter)
-
-	windowSize = args.window
-	print('NEUROENCODER: WINDOW', windowSize)
-
-	mode = args.mode
-
-	print()
-	main(device_name, xmlPath, useOpenEphysFilter, windowSize, mode)
+	main(args)
 
 	print()
 	print()
