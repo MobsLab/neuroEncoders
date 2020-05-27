@@ -136,7 +136,7 @@ def main(args):
 		spikeDetector.setThresholds(projectPath.thresholds)
 
 	# Create data files if not present
-	if not os.path.isfile(projectPath.tfrec["test"]):
+	if not os.path.isfile(projectPath.tfrec["test"]) or args.B:
 
 		# setup data readers and writers meta data
 		spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
@@ -271,6 +271,7 @@ if __name__=="__main__":
 		p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
 		p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
 		p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
+		p.add_argument('-B', action='store_true', help="rebuilds dataset, even if present.")
 	args = parser.parse_args()
 
 	print()
