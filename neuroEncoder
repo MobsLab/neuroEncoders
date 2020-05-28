@@ -64,7 +64,7 @@ class Project():
 		import json
 		with open(self.json, 'r') as f:
 			info = json.loads(f.read())
-		return [[-info[d][f] for f in ['threshold'+str(c) for c in range(info[d]['nChannels'])]] \
+		return [[abs(info[d][f]) for f in ['threshold'+str(c) for c in range(info[d]['nChannels'])]] \
 				for d in ['group'+str(g) for g in range(info['nGroups'])]], \
 			info['encodingPrefix']
 
