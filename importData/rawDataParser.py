@@ -144,6 +144,10 @@ class SpikeDetector:
 
 		if self.mode == "decode":
 			self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
+			if os.path.isfile(self.path.folder + "timestamps.npy"):
+				self.nChannels = int( os.path.getsize(self.path.dat) \
+					/ 2 \
+					/ np.load(self.path.folder + "timestamps.npy").shape[0] )
 			self.position = np.array([0,0], dtype=float).reshape([1,2])
 			self.position_time = np.array([0], dtype=float)
 			self.startTime = 0
@@ -329,9 +333,9 @@ class SpikeDetector:
 				if filteredBuffer[spl,chnl] < -thresholds[chnl] and filteredBuffer[spl-1, chnl] > -thresholds[chnl]:
 					triggered = True
 					positiveTrigger = False
-				if filteredBuffer[spl,chnl] > thresholds[chnl] and filteredBuffer[spl-1, chnl] < thresholds[chnl]:
-					triggered = True
-					positiveTrigger = True
+				# if filteredBuffer[spl,chnl] > thresholds[chnl] and filteredBuffer[spl-1, chnl] < thresholds[chnl]:
+				# 	triggered = True
+				# 	positiveTrigger = True
 
 				if triggered:
 
