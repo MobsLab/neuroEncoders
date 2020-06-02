@@ -5,6 +5,7 @@ import tables
 import struct
 import numpy as np
 import xml.etree.ElementTree as ET
+import multiprocessing as ml
 
 from tqdm import tqdm
 
@@ -130,6 +131,19 @@ class INTANFilter:
 
 
 
+
+def isTrainingExample(epochs, time):
+	for e in range(len(epochs['train'])//2):
+		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
+			return True
+	for e in range(len(epochs['test'])//2):
+		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
+			return False
+	return None
+
+def emptyData():
+	return {'group':[], 'time':[], 'spike':[], 'position':[], 'train':[]}
+
 class SpikeDetector:
 	'''A processor class to go through raw data to filter and extract spikes. Synchronizes with position.'''
 	def __init__(self, path, useOpenEphysFilter, mode, jsonPath=None):
@@ -174,7 +188,7 @@ class SpikeDetector:
 		self.thresholds		= np.zeros([len(self.filter.channelList)])
 
 		self.endOfLastBuffer = []
-		self.lateSpikes = self.emptyData()
+		self.lateSpikes = emptyData()
 		self.lastBuffer = False
 		self.firstBuffer = True
 
@@ -198,19 +212,7 @@ class SpikeDetector:
 	def dim_output(self):
 		return self.position.shape[1]
 
-	def emptyData(self):
-		return {'group':[], 'time':[], 'spike':[], 'position':[], 'train':[]}
 
-	def isTrainingExample(self, time):
-		if self.mode == "decode":
-			return False
-		for e in range(len(self.epochs['train'])//2):
-			if time >= self.epochs['train'][2*e] and time < self.epochs['train'][2*e+1]:
-				return True
-		for e in range(len(self.epochs['test'])//2):
-			if time >= self.epochs['test'][2*e] and time < self.epochs['test'][2*e+1]:
-				return False
-		return None
 
 	def __del__(self):
 		try:
@@ -249,7 +251,7 @@ class SpikeDetector:
 
 	def getLateSpikes(self):
 		temp = self.lateSpikes.copy()
-		self.lateSpikes = self.emptyData()
+		self.lateSpikes = emptyData()
 
 		for spk in range(len(temp['group'])):
 			channelsBefore = self.previousChannels[temp['group'][spk]]
@@ -280,18 +282,23 @@ class SpikeDetector:
 			self.previousChannels.append(n)
 			n += len(group)
 
+		self.inputQueue = ml.Queue()
+		self.outputQueue = ml.Queue()
+		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate, self.epochs, self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
+		[p.start() for p in self.proc]
+
 		return self
 
 	def __next__(self):
 
 		if self.lastBuffer:
+			[self.inputQueue.put('DONE') for _ in range(len(self.proc))]
+			[p.join() for p in self.proc]
 			self.pbar.close()
 			raise StopIteration
 
 		### filter signal, compute new thresholds and get late spikes from previous buffer
 		self.filteredSignal = self.getFilteredBuffer(BUFFERSIZE)
-		if self.mode != "decode":
-			self.thresholds = self.thresholdFactor * self.filteredSignal.std(axis=0)
 		spikesFound = self.getLateSpikes()
 
 		### copy end of previous buffer
@@ -300,13 +307,18 @@ class SpikeDetector:
 			self.filteredSignal = np.concatenate([self.endOfLastBuffer, self.filteredSignal], axis=0)
 		self.endOfLastBuffer = self.filteredSignal[-15:,:]
 
-
 		for group in range(len(self.list_channels)):
-			res = self.findSpikesInGroup(group)
+			filteredBuffer = self.filteredSignal[:,self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
+			thresholds	 = self.thresholds	  [self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
+			self.inputQueue.put([self.pbar.n, group, thresholds, filteredBuffer])
 
-			for key in self.emptyData().keys():
+
+		for _ in range(len(self.list_channels)):
+			res = self.outputQueue.get(block=True)
+			for key in emptyData().keys():
 				spikesFound[key] += res[0][key]
 				self.lateSpikes[key] += res[1][key]
+
 
 		self.pbar.update(1)
 		if spikesFound['time'] != [] and max(spikesFound["time"]) > self.stopTime:
@@ -314,28 +326,36 @@ class SpikeDetector:
 		return spikesFound
 
 
-	def findSpikesInGroup(self, group):
 
-		filteredBuffer = self.filteredSignal[:,self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
-		thresholds	 = self.thresholds	  [self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
+
+
+def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thresholdFactor, startTime, position, position_time):
+	
+	while True:
+		inputs = inputQueue.get(block=True)
+		if not isinstance(inputs, list):
+			if inputs=='DONE':
+				return
+			else:
+				raise ValueError("strange inputs")
+		N, group, thresholds, filteredBuffer = inputs[0], inputs[1], inputs[2], inputs[3]
+
+		if np.all(thresholds == np.zeros([filteredBuffer.shape[1]])):
+			thresholds = thresholdFactor * filteredBuffer.std(axis=0)
 
 		triggered = False
-		numChannelsDone = 0
 
-		spikesFound = self.emptyData()
-		lateSpikes = self.emptyData()
+		spikesFound = emptyData()
+		lateSpikes = emptyData()
 
 		spl = 15
 		while spl < filteredBuffer.shape[0]:
-			for chnl in range(len(self.list_channels[group])):
+			for chnl in range(filteredBuffer.shape[1]):
 
-				# check if cross positive or negative trigger
+				# check if cross negative trigger
 				if filteredBuffer[spl,chnl] < -thresholds[chnl] and filteredBuffer[spl-1, chnl] > -thresholds[chnl]:
 					triggered = True
 					positiveTrigger = False
-				# if filteredBuffer[spl,chnl] > thresholds[chnl] and filteredBuffer[spl-1, chnl] < thresholds[chnl]:
-				# 	triggered = True
-				# 	positiveTrigger = True
 
 				if triggered:
 
@@ -345,21 +365,21 @@ class SpikeDetector:
 					else:
 						spl = spl + np.argmin(filteredBuffer[spl:spl+15, chnl])
 
-					if self.firstBuffer:
-						time = (self.pbar.n * BUFFERSIZE + spl) / self.samplingRate
+					if N==0:
+						time = spl / samplingRate
 					else:
-						time = (self.pbar.n * BUFFERSIZE + spl - 15) / self.samplingRate
-					train = self.isTrainingExample(time)
+						time = (N * BUFFERSIZE + spl - 15) / samplingRate
+					train = isTrainingExample(epochs, time)
 
 					# Do nothing unless after behaviour data has started
-					if time > self.startTime:
+					if time > startTime:
 
 						# That's a late spike, we'll have to wait till next buffer
 						if spl > BUFFERSIZE - 18 + 15:
 							lateSpikes['group'].   append(group)
-							lateSpikes['time'].	append(time)
+							lateSpikes['time'].    append(time)
 							lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
-							lateSpikes['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
+							lateSpikes['position'].append( position[np.argmin(np.abs(position_time-time))] )
 							lateSpikes['train'].   append(train)
 
 						else:
@@ -367,8 +387,8 @@ class SpikeDetector:
 							if np.shape(spike)[0]==32:
 								spikesFound['group'].   append(group)
 								spikesFound['time'].	append(time)
-								spikesFound['spike'].   append( np.array(spike).reshape([32,len(self.list_channels[group])]).transpose() )
-								spikesFound['position'].append( self.position[np.argmin(np.abs(self.position_time-time))] )
+								spikesFound['spike'].   append( np.array(spike).reshape([32,filteredBuffer.shape[1]]).transpose() )
+								spikesFound['position'].append( position[np.argmin(np.abs(position_time-time))] )
 								spikesFound['train'].   append(train)
 
 
@@ -377,8 +397,5 @@ class SpikeDetector:
 					break
 			spl += 1
 
-		return [spikesFound, lateSpikes]
+		outputQueue.put([spikesFound, lateSpikes])
 
-
-if __name__ == '__main__':
-	sys.exit(1)
