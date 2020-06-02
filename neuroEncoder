@@ -104,9 +104,8 @@ class Params:
 
 def main(args):
 	from importData import rawDataParser
-	from fullEncoder import nnUtils, nnTraining
-	from unitClassifier import bayesUtils, bayesTraining
-	from decoder import decodeTraining
+	from fullEncoder import nnUtils
+	from unitClassifier import bayesUtils
 
 	if args.mode=="decode":
 		jsonPath = os.path.expanduser(args.jsonPath)
@@ -203,16 +202,14 @@ def main(args):
 
 	# Training, testing, and preparing network for online setup
 	if mode=="full":
-		trainer = nnTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
-		trainLosses = trainer.train()
-		outputs = trainer.test()
+		from fullEncoder import nnTraining as Training
 	elif mode=="fromUnits":
-		trainer = bayesTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
-		trainLosses = trainer.train()
-		outputs = trainer.test()
+		from unitClassifier import bayesTraining as Training
 	elif mode=="decode":
-		trainer = decodeTraining.Trainer(projectPath, params, spikeDetector, device_name=device_name)
-		outputs = trainer.test()
+		from decoder import decodeTraining as Training
+	trainer = Training.Trainer(projectPath, params, spikeDetector, device_name=device_name)
+	trainLosses = trainer.train()
+	outputs = trainer.test()
 
 
 
@@ -220,7 +217,7 @@ def main(args):
 	np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
 
 	import scipy.io
-	scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz))
+	scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
 
 	import json
 	outjsonStr = {};
