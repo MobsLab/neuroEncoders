@@ -13,7 +13,7 @@ class Trainer():
 			self.feat_desc.update({"group"+str(g): tf.io.VarLenFeature(tf.float32)})
 
 	def train(self):
-		pass
+		return []
 	def test(self):
 		### Loading and inferring
 		print()
