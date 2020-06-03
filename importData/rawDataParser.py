@@ -264,14 +264,19 @@ class SpikeDetector:
 		return temp
 
 
-	def getSpikes(self):
+	def __iter__(self):
 		self.dataFile = open(self.path.dat, 'rb')
 		self.dataFile.__enter__()
 		self.dataReader = struct.iter_unpack(str(self.nChannels)+'h', self.dataFile.read())
 		print('extracting spikes.')
-		return self.__iter__()
 
-	def __iter__(self):
+		self.inputQueue = ml.Queue()
+		self.outputQueue = ml.Queue()
+		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate, self.epochs, self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
+		for p in self.proc:
+			p.deamon = True
+			p.start()
+
 		datFileLengthInByte = os.stat(self.path.dat).st_size
 		numBuffer = datFileLengthInByte // (2 * self.nChannels * BUFFERSIZE) + 1
 		self.pbar = tqdm(total=numBuffer)
@@ -282,18 +287,18 @@ class SpikeDetector:
 			self.previousChannels.append(n)
 			n += len(group)
 
-		self.inputQueue = ml.Queue()
-		self.outputQueue = ml.Queue()
-		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate, self.epochs, self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
-		[p.start() for p in self.proc]
-
 		return self
 
 	def __next__(self):
 
 		if self.lastBuffer:
-			[self.inputQueue.put('DONE') for _ in range(len(self.proc))]
-			[p.join() for p in self.proc]
+			for p in self.proc:
+				self.inputQueue.put('DONE')
+			for p in self.proc:
+				p.join()
+				p.terminate()
+			self.inputQueue.close()
+			self.outputQueue.close()
 			self.pbar.close()
 			raise StopIteration
 

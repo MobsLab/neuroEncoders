@@ -191,7 +191,7 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		return genFromOld
 	else:
 		def genFromDet():
-			for spikes in spikeDetector.getSpikes():
+			for spikes in spikeDetector:
 				if len(spikes['time'])==0:
 					continue
 				for args in sorted(zip(spikes["train"],spikes['group'],spikes['time'],spikes['spike'],[p/maxPos for p in spikes['position']]), key=lambda x:x[2]):
