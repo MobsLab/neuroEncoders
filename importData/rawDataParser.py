@@ -293,10 +293,8 @@ class SpikeDetector:
 
 		if self.lastBuffer:
 			for p in self.proc:
-				self.inputQueue.put('DONE')
-			for p in self.proc:
-				p.join()
 				p.terminate()
+				p.join()
 			self.inputQueue.close()
 			self.outputQueue.close()
 			self.pbar.close()
@@ -337,13 +335,7 @@ class SpikeDetector:
 def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thresholdFactor, startTime, position, position_time):
 	
 	while True:
-		inputs = inputQueue.get(block=True)
-		if not isinstance(inputs, list):
-			if inputs=='DONE':
-				return
-			else:
-				raise ValueError("strange inputs")
-		N, group, thresholds, filteredBuffer = inputs[0], inputs[1], inputs[2], inputs[3]
+		N, group, thresholds, filteredBuffer = inputQueue.get(block=True)
 
 		if np.all(thresholds == np.zeros([filteredBuffer.shape[1]])):
 			thresholds = thresholdFactor * filteredBuffer.std(axis=0)
