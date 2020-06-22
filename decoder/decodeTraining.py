@@ -8,7 +8,11 @@ class Trainer():
 		self.projectPath = projectPath
 		self.params = params
 		self.device_name = device_name
-		self.feat_desc = {"pos": tf.io.FixedLenFeature([self.params.dim_output], tf.float32), "length": tf.io.FixedLenFeature([], tf.int64), "groups": tf.io.VarLenFeature(tf.int64)}
+		self.feat_desc = {
+			"pos": tf.io.FixedLenFeature([self.params.dim_output], tf.float32), 
+			"length": tf.io.FixedLenFeature([], tf.int64), 
+			"groups": tf.io.VarLenFeature(tf.int64),
+			"time": tf.io.FixedLenFeature(tf.float32)}
 		for g in range(self.params.nGroups):
 			self.feat_desc.update({"group"+str(g): tf.io.VarLenFeature(tf.float32)})
 
@@ -42,10 +46,12 @@ class Trainer():
 				pos = []
 				inferring = []
 				probaMaps = []
+				times = []
 				sess.run(iter.initializer)
 				for b in trange(cnt.eval()):
 					tmp = sess.run(spikes)
 					pos.append(tmp["pos"])
+					times.append(tmp["time"])
 					temp = sess.run(
 							[tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionProba:0"),
 							tf.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"),
@@ -57,4 +63,4 @@ class Trainer():
 
 				pos = np.array(pos)
 
-		return {"inferring":np.array(inferring), "pos":pos, "probaMaps": np.array(probaMaps)}
+		return {"inferring":np.array(inferring), "pos":pos, "probaMaps":np.array(probaMaps), "times":times}

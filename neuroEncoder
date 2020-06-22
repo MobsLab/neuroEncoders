@@ -172,7 +172,7 @@ def main(args):
 					if mode=="full":
 						writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
 							params, 
-							*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
+							*tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
 					else:
 						# If decoding from units, we need to find a sorted spike with corresponding timestamp
 						for spk in range(example["length"]):
@@ -191,7 +191,7 @@ def main(args):
 				else:
 					writers["testSequences"].write(nnUtils.serializeSpikeSequence(
 						params, 
-						*tuple(example[k] for k in ["pos", "groups", "length"]+["spikes"+str(g) for g in range(params.nGroups)])))
+						*tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
 		if mode=="fromUnits":
 			for g in range(params.nGroups):
