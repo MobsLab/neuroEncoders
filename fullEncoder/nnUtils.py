@@ -109,11 +109,12 @@ def getSpikeSequences(params, generator):
 
 
 
-def serializeSpikeSequence(params, pos, groups, length, *spikes):
+def serializeSpikeSequence(params, pos, groups, length, times, *spikes):
 	feat = {
 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
 		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
-		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups))
+		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups)),
+		"time": tf.train.Feature(float_list = tf.train.FloatList(value=[np.mean(times)]))
 	}
 	for g in range(params.nGroups):
 		feat.update({"group"+str(g): tf.train.Feature(float_list = tf.train.FloatList(value=spikes[g].ravel()))})
