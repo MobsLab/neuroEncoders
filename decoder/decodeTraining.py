@@ -12,7 +12,7 @@ class Trainer():
 			"pos": tf.io.FixedLenFeature([self.params.dim_output], tf.float32), 
 			"length": tf.io.FixedLenFeature([], tf.int64), 
 			"groups": tf.io.VarLenFeature(tf.int64),
-			"time": tf.io.FixedLenFeature(tf.float32)}
+			"time": tf.io.FixedLenFeature([], tf.float32)}
 		for g in range(self.params.nGroups):
 			self.feat_desc.update({"group"+str(g): tf.io.VarLenFeature(tf.float32)})
 
