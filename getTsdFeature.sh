@@ -15,7 +15,7 @@ cat <<EOF | matlab -nodesktop -nosplash -nodisplay /> $path$log
         cd $prjpath
         LoadPATHencoder $USER;
         cd $path;
-        export_spikes($2);
+        export_spikes($2, $3, $4);
         exit
 EOF
 
