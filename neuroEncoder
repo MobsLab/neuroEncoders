@@ -7,7 +7,7 @@ import sys
 import os.path
 import subprocess
 import numpy as np
-# import tensorflow as tf
+import tensorflow as tf
 from contextlib import ExitStack
 
 
