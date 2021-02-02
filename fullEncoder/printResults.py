@@ -65,10 +65,8 @@ def printResults(dir, show=False):
 	print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
 	sys.stdout.write("threshold value: "+str(thresh)+"\r"); sys.stdout.flush()
 
-	# Take away indices corresponding to zero values
-	for dim in range(dim_output):
-		temp_idxs = inferring[:,dim]>0
-		selection = np.logical_and(selection, temp_idxs)
+
+
 
 
 	# Overview
