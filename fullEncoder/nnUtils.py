@@ -6,7 +6,8 @@ from tqdm import tqdm
 
 def last_relevant(output, length, timeMajor=False):
 	''' Used to select the right output of 
-		tf.rnn.dynamic_rnn for sequences of variable sizes '''
+		tf.rnn.dynamic_rnn for sequences of variable sizes
+		'''
 	if timeMajor:
 		output = tf.transpose(output, [1,0,2])
 	batch_size = tf.shape(output)[0]
