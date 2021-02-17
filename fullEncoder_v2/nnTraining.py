@@ -31,8 +31,8 @@ class Trainer():
 
 			#Remove by Pierre 16/02/2021: conversion to 2.0: not needed anymore
 			#iter = tf.compat.v1.data.make_initializable_iterator(dataset)
-
-			iterators = iter(dataset)
+			my_iter = iter(dataset)
+			iterators = my_iter.get_next()
 
 			with tf.device(self.device_name):
 				spkParserNet = []
@@ -42,17 +42,27 @@ class Trainer():
 				for group in range(self.params.nGroups):
 					with tf.compat.v1.variable_scope("group"+str(group)+"-encoder"):
 						x = iterators["group"+str(group)]
+						#--> [nbKeptSpikeSequence(time steps where we have more than one spiking),nbChannels,32] tensors
 						idMatrix = tf.eye(tf.shape(input=iterators["groups"])[0])
-						completionTensor = tf.transpose(a=tf.gather(idMatrix, tf.compat.v1.where(tf.equal(iterators["groups"], group)))[:,0,:], perm=[1,0], name="completion")
+						# What is the role of the completionTensor?
+						# The id matrix dimension is the number of different spike sequence encoded inside the spike window
+						# Indeed iterators["groups"] is the list of group that were emitted during each spike sequence merged into the spike window
+
+						completionTensor = tf.transpose(a=tf.gather(idMatrix, tf.where(tf.equal(iterators["groups"], group)))[:,0,:], perm=[1,0], name="completion")
+						# The completion Matrix, gather the row of the idMatrix, ie the spike sequence corresponding to the group: group
 
 					newSpikeNet = nnUtils.spikeNet(nChannels=self.params.nChannels[group], device="/cpu:0", nFeatures=self.params.nFeatures)
-					x = newSpikeNet.apply(x)
+					x = newSpikeNet.apply(x) # outputs a [nbTimeWindow,nFeatures=self.params.nFeatures:128] tensor.
 					x = tf.matmul(completionTensor, x)
-					x = tf.reshape(x, [self.params.batch_size, -1, self.params.nFeatures])
+					# Pierre: Multiplying by completionTensor allows to remove the windows where no spikes was observed from this group.
+					# But I thought that for iterators["group"+str(group)] this was already the case.
+
+					x = tf.reshape(x, [self.params.batch_size, -1, self.params.nFeatures]) # Reshaping the result of the spike net as batch_size:nbTimeSteps:nFeatures
 					if self.params.timeMajor:
-						x = tf.transpose(a=x, perm=[1,0,2])
+						x = tf.transpose(a=x, perm=[1,0,2]) # if timeMajor (the case by default): exchange batch-size and nbTimeSteps
 					allFeatures.append(x)
-				allFeatures = tf.tuple(tensors=allFeatures)
+				allFeatures = tf.tuple(tensors=allFeatures) #synchronizes the computation of all features (like a join)
+				# The concatenation is made over axis 2, which is the Feature axis
 				allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
 
 				# LSTM on the concatenated outputs of previous graphs
@@ -60,15 +70,17 @@ class Trainer():
 				lstms = [nnUtils.layerLSTM(self.params.lstmSize, dropout=self.params.lstmDropout) for _ in
 						 range(self.params.lstmLayers)]
 				stacked_lstm = tf.keras.layers.StackedRNNCells(lstms)
-				lstm = tf.keras.layers.RNN(stacked_lstm, time_major=self.params.timeMajor, return_state=true)
+				lstm = tf.keras.layers.RNN(stacked_lstm, time_major=self.params.timeMajor, return_state= True)
 				outputs, finalState = lstm(allFeatures)
 
 
 			# dense to extract regression on output and loss
-			denseOutput = tf.compat.v1.layers.Dense(self.params.dim_output, activation = None, name="pos")
-			denseLoss1  = tf.compat.v1.layers.Dense(self.params.lstmSize, activation = tf.nn.relu, name="loss1")
-			denseLoss2  = tf.compat.v1.layers.Dense(1, activation = self.params.lossActivation, name="loss2")
+			denseOutput = tf.keras.layers.Dense(self.params.dim_output, activation = None)
+			denseLoss1  = tf.keras.layers.Dense(self.params.lstmSize, activation = tf.nn.relu)
+			denseLoss2  = tf.keras.layers.Dense(1, activation = self.params.lossActivation)
+			#Modif by Pierre 12/02/2021: removed name
 
+			# Pierre: the question is: do we have to use last_relevant?
 			output = nnUtils.last_relevant(outputs, iterators["length"], timeMajor=self.params.timeMajor)
 			outputLoss = denseLoss2(denseLoss1(output))[:,0]
 			outputPos = denseOutput(output)
