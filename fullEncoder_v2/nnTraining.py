@@ -40,6 +40,8 @@ class Trainer():
 
 				# CNN plus dense on every group indepedently
 				for group in range(self.params.nGroups):
+					# For each group, Thibault would create a variable scope to keep track
+					# of the spike net used for encoding the spike of the specific group.
 					with tf.compat.v1.variable_scope("group"+str(group)+"-encoder"):
 						x = iterators["group"+str(group)]
 						#--> [nbKeptSpikeSequence(time steps where we have more than one spiking),nbChannels,32] tensors
@@ -51,11 +53,13 @@ class Trainer():
 						completionTensor = tf.transpose(a=tf.gather(idMatrix, tf.where(tf.equal(iterators["groups"], group)))[:,0,:], perm=[1,0], name="completion")
 						# The completion Matrix, gather the row of the idMatrix, ie the spike sequence corresponding to the group: group
 
-					newSpikeNet = nnUtils.spikeNet(nChannels=self.params.nChannels[group], device="/cpu:0", nFeatures=self.params.nFeatures)
-					x = newSpikeNet.apply(x) # outputs a [nbTimeWindow,nFeatures=self.params.nFeatures:128] tensor.
+					#Pierre: switched device from cpu to self.device_name
+					newSpikeNet = nnUtils.spikeNet(nChannels=self.params.nChannels[group], device=self.device_name, nFeatures=self.params.nFeatures)
+					x = newSpikeNet.apply(x) # outputs a [nbTimeWindow,nFeatures=self.params.nFeatures(default 128)] tensor.
 					x = tf.matmul(completionTensor, x)
 					# Pierre: Multiplying by completionTensor allows to remove the windows where no spikes was observed from this group.
 					# But I thought that for iterators["group"+str(group)] this was already the case.
+
 
 					x = tf.reshape(x, [self.params.batch_size, -1, self.params.nFeatures]) # Reshaping the result of the spike net as batch_size:nbTimeSteps:nFeatures
 					if self.params.timeMajor:

@@ -4,13 +4,17 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
+@tf.function
 def last_relevant(output, length, timeMajor=False):
 	''' Used to select the right output of 
 		tf.rnn.dynamic_rnn for sequences of variable sizes
 
 		# Note: Pierre 13/02/2021: verify weither this is compatible with the new outputs we get from the stacked RNN
 		# length: got from iterators["length"], where iterators = iter( dataset)
-		# It is the number of spikesequence gathered inside the window in consideration.
+		# It is the number of spike sequence gathered inside the window in consideration.
+		# Therefore index = ((length-1):max_length:(batch_size*max_length+length-1))
+
+		# example: the output
 
 		'''
 	if timeMajor:
