@@ -29,6 +29,7 @@ class Trainer():
 			dataset = dataset.batch(self.params.batch_size)
 			dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals, batched=True))
 
+
 			#Remove by Pierre 16/02/2021: conversion to 2.0: not needed anymore
 			#iter = tf.compat.v1.data.make_initializable_iterator(dataset)
 			my_iter = iter(dataset)
