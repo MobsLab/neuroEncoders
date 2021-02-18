@@ -153,10 +153,13 @@ class LSTMandSpikeNetwork():
         print()
         print("INFERRING")
 
-        with tf.Graph().as_default(), tf.device("/cpu:0"):
-            dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
-            dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals))
+        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
+        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals))
 
-            output_test, outputPos_test, outputLoss_test, lossFromOutputLoss_test = self.model.predict(dataset)
+        output_test, outputPos_test, outputLoss_test, lossFromOutputLoss_test = self.model.predict(dataset)
+        datasetPos = dataset.map(lambda x: x["pos"])
+        pos = list(datasetPos.as_numpy_iterator())
+        datasetTimes = dataset.map(lambda x: x["times"])
+        times = list(datasetTimes.as_numpy_iterator())
 
-        return {"inferring": np.array(inferring), "pos": output_test, "probaMaps": np.array(probaMaps), "times": times}
+        return {"inferring": np.array(outputPos_test), "pos": np.array(pos), "times": times}

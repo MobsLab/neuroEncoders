@@ -19,7 +19,7 @@ def printResults(dir, show=False):
 	pos = results['pos']
 	inferring = results['inferring']
 	trainLosses = results['trainLosses']
-	probaMaps = results["probaMaps"]
+	#Pierre: deleta ProbaMaps as it was not used...
 	block=show
 	lossSelection = .2
 	maxPos = 1
