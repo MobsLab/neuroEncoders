@@ -17,14 +17,18 @@ class LSTMandSpikeNetwork():
         self.projectPath = projectPath
         self.params = params
         self.device_name = device_name
+        # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
+        # as tf.train.Feature in the proto format.
         self.feat_desc = {
-            "pos": tf.io.FixedLenFeature([self.params.dim_output], tf.float32),
-            "length": tf.io.FixedLenFeature([], tf.int64),
-            "groups": tf.io.VarLenFeature(tf.int64),
-            "time": tf.io.FixedLenFeature([], tf.float32)}
+            "pos": tf.io.FixedLenFeature([self.params.dim_output], tf.float32), #target positions
+            "length": tf.io.FixedLenFeature([], tf.int64), #number of spike sequence gathered in the window
+            "groups": tf.io.VarLenFeature(tf.int64), # the index of the groups having spike sequences in the window
+            "time": tf.io.FixedLenFeature([], tf.float32)} # the time-steps
         for g in range(self.params.nGroups):
-            self.feat_desc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)})
+            self.feat_desc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)}) # the spike sequence of each groups in the window
 
+        #Loss obtained during training
+        self.trainLosses = []
 
         # TODO: initialization of the networks
         with tf.device(self.device_name):
@@ -44,6 +48,8 @@ class LSTMandSpikeNetwork():
             self.truePos = tf.keras.layers.Input(shape=(),name="truePos")
             self.denseLoss1 = tf.keras.layers.Dense(self.params.lstmSize, activation=tf.nn.relu)
             self.denseLoss2 = tf.keras.layers.Dense(1, activation=self.params.lossActivation)
+
+        self.model = self.get_Model()
 
     def get_Model(self):
         # generate and compile the model, lr is the chosen learning rate
@@ -121,72 +127,36 @@ class LSTMandSpikeNetwork():
             dataset = dataset.batch(self.params.batch_size)
             dataset = dataset.map(
                 lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals, batched=True))
-
-            # Set-up the models
-            model = self.get_Model()
+            # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
+            # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
+            dataset = dataset.map(lambda vals:  (vals, vals))
 
             # The callbacks called during the training:
             callbackLR = tf.keras.callbacks.LearningRateScheduler(self.lr_schedule)
             csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath,'training.log'))
-
             checkpoint_path = os.path.join(self.projectPath,"training_1/cp.ckpt")
             # Create a callback that saves the model's weights
             cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                              save_weights_only=True,
                                                              verbose=1)
 
-            # TODO: change the Dataset input so that it clearly separates inputs and outputs of the network
-            model.fit(dataset,epochs=self.params.nEpochs,callbacks=[callbackLR, csv_logger, cp_callback])
+            hist = self.model.fit(dataset,
+                      epochs=self.params.nEpochs,
+                      callbacks=[callbackLR, csv_logger, cp_callback])
 
         #TODO Look at the goal of convert: self.convert()
-        return np.array(trainLosses)
+        return hist.history["Loss"]
 
 
-def test(self):
-    ### Loading and inferring
-    print()
-    print("INFERRING")
+    def test(self):
+        ### Loading and inferring
+        print()
+        print("INFERRING")
 
-    tf.contrib.rnn
-    with tf.Graph().as_default(), tf.device("/cpu:0"):
+        with tf.Graph().as_default(), tf.device("/cpu:0"):
+            dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
+            dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals))
 
-        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
-        cnt = dataset.batch(1).repeat(1).reduce(np.int64(0), lambda x, _: x + 1)
-        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals))
-        iter = tf.compat.v1.data.make_initializable_iterator(dataset)
-        spikes = iter.get_next()
-        for group in range(self.params.nGroups):
-            idMatrix = tf.eye(tf.shape(input=spikes["groups"])[0])
-            completionTensor = tf.transpose(
-                a=tf.gather(idMatrix, tf.compat.v1.where(tf.equal(spikes["groups"], group)))[:, 0, :], perm=[1, 0],
-                name="completion")
-            spikes["group" + str(group)] = tf.tensordot(completionTensor, spikes["group" + str(group)],
-                                                        axes=[[1], [0]])
+            output_test, outputPos_test, outputLoss_test, lossFromOutputLoss_test = self.model.predict(dataset)
 
-        saver = tf.compat.v1.train.import_meta_graph(self.projectPath.graphMeta)
-
-        with tf.compat.v1.Session() as sess:
-            saver.restore(sess, self.projectPath.graph)
-
-            pos = []
-            inferring = []
-            probaMaps = []
-            times = []
-            sess.run(iter.initializer)
-            for b in trange(cnt.eval()):
-                tmp = sess.run(spikes)
-                pos.append(tmp["pos"])
-                times.append(tmp["time"])
-                temp = sess.run(
-                    [tf.compat.v1.get_default_graph().get_tensor_by_name("bayesianDecoder/positionProba:0"),
-                     tf.compat.v1.get_default_graph().get_tensor_by_name("bayesianDecoder/positionGuessed:0"),
-                     tf.compat.v1.get_default_graph().get_tensor_by_name("bayesianDecoder/standardDeviation:0")],
-                    {tf.compat.v1.get_default_graph().get_tensor_by_name("group" + str(group) + "-encoder/x:0"):
-                         tmp["group" + str(group)]
-                     for group in range(self.params.nGroups)})
-                inferring.append(np.concatenate([temp[1], temp[2]], axis=0))
-                probaMaps.append(temp[0])
-
-            pos = np.array(pos)
-
-    return {"inferring": np.array(inferring), "pos": pos, "probaMaps": np.array(probaMaps), "times": times}
+        return {"inferring": np.array(inferring), "pos": output_test, "probaMaps": np.array(probaMaps), "times": times}
