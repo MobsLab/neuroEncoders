@@ -4,14 +4,14 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
-@tf.function
+#@tf.function
 def last_relevant(output, length, timeMajor=False):
 	''' Used to select the right output of 
 		tf.rnn.dynamic_rnn for sequences of variable sizes
 
-		# Note: Pierre 13/02/2021: verify weither this is compatible with the new outputs we get from the stacked RNN
+		# Note: Pierre 13/02/2021: verify that this is compatible with the new outputs we get from the stacked RNN
 		# length: got from iterators["length"], where iterators = iter( dataset)
-		# It is the number of spike sequence gathered inside the window in consideration.
+		# It is the number of spike gathered inside the window in consideration.
 		# Therefore index = ((length-1):max_length:(batch_size*max_length+length-1))
 
 		# example: the output
@@ -28,16 +28,6 @@ def last_relevant(output, length, timeMajor=False):
 	relevant = tf.gather(flat, index)
 	return relevant
 
-
-
-
-
-def layerLSTM(lstmSize, dropout=0.0):
-	# modified by Pierre 16/02/2021: migration to 2.0 of RNN
-	cell = tf.keras.layers.LSTM(lstmSize,recurrent_dropout=dropout)
-	# lstmSize: dim of output space
-	# recurrent_dropout: faction of units to drop for the linear transfo of the recurrent state
-	return cell
 
 class spikeNet:
 	def __init__(self, nChannels=4, device="/cpu:0", nFeatures=128):
@@ -67,6 +57,7 @@ class spikeNet:
 	def __call__(self, input):
 		return self.apply(input)
 
+	#@tf.function
 	def apply(self, input):
 		with tf.device(self.device):
 			x = tf.expand_dims(input, axis=3)
@@ -145,7 +136,7 @@ def getSpikeSequences(params, generator):
 def serializeSpikeSequence(params, pos, groups, length, times, *spikes):
 	# Moves from the info obtained via the SpikeDetector -> spikeGenerator -> getSpikeSequences pipeline toward the
 	# tensorflow storing file. This take a specific format, which is here declared through the dic+tf.train.Feature
-	# organisation. We see that groups now correspond to the spikes we had before....
+	# organisation. We see that groups now correspond to the "spikes" we had before....
 
 	feat = {
 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
@@ -182,6 +173,7 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 	# Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
 	# Probably because he wanted a variable length <> inputs sequences
 	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+	# with this reshape; batch and variable length of time window are merged.... empty values are assigned -1 !
 	for g in range(params.nGroups):
 		#here 32 correspond to???
 		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
@@ -190,15 +182,19 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
 		if batched:
 			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, -1, params.nChannels[g], 32])
+		# even if batched: gather all together
 		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
 		# Pierre 12/03/2021: the batch_size and timesteps are gathered together
 		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(input_tensor=tf.cast(tf.equal(
 			tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
-		# nonZeros: false if the number of zeros present in each timestep is exactly 32*nbChannel
-		# i.e there was no spiking at this time step/ true if there was a spiking
+		# nonZeros: control that the voltage measured is not 0, at all channels and time bin inside the detected spike
 		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
 		#I don't understand why it can then call [:,0,:,:] as the output tensor of gather should have the same
 		# shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
+	# Pierre 22/02/2021
+	# we add an input that is a identity matrix
+	tensors["completionMatrix"] = tf.zeros_like(tensors["groups"])
+
 	return tensors
 
 def parseSerializedSpike(params, feat_desc, ex_proto, batched=False):

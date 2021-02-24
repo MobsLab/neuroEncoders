@@ -63,8 +63,12 @@ def get_position(folder):
 		positions = np.swapaxes(positions[:,:],1,0)
 		position_time = np.swapaxes(position_time[:,:],1,0)
 
-		trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
-		testEpochs = np.array(f.root.behavior.testEpochs).flatten()
+		# Problem as this was not in the file:
+		#trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
+		#testEpochs = np.array(f.root.behavior.testEpochs).flatten()
+		trainEpochs = np.array([1143,4100])
+		testEpochs = np.array([4100,8000])
+
 
 	return positions, position_time, list(trainEpochs), list(testEpochs)
 
