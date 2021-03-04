@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
-#@tf.function
+@tf.function
 def last_relevant(output, length, timeMajor=False):
 	''' Used to select the right output of 
 		tf.rnn.dynamic_rnn for sequences of variable sizes
@@ -21,9 +21,9 @@ def last_relevant(output, length, timeMajor=False):
 		output = tf.transpose(output, [1,0,2])
 	batch_size = tf.shape(output)[0]
 	max_length = tf.shape(output)[1]
-	out_size = int(output.get_shape()[2])
+	out_size = tf.shape(output)[2]
 	# Note Pierre: removed the relu because the length should be >=1
-	index = tf.range(0, batch_size) * max_length + tf.cast(length - 1, tf.int32)
+	index = tf.nn.relu(tf.range(0, batch_size) * max_length + tf.cast(length - 1, tf.int32))
 	flat = tf.reshape(output, [-1, out_size])
 	relevant = tf.gather(flat, index)
 	return relevant
@@ -43,11 +43,11 @@ class spikeNet:
 			# 			has same size as input....
 
 			self.convLayer2 = tf.keras.layers.Conv2D(16, [2,3], padding='SAME')
-			self.convLayer3 = tf.keras.layers.Conv2D(32, [2,3], padding='SAME')
+			#self.convLayer3 = tf.keras.layers.Conv2D(32, [2,3], padding='SAME') #change from 32 to 16 and [2;3] to [2;2]
 
 			self.maxPoolLayer1 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
 			self.maxPoolLayer2 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
-			self.maxPoolLayer3 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
+			#self.maxPoolLayer3 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
 
 			self.dropoutLayer = tf.keras.layers.Dropout(0.5)
 			self.denseLayer1 = tf.keras.layers.Dense(self.nFeatures, activation='relu')
@@ -57,18 +57,19 @@ class spikeNet:
 	def __call__(self, input):
 		return self.apply(input)
 
-	#@tf.function
+
 	def apply(self, input):
 		with tf.device(self.device):
 			x = tf.expand_dims(input, axis=3)
 			x = self.convLayer1(x)
 			x = self.maxPoolLayer1(x)
-			x = self.convLayer2(x)
-			x = self.maxPoolLayer2(x)
-			x = self.convLayer3(x)
-			x = self.maxPoolLayer3(x)
+			#x = self.convLayer2(x)
+			#x = self.maxPoolLayer2(x)
+			#x = self.convLayer3(x)
+			#x = self.maxPoolLayer3(x)
 
-			x = tf.reshape(x, [-1, self.nChannels*4*32])
+			x = tf.reshape(x, [-1, self.nChannels*8*16]) #change from 32 to 16 and 4 to 8
+			#by pooling we moved from 32 bins to 4. By convolution we generated 32 channels
 			x = self.denseLayer1(x)
 			x = self.dropoutLayer(x)
 			x = self.denseLayer2(x)
@@ -162,7 +163,7 @@ def serializeSingleSpike(params, clu, spike):
 
 
 
-
+@tf.function
 def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 	if batched:
 		tensors = tf.io.parse_example(serialized=ex_proto, features=feat_desc)
@@ -175,7 +176,7 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
 	# with this reshape; batch and variable length of time window are merged.... empty values are assigned -1 !
 	for g in range(params.nGroups):
-		#here 32 correspond to???
+		#here 32 correspond to the number of discretized time bin for a spike
 		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
 		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
 		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
@@ -191,9 +192,6 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
 		#I don't understand why it can then call [:,0,:,:] as the output tensor of gather should have the same
 		# shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
-	# Pierre 22/02/2021
-	# we add an input that is a identity matrix
-	tensors["completionMatrix"] = tf.zeros_like(tensors["groups"])
 
 	return tensors
 
@@ -241,6 +239,7 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 				if len(spikes['time'])==0:
 					continue
 				# sort by the spike group, and provide a zip object giving tuple of size 5....
+				# We observe that the position is normalized here...
 				for args in sorted(zip(spikes["train"],spikes['group'],spikes['time'],spikes['spike'],[p/maxPos for p in spikes['position']]), key=lambda x:x[2]):
 					yield args
 		return genFromDet
