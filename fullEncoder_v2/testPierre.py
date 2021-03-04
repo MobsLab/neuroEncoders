@@ -75,7 +75,7 @@ class Params:
         self.nChannels = detector.numChannelsPerGroup()
         self.length = 0
 
-        self.nSteps = int(10000 * 0.036 / windowSize)
+        self.nSteps = int(500 * 0.036 / windowSize)
         self.nEpochs = 10
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
@@ -87,17 +87,21 @@ class Params:
         self.masking = 20
 
         ### full encoder params
-        self.nFeatures = 128
+        self.nFeatures = 128 #Pierre: test with much lower nb of feature; before it was 128
         self.lstmLayers = 3
-        self.lstmSize = 128
+        self.lstmSize = 128 #to change back to 128
         self.lstmDropout = 0.3
 
-        self.batch_size = 10
+        self.batch_size = 52 #previously 52
         self.timeMajor = True
 
-        self.learningRates = [0.0003, 0.00003, 0.00001]
+        self.learningRates = [0.0003] #, 0.00003, 0.00001]
         self.lossLearningRate = 0.00003
         self.lossActivation = None
+
+        self.usingMixedPrecision = True # this boolean indicates weither tensorflow uses mixed precision
+        # ie enforcing float16 computations whenever possible
+        # According to tf tutorials, we can allow that in most layer except the output for unclear reasons linked to gradient computations
 
 
 
@@ -105,8 +109,9 @@ def main():
     from importData import rawDataParser
     from fullEncoder_v2 import nnUtils
     from fullEncoder_v2 import nnNetwork2
+    import tensorflow.keras.mixed_precision as mixed_precision
 
-    device_name = "/gpu:0" #  device_name = "/cpu:0"
+    # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
 
     xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
     datPath = xmlPath
@@ -119,9 +124,31 @@ def main():
     print('NEUROENCODER: TEST SPLIT', split)
     print()
 
+    #tf.debugging.set_log_device_placement(True)
+
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
     spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
     params = Params(spikeDetector, windowSize)
+
+    physical_devices = tf.config.list_physical_devices('GPU')
+    try:
+        # Disable first GPU
+        #tf.config.set_visible_devices([], 'GPU')
+        logical_devices = tf.config.list_logical_devices('GPU')
+    except:
+        # Invalid device or cannot modify virtual devices once initialized.
+        print("FAILED")
+        pass
+
+    # OPTIMIZATION of tensorflow
+    tf.config.optimizer.set_jit(True) # activate the XLA compilation
+    mixed_precision.experimental.set_policy('mixed_float16')
+    params.usingMixedPrecision = True
+
+    #tf.distribute.OneDeviceStrategy(device=tf.config.list_logical_devices('GPU')[0])
+
+
+
     if mode == "decode":
         spikeDetector.setThresholds(projectPath.thresholds)
 
@@ -165,63 +192,30 @@ def main():
     outputs = trainer.test()
 
     inferedPos = np.stack(outputs["inferring"])
-    realPos = np.reshape(np.stack(outputs["pos"],axis=0),inferedPos.shape)
-    fig,ax = plt.subplots()
-    ax.scatter(inferedPos[:,0],realPos[:,0])
-    ax.scatter(inferedPos[:, 1], realPos[:, 1])
+    realPos = np.reshape(outputs["pos"],inferedPos.shape)
+    fig,ax = plt.subplots(3,1)
+    ax[0].scatter(inferedPos[:,0],realPos[:,0])
+    ax[0].scatter(inferedPos[:, 1], realPos[:, 1])
+    ax[1].hist(realPos[:,0],bins=100)
+    ax[1].hist(realPos[:,1], bins=100)
+    ax[2].scatter(realPos[:, 0], realPos[:, 1])
+    ax[2].scatter(inferedPos[:, 0], inferedPos[:, 1])
     fig.show()
 
     fig, ax = plt.subplots()
     ax.plot(inferedPos[:, 0], c="black")
     ax.plot(realPos[:, 0], c="red")
     fig.show()
+    fig,ax = plt.subplots()
+    ax.plot(trainLosses)
 
-    # fig, ax = plt.subplots()
-    # ax.plot(trainLosses, c="black")
-    # fig.show()
-
-
-    # Saving files
-    np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
-
-    import scipy.io
-    scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
-
-    import json
-    outjsonStr = {};
-    outjsonStr['encodingPrefix'] = projectPath.graph
-    outjsonStr['defaultFilter'] = not useOpenEphysFilter
-    outjsonStr['mousePort'] = 0
-
-    outjsonStr['nGroups'] = int(params.nGroups)
-    idx=0
-    for group in range(len(spikeDetector.list_channels)):
-        outjsonStr['group'+str(group-idx)]={}
-        outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
-        for chnl in range(len(spikeDetector.list_channels[group])):
-            outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
-            outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
-
-    outjsonStr['nStimConditions'] = 1
-    outjsonStr['stimCondition0'] = {}
-    outjsonStr['stimCondition0']['stimPin'] = 14
-    outjsonStr['stimCondition0']['lowerX'] = 0.0
-    outjsonStr['stimCondition0']['higherX'] = 0.0
-    outjsonStr['stimCondition0']['lowerY'] = 0.0
-    outjsonStr['stimCondition0']['higherY'] = 0.0
-    outjsonStr['stimCondition0']['lowerDev'] = 0.0
-    outjsonStr['stimCondition0']['higherDev'] = 0.0
-
-    outjson = json.dumps(outjsonStr, indent=4)
-    with open(projectPath.json,"w") as json_file:
-        json_file.write(outjson)
-
-    subprocess.run(["./createOpenEphysTemplateFromJson.sh", projectPath.json])
-
-    from fullEncoder import printResults
+    from fullEncoder_v2 import printResults
     printResults.printResults(projectPath.folder)
 
 if __name__=="__main__":
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
+    subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
+                    "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
 
     main()
 
