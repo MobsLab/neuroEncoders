@@ -158,7 +158,7 @@ class LSTMandSpikeNetwork():
 
 
             myoutputPos = self.denseOutput(output)
-            outputLoss = self.denseLoss2(self.denseLoss1(output))[:,0]
+            outputLoss = self.denseLoss2(self.denseLoss1(output))
 
             # Idea to bypass the fact that we need the loss of the Pos network.
             # We already compute in the main loops the loss of the Pos network by feeding the targetPos to the network
@@ -247,11 +247,11 @@ class LSTMandSpikeNetwork():
 
         hist = self.model.fit(dataset,
                   epochs=self.params.nEpochs,
-                  callbacks=[callbackLR,tb_callback], # , csv_logger, cp_callback
+                  callbacks=[callbackLR,tb_callback,cp_callback,csv_logger], # , csv_logger, cp_callback
                               steps_per_epoch = int(self.params.nSteps / self.params.nEpochs))
 
         #TODO Look at the goal of convert: self.convert()
-        return hist.history["loss"]
+        return np.transpose(np.stack([hist.history["outputPos_loss"],hist.history["tf_op_layer_lossOfLossPredictor_loss"]]))
 
 
     def test(self):
@@ -291,11 +291,15 @@ class LSTMandSpikeNetwork():
 
         datasetPos = dataset.map(lambda x, y: x["pos"])
         pos = list(datasetPos.as_numpy_iterator())
+        pos = np.array(pos)
+
         datasetTimes = dataset.map(lambda x, y: x["time"])
         times = list(datasetTimes.as_numpy_iterator())
 
 
 
-        outputPos_test, outputLoss_test = self.model.predict(dataset) #
-
-        return {"inferring": np.array(outputPos_test), "pos": np.array(pos), "times": times}
+        output_test = self.model.predict(dataset) #
+        outLoss = np.expand_dims(output_test[1],axis=1)
+        pos = np.reshape(pos, [output_test[0].shape[0], pos.shape[-1]])
+        times = np.reshape(times, [output_test[0].shape[0]])
+        return {"inferring": np.concatenate([output_test[0],outLoss],axis=1), "pos": pos, "times": times}
