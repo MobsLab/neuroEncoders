@@ -75,7 +75,7 @@ class Params:
         self.nChannels = detector.numChannelsPerGroup()
         self.length = 0
 
-        self.nSteps = int(500 * 0.036 / windowSize)
+        self.nSteps = int(10000 * 0.036 / windowSize)
         self.nEpochs = 10
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
@@ -208,6 +208,12 @@ def main():
     fig.show()
     fig,ax = plt.subplots()
     ax.plot(trainLosses)
+
+
+    # Saving files
+    np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
+    import scipy.io
+    scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
 
     from fullEncoder_v2 import printResults
     printResults.printResults(projectPath.folder)

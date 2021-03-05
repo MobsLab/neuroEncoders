@@ -100,7 +100,7 @@ class LSTMandSpikeNetwork():
                 #Note: inputGroups is already filled with -1 at position that correspond to filling
                 # for batch issues
                 # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
-                # We therefore need to set indices[spikePosition[i]] to i  so that it is effectively gathere
+                # We therefore need to set indices[spikePosition[i]] to i  so that it is effectively gather
                 # We then gather either a value of
                 filledFeatureTrain = tf.gather(tf.concat([self.zeroForGather ,x],axis=0),self.indices[group],axis=0)
                 # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
@@ -126,15 +126,26 @@ class LSTMandSpikeNetwork():
             # So we reserve columns to each output of the spiking networks...
             allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
 
-            #allFeatures = tf.add_n(allFeatures, name="sum1")
-            #Other possibility we sum the list of 2D output of each batch elementwise
+            # Next we try a simple strategy to reduce training time:
+            # We reduce in duration the sequence fed to the LSTM by summing convnets ouput
+            # over bins of 10 successive spikes.
+            if self.params.timeMajor:
+                segment_ids = tf.range(tf.shape(allFeatures)[0])
+                segment_ids = tf.math.floordiv(segment_ids,10)
+            else:
+                segment_ids = tf.range(tf.shape(allFeatures)[1])
+                segment_ids = tf.math.floordiv(segment_ids, 10)
+            allFeatures = tf.math.segment_sum(allFeatures,segment_ids)
+
 
             #We would like to mask timesteps that were added for batching purpose, before running the RNN
             batchedInputGroups = tf.reshape(self.inputGroups,[self.params.batch_size,-1])
             if self.params.timeMajor:
                 batchedInputGroups = tf.transpose(batchedInputGroups)
             mymask = tf.not_equal(batchedInputGroups,-1)
-            output = self.myRNN(allFeatures,mask=mymask) #
+            output = self.myRNN(allFeatures,mask=mymask)
+            #big question: does the mask take into account time majoration?
+
 
             # Last_relevant select in each window of each batch the last indexes which effectively had spike.
             # Indeed, for each batch (time window corresponding to a particular time window) there is a varying number of spike
@@ -147,7 +158,7 @@ class LSTMandSpikeNetwork():
 
 
             myoutputPos = self.denseOutput(output)
-            outputLoss = self.denseLoss2(self.denseLoss1(output))[:, 0]
+            outputLoss = self.denseLoss2(self.denseLoss1(output))[:,0]
 
             # Idea to bypass the fact that we need the loss of the Pos network.
             # We already compute in the main loops the loss of the Pos network by feeding the targetPos to the network
@@ -158,7 +169,7 @@ class LSTMandSpikeNetwork():
 
     def mybuild(self, outputPos, lossFromOutputLoss):
         model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.iteratorLengthInput,self.truePos,self.inputGroups],
-                               outputs=[outputPos]) #, lossFromOutputLoss
+                               outputs=[outputPos,lossFromOutputLoss]) #,
 
         tf.keras.utils.plot_model(
             model, to_file='model.png', show_shapes=True
@@ -168,7 +179,7 @@ class LSTMandSpikeNetwork():
             optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
             loss={
                 "outputPos" : tf.keras.losses.mean_squared_error,
-                #"tf_op_layer_lossOfLossPredictor" : tf.keras.losses.mean_squared_error,
+                "tf_op_layer_lossOfLossPredictor" : tf.keras.losses.mean_squared_error,
             }
         )
         return model
@@ -189,7 +200,8 @@ class LSTMandSpikeNetwork():
             lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals, batched=True))
         # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
         # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
-        dataset = dataset.map(lambda vals: (vals,{"outputPos":vals["pos"]}),num_parallel_calls=4)
+        dataset = dataset.map(lambda vals: (vals,{"outputPos":vals["pos"] ,
+                                                  "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
 
         #,"tf_op_layer_lossOfLossPredictor": tf.zeros_like(vals["pos"])
 
@@ -217,8 +229,9 @@ class LSTMandSpikeNetwork():
             return vals,valsout
         dataset = dataset.map(add_CompletionMatrix,num_parallel_calls=4)
 
-        dataset = dataset.cache().repeat()
-        dataset = dataset.prefetch(self.params.batch_size * 10)
+
+        dataset = dataset.cache().repeat() #
+        dataset = dataset.prefetch(self.params.batch_size* 10) #
 
 
         # The callbacks called during the training:
@@ -252,7 +265,8 @@ class LSTMandSpikeNetwork():
         dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
         #drop_remainder allows us to remove the last batch if it does not contain enough elements to form a batch.
         dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals,batched=True))
-        dataset = dataset.map(lambda vals: ( vals, {"outputPos": vals["pos"], "tf_op_layer_lossOfLossPredictor": tf.zeros_like(vals["pos"])}))
+        dataset = dataset.map(lambda vals: ( vals, {"outputPos": vals["pos"],
+                                                    "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
         def add_CompletionMatrix(vals, valsout):
             #vals.update({"completionMatrix": tf.eye(tf.shape(vals["pos"])[0])})
             for group in range(self.params.nGroups):
@@ -273,13 +287,15 @@ class LSTMandSpikeNetwork():
             if self.params.usingMixedPrecision:
                 vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
             return vals, valsout
-        dataset = dataset.map(add_CompletionMatrix)
+        dataset = dataset.map(add_CompletionMatrix,num_parallel_calls=4)
 
         datasetPos = dataset.map(lambda x, y: x["pos"])
         pos = list(datasetPos.as_numpy_iterator())
         datasetTimes = dataset.map(lambda x, y: x["time"])
         times = list(datasetTimes.as_numpy_iterator())
 
-        outputPos_test = self.model.predict(dataset) #, outputLoss_test
+
+
+        outputPos_test, outputLoss_test = self.model.predict(dataset) #
 
         return {"inferring": np.array(outputPos_test), "pos": np.array(pos), "times": times}
