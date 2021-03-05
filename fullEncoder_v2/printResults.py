@@ -15,7 +15,7 @@ def printResults(dir, show=False):
 	folder = findFolder(dir)
 	file = folder + 'results/inferring.npz'
 
-	results = np.load(os.path.expanduser(file))
+	results = np.load(os.path.expanduser(file), allow_pickle=True)
 	pos = results['pos']
 	inferring = results['inferring']
 	trainLosses = results['trainLosses']

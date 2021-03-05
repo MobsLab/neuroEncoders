@@ -191,7 +191,7 @@ def main():
     trainLosses = trainer.train()
     outputs = trainer.test()
 
-    inferedPos = np.stack(outputs["inferring"])
+    inferedPos = np.stack(outputs["inferring"][:,0:2])
     realPos = np.reshape(outputs["pos"],inferedPos.shape)
     fig,ax = plt.subplots(3,1)
     ax[0].scatter(inferedPos[:,0],realPos[:,0])
@@ -214,6 +214,21 @@ def main():
     np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
     import scipy.io
     scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
+
+    findFolder = lambda path: path if path[-1] == '/' or len(path) == 1 else findFolder(path[:-1])
+    folder = findFolder(projectPath.folder)
+    file = folder + 'results/inferring.npz'
+
+    results = np.load(os.path.expanduser(file), allow_pickle=True)
+    pos = results['pos']
+    inferring = results['inferring']
+    trainLosses = results['trainLosses']
+    block = False
+    lossSelection = .2
+    maxPos = 1
+    dim_output = pos.shape[1]
+    assert (pos.shape[1] == inferring.shape[1] - 1)
+
 
     from fullEncoder_v2 import printResults
     printResults.printResults(projectPath.folder)
