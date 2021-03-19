@@ -41,16 +41,17 @@ class Project():
             "train": self.folder + 'dataset/trainingDataset.tfrec',
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
-        self.resultsNpz = self.folder + 'results/inferring.npz'
-        self.resultsMat = self.folder + 'results/inferring.mat'
+        #TO change at every experiment:
+        self.resultsPath = self.folder + 'results_TF20_NoDropoutFastRNN'
+        self.resultsNpz = self.resultsPath + '/inferring.npz'
+        self.resultsMat = self.resultsPath + '/inferring.mat'
 
-        self.resultsPath = os.path.join(self.folder,"result_sameLossWeight")
         if not os.path.isdir(self.folder + 'dataset'):
             os.makedirs(self.folder + 'dataset')
         if not os.path.isdir(self.folder + 'graph'):
             os.makedirs(self.folder + 'graph')
-        if not os.path.isdir(self.folder + 'results'):
-            os.makedirs(self.folder + 'results')
+        if not os.path.isdir(self.resultsPath):
+            os.makedirs(self.resultsPath )
         if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
             os.makedirs(os.path.join(self.resultsPath, "resultInference"))
 
@@ -111,13 +112,13 @@ class Params:
 
 def main():
     from importData import rawDataParser
-    from fullEncoder_v2 import nnUtils
-    from fullEncoder_v2 import nnNetwork2
+    from fullEncoder_v1 import nnUtils
+    from fullEncoder_v1 import nnNetwork2
     import tensorflow.keras.mixed_precision as mixed_precision
 
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -182,15 +183,10 @@ def main():
                         params,
                         *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
-    # Let us first find a simplification of the network topology: we gather all positions point and
-    # fit splines
-
-
-
 
     # Training, testing, and preparing network for online setup
     if mode=="full":
-        from fullEncoder_v2 import nnNetwork2 as Training
+        from fullEncoder_v1 import nnNetwork2 as Training
     elif mode=="decode":
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
@@ -200,78 +196,65 @@ def main():
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
 
     outputs = trainer.test()
+    predPos = outputs["featurePred"][:, 0:2]
+    truePos = outputs["featureTrue"]
+    predLoss = outputs["lossFromOutputLoss"]
 
-    featurePred = outputs["featurePred"]
-    featureTrue= outputs["featureTrue"]
-    probaTrue = outputs["manifoldProbaTrue"]
-    probaPred = outputs["manifoldProbaPred"]
-    lossPred = outputs["lossFromOutputLoss"]
-
-    featurePredSelec = np.where((probaTrue[:,0])>0.5,featurePred[:,0],featurePred[:,1])
-    featureTrueSelec = np.where((probaTrue[:,0])>0.5,featureTrue[:,0],featureTrue[:,1])
-
-    errorProba = np.where((probaTrue[:,0])>0.5,probaPred[:,0]>0.5,probaPred[:,0]<=0.5)
-    np.sum(errorProba)/errorProba.shape[0]
-
-    fig,ax = plt.subplots(4,1)
-    ax[0].scatter(featurePredSelec,featureTrueSelec,alpha=0.03)
-    #ax[0].scatter(featurePred[:, 1], featureTrue[:, 1])
-    ax[1].hist(featureTrueSelec,bins=100,density=True,histtype="step")
-    ax[1].hist(featurePredSelec, bins=100,density=True,histtype="step")
-    ax[2].plot(featureTrueSelec,alpha=0.5)
-    ax[2].plot(featurePredSelec,alpha=0.5)
-    # ax[2].plot(featureTrueSelec-featurePredSelec,c="black",alpha=0.5)
-    # ax[2].plot(np.square(np.sin(np.pi*(featureTrueSelec - featurePredSelec))), c="red", alpha=0.5)
-    #ax[2].plot(featurePredSelec, c="red",alpha=0.5)
-    ax[3].plot(probaTrue[:,0], c="black",alpha=0.5)
-    ax[3].plot(probaPred[:,0], c="red",alpha=0.5)
-    fig.show()
-    plt.savefig(os.path.join(projectPath.resultsPath, "ExamplePrediction.png"))
-
-    #We then save the output feature so that they are loaded and converted into position in Julia.
-    df = pd.DataFrame(featurePred)
-    try:
-        os.mkdir(os.path.join(projectPath.resultsPath,"resultInference"))
-    except:
-        pass
-    df.to_csv(os.path.join(projectPath.resultsPath,"resultInference","featurePred.csv"))
-    df = pd.DataFrame(featureTrue)
+    # Saving files
+    df = pd.DataFrame(predPos)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
+    df = pd.DataFrame(truePos)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
-    df = pd.DataFrame(probaPred)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "probaPred.csv"))
-    df = pd.DataFrame(probaTrue)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "probaTrue.csv"))
-    df = pd.DataFrame(lossPred)
+    df = pd.DataFrame(predLoss)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossPred.csv"))
 
-    fig,ax = plt.subplots(2,1)
-    ax[0].plot(trainLosses[:,0],c="blue")
-    ax[0].set_xlabel("epoch")
-    ax[0].set_ylabel("Manifold loss",c="blue")
-    ax2 = ax[0].twinx()
-    ax2.plot(trainLosses[:, 1],c="red")
-    ax2.set_ylabel("KL divergence of manifold \n predicted and true proba", c= "red")
-    ax[1].plot(trainLosses[:,2],c="black")
-    ax[1].set_ylabel("Manifold loss Prediction Error")
-    fig.show()
-    plt.savefig(os.path.join(projectPath.folder, "results", "loss.png"))
+    maxPos = spikeDetector.maxPos()
+    euclideanDistance = np.sqrt(np.sum(np.square(predPos * maxPos - truePos * maxPos), axis=1))
+    np.mean(euclideanDistance)
+    np.std(euclideanDistance)
 
+    fig, ax = plt.subplots()
+    ax.scatter(truePos[:, 0], truePos[:, 1], c="black", alpha=0.1, label="true Position")
+    ax.scatter(predPos[:, 0], predPos[:, 1], c="red", alpha=0.1, label="predicted Position")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title("prediction with TF2.0's architecture")
+    fig.legend()
+    fig.show()
+    fig.savefig(os.path.join(projectPath.resultsPath, "testSetPrediciton.png"))
+    fig, ax = plt.subplots()
+    ax.plot(trainLosses[:, 0], c="red")
+    ax2 = ax.twinx()
+    ax2.plot(trainLosses[:, 1], c="black")
+    ax.set_title("1 epochs = 1018 time steps")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("position loss", c="red")
+    ax2.set_ylabel("loss of loss", c="black")
+    fig.show()
+    fig, ax = plt.subplots()
+    ax.hist(euclideanDistance, bins=100)
+    fig.show()
+    fig, ax = plt.subplots(2, 1)
+    ax[0].plot(truePos[:, 0])
+    ax[0].plot(predPos[:, 0])
+    ax[1].plot(truePos[:, 1])
+    ax[1].plot(predPos[:, 1])
+    fig.show()
 
     # Saving files
     np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
     import scipy.io
     scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
 
-    from fullEncoder_v2 import printResults
+    from fullEncoder_v1 import printResults
     printResults.printResults(projectPath.resultsPath)
 
 if __name__=="__main__":
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
     subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
                     "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
 
-    main()
+    # In this architecture we use a 2.0 tensorflow backend, predicting solely the position.
+    # I.E without using the simpler feature strategy based on stratified spaces.
 
-    print()
-    print()
-    print('Encoding over.')
+    main()

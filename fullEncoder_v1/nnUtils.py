@@ -198,13 +198,9 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		GRP_test = Results['arr_3']
 		SPK_train = Results['arr_4']
 		SPK_test = Results['arr_5']
+		SPK_train = Results['arr_6']
+		SPK_test = Results['arr_7']
 
-		## ADDED: Pierre (15/02/2021) --> One need to  Change the feature in POS_train and POS_test
-		# previously under the names arr_6 and arr_7
-		# Instead we now get them from two CSV file which are generated in Julia
-		POS_train = pd.read_csv(os.path.join(projectPath.folder, "dataset", "featureAndProbaTrain.csv")).values
-		POS_test = pd.read_csv(os.path.join(projectPath.folder,"dataset","featureAndProbaTest.csv")).values
-		maxPos = 1.0 #We already set the feature to be between 0 and 1
 		print('data loaded')
 		def genFromOld():
 			pbar = tqdm(total=len(GRP_train)+len(GRP_test))

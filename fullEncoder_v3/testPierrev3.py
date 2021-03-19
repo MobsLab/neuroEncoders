@@ -41,16 +41,17 @@ class Project():
             "train": self.folder + 'dataset/trainingDataset.tfrec',
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
-        self.resultsNpz = self.folder + 'results/inferring.npz'
-        self.resultsMat = self.folder + 'results/inferring.mat'
+        #TO change at every experiment:
+        self.resultsPath = self.folder + 'results_RecurrentDropout'
+        self.resultsNpz = self.resultsPath + '/inferring.npz'
+        self.resultsMat = self.resultsPath + '/inferring.mat'
 
-        self.resultsPath = os.path.join(self.folder,"result_sameLossWeight")
         if not os.path.isdir(self.folder + 'dataset'):
             os.makedirs(self.folder + 'dataset')
         if not os.path.isdir(self.folder + 'graph'):
             os.makedirs(self.folder + 'graph')
-        if not os.path.isdir(self.folder + 'results'):
-            os.makedirs(self.folder + 'results')
+        if not os.path.isdir(self.resultsPath):
+            os.makedirs(self.resultsPath )
         if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
             os.makedirs(os.path.join(self.resultsPath, "resultInference"))
 
@@ -80,7 +81,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 90
+        self.nEpochs = 25
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -111,13 +112,13 @@ class Params:
 
 def main():
     from importData import rawDataParser
-    from fullEncoder_v2 import nnUtils
-    from fullEncoder_v2 import nnNetwork2
+    from fullEncoder_v3 import nnUtils
+    from fullEncoder_v3 import nnNetwork2
     import tensorflow.keras.mixed_precision as mixed_precision
 
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseV3/rat122-20090731.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -190,7 +191,7 @@ def main():
 
     # Training, testing, and preparing network for online setup
     if mode=="full":
-        from fullEncoder_v2 import nnNetwork2 as Training
+        from fullEncoder_v3 import nnNetwork2 as Training
     elif mode=="decode":
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
@@ -254,7 +255,7 @@ def main():
     ax[1].plot(trainLosses[:,2],c="black")
     ax[1].set_ylabel("Manifold loss Prediction Error")
     fig.show()
-    plt.savefig(os.path.join(projectPath.folder, "results", "loss.png"))
+    plt.savefig(os.path.join(projectPath.resultsPath, "loss.png"))
 
 
     # Saving files
@@ -262,11 +263,11 @@ def main():
     import scipy.io
     scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
 
-    from fullEncoder_v2 import printResults
-    printResults.printResults(projectPath.resultsPath)
+    from fullEncoder_v3 import printResults
+    printResults.printResults(projectPath.folder)
 
 if __name__=="__main__":
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCatanese/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseV3/rat122-20090731.xml"
     subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
                     "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
 

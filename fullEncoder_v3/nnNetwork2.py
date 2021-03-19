@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 
-from fullEncoder_v2 import nnUtils
+from fullEncoder_v3 import nnUtils
 import os
 
 # Pierre 14/02/01:
@@ -131,13 +131,13 @@ class LSTMandSpikeNetwork():
             # Next we try a simple strategy to reduce training time:
             # We reduce in duration the sequence fed to the LSTM by summing convnets ouput
             # over bins of 10 successive spikes.
-            if self.params.timeMajor:
-                segment_ids = tf.range(tf.shape(allFeatures)[0])
-                segment_ids = tf.math.floordiv(segment_ids,10)
-            else:
-                segment_ids = tf.range(tf.shape(allFeatures)[1])
-                segment_ids = tf.math.floordiv(segment_ids, 10)
-            allFeatures = tf.math.segment_sum(allFeatures,segment_ids)
+            # if self.params.timeMajor:
+            #     segment_ids = tf.range(tf.shape(allFeatures)[0])
+            #     segment_ids = tf.math.floordiv(segment_ids,10)
+            # else:
+            #     segment_ids = tf.range(tf.shape(allFeatures)[1])
+            #     segment_ids = tf.math.floordiv(segment_ids, 10)
+            # allFeatures = tf.math.segment_sum(allFeatures,segment_ids)
 
 
             #We would like to mask timesteps that were added for batching purpose, before running the RNN
@@ -204,8 +204,12 @@ class LSTMandSpikeNetwork():
                 "tf_op_layer_lossOfProba" : tf.keras.losses.mean_absolute_error,
                 "tf_op_layer_lossOfLossPredictor" : tf.keras.losses.mean_absolute_error,
             },
+            loss_weights ={
+                "tf_op_layer_lossOfManifold": 0.8,
+                "tf_op_layer_lossOfProba": 0.1,
+                "tf_op_layer_lossOfLossPredictor": 0.1,
+            }
         )
-        #loss_weight removed here to try to get better probability and loss of loss learning
         return model
 
     def lr_schedule(self,epoch):
@@ -258,8 +262,8 @@ class LSTMandSpikeNetwork():
 
         # The callbacks called during the training:
         callbackLR = tf.keras.callbacks.LearningRateScheduler(self.lr_schedule)
-        csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.folder+"results",'training.log'))
-        checkpoint_path = os.path.join(self.projectPath.folder+"results","training_1/cp.ckpt")
+        csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.resultsPath,'training.log'))
+        checkpoint_path = os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt")
         # Create a callback that saves the model's weights
         cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                          save_weights_only=True,
@@ -279,7 +283,7 @@ class LSTMandSpikeNetwork():
 
     def test(self):
 
-        self.model.load_weights(os.path.join(self.projectPath.folder+"results","training_1/cp.ckpt"))
+        self.model.load_weights(os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt"))
 
         ### Loading and inferring
         print("INFERRING")

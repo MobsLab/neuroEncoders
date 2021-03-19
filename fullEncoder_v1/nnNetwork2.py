@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 
-from fullEncoder_v2 import nnUtils
+from fullEncoder_v1 import nnUtils
 import os
 
 # Pierre 14/02/01:
@@ -65,13 +65,11 @@ class LSTMandSpikeNetwork():
             self.spikeNets = [nnUtils.spikeNet(nChannels=self.params.nChannels[group], device=self.device_name,
                                                nFeatures=self.params.nFeatures) for group in range(self.params.nGroups)]
             lstmsNets = [tf.keras.layers.LSTMCell(self.params.lstmSize) for _ in
-                         range(self.params.lstmLayers)] #,recurrent_dropout=self.params.lstmDropout
+                         range(self.params.lstmLayers)] #,,recurrent_dropout=self.params.lstmDropout
             # LSTM on the concatenated outputs of previous graphs
             stacked_lstm = tf.keras.layers.StackedRNNCells(lstmsNets)
             self.myRNN = tf.keras.layers.RNN(stacked_lstm, time_major=self.params.timeMajor) # , return_sequences=True
-            self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output//2, activation=tf.keras.activations.hard_sigmoid, dtype=tf.float32)
-            self.denseProbaOutput = tf.keras.layers.Dense(self.params.dim_output//2,
-                                                          activation=tf.keras.activations.softmax, dtype=tf.float32)
+            self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output, activation=None, dtype=tf.float32)
             # Used as inputs to already compute the loss in the forward pass and feed it to the loss network.
             # Potential issue: the backprop will go to both student (loss pred network) and teacher (pos pred network...)
             self.truePos = tf.keras.layers.Input(shape=(self.params.dim_output), name="pos")
@@ -148,64 +146,36 @@ class LSTMandSpikeNetwork():
             output = self.myRNN(allFeatures,mask=mymask)
             #big question: does the mask take into account time majoration?
 
-            # OLD:
-            # Last_relevant select in each window of each batch the last indexes which effectively had spike.
-            # Indeed, for each batch (time window corresponding to a particular time window) there is a varying number of spike
-            # detected groups-wide
-            # But to have dense matrix; we allocate the same number of spike in each window (so shared by window
-            # of a given batch), the inputs are therefore filled with additional 0 value.
-            #  Therefore we select the output of the RNN that correspond to the last spike seen in each window
-            # This is the role of the last_relevant function/
-            #output = nnUtils.last_relevant(output, self.iteratorLengthInput , timeMajor=self.params.timeMajor)
-
-
             myoutputPos = self.denseFeatureOutput(output)
-            myoutputProba = self.denseProbaOutput(output)
             outputLoss = self.denseLoss2(self.denseLoss1(output))
 
             # Idea to bypass the fact that we need the loss of the Pos network.
             # We already compute in the main loops the loss of the Pos network by feeding the targetPos to the network
             # to use it in part of the network that predicts the loss.
 
-            # Secondly, we also wish to use a weighted MSE loss
-            # the prediction of each manifold variables are weighted by the proba associated to this manifold.
-            # TODO: fix the implementation to allow multiple parameter per manifold
-            trueParametrization = self.truePos[:,0:self.params.dim_output//2]
-            trueProba = self.truePos[:, self.params.dim_output // 2:]
+            posLoss = tf.losses.mean_squared_error(myoutputPos,self.truePos)
 
-            #To define the manifold loss one can use either the true or predicted proba
-            # Here the true Proba is chosen.
-            # Secondly,the predicted variable is periodic.
-            # Therefore the loss need to take this into account.
-            # We therefore used a squared sin where the feature (in [0,1] are multiplied by 2 pi.
-            manifoldLoss = tf.math.reduce_mean(tf.math.multiply(trueProba,
-                                                                tf.math.square(tf.math.sin(np.pi*(myoutputPos-trueParametrization)))),axis=-1)
-
-
-            mylossProba = tf.losses.kld(myoutputProba,trueProba)
-
-            idmanifoldloss = tf.identity(manifoldLoss,name="lossOfManifold")
-            idProbaLoss = tf.identity(mylossProba,name="lossOfProba")
-            lossFromOutputLoss = tf.identity(tf.losses.mean_squared_error(outputLoss, manifoldLoss),name="lossOfLossPredictor")
-        return  myoutputPos , myoutputProba, idmanifoldloss, idProbaLoss , lossFromOutputLoss
+            idmanifoldloss = tf.identity(posLoss,name="lossOfManifold")
+            lossFromOutputLoss = tf.identity(tf.losses.mean_squared_error(outputLoss, posLoss),name="lossOfLossPredictor")
+        return  myoutputPos, idmanifoldloss , lossFromOutputLoss
 
     def mybuild(self, outputs):
         model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.iteratorLengthInput,self.truePos,self.inputGroups],
-                               outputs=outputs) #,
-
+                               outputs=outputs)
         tf.keras.utils.plot_model(
             model, to_file='model.png', show_shapes=True
         )
-
         model.compile(
             optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
             loss={
                 "tf_op_layer_lossOfManifold" : tf.keras.losses.mean_absolute_error,
-                "tf_op_layer_lossOfProba" : tf.keras.losses.mean_absolute_error,
                 "tf_op_layer_lossOfLossPredictor" : tf.keras.losses.mean_absolute_error,
             },
+            loss_weights ={
+                "tf_op_layer_lossOfManifold": 0.9,
+                "tf_op_layer_lossOfLossPredictor": 0.1,
+            }
         )
-        #loss_weight removed here to try to get better probability and loss of loss learning
         return model
 
     def lr_schedule(self,epoch):
@@ -225,7 +195,6 @@ class LSTMandSpikeNetwork():
         # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
         # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
         dataset = dataset.map(lambda vals: (vals,{"tf_op_layer_lossOfManifold": tf.zeros(self.params.batch_size),
-                                                  "tf_op_layer_lossOfProba": tf.zeros(self.params.batch_size),
                                                   "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
 
         def add_CompletionMatrix(vals,valsout):
@@ -258,8 +227,8 @@ class LSTMandSpikeNetwork():
 
         # The callbacks called during the training:
         callbackLR = tf.keras.callbacks.LearningRateScheduler(self.lr_schedule)
-        csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.folder+"results",'training.log'))
-        checkpoint_path = os.path.join(self.projectPath.folder+"results","training_1/cp.ckpt")
+        csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.resultsPath,'training.log'))
+        checkpoint_path = os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt")
         # Create a callback that saves the model's weights
         cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                          save_weights_only=True,
@@ -273,13 +242,12 @@ class LSTMandSpikeNetwork():
                               ) #steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
 
         return np.transpose(np.stack([hist.history["tf_op_layer_lossOfManifold_loss"],
-                                      hist.history["tf_op_layer_lossOfProba_loss"],
                                       hist.history["tf_op_layer_lossOfLossPredictor_loss"]]))
 
 
     def test(self):
 
-        self.model.load_weights(os.path.join(self.projectPath.folder+"results","training_1/cp.ckpt"))
+        self.model.load_weights(os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt"))
 
         ### Loading and inferring
         print("INFERRING")
@@ -288,7 +256,6 @@ class LSTMandSpikeNetwork():
         #drop_remainder allows us to remove the last batch if it does not contain enough elements to form a batch.
         dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals,batched=True))
         dataset = dataset.map(lambda vals: ( vals, {"tf_op_layer_lossOfManifold": tf.zeros(self.params.batch_size),
-                                                    "tf_op_layer_lossOfProba": tf.zeros(self.params.batch_size),
                                                     "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
         def add_CompletionMatrix(vals, valsout):
             #vals.update({"completionMatrix": tf.eye(tf.shape(vals["pos"])[0])})
@@ -320,13 +287,11 @@ class LSTMandSpikeNetwork():
         times = list(datasetTimes.as_numpy_iterator())
 
         output_test = self.model.predict(dataset) #
-        outLoss = np.expand_dims(output_test[2],axis=1)
-        outLoss2 = np.expand_dims(output_test[3], axis=1)
-        nbManifold = output_test[0].shape[1]
-        featureTrue = np.reshape(fullFeatureTrue[:,:,:nbManifold], [output_test[0].shape[0], output_test[0].shape[-1]])
-        manifoldProbaTrue = np.reshape(fullFeatureTrue[:,:,nbManifold:], [output_test[1].shape[0], output_test[1].shape[-1]])
+        outLoss = np.expand_dims(output_test[1],axis=1)
+        outLoss2 = np.expand_dims(output_test[2], axis=1)
+        featureTrue = np.reshape(fullFeatureTrue, [output_test[0].shape[0], output_test[0].shape[-1]])
 
         times = np.reshape(times, [output_test[0].shape[0]])
-        return {"featurePred": output_test[0], "featureTrue": featureTrue,"manifoldProbaPred": output_test[1],
-                "manifoldProbaTrue": manifoldProbaTrue, "times": times, "lossesFeaturePred" : outLoss,
-                "lossesManifoldProba" : outLoss2, "lossFromOutputLoss" : np.expand_dims(output_test[4], axis=1)}
+        return {"featurePred": output_test[0], "featureTrue": featureTrue,
+                "times": times, "lossesFeaturePred" : outLoss,
+                "lossFromOutputLoss" : outLoss2}
