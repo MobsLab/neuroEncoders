@@ -17,21 +17,21 @@ from sklearn.neighbors import KernelDensity
 
 # trainer class
 class Trainer():
-	def __init__(self, projectPath, clusters_data, behavior_data):
+	def __init__(self, projectPath, bandwidth=None, kernel='epanechnikov'):
 		self.projectPath = projectPath
-		self.bandwidth = None
-		self.kernel = 'epanechnikov'
+		self.bandwidth = bandwidth
+		self.kernel = kernel
 
 		self.positions = []
 		# etc etc etc
   
-	def train(self, spike_positions, positions, speed, position_time,  tetrode_names, spike_time, spike_speed, speed_cut, start_time, stop_time, end_time, masking_factor, labels, rand_param):
+	def train(self, behavior_data,  tetrode_names, spike_time, spike_speed, speed_cut, start_time, stop_time, end_time, masking_factor, labels, rand_param):
 		### GLOBAL OCCUPATION
 
-		selected_positions = positions[reduce(np.intersect1d,
-			(np.where(speed[:,0] > speed_cut),
-			np.where(position_time[:,0] > start_time),
-			np.where(position_time[:,0] < stop_time)))]
+		selected_positions = behavior_data['Positions'][reduce(np.intersect1d,
+			(np.where(behavior_data['Speed'][:,0] > speed_cut),
+			np.where(behavior_data['Position_time'][:,0] > start_time),
+			np.where(behavior_data['Position_time'][:,0] < stop_time)))]
 		xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
 		Occupation[Occupation==0] = np.min(Occupation[Occupation!=0])  # We want to avoid having zeros
 
@@ -85,6 +85,9 @@ class Trainer():
 				Local_rate_functions.append(np.ones(np.shape(Occupation)))
 
 		Rate_functions.append(Local_rate_functions)
+  
+		return {'Ocupation': Occupation, 'Marginal rate functions': Marginal_rate_functions, 'Rate functions': Rate_functions, 'Bins':[xEdges[:,0],yEdges[0,:]], 
+				'fake_labels_info': {'clusters':fake_labels, 'time':fake_labels_time}, 'time_limits': [start_time, stop_time]}
 
   
 
