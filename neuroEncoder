@@ -38,7 +38,7 @@ class Project():
             self.graphMeta = self.graph + '.meta'
 
         self.tfrec = {
-            "train": self.folder + 'dataset/trainingDataset.tfrec', 
+            "train": self.folder + 'dataset/trainingDataset.tfrec',
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
         self.resultsNpz = self.folder + 'results/inferring.npz'
@@ -56,6 +56,9 @@ class Project():
 
     def res(self, g):
         return self.baseName + ".res." + str(g+1)
+
+    def spk(self, g):
+        return self.baseName + ".spk." + str(g+1)
 
     def pos(self, g):
         return self.folder + "dataset/pos." + str(g+1) + ".npz"
@@ -129,150 +132,172 @@ def main(args):
     print('NEUROENCODER: TEST SPLIT', split)
     print()
 
-    trainLosses = []
-    projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=jsonPath)
-    spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
-    params = Params(spikeDetector, windowSize)
-    if mode == "decode":
-        spikeDetector.setThresholds(projectPath.thresholds)
+    if mode=='simpleBayes':
+        from importData import ImportClusters
+        projectPath = Project(os.path.expanduser(xmlPath))
+        # Get behavior for bayes
+        behavior_data = ImportClusters.getBehavior(projectPath.folder)
+        # Get clusters for bayes
+        if os.path.isfile(projectPath.folder + 'ClusterData.npy'):
+            cluster_data = np.load(projectPath.folder + 'ClusterData.npy',allow_pickle='TRUE').item()
+        else:
+            cluster_data = ImportClusters.getSpikesfromClu(projectPath, behavior_data)
+    else:
+        trainLosses = []
+        projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=jsonPath)
+        spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
+        params = Params(spikeDetector, windowSize)
+        if mode == "decode":
+            spikeDetector.setThresholds(projectPath.thresholds)
 
-    # Create data files if not present
-    if not os.path.isfile(projectPath.tfrec["test"]) or args.B:
+        # Create data files if not present
+        if not os.path.isfile(projectPath.tfrec["test"]) or args.B:
 
-        # setup data readers and writers meta data
-        spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
-        spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
-        readers = {}
-        writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
-        if mode=="full":
-            writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
-        elif mode=="fromUnits":
-            readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
-            readers.update({"res"+str(g): open(projectPath.res(g), 'r') for g in range(params.nGroups)})
-            writers.update({"trainGroup"+str(g): tf.python_io.TFRecordWriter(projectPath.tfrec["train"]+"."+str(g)) for g in range(params.nGroups)})
+            # setup data readers and writers meta data
+            spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
+            spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
+            readers = {}
+            writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
+            if mode=="full":
+                writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
+            elif mode=="fromUnits":
+                readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
+                readers.update({"res"+str(g): open(projectPath.res(g), 'r') for g in range(params.nGroups)})
+                writers.update({"trainGroup"+str(g): tf.python_io.TFRecordWriter(projectPath.tfrec["train"]+"."+str(g)) for g in range(params.nGroups)})
 
-        with ExitStack() as stack:
-            # Open data files
-            for k,v in writers.items():
-                writers[k] = stack.enter_context(v)
-            for k,v in readers.items():
-                readers[k] = stack.enter_context(v)
+            with ExitStack() as stack:
+                # Open data files
+                for k,v in writers.items():
+                    writers[k] = stack.enter_context(v)
+                for k,v in readers.items():
+                    readers[k] = stack.enter_context(v)
+
+                if mode=="fromUnits":
+                    nClusters = [int(readers["clu"+str(g)].readline()) for g in range(params.nGroups)]
+                    params.nClusters = nClusters
+                    clusterPositions = [{"clu"+str(n):[] for n in range(params.nClusters[g])} for g in range(params.nGroups)]
+                    clusterReaders = [bayesUtils.ClusterReader(readers["clu"+str(g)], readers["res"+str(g)], spikeDetector.samplingRate) \
+                        for g in range(params.nGroups)]
+                    [clusterReaders[g].getNext() for g in range(params.nGroups)]
+
+                # generate spike sequences in windows of size params.windowLength
+                for example in spikeSequenceGen:
+                    if example["train"] == None:
+                        continue
+                    if example["train"]:
+                        if mode=="full":
+                            writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
+                                params,
+                                *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
+                        else:
+                            # If decoding from units, we need to find a sorted spike with corresponding timestamp
+                            for spk in range(example["length"]):
+                                group = example["groups"][spk]
+                                while clusterReaders[group].res < example["times"][spk] - params.validCluWindow:
+                                    clusterReaders[group].getNext()
+                                if clusterReaders[group].res > example["times"][spk] + params.validCluWindow:
+                                    continue
+                                clusterPositions[group]["clu"+str(clusterReaders[group].clu)].append(example["pos"])
+                                writers["trainGroup"+str(group)].write(nnUtils.serializeSingleSpike(
+                                    params,
+                                    clusterReaders[group].clu,
+                                    example["spikes"+str(group)][(np.array(example["groups"])==group)[:spk+1].sum()-1]))
+                                clusterReaders[group].getNext()
+
+                    else:
+                        writers["testSequences"].write(nnUtils.serializeSpikeSequence(
+                            params,
+                            *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
             if mode=="fromUnits":
-                nClusters = [int(readers["clu"+str(g)].readline()) for g in range(params.nGroups)]
-                params.nClusters = nClusters
-                clusterPositions = [{"clu"+str(n):[] for n in range(params.nClusters[g])} for g in range(params.nGroups)]
-                clusterReaders = [bayesUtils.ClusterReader(readers["clu"+str(g)], readers["res"+str(g)], spikeDetector.samplingRate) \
-                    for g in range(params.nGroups)]
-                [clusterReaders[g].getNext() for g in range(params.nGroups)]
-
-            # generate spike sequences in windows of size params.windowLength
-            for example in spikeSequenceGen:
-                if example["train"] == None:
-                    continue
-                if example["train"]:
-                    if mode=="full":
-                        writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
-                            params, 
-                            *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-                    else:
-                        # If decoding from units, we need to find a sorted spike with corresponding timestamp
-                        for spk in range(example["length"]):
-                            group = example["groups"][spk]
-                            while clusterReaders[group].res < example["times"][spk] - params.validCluWindow:
-                                clusterReaders[group].getNext()
-                            if clusterReaders[group].res > example["times"][spk] + params.validCluWindow:
-                                continue
-                            clusterPositions[group]["clu"+str(clusterReaders[group].clu)].append(example["pos"])
-                            writers["trainGroup"+str(group)].write(nnUtils.serializeSingleSpike(
-                                params,
-                                clusterReaders[group].clu,
-                                example["spikes"+str(group)][(np.array(example["groups"])==group)[:spk+1].sum()-1]))
-                            clusterReaders[group].getNext()
-
-                else:
-                    writers["testSequences"].write(nnUtils.serializeSpikeSequence(
-                        params, 
-                        *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-
-        if mode=="fromUnits":
-            for g in range(params.nGroups):
-                for c in range(params.nClusters[g]):
-                    clusterPositions[g]["clu"+str(c)] = np.array(clusterPositions[g]["clu"+str(c)])
-                np.savez(projectPath.pos(g), **clusterPositions[g])
+                for g in range(params.nGroups):
+                    for c in range(params.nClusters[g]):
+                        clusterPositions[g]["clu"+str(c)] = np.array(clusterPositions[g]["clu"+str(c)])
+                    np.savez(projectPath.pos(g), **clusterPositions[g])
 
 
     # Training, testing, and preparing network for online setup
-    if mode=="full":
-        from fullEncoder import nnTraining as Training
-    elif mode=="fromUnits":
-        from unitClassifier import bayesTraining as Training
-    elif mode=="decode":
-        from decoder import decodeTraining as Training
-    trainer = Training.Trainer(projectPath, params, spikeDetector, device_name=device_name)
-    trainLosses = trainer.train()
-    outputs = trainer.test()
+    if mode!='simpleBayes':
+        if mode=="full":
+            from fullEncoder import nnTraining as Training
+        elif mode=="fromUnits":
+            from unitClassifier import bayesTraining as Training
+        elif mode=="decode":
+            from decoder import decodeTraining as Training
+        trainer = Training.Trainer(projectPath, params, spikeDetector, device_name=device_name)
+        trainLosses = trainer.train()
+        outputs = trainer.test()
 
+        # Saving files
+        np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
 
+        import scipy.io
+        scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
 
-    # Saving files
-    np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
+        import json
+        outjsonStr = {};
+        outjsonStr['encodingPrefix'] = projectPath.graph
+        outjsonStr['defaultFilter'] = not useOpenEphysFilter
+        outjsonStr['mousePort'] = 0
 
-    import scipy.io
-    scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
+        outjsonStr['nGroups'] = int(params.nGroups)
+        idx=0
+        for group in range(len(spikeDetector.list_channels)):
+            outjsonStr['group'+str(group-idx)]={}
+            outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
+            for chnl in range(len(spikeDetector.list_channels[group])):
+                outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
+                outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
 
-    import json
-    outjsonStr = {};
-    outjsonStr['encodingPrefix'] = projectPath.graph
-    outjsonStr['defaultFilter'] = not useOpenEphysFilter
-    outjsonStr['mousePort'] = 0
+        outjsonStr['nStimConditions'] = 1
+        outjsonStr['stimCondition0'] = {}
+        outjsonStr['stimCondition0']['stimPin'] = 14
+        outjsonStr['stimCondition0']['lowerX'] = 0.0
+        outjsonStr['stimCondition0']['higherX'] = 0.0
+        outjsonStr['stimCondition0']['lowerY'] = 0.0
+        outjsonStr['stimCondition0']['higherY'] = 0.0
+        outjsonStr['stimCondition0']['lowerDev'] = 0.0
+        outjsonStr['stimCondition0']['higherDev'] = 0.0
 
-    outjsonStr['nGroups'] = int(params.nGroups)
-    idx=0
-    for group in range(len(spikeDetector.list_channels)):
-        outjsonStr['group'+str(group-idx)]={}
-        outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
-        for chnl in range(len(spikeDetector.list_channels[group])):
-            outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
-            outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
+        outjson = json.dumps(outjsonStr, indent=4)
+        with open(projectPath.json,"w") as json_file:
+            json_file.write(outjson)
 
-    outjsonStr['nStimConditions'] = 1
-    outjsonStr['stimCondition0'] = {}
-    outjsonStr['stimCondition0']['stimPin'] = 14
-    outjsonStr['stimCondition0']['lowerX'] = 0.0
-    outjsonStr['stimCondition0']['higherX'] = 0.0
-    outjsonStr['stimCondition0']['lowerY'] = 0.0
-    outjsonStr['stimCondition0']['higherY'] = 0.0
-    outjsonStr['stimCondition0']['lowerDev'] = 0.0
-    outjsonStr['stimCondition0']['higherDev'] = 0.0
+        subprocess.run(["./createOpenEphysTemplateFromJson.sh", projectPath.json])
 
-    outjson = json.dumps(outjsonStr, indent=4)
-    with open(projectPath.json,"w") as json_file:
-        json_file.write(outjson)
-
-    subprocess.run(["./createOpenEphysTemplateFromJson.sh", projectPath.json])
-
-    from fullEncoder import printResults
-    printResults.printResults(projectPath.folder)
+        from fullEncoder import printResults
+        printResults.printResults(projectPath.folder)
+    else:
+        from SimpleBayes import decodebayes
+        trainer = decodebayes.Trainer(projectPath)
+        bayes_matrices = trainer.train(behavior_data, cluster_data)
+        position_proba, position_true, nSpikes = trainer.test(projectPath, bayes_matrices, behavior_data)
 
 if __name__=="__main__":
     print()
     import argparse
     parser = argparse.ArgumentParser(description="Creating and training an agent to decode high level features from electrophysiology data")
     subparsers = parser.add_subparsers(dest='mode', title='modes', description='all existing modes of encoding', help='selects an encoding mode')
-    for cmd in ['full', 'fromUnits', 'decode']:
+    for cmd in ['full', 'fromUnits', 'decode', 'simpleBayes']:
         p = subparsers.add_parser(cmd)
         p.add_argument('path', type=str, help="path to xml file")
-        if cmd == 'decode':
-            p.add_argument('jsonPath', type=str, help="path to json file")
-        p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
-        p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
-        p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
-        p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
-        p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
-        p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
-        p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
-        p.add_argument('-B', action='store_true', help="rebuilds dataset, even if present.")
+        if cmd != 'simpleBayes':
+            if cmd == 'decode':
+                p.add_argument('jsonPath', type=str, help="path to json file")
+            p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
+            p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
+            p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
+            p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
+            p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
+            p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
+            p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
+            p.add_argument('-B', action='store_true', help="rebuilds dataset, even if present.")
+        else:
+            p.add_argument('-p', '--path', type=str, default='', help="path to folder with .clu, .res and .spk files, and behavResources.mat.")
+            p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
+            p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
+            p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
+            p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
     args = parser.parse_args()
 
     print()

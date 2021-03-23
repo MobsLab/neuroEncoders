@@ -6,7 +6,7 @@ from sklearn.neighbors import KernelDensity
 
 
 def exp256(x):
-	
+
 	"""This function is supposedly 330 times faster than a classic exponential.
 	This is an approximation, theoretically very good if x<5.
 	It was also tested to be working normally here."""
@@ -75,7 +75,7 @@ def be_sure_about(bin_probas):
 # ########## Data processing
 
 def modify_labels(labels,clu_modifier=1):
-	
+
 	if clu_modifier==1 :
 		return labels
 
@@ -92,10 +92,10 @@ def modify_labels(labels,clu_modifier=1):
 		n_clu = np.shape(labels)[1]
 		idx = list(range(n_clu))
 		labels2 = np.ndarray([n, (n_clu+1)//2])
-		labels2 = [[(labels[x,idx[2*n]] + labels[x,idx[2*n+1]] 
-			if (2*n+1<=len(idx)-1) 
-			else labels[x,idx[2*n]])  
-			for n in range(np.shape(labels2)[1])] 
+		labels2 = [[(labels[x,idx[2*n]] + labels[x,idx[2*n+1]]
+			if (2*n+1<=len(idx)-1)
+			else labels[x,idx[2*n]])
+			for n in range(np.shape(labels2)[1])]
 			for x in range(n)]
 		return np.array(labels2)
 
