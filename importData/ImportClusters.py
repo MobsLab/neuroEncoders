@@ -54,12 +54,9 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				clu_str = fClu.readlines()
 				res_str = fRes.readlines()
 				n_clu = int(clu_str[0])-1
-				# n_channels = len(list_channels[tetrode])
-				# spikeReader = struct.iter_unpack(str(32*n_channels)+'h', fSpk.read())
 
-				# labels = np.array([[1. if int(clu_str[n+1])-1==l else 0. for l in range(n_clu)] for n in range(len(clu_str)-1) if (int(clu_str[n+1])!=0)])
-				# spike_time = np.array([[float(res_str[n])/samplingRate] for n in range(len(clu_str)-1) if (int(clu_str[n+1])!=0)])
-				labels_temp = butils.modify_labels(np.array([[1. if int(clu_str[n+1])==l else 0. for l in range(n_clu+1)] for n in range(len(clu_str)-1)]), cluster_modifier)
+				# Xlusters only with labels >= 1
+				labels_temp = butils.modify_labels(np.array([[1. if int(clu_str[n+1])==l else 0. for l in range(1, n_clu+1)] for n in range(len(clu_str)-1)]), cluster_modifier)
 				st = (np.array([[float(res_str[n])/samplingRate] for n in range(len(clu_str)-1)]))
 				sp = (np.array([behavior_data['Positions'][np.argmin(np.abs(st[n]-behavior_data['Position_time'])),:] for n in range(len(st))]))
 				ss = (np.array([behavior_data['Speed'][np.min((np.argmin(np.abs(st[n]-behavior_data['Position_time'])),
