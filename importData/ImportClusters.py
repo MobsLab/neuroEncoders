@@ -55,7 +55,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				res_str = fRes.readlines()
 				n_clu = int(clu_str[0])-1
 
-				# Xlusters only with labels >= 1
+				# Clusters only with labels >= 1
 				labels_temp = butils.modify_labels(np.array([[1. if int(clu_str[n+1])==l else 0. for l in range(1, n_clu+1)] for n in range(len(clu_str)-1)]), cluster_modifier)
 				st = (np.array([[float(res_str[n])/samplingRate] for n in range(len(clu_str)-1)]))
 				sp = (np.array([behavior_data['Positions'][np.argmin(np.abs(st[n]-behavior_data['Position_time'])),:] for n in range(len(st))]))
@@ -77,7 +77,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 		sys.stdout.write('We have finished building rates for group ' + str(tetrode+1) + ', loading next                           ')
 		sys.stdout.write('\r')
 		sys.stdout.flush()
-	sys.stdout.write('We have finished building rates.                                                           ')
+	sys.stdout.write('We have importing clusters.                                                           ')
 	sys.stdout.write('\r')
 	sys.stdout.flush()
 
