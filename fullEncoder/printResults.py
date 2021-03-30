@@ -10,7 +10,7 @@ from scipy.stats import gaussian_kde
 
 
 
-def printResults(dir, show=False):
+def printResults(dir, show=False, bayes=False):
 	findFolder = lambda path: path if path[-1]=='/' or len(path)==1 else findFolder(path[:-1])
 	folder = findFolder(dir)
 	file = folder + 'results/inferring.npz'
@@ -18,10 +18,15 @@ def printResults(dir, show=False):
 	results = np.load(os.path.expanduser(file))
 	pos = results['pos']
 	inferring = results['inferring']
-	trainLosses = results['trainLosses']
+	try:
+		trainLosses = results['trainLosses']
+	except KeyError:
+		trainLosses = []
 	probaMaps = results["probaMaps"]
 	block=show
 	lossSelection = .2
+	if bayes:
+		lossSelection = 1 - lossSelection
 	maxPos = 1
 	dim_output = pos.shape[1]
 	assert(pos.shape[1] == inferring.shape[1]-1)
