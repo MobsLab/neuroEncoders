@@ -30,8 +30,8 @@ class Trainer():
 		### GLOBAL OCCUPATION
 		selected_positions = behavior_data['Positions'][reduce(np.intersect1d,
 			(np.where(behavior_data['Speed'][:,0] > speed_cut),
-			np.where(behavior_data['Position_time'][:,0] > behavior_data['Times']['start']),
-			np.where(behavior_data['Position_time'][:,0] < behavior_data['Times']['stop'])))]
+			np.where(behavior_data['Position_time'][:,0] > behavior_data['Times']['start_train']),
+			np.where(behavior_data['Position_time'][:,0] < behavior_data['Times']['stop_train'])))]
 		xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
 		Occupation[Occupation==0] = np.min(Occupation[Occupation!=0])  # We want to avoid having zeros
 
@@ -44,38 +44,37 @@ class Trainer():
 		guessed_clusters_time = []
 		guessed_clusters = []
 		Marginal_rate_functions = []
-		Local_rate_functions = []
 		Rate_functions = []
 
 		n_tetrodes = len(cluster_data['Spike_labels'])
 		for tetrode in range(n_tetrodes):
+			# Get cluster for inferring
 			guessed_clusters_time.append(cluster_data['Spike_times'][tetrode][reduce(np.intersect1d,
-				(np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['stop']),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['end']),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] > speed_cut)))])
+				(np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_test']),
+				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_test'])))])
 			guessed_clusters.append(butils.shuffle_labels(cluster_data['Spike_labels'][tetrode][reduce(np.intersect1d,
-				(np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['stop']),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['end']),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] > speed_cut)))], rand_param))
+				(np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_test']),
+				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_test'])))], rand_param))
 
 			### MARGINAL RATE FUNCTION
 			selected_positions = cluster_data['Spike_positions'][tetrode][reduce(np.intersect1d,
 				(np.where(cluster_data['Spike_speed'][tetrode][:,0] > speed_cut),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start']),
-				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop'])))]
+				np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_train']),
+				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_train'])))]
 			xEdges, yEdges, MRF = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
 			MRF[MRF==0] = np.min(MRF[MRF!=0])
 			MRF         = MRF/np.sum(MRF)
 			MRF         = np.shape(selected_positions)[0]*np.multiply(MRF, Occupation_inverse)/behavior_data['Times']['learning']
 			Marginal_rate_functions.append(MRF)
 
+			Local_rate_functions = []
 		### LOCAL RATE FUNCTION FOR EACH CLUSTER
 			for label in range(np.shape(cluster_data['Spike_labels'][tetrode])[1]):
 				selected_positions = cluster_data['Spike_positions'][tetrode][reduce(np.intersect1d,
 					(np.where(cluster_data['Spike_speed'][tetrode][:,0] > speed_cut),
 					np.where(cluster_data['Spike_labels'][tetrode][:,label] == 1),
-					np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start']),
-					np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop'])))]
+					np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_train']),
+					np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_train'])))]
 				if np.shape(selected_positions)[0]!=0:
 					xEdges, yEdges, LRF =  butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
 					LRF[LRF==0] = np.min(LRF[LRF!=0])
@@ -89,7 +88,7 @@ class Trainer():
 
 		bayes_matrices = {'Occupation': Occupation, 'Marginal rate functions': Marginal_rate_functions, 'Rate functions': Rate_functions,
 				'Bins':[xEdges[:,0],yEdges[0,:]],'guessed_clusters_info': {'clusters':guessed_clusters, 'time':guessed_clusters_time},
-				'time_limits': [behavior_data['Times']['start'], behavior_data['Times']['stop'], behavior_data['Times']['end']]}
+				'time_limits': [behavior_data['Times']['start_train'], behavior_data['Times']['stop_train'], behavior_data['Times']['start_test'], behavior_data['Times']['stop_test']]}
 
 		return bayes_matrices
 
@@ -104,13 +103,10 @@ class Trainer():
 		Occupation, Marginal_rate_functions, Rate_functions = [bayes_matrices[key] for key in ['Occupation','Marginal rate functions','Rate functions']]
 		guessed_clusters, guessed_clusters_time = [guessed_clusters_info[key] for key in ['clusters','time']]
 		mask = Occupation > (np.max(Occupation)/masking_factor)
-
-		# Constant term
-		ConstantTerm = np.sum(bayes_matrices['Marginal rate functions'], axis=0)
-
+  
 		### Build Poisson term
-		n_bins = math.floor((behavior_data['Times']['end'] - behavior_data['Times']['stop'])/windowSize)
-		All_Poisson_term = [np.exp( (-windowSize)*Marginal_rate_functions[tetrode]) for tetrode in range(len(guessed_clusters))]
+		n_bins = math.floor((behavior_data['Times']['stop_test'] - behavior_data['Times']['start_test'])/windowSize)
+		All_Poisson_term = [np.exp((-windowSize)*Marginal_rate_functions[tetrode]) for tetrode in range(len(guessed_clusters))]
 		All_Poisson_term = reduce(np.multiply, All_Poisson_term)
 
 		### Log of rate functions
@@ -128,13 +124,12 @@ class Trainer():
 		times = []
 		for bin in range(n_bins):
 
-			bin_start_time = behavior_data['Times']['stop'] + bin*windowSize
+			bin_start_time = behavior_data['Times']['start_test'] + bin*windowSize
 			bin_stop_time = bin_start_time + windowSize
 			times.append(bin_start_time)
 
 			binSpikes = 0
 			tetrodes_contributions = []
-			tetrodes_contributions.append(ConstantTerm)
 			tetrodes_contributions.append(All_Poisson_term)
 
 			for tetrode in range(len(guessed_clusters)):
@@ -146,14 +141,11 @@ class Trainer():
 				binSpikes = binSpikes + np.sum(bin_clusters)
 
 
-				# Terms that come from spike information (with normalization)
+				# Terms that come from spike information
 				if np.sum(bin_clusters) > 0.5:
-					place_maps = reduce(np.multiply,
-						[np.power(log_RF[tetrode][cluster], np.ones(np.shape(Occupation)) * bin_clusters[cluster])
+					spike_pattern = reduce(np.multiply,
+						[np.exp(log_RF[tetrode][cluster] * bin_clusters[cluster])
 						for cluster in range(np.shape(bin_clusters)[0])])
-
-
-					spike_pattern = place_maps
 				else:
 					spike_pattern = np.multiply(np.ones(np.shape(Occupation)), mask)
 
@@ -161,9 +153,8 @@ class Trainer():
 
 			nSpikes.append(binSpikes)
 
-			AllSpikesContribution = reduce(np.multiply, tetrodes_contributions)
-			position_proba[bin] = np.multiply(AllSpikesContribution, Occupation)
 			# Guessed probability map
+			position_proba[bin] = reduce(np.multiply, tetrodes_contributions)
 			position_proba[bin] = position_proba[bin] / np.sum(position_proba[bin])
 			# True position
 			position_true_mean = np.nanmean( behavior_data['Positions'][reduce(np.intersect1d,

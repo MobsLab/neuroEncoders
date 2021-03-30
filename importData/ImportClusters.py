@@ -21,15 +21,16 @@ def getBehavior(folder, bandwidth=None):
 	speed = np.swapaxes(speed[:,:],1,0)
 	position_time = np.swapaxes(position_time[:,:],1,0)
 
-	start_time = f.root.behavior.trainEpochs[:,0]
-	stop_time = f.root.behavior.trainEpochs[:,1]
-	end_time = f.root.behavior.testEpochs[:,1]
+	start_time_train = f.root.behavior.trainEpochs[:,0]
+	stop_time_train = f.root.behavior.trainEpochs[:,1]
+	start_time_test = f.root.behavior.testEpochs[:,0]
+	stop_time_test = f.root.behavior.testEpochs[:,1]
 	if bandwidth == None:
 		bandwidth = (np.max(positions) - np.min(positions))/20
-	learning_time = stop_time - start_time
+	learning_time = stop_time_train - start_time_train
 
 	behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
-		'Times': {'start': start_time, 'stop': stop_time, 'end': end_time, 'learning': learning_time}}
+		'Times': {'start_train': start_time_train, 'stop_train': stop_time_train, 'start_test': start_time_test, 'stop_test': stop_time_test, 'learning': learning_time}}
 
 	return behavior_data
 

@@ -271,7 +271,17 @@ def main(args):
         from SimpleBayes import decodebayes
         trainer = decodebayes.Trainer(projectPath)
         bayes_matrices = trainer.train(behavior_data, cluster_data)
-        position_proba, position_true, nSpikes = trainer.test(projectPath, bayes_matrices, behavior_data)
+        outputs = trainer.test(bayes_matrices, behavior_data, windowSize=windowSize)
+        trainLosses=[]
+        
+         # Saving files
+        np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
+
+        import scipy.io
+        scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
+        
+        from fullEncoder import printResults
+        printResults.printResults(projectPath.folder, bayes=True)
 
 if __name__=="__main__":
     print()
@@ -294,6 +304,9 @@ if __name__=="__main__":
             p.add_argument('-B', action='store_true', help="rebuilds dataset, even if present.")
         else:
             p.add_argument('-p', '--path', type=str, default='', help="path to folder with .clu, .res and .spk files, and behavResources.mat.")
+            p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
+            p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
+            p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
             p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
             p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
             p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
@@ -321,7 +334,8 @@ if __name__=="__main__":
             else:
                 raise ValueError('The answer is y or n. Try again \n')
 
-    subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')), "\""+args.target+"\"", "\""+str(args.split)+"\"", "\""+args.whichsplit+"\""])
+    if not(os.path.isfile(os.path.expanduser(os.path.split(args.path)[0] + os.path.sep + 'nnBehavior.mat'))):
+        subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')), "\""+args.target+"\"", "\""+str(args.split)+"\"", "\""+args.whichsplit+"\""])
     print()
 
     main(args)
