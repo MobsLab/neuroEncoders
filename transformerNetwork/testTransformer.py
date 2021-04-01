@@ -41,17 +41,16 @@ class Project():
             "train": self.folder + 'dataset/trainingDataset.tfrec',
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
-        #TO change at every experiment:
-        self.resultsPath = self.folder + 'results_RecurrentDropout'
-        self.resultsNpz = self.resultsPath + '/inferring.npz'
-        self.resultsMat = self.resultsPath + '/inferring.mat'
+        self.resultsNpz = self.folder + 'results/inferring.npz'
+        self.resultsMat = self.folder + 'results/inferring.mat'
 
+        self.resultsPath = os.path.join(self.folder,"result_Transformer_test")
         if not os.path.isdir(self.folder + 'dataset'):
             os.makedirs(self.folder + 'dataset')
         if not os.path.isdir(self.folder + 'graph'):
             os.makedirs(self.folder + 'graph')
-        if not os.path.isdir(self.resultsPath):
-            os.makedirs(self.resultsPath )
+        if not os.path.isdir(self.folder + 'results'):
+            os.makedirs(self.folder + 'results')
         if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
             os.makedirs(os.path.join(self.resultsPath, "resultInference"))
 
@@ -81,7 +80,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 25
+        self.nEpochs = 100
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -91,16 +90,38 @@ class Params:
         self.bandwidth = 0.1
         self.masking = 20
 
-        ### full encoder params
-        self.nFeatures = 128 #Pierre: test with much lower nb of feature; before it was 128
-        self.lstmLayers = 3
-        self.lstmSize = 128 #to change back to 128
-        self.lstmDropout = 0.3
+        ## Model dimensionality of the convnet output
+        # We want d_model to be a n_output_variable-root of an integer.
+        # i.e d_model**(1/n_output_variable) integer, integer correspond to the number of bin
+        # over each axis of the output_variable space (but together the discretization form a grid mesh)
+        # If we want bin = 20 for example we can use:
+
+        self.d_model = 128**(self.dim_output)
+        assert self.d_model//self.nGroups == self.d_model/self.nGroups
+        self.nFeatures = int(self.d_model/self.nGroups)
+        # The output of each convernet is concatenated to form the input to the model.
+        ### full Tranformer params
+        self.num_layers_encoder_transformer = 4
+        self.num_heads_transformer = 8 #to change back to 128
+        self.dff = 512
+        self.transformerDropout = 0.1
+        self.num_layers_decoder_transformer = 8
+
+        # While the transformer will operate with a wider language, in a higher dimensional space
+        # we can force the loss to be a cross-entropy loss by using a restricted vocabulary
+        # if this voc is too large, the network does not seem to be able to learn.
+        self.placeCellVocSize = 8
+
+        #For the positional encoding: the maximal sequence length
+        # I.e the maximal number of spike we could detect
+        # Spike detection is made by block of 32 timestep
+        # But each group is detected in parallel so we have to multiply this by the nnumber of groups
+        self.max_nb_spike_in_window = np.ceil(self.windowLength*20000/32*self.nGroups)
+        # TODO: detect sampling rate in xml file (here 20000)
 
         self.batch_size = 52 #previously 52
-        self.timeMajor = True
 
-        self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
+        self.learningRates = [0.001] #  0.00003  ,    0.00003, 0.00001]
         self.lossLearningRate = 0.00003
         self.lossActivation = None
 
@@ -112,13 +133,12 @@ class Params:
 
 def main():
     from importData import rawDataParser
-    from fullEncoder_v3 import nnUtils
-    from fullEncoder_v3 import nnNetwork2
+    import  nnUtils
     import tensorflow.keras.mixed_precision as mixed_precision
 
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseV3/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -131,24 +151,10 @@ def main():
     spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
     params = Params(spikeDetector, windowSize)
 
-    physical_devices = tf.config.list_physical_devices('GPU')
-    try:
-        # Disable first GPU
-        #tf.config.set_visible_devices([], 'GPU')
-        logical_devices = tf.config.list_logical_devices('GPU')
-    except:
-        # Invalid device or cannot modify virtual devices once initialized.
-        print("FAILED")
-        pass
-
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
-    mixed_precision.experimental.set_policy('mixed_float16')
-    params.usingMixedPrecision = True
-
-    #tf.distribute.OneDeviceStrategy(device=tf.config.list_logical_devices('GPU')[0])
-
-
+    # mixed_precision.experimental.set_policy('mixed_float16')
+    params.usingMixedPrecision = False
 
     if mode == "decode":
         spikeDetector.setThresholds(projectPath.thresholds)
@@ -191,14 +197,46 @@ def main():
 
     # Training, testing, and preparing network for online setup
     if mode=="full":
-        from fullEncoder_v3 import nnNetwork2 as Training
+        import waveformTranslator as Training
     elif mode=="decode":
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
-    trainer = Training.LSTMandSpikeNetwork(projectPath, params)
-    trainLosses = trainer.train()
-    df = pd.DataFrame(trainLosses)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
+    trainer = Training.WaveformTranslator(projectPath, params)
+    # trainLosses = trainer.train()
+    # df = pd.DataFrame(trainLosses)
+    # df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
+    # fig,ax = plt.subplots()
+    # ax.plot(trainLosses[:,0])
+    # plt.show()
+
+    # trainer.outputEmbeding.sigma *= 0.1
+    # res = trainer.outputEmbeding(tf.squeeze(trainer.outputEmbeding.prefered_feature_tensor,axis=1))
+    # res_ex = res[0,:,:]
+    # res_ex_meanless = res_ex   #tf.reduce_mean(res_ex,axis=1)
+    # testCosine = tf.keras.losses.CosineSimilarity(axis=-1,reduction='none')
+    # res_loss = testCosine(res_ex_meanless[-1,:],res_ex_meanless[:,:])
+    #
+    # pos_pref = trainer.outputEmbeding.prefered_feature_tensor[0,0,:,:]
+    # res_loss_sorted = np.sort(res_loss)
+    # fig,ax = plt.subplots(3,1)
+    # # ax[0].scatter(pos_pref[:, 0], pos_pref[:, 1], c=(tf.reduce_mean(res_ex, axis=1)))
+    # # ax[1].plot(tf.reduce_mean(res_ex, axis=1))
+    # ax[0].scatter(pos_pref[:,0],pos_pref[:,1],c=(res_loss+1))
+    # ax[1].plot(res_loss_sorted)
+    # ax[2].imshow(res_ex)
+    # plt.show()
+    #
+    #
+    # res_ex_meanless = (res_ex  - tf.reduce_mean(res_ex,axis=0))/tf.math.reduce_std(res_ex,axis=0)
+    # corr = np.transpose(res_ex_meanless)*res_ex_meanless
+    # corr_0 = corr[210,:]
+    # fig, ax = plt.subplots(3, 1)
+    # ax[0].scatter(pos_pref[:, 0], pos_pref[:, 1], c=corr_0)
+    # ax[1].plot(np.sort(corr_0))
+    # ax[2].imshow(corr)
+    # plt.show()
+
+
 
     outputs = trainer.test()
 
@@ -255,21 +293,10 @@ def main():
     ax[1].plot(trainLosses[:,2],c="black")
     ax[1].set_ylabel("Manifold loss Prediction Error")
     fig.show()
-    plt.savefig(os.path.join(projectPath.resultsPath, "loss.png"))
-
-
-    # Saving files
-    np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
-    import scipy.io
-    scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
-
-    from fullEncoder_v3 import printResults
-    printResults.printResults(projectPath.folder)
+    plt.savefig(os.path.join(projectPath.folder, "results", "loss.png"))
 
 if __name__=="__main__":
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseV3/rat122-20090731.xml"
-    subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
-                    "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
 
     main()
 

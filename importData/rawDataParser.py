@@ -78,6 +78,12 @@ def get_position(folder):
 
 class openEphysFilter:
 	'''reads the open-ephys filtered data'''
+	"""
+		Overall just a parser from the C file which is structued as:
+			Chan1Measure1 Chan2Measure2 ... ChanNMeasure1 Chan1Measure2 .....
+		with data in short format (ie read as int16 in python).
+		
+	"""
 	def __init__(self, path, list_channels, nChannels):
 		if not os.path.exists(path):
 			raise ValueError('this file does not exist: '+ path)
@@ -89,8 +95,21 @@ class openEphysFilter:
 		self.dataReader = struct.iter_unpack(str(self.nChannels)+'h', self.dataFile.read())
 
 	def filter(self, sample):
+		"""
+			Take the next element of the dataReader, according to the shape of sample:
+				if sample is one dimensional, extract 1 element
+				if sample is @ dim, extract 1 element for each row.
+			The read data is multiplied by 0.197 to be set in the correct unit (??)
+			Note: dataReader is initialized with  "struct.iter_unpack(str(self.nChannels)+'h', self.dataFile.read())"
+
+		  	the 'h' letter indicates a conversion from the C-type short to the python type Int16
+		  	adding an interget in front (str(self.nChannels)) indicate that the packet contains this number of elements of the type h
+		"""
 		if sample.ndim==1:
 			return np.array(next(self.dataReader))[self.channelList]*0.195
+			# We might not want to read all channels, so we use "self.channelList" the list of channel to consider
+			# to filter out uninteresting channels
+			# Here the channelList simply gather all channels (over different groups) that were acquired
 		else:
 			temp = []
 			for i in range(sample.shape[0]):
@@ -185,6 +204,9 @@ class SpikeDetector:
 			self.filter = INTANFilter(350., self.samplingRate, self.list_channels)
 
 		self.thresholdFactor   = 3 # in units of standard deviation
+		# this is the threshold that is really used here
+		# It multiplies the std of each channel in each group, taken over a complete buffer (where the late spike are added)
+
 		self.filteredSignal	= np.zeros([BUFFERSIZE, len(self.filter.channelList)])
 		self.thresholds		= np.zeros([len(self.filter.channelList)])
 
@@ -238,19 +260,34 @@ class SpikeDetector:
 
 
 	def getFilteredBuffer(self, bufferSize):
+		"""
+			Given bufferSize, read bufferSize elements from the filter
+			each elements will have the shape of the next(self.dataReader)) element which is
+			of size nChannels too and of the type short converted in Int16
+
+		"""
 		temp = []
 		for item in range(bufferSize):
 			try:
 				temp.append(self.filter.filter(np.array(next(self.dataReader))*0.195))
+				# the value of np.array(next(self.dataReader))*0.195) is not used in the Open Ephys filter
+				# so why multiply by 0.195 ?? (Pierre)
+				# The key is that it is used by the IntanFilter.
+				# In the case of the IntanFilter, the elements of self.dataReader is modified on read time
+				# while for the open ephys it had been modified before!
 			except StopIteration:
 				self.lastBuffer = True
 				break
 		temp = np.array(temp)
 		return temp
 
-
-
 	def getLateSpikes(self):
+		# store the late spikes
+		# by concatenating it with the beginning of the next buffer of the filtered signal.
+		# This has to be done over the different channel groups
+		# Here this is not achieved in parallel, effectively creating a small bottlneck
+		# but as the proces all join before the next buffer this bottleneck exist before this function.
+		# Maybe we could design things so that everything is done in parallel over different groups...
 		temp = self.lateSpikes.copy()
 		self.lateSpikes = emptyData()
 
@@ -283,7 +320,9 @@ class SpikeDetector:
 		self.pbar = tqdm(total=numBuffer)
 
 		n=0
-		self.previousChannels = []
+		self.previousChannels = [] #store the number of channel in the previous group...
+		# if channel are 1 by 1 incremented and the group association is constant by parts
+		# then it also store the index of the first channel of the group
 		for group in self.list_channels:
 			self.previousChannels.append(n)
 			n += len(group)
@@ -301,16 +340,21 @@ class SpikeDetector:
 			self.pbar.close()
 			raise StopIteration
 
-		### filter signal, compute new thresholds and get late spikes from previous buffer
+		### filter signal (or simply read it in the .fil file), compute new thresholds and get late spikes from previous buffer
+		# The filtering is done over BUFFERSIZE elements
 		self.filteredSignal = self.getFilteredBuffer(BUFFERSIZE)
 		spikesFound = self.getLateSpikes()
 
-		### copy end of previous buffer
+		### copy end of previous buffer at the beginning of the filteredSignal
 		if self.endOfLastBuffer != []:
 			self.firstBuffer = False
 			self.filteredSignal = np.concatenate([self.endOfLastBuffer, self.filteredSignal], axis=0)
 		self.endOfLastBuffer = self.filteredSignal[-15:,:]
 
+		#The filtered signal is in shape [n_channels]
+		# For each group, a set of channels listed in elements of self.list_channels
+		# the signal is extracted as well as the corresponding thresholds.
+		# Then sent on the inputQueue to be process by the function findSpikesInGroupParallel ran in parallel
 		for group in range(len(self.list_channels)):
 			filteredBuffer = self.filteredSignal[:,self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
 			thresholds	 = self.thresholds	  [self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
@@ -322,7 +366,8 @@ class SpikeDetector:
 			for key in emptyData().keys():
 				spikesFound[key] += res[0][key]
 				self.lateSpikes[key] += res[1][key]
-
+		# As the block argument is used, we make sure to wait for len(self.list_channels)==nb groups elements to be available
+		# So really working in a bottleneck manner.
 
 		self.pbar.update(1)
 		if spikesFound['time'] != [] and max(spikesFound["time"]) > self.stopTime:
@@ -334,7 +379,18 @@ class SpikeDetector:
 
 
 def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thresholdFactor, startTime, position, position_time):
-	
+	"""
+		How it detect spikes:
+			moves with steps of size 15, ie dt= 15*1/sampling_rate
+			A spike has shape 32, -15 from the spike time, 1 at spike time, 16 after.
+			Therefore if it is detected at 15 steps before the last time,
+		The inputQueue contains:
+			N --> the number of buffer of size BUFFERSIZE we have been through, allows to compute the time
+			group -->
+			thesholds -->
+			filteredBuffer --> an array of size BUFFERSIZE plus (if not the first buffer) 15 elements from the end of previous buffer
+
+	"""
 	while True:
 		N, group, thresholds, filteredBuffer = inputQueue.get(block=True)
 
@@ -347,11 +403,19 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 		lateSpikes = emptyData()
 
 		spl = 15
+		#the spike looking time starts at 15, therefore a spike initiating at time t=0, i.e for the first buffer
+		# will not be considered !
 		while spl < filteredBuffer.shape[0]:
 			for chnl in range(filteredBuffer.shape[1]):
 
 				# check if cross negative trigger
-				if filteredBuffer[spl,chnl] < -thresholds[chnl] and filteredBuffer[spl-1, chnl] > -thresholds[chnl]:
+				# Note Pierre: this test will work because we force spl to start at 15
+				# so no boundary problem....
+				# But there is a potential problem at the buffer limit if a late spike was detected on another channel
+				# and the voltage goes below the threshold (so with a slight delay) after the buffer limit in the current channel
+				# therefore we change the second  test to np.all(filteredBuffer[spl-1,:] > -thresholds)
+				# rather than  filteredBuffer[spl-1, chnl] > -thresholds[chnl]
+				if filteredBuffer[spl,chnl] < -thresholds[chnl] and np.all(filteredBuffer[spl-1,:] > -thresholds):
 					triggered = True
 					positiveTrigger = False
 
@@ -363,36 +427,57 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 					else:
 						spl = spl + np.argmin(filteredBuffer[spl:spl+15, chnl])
 
+					# note: as the code is now, we are always in the case of negativeTrigger,
+					# therefore testing if the filteredBuffer is below the thresholds value...
+
 					if N==0:
 						time = spl / samplingRate
+						maxSplTimeToUseInBuffer = BUFFERSIZE-17
 					else:
 						time = (N * BUFFERSIZE + spl - 15) / samplingRate
+						maxSplTimeToUseInBuffer = BUFFERSIZE - 17 + 15
 					train = isTrainingExample(epochs, time)
+					assert maxSplTimeToUseInBuffer == filteredBuffer.shape[0]-17
 
 					# Do nothing unless after behaviour data has started
 					if time > startTime:
 
+						#OLD PROBLEM: modified by Puere on 23/03/21
 						# That's a late spike, we'll have to wait till next buffer
-						if spl > BUFFERSIZE - 18 + 15:
+						# why -18 here??
+						# if spl = BUFFERSIZE - 17 + 15, spl+17 =  BUFFERSIZE + 15
+						# which can be use as the last index, except for the first buffer
+						# if we are in the case of the first buffer,
+						# and spl = BUFFERSIZE-18+15 for example
+						# filteredBuffer[spl-15:spl+17, :]
+						# will not raise an error, but give an array of a smaller shape than 32
+						# therefore the test... if np.shape(spike)[0]==32: fails
+						# and the spike is not stored....
+						# Fixed my using maxSplTimeToUseInBuffer varying if N==0 or another buffer
+
+						if spl > maxSplTimeToUseInBuffer:
 							lateSpikes['group'].   append(group)
 							lateSpikes['time'].    append(time)
+							#Note: no transpose of the filteredBuffer because it will then be concatenated with the
+							# beginning of the next buffer to create a nice spike window.
 							lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
 							lateSpikes['position'].append( position[np.argmin(np.abs(position_time-time))] )
 							lateSpikes['train'].   append(train)
 
 						else:
 							spike = filteredBuffer[spl-15:spl+17, :].copy()
+
 							if np.shape(spike)[0]==32:
 								spikesFound['group'].   append(group)
 								spikesFound['time'].	append(time)
+								#note: here the reshape does not bring anything...
 								spikesFound['spike'].   append( np.array(spike).reshape([32,filteredBuffer.shape[1]]).transpose() )
 								spikesFound['position'].append( position[np.argmin(np.abs(position_time-time))] )
 								spikesFound['train'].   append(train)
 
-
 					spl += 15
 					triggered = False
-					break
+					break #leaves the for loop --> so the spike is stored as soon as it is detected over a channel.
 			spl += 1
 
 		outputQueue.put([spikesFound, lateSpikes])

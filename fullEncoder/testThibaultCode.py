@@ -43,15 +43,18 @@ class Project():
             "train": self.folder + 'dataset/trainingDataset.tfrec', 
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
-        self.resultsNpz = self.folder + 'results/inferring.npz'
-        self.resultsMat = self.folder + 'results/inferring.mat'
+        self.resultsPath = self.folder + 'resultsTrainingNewTestSet'
+        self.resultsNpz = self.resultsPath + '/inferring.npz'
+        self.resultsMat = self.resultsPath + '/inferring.mat'
 
         if not os.path.isdir(self.folder + 'dataset'):
             os.makedirs(self.folder + 'dataset')
         if not os.path.isdir(self.folder + 'graph'):
             os.makedirs(self.folder + 'graph')
-        if not os.path.isdir(self.folder + 'results'):
-            os.makedirs(self.folder + 'results')
+        if not os.path.isdir(self.resultsPath):
+            os.makedirs(self.resultsPath)
+        if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
+            os.makedirs(os.path.join(self.resultsPath, "resultInference"))
 
     def clu(self, g):
         return self.baseName + ".clu." + str(g+1)
@@ -79,7 +82,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 10
+        self.nEpochs = 20
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -109,9 +112,11 @@ def main():
     from fullEncoder import nnUtils
     from unitClassifier import bayesUtils
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
     datPath = ''
-    useOpenEphysFilter = False # false if we don't have a .fil file
+    useOpenEphysFilter = False
+    # false if we don't have a .fil file
+    # will then use the IntanFilter, except if a .npz file is present (old version of dataset)
     windowSize = 0.036
     mode = "full"
     split = 0.1
@@ -204,20 +209,24 @@ def main():
         from decoder import decodeTraining as Training
     trainer = Training.Trainer(projectPath, params, spikeDetector, device_name=device_name)
     trainLosses = trainer.train()
-    # df = pd.DataFrame(trainLosses)
-    # df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
+    df = pd.DataFrame(trainLosses)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
 
     outputs = trainer.test()
     predPos = outputs["inferring"][:, 0:2]
     truePos = outputs["pos"]
     predLoss = outputs["inferring"][:,2]
+    timeStepPred = outputs["times"]
+
     # Saving files
     df = pd.DataFrame(predPos)
-    df.to_csv(os.path.join(projectPath.folder, "resultInference", "featurePred.csv"))
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
     df = pd.DataFrame(truePos)
-    df.to_csv(os.path.join(projectPath.folder, "resultInference", "featureTrue.csv"))
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
     df = pd.DataFrame(predLoss)
-    df.to_csv(os.path.join(projectPath.folder, "resultInference", "lossPred.csv"))
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossPred.csv"))
+    df = pd.DataFrame(timeStepPred)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "timeStepPred.csv"))
     # Saving files
     #np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
 
@@ -267,7 +276,7 @@ def main():
 
 if __name__=="__main__":
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
     subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
                     "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
     main()

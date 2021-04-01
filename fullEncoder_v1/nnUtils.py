@@ -21,11 +21,11 @@ class spikeNet:
 			# 			has same size as input....
 
 			self.convLayer2 = tf.keras.layers.Conv2D(16, [2,3], padding='SAME')
-			#self.convLayer3 = tf.keras.layers.Conv2D(32, [2,3], padding='SAME') #change from 32 to 16 and [2;3] to [2;2]
+			self.convLayer3 = tf.keras.layers.Conv2D(32, [2,3], padding='SAME') #change from 32 to 16 and [2;3] to [2;2]
 
 			self.maxPoolLayer1 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
 			self.maxPoolLayer2 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
-			#self.maxPoolLayer3 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
+			self.maxPoolLayer3 = tf.keras.layers.MaxPool2D([1,2], [1,2], padding='SAME')
 
 			self.dropoutLayer = tf.keras.layers.Dropout(0.5)
 			self.denseLayer1 = tf.keras.layers.Dense(self.nFeatures, activation='relu')
@@ -41,10 +41,10 @@ class spikeNet:
 			x = tf.expand_dims(input, axis=3)
 			x = self.convLayer1(x)
 			x = self.maxPoolLayer1(x)
-			#x = self.convLayer2(x)
-			#x = self.maxPoolLayer2(x)
-			#x = self.convLayer3(x)
-			#x = self.maxPoolLayer3(x)
+			x = self.convLayer2(x)
+			x = self.maxPoolLayer2(x)
+			x = self.convLayer3(x)
+			x = self.maxPoolLayer3(x)
 
 			x = tf.reshape(x, [-1, self.nChannels*8*16]) #change from 32 to 16 and 4 to 8
 			#by pooling we moved from 32 bins to 4. By convolution we generated 32 channels
@@ -93,9 +93,9 @@ def getSpikeSequences(params, generator):
 			windowStart += params.windowLength
 			#Pierre: Then we increment the windowStart until it is above the last seen spike time
 			while time > windowStart + params.windowLength:
-				res = {"train": train, "pos": pos, "groups": [], "length": 0, "times": []}
-				res.update({"spikes"+str(g): np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups)})
-				yield res
+				# res = {"train": train, "pos": pos, "groups": [], "length": 0, "times": []}
+				# res.update({"spikes"+str(g): np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups)})
+				# yield res
 				windowStart += params.windowLength
 		# Pierre: While we have not entered a new window, we start to gather spikes, time and group
 		# of each input.
