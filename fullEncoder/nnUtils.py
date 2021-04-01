@@ -96,9 +96,9 @@ def getSpikeSequences(params, generator):
 			allSpikes = [[] for _ in range(params.nGroups)]
 			windowStart += params.windowLength
 			while time > windowStart + params.windowLength:
-				res = {"train": train, "pos": pos, "groups": [], "length": 0, "times": []}
-				res.update({"spikes"+str(g): np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups)})
-				yield res
+				# res = {"train": train, "pos": pos, "groups": [], "length": 0, "times": []}
+				# res.update({"spikes"+str(g): np.zeros([0, params.nChannels[g], 32]) for g in range(params.nGroups)})
+				# yield res
 				windowStart += params.windowLength
 
 		times.append(time)

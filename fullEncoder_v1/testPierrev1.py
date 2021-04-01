@@ -9,6 +9,7 @@ import tensorflow as tf
 from contextlib import ExitStack
 import matplotlib.pyplot as plt
 import pandas as pd
+import transformData.linearizer
 
 
 class Project():
@@ -42,7 +43,7 @@ class Project():
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
         #TO change at every experiment:
-        self.resultsPath = self.folder + 'results_TF20_NoDropoutFastRNN'
+        self.resultsPath = self.folder + 'results_TF20_NoDropoutSlowRNNhardsigmoid_Euclidean_blockloss'
         self.resultsNpz = self.resultsPath + '/inferring.npz'
         self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -81,7 +82,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 90
+        self.nEpochs = 150
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -97,8 +98,11 @@ class Params:
         self.lstmSize = 128 #to change back to 128
         self.lstmDropout = 0.3
 
+        # To speed up computation we might reduce the number of step done
+        # by the lstm.
+        self.fasterRNN = False
+
         self.batch_size = 52 #previously 52
-        self.timeMajor = True
 
         self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
         self.lossLearningRate = 0.00003
@@ -117,8 +121,9 @@ def main():
     import tensorflow.keras.mixed_precision as mixed_precision
 
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
+    # tf.compat.v1.enable_eager_execution()
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -143,8 +148,8 @@ def main():
 
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
-    mixed_precision.experimental.set_policy('mixed_float16')
-    params.usingMixedPrecision = True
+    #mixed_precision.experimental.set_policy('mixed_float16')
+    params.usingMixedPrecision = False
 
     #tf.distribute.OneDeviceStrategy(device=tf.config.list_logical_devices('GPU')[0])
 
@@ -191,22 +196,33 @@ def main():
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
     trainer = Training.LSTMandSpikeNetwork(projectPath, params)
-    trainLosses = trainer.train()
-    df = pd.DataFrame(trainLosses)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
+    # trainLosses = trainer.train()
+    # df = pd.DataFrame(trainLosses)
+    # df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
+    # fog,ax = plt.subplots()
+    # ax.plot(trainLosses[:,0])
+    # plt.show()
 
     outputs = trainer.test()
     predPos = outputs["featurePred"][:, 0:2]
     truePos = outputs["featureTrue"]
-    predLoss = outputs["lossFromOutputLoss"]
+    predLoss = outputs["predofLoss"]
+    timeStepsPred = outputs["times"]
 
     # Saving files
     df = pd.DataFrame(predPos)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
     df = pd.DataFrame(truePos)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
-    df = pd.DataFrame(predLoss)
+    df = pd.DataFrame(predLoss[:,0,0])
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossPred.csv"))
+    df = pd.DataFrame(timeStepsPred)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "timeStepsPred.csv"))
+
+    # linearize the results:
+    linearPred = transformData.linearizer.uMazeLinearization(predPos)
+    linearTrue = transformData.linearizer.uMazeLinearization(truePos)
+
 
     maxPos = spikeDetector.maxPos()
     euclideanDistance = np.sqrt(np.sum(np.square(predPos * maxPos - truePos * maxPos), axis=1))
@@ -216,6 +232,14 @@ def main():
     fig, ax = plt.subplots()
     ax.scatter(truePos[:, 0], truePos[:, 1], c="black", alpha=0.1, label="true Position")
     ax.scatter(predPos[:, 0], predPos[:, 1], c="red", alpha=0.1, label="predicted Position")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title("prediction with TF2.0's architecture")
+    fig.legend()
+    fig.show()
+    fig, ax = plt.subplots()
+    ax.scatter(linearTrue[:, 0], linearTrue[:, 1], c="black", alpha=0.1, label="true Position")
+    ax.scatter(linearPred[:, 0], linearPred[:, 1], c="red", alpha=0.1, label="predicted Position")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_title("prediction with TF2.0's architecture")
@@ -234,26 +258,27 @@ def main():
     fig, ax = plt.subplots()
     ax.hist(euclideanDistance, bins=100)
     fig.show()
-    fig, ax = plt.subplots(2, 1)
-    ax[0].plot(truePos[:, 0])
-    ax[0].plot(predPos[:, 0])
-    ax[1].plot(truePos[:, 1])
-    ax[1].plot(predPos[:, 1])
+
+
+    # TO do : create a python file for automatic projection of the results...
+    # so that Dima can use it easily.
+    bestPred = predLoss < np.quantile(predLoss,0.9)
+    fig,ax = plt.subplots()
+    ax.plot(predPos[bestPred[:,0,0],1],c="orange")
+    ax.plot(truePos[bestPred[:,0,0],1],c="black")
     fig.show()
 
-    # Saving files
-    np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
-    import scipy.io
-    scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
+    fig,ax = plt.subplots(2,1)
+    ax[0].plot(predPos[:, 0], c="orange")
+    ax[0].plot(truePos[:, 0], c="black")
+    ax[1].plot(linearPred[:,0],c="orange")
+    ax[1].plot(linearTrue[:,0],c="black")
+    fig.show()
 
     from fullEncoder_v1 import printResults
     printResults.printResults(projectPath.resultsPath)
 
 if __name__=="__main__":
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
-    subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
-                    "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
-
     # In this architecture we use a 2.0 tensorflow backend, predicting solely the position.
     # I.E without using the simpler feature strategy based on stratified spaces.
 
