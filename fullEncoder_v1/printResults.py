@@ -10,20 +10,17 @@ from scipy.stats import gaussian_kde
 
 
 
-def printResults(dir, show=False, bayes=False):
+def printResults(dir, show=False):
 	findFolder = lambda path: path if path[-1]=='/' or len(path)==1 else findFolder(path[:-1])
 	folder = findFolder(dir)
 	file = folder + 'results/inferring.npz'
 
-	results = np.load(os.path.expanduser(file))
+	results = np.load(os.path.expanduser(file), allow_pickle=True)
 	pos = results['pos']
 	inferring = results['inferring']
 	trainLosses = results['trainLosses']
-	#Pierre: deleta ProbaMaps as it was not used...
 	block=show
 	lossSelection = .2
-	if bayes:
-		lossSelection = 1 - lossSelection
 	maxPos = 1
 	dim_output = pos.shape[1]
 	assert(pos.shape[1] == inferring.shape[1]-1)
@@ -66,10 +63,6 @@ def printResults(dir, show=False, bayes=False):
 	Error = np.array([np.sqrt(sum([(inferring[n,dim] - pos[n,dim])**2 for dim in range(dim_output)])) for n in range(inferring.shape[0])])
 	print('mean error:', np.nanmean(Error)*maxPos, "| selected error:", np.nanmean(Error[frames])*maxPos)
 	sys.stdout.write("threshold value: "+str(thresh)+"\r"); sys.stdout.flush()
-
-
-
-
 
 	# Overview
 	fig, ax = plt.subplots(figsize=(15,9))
