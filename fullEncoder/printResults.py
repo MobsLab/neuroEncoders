@@ -10,7 +10,7 @@ from scipy.stats import gaussian_kde
 
 
 
-def printResults(dir, show=False):
+def printResults(dir, show=False, bayes=False):
 	findFolder = lambda path: path if path[-1]=='/' or len(path)==1 else findFolder(path[:-1])
 	folder = findFolder(dir)
 	file = folder + 'results/inferring.npz'
@@ -22,6 +22,8 @@ def printResults(dir, show=False):
 	#Pierre: deleta ProbaMaps as it was not used...
 	block=show
 	lossSelection = .2
+	if bayes:
+		lossSelection = 1 - lossSelection
 	maxPos = 1
 	dim_output = pos.shape[1]
 	assert(pos.shape[1] == inferring.shape[1]-1)
