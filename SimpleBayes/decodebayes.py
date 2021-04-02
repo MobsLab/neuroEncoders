@@ -174,11 +174,17 @@ class Trainer():
 		print('\nDecoding finished')
 
 		# Guessed X and Y
-		xProba  = [np.sum(position_proba[bin], axis=1) for bin in range(len(nSpikes))]
-		xGuessed = [bayes_matrices['Bins'][0][np.argmax(xProba[bin])] for bin in range(len(nSpikes))]
-		yProba  = [np.sum(position_proba[bin], axis=0) for bin in range(len(nSpikes))]
-		yGuessed = [bayes_matrices['Bins'][1][np.argmax(yProba[bin])] for bin in range(len(nSpikes))]
+
+		#Pierre: correction, here we should not marginalize over x and y to find the best predicted proba
+		allProba = [np.argmax(np.concatenate(position_proba[bin])) for bin in range(len(nSpikes))]
+		xGuessed = [bayes_matrices['Bins'][0][allProba[bin]//45] for bin in range(len(nSpikes))]
+		yGuessed = [bayes_matrices['Bins'][1][allProba[bin]%45] for bin in range(len(nSpikes))]
 		bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
+		# xProba  = [np.sum(position_proba[bin], axis=1) for bin in range(len(nSpikes))]
+		# xGuessed = [bayes_matrices['Bins'][0][np.argmax(xProba[bin])] for bin in range(len(nSpikes))]
+		# yProba  = [np.sum(position_proba[bin], axis=0) for bin in range(len(nSpikes))]
+		# yGuessed = [bayes_matrices['Bins'][1][np.argmax(yProba[bin])] for bin in range(len(nSpikes))]
+		# bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
 		position_guessed = np.vstack((xGuessed, yGuessed, bestProba)).T
 
 		outputResults = {"inferring":position_guessed, "pos": np.array(position_true), "probaMaps": position_proba, "times":np.array(times), 'nSpikes': np.array(nSpikes)}
