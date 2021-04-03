@@ -41,7 +41,7 @@ class Project():
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
         #TO change at every experiment:
-        self.resultsPath = self.folder + 'results_TF20_NoDropoutSlowRNNhardsigmoid_Euclidean_blockloss'
+        self.resultsPath = self.folder + 'resultsBayesRatDataset'
         self.resultsNpz = self.resultsPath + '/inferring.npz'
         self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -60,6 +60,9 @@ class Project():
     def res(self, g):
         return self.baseName + ".res." + str(g+1)
 
+    def spk(self, g):
+        return self.baseName + ".spk." + str(g+1)
+
     def pos(self, g):
         return self.folder + "dataset/pos." + str(g+1) + ".npz"
 
@@ -73,15 +76,18 @@ class Project():
 
 def main():
     xml_path = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseCluster/rat122-20090731.xml"
+    # xml_path = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
     projectPath = Project(xml_path)
 
-    behavior_data = ImportClusters.getBehavior(projectPath.folder)
 
     if os.path.isfile(projectPath.folder + 'ClusterData.npy'):
-        cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle='TRUE').item()
+        # cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle='TRUE').item()
+        cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle=True).item()
     else:
+        behavior_data = ImportClusters.getBehavior(projectPath.folder)
         cluster_data = ImportClusters.getSpikesfromClu(projectPath, behavior_data)
 
+    behavior_data = ImportClusters.getBehavior(projectPath.folder)
     print('Number of clusters:')
     n_clusters = np.sum(
         [np.shape(cluster_data['Spike_labels'][tetrode])[1] for tetrode in range(len(cluster_data['Spike_labels']))])
@@ -95,17 +101,38 @@ def main():
 
     posProbaPred = outputs["inferring"]
     posTrue = outputs["pos"]
+
+
     path_to_code = os.path.join(projectPath.folder,"../../neuroEncoders/transformData")
     predProjPos = transformData.linearizer.doubleArmMazeLinearization(posProbaPred[:,0:2],scale=False,path_to_folder=path_to_code)
+    trueProjPos = transformData.linearizer.doubleArmMazeLinearization(posTrue[:, 0:2], scale=False,
+                                                                      path_to_folder=path_to_code)
+
+    fig,ax = plt.subplots(2,1)
+    ax[0].plot(posProbaPred[:,0])
+    ax[0].plot(posTrue[:,0])
+    # ax[1].plot(predProjPos[:,0])
+    # ax[1].plot(trueProjPos[:,0])
+    fig.show()
+
+    fig,ax = plt.subplots(2,1)
+    ax[0].scatter(posTrue[:,0],posTrue[:,1])
+    ax[0].scatter(posProbaPred[:,0],posProbaPred[:,1])
+    ax[1].plot(predProjPos[:,0])
+    ax[1].plot(trueProjPos[:,0])
+    fig.show()
 
 
-    df = pd.DataFrame(predPos)
+    df = pd.DataFrame(posProbaPred[:,0:2])
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
-    df = pd.DataFrame(truePos)
+    df = pd.DataFrame(posTrue)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
-    df = pd.DataFrame(timeStepsPred)
+    df = pd.DataFrame(outputs["times"])
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "timeStepsPred.csv"))
-
+    df = pd.DataFrame(predProjPos)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "preojectionPred.csv"))
+    df = pd.DataFrame(trueProjPos)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "preojectionTrue.csv"))
 
 
 if __name__=="__main__":
