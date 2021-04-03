@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.interpolate as itp
+import os
 
 
 def uMazeLinearization(euclideanData):
@@ -22,7 +23,7 @@ def uMazeLinearization(euclideanData):
     return projectedPos
 
 
-def doubleArmMazeLinearization(euclideanData,scale=True):
+def doubleArmMazeLinearization(euclideanData,scale=True,path_to_folder=""):
     # We find a simpler parametrization of the maze,
     # project each prediction on this parametrization (forcing it to be on the maze)
     # and project back into euclidean values.
@@ -34,8 +35,8 @@ def doubleArmMazeLinearization(euclideanData,scale=True):
     #Note: the euclidean data need to be in the original coordinate scale, i.e cm in [0,261]
     # approximately
 
-    nnPointsFilePath1 = "interpolationKmeanCenter1.csv"
-    nnPointsFilePath2 = "interpolationKmeanCenter2.csv"
+    nnPointsFilePath1 = os.path.join(path_to_folder,"interpolationKmeanCenter1.csv")
+    nnPointsFilePath2 = os.path.join(path_to_folder,"interpolationKmeanCenter1.csv")
 
     df = pd.read_csv(nnPointsFilePath1)
     nnPoints1 = df.values

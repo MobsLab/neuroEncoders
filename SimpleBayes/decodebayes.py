@@ -32,7 +32,8 @@ class Trainer():
 			(np.where(behavior_data['Speed'][:,0] > speed_cut),
 			np.where(behavior_data['Position_time'][:,0] > behavior_data['Times']['start_train']),
 			np.where(behavior_data['Position_time'][:,0] < behavior_data['Times']['stop_train'])))]
-		xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
+		# xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
+		gridFeature, Occupation = butils.kdenD(selected_positions, self.bandwidth,kernel=self.kernel)
 		Occupation[Occupation==0] = np.min(Occupation[Occupation!=0])  # We want to avoid having zeros
 
 		mask = Occupation > (np.max(Occupation)/masking_factor)
@@ -61,7 +62,9 @@ class Trainer():
 				(np.where(cluster_data['Spike_speed'][tetrode][:,0] > speed_cut),
 				np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_train']),
 				np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_train'])))]
-			xEdges, yEdges, MRF = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
+			# xEdges, yEdges, MRF = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
+			gridFeature, MRF = butils.kdenD(selected_positions, self.bandwidth,
+											   edges=gridFeature, kernel=self.kernel)
 			MRF[MRF==0] = np.min(MRF[MRF!=0])
 			MRF         = MRF/np.sum(MRF)
 			MRF         = np.shape(selected_positions)[0]*np.multiply(MRF, Occupation_inverse)/behavior_data['Times']['learning']
@@ -76,7 +79,9 @@ class Trainer():
 					np.where(cluster_data['Spike_times'][tetrode][:,0] > behavior_data['Times']['start_train']),
 					np.where(cluster_data['Spike_times'][tetrode][:,0] < behavior_data['Times']['stop_train'])))]
 				if np.shape(selected_positions)[0]!=0:
-					xEdges, yEdges, LRF =  butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
+					# xEdges, yEdges, LRF =  butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
+					gridFeature, LRF = butils.kdenD(selected_positions, self.bandwidth,
+													edges=gridFeature, kernel=self.kernel)
 					LRF[LRF==0] = np.min(LRF[LRF!=0])
 					LRF         = LRF/np.sum(LRF)
 					LRF         = np.shape(selected_positions)[0]*np.multiply(LRF, Occupation_inverse)/behavior_data['Times']['learning']
@@ -86,9 +91,12 @@ class Trainer():
 
 			Rate_functions.append(Local_rate_functions)
 
+		#given a n-dim grid, let us find the binning over each edges
 		bayes_matrices = {'Occupation': Occupation, 'Marginal rate functions': Marginal_rate_functions, 'Rate functions': Rate_functions,
-				'Bins':[xEdges[:,0],yEdges[0,:]],'guessed_clusters_info': {'clusters':guessed_clusters, 'time':guessed_clusters_time},
-				'time_limits': [behavior_data['Times']['start_train'], behavior_data['Times']['stop_train'], behavior_data['Times']['start_test'], behavior_data['Times']['stop_test']]}
+				'Bins':[np.unique(gridFeature[i]) for i in range(len(gridFeature))],
+				'guessed_clusters_info': {'clusters':guessed_clusters, 'time':guessed_clusters_time},
+				'time_limits': [behavior_data['Times']['start_train'], behavior_data['Times']['stop_train'],
+				                behavior_data['Times']['start_test'], behavior_data['Times']['stop_test']]}
 
 		return bayes_matrices
 
@@ -174,14 +182,15 @@ class Trainer():
 		print('\nDecoding finished')
 
 		# Guessed X and Y
-		xProba  = [np.sum(position_proba[bin], axis=1) for bin in range(len(nSpikes))]
-		xGuessed = [bayes_matrices['Bins'][0][np.argmax(xProba[bin])] for bin in range(len(nSpikes))]
-		yProba  = [np.sum(position_proba[bin], axis=0) for bin in range(len(nSpikes))]
-		yGuessed = [bayes_matrices['Bins'][1][np.argmax(yProba[bin])] for bin in range(len(nSpikes))]
-		bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
-		position_guessed = np.vstack((xGuessed, yGuessed, bestProba)).T
 
-		outputResults = {"inferring":position_guessed, "pos": np.array(position_true), "probaMaps": position_proba, "times":np.array(times), 'nSpikes': np.array(nSpikes)}
+		#Pierre: correction, here we should not marginalize over x and y to find the best predicted proba
+		allProba = [np.unravel_index(np.argmax(position_proba[bin]),position_proba[bin].shape) for bin in range(len(nSpikes))]
+		bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
+		position_guessed = [ [bayes_matrices['Bins'][i][allProba[bin][i]] for i in range(len(bayes_matrices['Bins']))]
+							 for bin in range(len(nSpikes)) ]
+		inferResults = np.concatenate([np.array(position_guessed),np.array(bestProba).reshape([-1,1])],axis=-1)
+
+		outputResults = {"inferring":inferResults, "pos": np.array(position_true), "probaMaps": position_proba, "times":np.array(times), 'nSpikes': np.array(nSpikes)}
 		return outputResults
 
 
