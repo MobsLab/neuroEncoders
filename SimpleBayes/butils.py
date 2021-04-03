@@ -62,6 +62,30 @@ def kde2D(x, y, bandwidth, xbins=45j, ybins=45j, **kwargs):
 	zz = np.reshape(z, xx.shape)
 	return xx, yy, zz/np.sum(zz)
 
+def kdenD(feature, bandwidth, nbins=None, **kwargs):
+	"""Build nD kernel density estimate (KDE)."""
+	if nbins ==None:
+		nbins = [45 for j in range(feature.shape[1])]
+
+	kernel       = kwargs.get('kernel',       'epanechnikov')
+	if ('edges' in kwargs):
+		gridFeature = kwargs['edges']
+	else:
+		# create grid of sample locations (default: 150x150x...x150)
+		lspace = [np.linspace(np.min(feature[:,i]),np.max(feature[:,i]),nbins[i]) for i in range(feature.shape[1])]
+		gridFeature = np.meshgrid(*lspace,indexing="ij")
+
+
+	xy_sample = np.vstack([gridFeature[i].ravel() for i in range(len(gridFeature))]).T
+
+	kde_skl = KernelDensity(kernel=kernel, bandwidth=bandwidth)
+	kde_skl.fit(feature)
+
+	# score_samples() returns the log-likelihood of the samples
+	z = np.exp(kde_skl.score_samples(xy_sample))
+	zz = np.reshape(z, gridFeature[0].shape)
+	return gridFeature, zz/np.sum(zz)
+
 
 def be_sure_about(bin_probas):
 	"""Turns an array of probabilities into an array of zeros and ones"""
