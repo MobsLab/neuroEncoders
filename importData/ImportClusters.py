@@ -9,6 +9,8 @@ import xml.etree.ElementTree as ET
 from functools import reduce
 from SimpleBayes import butils
 from importData import rawDataParser
+import tqdm as tqdm
+import pandas as pd
 
 
 def getBehavior(folder, bandwidth=None):
@@ -46,7 +48,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 	spike_speed = []
 
 	n_tetrodes = len(list_channels)
-	for tetrode in range(n_tetrodes):
+	for tetrode in tqdm.tqdm(range(n_tetrodes)):
 		if os.path.isfile(projectPath.clu(tetrode)):
 			with open(
 					projectPath.clu(tetrode), 'r') as fClu, open(
@@ -85,5 +87,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 	cluster_data = {'Spike_labels': labels, 'Spike_times': spike_time, 'Spike_positions': spike_positions, 'Spike_speed': spike_speed}
 	if savedata:
 		np.save(projectPath.folder + 'ClusterData.npy', cluster_data)
+		df = pd.DataFrame(cluster_data)
+		df.to_csv(projectPath.folder+"ClusterData.csv")
 
 	return cluster_data
