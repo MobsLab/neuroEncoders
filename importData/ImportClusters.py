@@ -23,16 +23,22 @@ def getBehavior(folder, bandwidth=None):
 	speed = np.swapaxes(speed[:,:],1,0)
 	position_time = np.swapaxes(position_time[:,:],1,0)
 
-	start_time_train = f.root.behavior.trainEpochs[:,0]
-	stop_time_train = f.root.behavior.trainEpochs[:,1]
-	start_time_test = f.root.behavior.testEpochs[:,0]
-	stop_time_test = f.root.behavior.testEpochs[:,1]
+	#  Pierre 04/04/2021: train Epochs should be a continuous array, and test epochs too.
+	# odd indices indicate end of training,
+	if len(f.root.behavior.trainEpochs.shape) == 2:
+		trainEpochs = np.concatenate(f.root.behavior.trainEpochs)
+		testEpochs = np.concatenate(f.root.behavior.testEpochs)
+	elif len(f.root.behavior.trainEpochs.shape) == 1:
+		trainEpochs = f.root.behavior.trainEpochs
+		testEpochs= f.root.behavior.testEpochs
+	else:
+		raise Exception("bad train and test epochs format in mat file")
 	if bandwidth == None:
 		bandwidth = (np.max(positions) - np.min(positions))/20
-	learning_time = stop_time_train - start_time_train
+	learning_time = np.sum([trainEpochs[2*i+1]-trainEpochs[2*i] for i in range(len(trainEpochs)//2)])
 
 	behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
-		'Times': {'start_train': start_time_train, 'stop_train': stop_time_train, 'start_test': start_time_test, 'stop_test': stop_time_test, 'learning': learning_time}}
+		'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time}}
 
 	return behavior_data
 
