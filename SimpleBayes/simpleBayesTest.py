@@ -79,6 +79,7 @@ def main():
     # xml_path = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
     projectPath = Project(xml_path)
 
+    behavior_data = ImportClusters.getBehavior(projectPath.folder)
 
     if os.path.isfile(projectPath.folder + 'ClusterData.npy'):
         # cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle='TRUE').item()
@@ -109,10 +110,11 @@ def main():
                                                                       path_to_folder=path_to_code)
 
     fig,ax = plt.subplots(2,1)
-    ax[0].plot(posProbaPred[:,0])
-    ax[0].plot(posTrue[:,0])
+    ax[0].plot(posProbaPred[:,0],c="orange",label="pred")
+    ax[0].plot(posTrue[:,0],c="black",label="true")
     # ax[1].plot(predProjPos[:,0])
     # ax[1].plot(trueProjPos[:,0])
+    fig.legend()
     fig.show()
 
     fig,ax = plt.subplots(2,1)
