@@ -63,9 +63,14 @@ def kde2D(x, y, bandwidth, xbins=45j, ybins=45j, **kwargs):
 	return xx, yy, zz/np.sum(zz)
 
 def kdenD(feature, bandwidth, nbins=None, **kwargs):
-	"""Build nD kernel density estimate (KDE)."""
+	"""Build nD kernel density estimate (KDE).
+		feature should be an array of shape (N,n) where n is the dimension of the env variable
+		N number of elements.
+	"""
 	if nbins ==None:
 		nbins = [45 for j in range(feature.shape[1])]
+
+	feature = feature.reshape([feature.shape[0],-1]) # make sure feature is of the shape [N,n]
 
 	kernel       = kwargs.get('kernel',       'epanechnikov')
 	if ('edges' in kwargs):

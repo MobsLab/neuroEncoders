@@ -41,7 +41,7 @@ class Project():
             "test": self.folder + 'dataset/testingDataset.tfrec'}
 
         #TO change at every experiment:
-        self.resultsPath = self.folder + 'resultsBayesRatDataset'
+        self.resultsPath = self.folder + 'resultsBayesUMazeDataset'
         self.resultsNpz = self.resultsPath + '/inferring.npz'
         self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -75,14 +75,24 @@ class Project():
             info['encodingPrefix']
 
 def main():
-    xml_path = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseCluster/rat122-20090731.xml"
-    # xml_path = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
+    # xml_path = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseCluster/rat122-20090731.xml"
+    xml_path = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
     projectPath = Project(xml_path)
 
-
-    if os.path.isfile(projectPath.folder + 'ClusterData.npy'):
-        # cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle='TRUE').item()
-        cluster_data = np.load(projectPath.folder + 'ClusterData.npy', allow_pickle=True).item()
+    cluster_save_path = os.path.join(projectPath.resultsPath, 'ClusterData')
+    if os.path.isfile(os.path.join(cluster_save_path, 'Spike_labels0.csv')):
+        cluster_data = {"Spike_labels":[],"Spike_times":[],"Spike_positions":[],"Spike_speed":[]}
+        print("Reading saved cluster csv file")
+        for l in range(4):
+            df = pd.read_csv(os.path.join(cluster_save_path, "Spike_labels"+str(l)+".csv"))
+            cluster_data["Spike_labels"].append(df.values[:,1:])
+            df = pd.read_csv(os.path.join(cluster_save_path, "spike_time"+str(l)+".csv"))
+            cluster_data["Spike_times"].append(df.values[:,1:])
+            df = pd.read_csv(os.path.join(cluster_save_path, "spike_positions"+str(l)+".csv"))
+            cluster_data["Spike_positions"].append(df.values[:,1:])
+            df = pd.read_csv(os.path.join(cluster_save_path, "spike_speed"+str(l)+".csv"))
+            cluster_data["Spike_speed"].append(df.values[:,1:])
+        print("finished reading")
     else:
         behavior_data = ImportClusters.getBehavior(projectPath.folder)
         cluster_data = ImportClusters.getSpikesfromClu(projectPath, behavior_data)
@@ -109,10 +119,11 @@ def main():
                                                                       path_to_folder=path_to_code)
 
     fig,ax = plt.subplots(2,1)
-    ax[0].plot(posProbaPred[:,0])
-    ax[0].plot(posTrue[:,0])
-    # ax[1].plot(predProjPos[:,0])
+    ax[0].plot(posProbaPred[:,1],c="orange",label="pred")
+    ax[0].plot(posTrue[:,1],c="black",label="true")
+    ax[1].plot(posProbaPred[:,2])
     # ax[1].plot(trueProjPos[:,0])
+    fig.legend()
     fig.show()
 
     fig,ax = plt.subplots(2,1)

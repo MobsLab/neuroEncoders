@@ -23,16 +23,22 @@ def getBehavior(folder, bandwidth=None):
 	speed = np.swapaxes(speed[:,:],1,0)
 	position_time = np.swapaxes(position_time[:,:],1,0)
 
-	start_time_train = f.root.behavior.trainEpochs[:,0]
-	stop_time_train = f.root.behavior.trainEpochs[:,1]
-	start_time_test = f.root.behavior.testEpochs[:,0]
-	stop_time_test = f.root.behavior.testEpochs[:,1]
+	#  Pierre 04/04/2021: train Epochs should be a continuous array, and test epochs too.
+	# odd indices indicate end of training,
+	if len(f.root.behavior.trainEpochs.shape) == 2:
+		trainEpochs = np.concatenate(f.root.behavior.trainEpochs)
+		testEpochs = np.concatenate(f.root.behavior.testEpochs)
+	elif len(f.root.behavior.trainEpochs.shape) == 1:
+		trainEpochs = f.root.behavior.trainEpochs
+		testEpochs= f.root.behavior.testEpochs
+	else:
+		raise Exception("bad train and test epochs format in mat file")
 	if bandwidth == None:
 		bandwidth = (np.max(positions) - np.min(positions))/20
-	learning_time = stop_time_train - start_time_train
+	learning_time = np.sum([trainEpochs[2*i+1]-trainEpochs[2*i] for i in range(len(trainEpochs)//2)])
 
 	behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
-		'Times': {'start_train': start_time_train, 'stop_train': stop_time_train, 'start_test': start_time_test, 'stop_test': stop_time_test, 'learning': learning_time}}
+		'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time}}
 
 	return behavior_data
 
@@ -80,14 +86,25 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 		sys.stdout.write('We have finished building rates for group ' + str(tetrode+1) + ', loading next                           ')
 		sys.stdout.write('\r')
 		sys.stdout.flush()
-	sys.stdout.write('We have importing clusters.                                                           ')
+	sys.stdout.write('We have imported clusters.                                                           ')
 	sys.stdout.write('\r')
 	sys.stdout.flush()
 
 	cluster_data = {'Spike_labels': labels, 'Spike_times': spike_time, 'Spike_positions': spike_positions, 'Spike_speed': spike_speed}
 	if savedata:
+		cluster_save_path = os.path.join(projectPath.resultsPath,'ClusterData')
+		if not os.path.isdir(cluster_save_path):
+			os.makedirs(cluster_save_path)
+		for l in range(len(labels)):
+			df = pd.DataFrame(labels[l])
+			df.to_csv(os.path.join(cluster_save_path,"Spike_labels"+str(l)+".csv"))
+			df = pd.DataFrame(spike_time[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_time"+str(l)+".csv"))
+			df = pd.DataFrame(spike_positions[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_positions"+str(l)+".csv"))
+			df = pd.DataFrame(spike_speed[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_speed"+str(l)+".csv"))
 		np.save(projectPath.folder + 'ClusterData.npy', cluster_data)
-		df = pd.DataFrame(cluster_data)
-		df.to_csv(projectPath.folder+"ClusterData.csv")
+
 
 	return cluster_data
