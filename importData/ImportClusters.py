@@ -86,14 +86,25 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 		sys.stdout.write('We have finished building rates for group ' + str(tetrode+1) + ', loading next                           ')
 		sys.stdout.write('\r')
 		sys.stdout.flush()
-	sys.stdout.write('We have importing clusters.                                                           ')
+	sys.stdout.write('We have imported clusters.                                                           ')
 	sys.stdout.write('\r')
 	sys.stdout.flush()
 
 	cluster_data = {'Spike_labels': labels, 'Spike_times': spike_time, 'Spike_positions': spike_positions, 'Spike_speed': spike_speed}
 	if savedata:
+		cluster_save_path = os.path.join(projectPath.resultsPath,'ClusterData')
+		if not os.path.isdir(cluster_save_path):
+			os.makedirs(cluster_save_path)
+		for l in range(len(labels)):
+			df = pd.DataFrame(labels[l])
+			df.to_csv(os.path.join(cluster_save_path,"Spike_labels"+str(l)+".csv"))
+			df = pd.DataFrame(spike_time[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_time"+str(l)+".csv"))
+			df = pd.DataFrame(spike_positions[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_positions"+str(l)+".csv"))
+			df = pd.DataFrame(spike_speed[l])
+			df.to_csv(os.path.join(cluster_save_path,"spike_speed"+str(l)+".csv"))
 		np.save(projectPath.folder + 'ClusterData.npy', cluster_data)
-		df = pd.DataFrame(cluster_data)
-		df.to_csv(projectPath.folder+"ClusterData.csv")
+
 
 	return cluster_data
