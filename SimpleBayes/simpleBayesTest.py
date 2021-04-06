@@ -42,13 +42,6 @@ class Project():
 
         #TO change at every experiment:
         self.resultsPath = self.folder + 'resultsBayesUMazeDataset'
-        self.resultsNpz = self.resultsPath + '/inferring.npz'
-        self.resultsMat = self.resultsPath + '/inferring.mat'
-
-        if not os.path.isdir(self.folder + 'dataset'):
-            os.makedirs(self.folder + 'dataset')
-        if not os.path.isdir(self.folder + 'graph'):
-            os.makedirs(self.folder + 'graph')
         if not os.path.isdir(self.resultsPath):
             os.makedirs(self.resultsPath )
         if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
@@ -107,6 +100,13 @@ def main():
     trainer = decodebayes.Trainer(projectPath)
     bayesMatrices = trainer.train(behavior_data,cluster_data)
 
+    fig,ax = plt.subplots()
+    ax.imshow(bayesMatrices["Occupation"])
+    fig.show()
+    fig,ax = plt.subplots()
+    ax.imshow(bayesMatrices["Rate functions"][1][-1][:,:])
+    fig.show()
+
     outputs = trainer.test(bayesMatrices,behavior_data)
 
     posProbaPred = outputs["inferring"]
@@ -118,10 +118,15 @@ def main():
     trueProjPos = transformData.linearizer.doubleArmMazeLinearization(posTrue[:, 0:2], scale=False,
                                                                       path_to_folder=path_to_code)
 
+    predProjPos = transformData.linearizer.uMazeLinearization(posProbaPred[:,0:2])
+    trueProjPos = transformData.linearizer.uMazeLinearization(posTrue[:,0:2])
+
     fig,ax = plt.subplots(2,1)
-    ax[0].plot(posProbaPred[:,1],c="orange",label="pred")
-    ax[0].plot(posTrue[:,1],c="black",label="true")
-    ax[1].plot(posProbaPred[:,2])
+    ax[0].plot(posProbaPred[:,0],c="orange",label="pred")
+    ax[0].plot(posTrue[:,0],c="black",label="true")
+    ax[1].plot(posProbaPred[:,1],c="orange",label="pred")
+    ax[1].plot(posTrue[:,1],c="black",label="true")
+    # ax[1].plot(posProbaPred[:,2])
     # ax[1].plot(trueProjPos[:,0])
     fig.legend()
     fig.show()
@@ -132,6 +137,11 @@ def main():
     ax[1].plot(predProjPos[:,0])
     ax[1].plot(trueProjPos[:,0])
     fig.show()
+
+    fig,ax = plt.subplots()
+    ax.imshow(outputs["probaMaps"][300])
+    fig.show()
+
 
 
     df = pd.DataFrame(posProbaPred[:,0:2])
