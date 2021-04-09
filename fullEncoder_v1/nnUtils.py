@@ -66,6 +66,10 @@ def getSpikeSequences(params, generator):
 	# Used in the main function to  get the Spike sequence from the spike generator
 	# and cast it into an "example" format that will then be decoded by tensorflow inputs system tf.io
 	# as the key word yield is used, this function effectively returns a generator
+
+	# The goal of the function is to bin the set of spikes with respect to times, gather spikes in time windows
+	# of fix length
+
 	windowStart = None
 
 	length = 0
@@ -198,8 +202,8 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		GRP_test = Results['arr_3']
 		SPK_train = Results['arr_4']
 		SPK_test = Results['arr_5']
-		SPK_train = Results['arr_6']
-		SPK_test = Results['arr_7']
+		POS_train = Results['arr_6']
+		POS_test = Results['arr_7']
 
 		print('data loaded')
 		def genFromOld():
