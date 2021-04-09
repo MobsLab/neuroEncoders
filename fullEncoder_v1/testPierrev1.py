@@ -10,6 +10,7 @@ from contextlib import ExitStack
 import matplotlib.pyplot as plt
 import pandas as pd
 import transformData.linearizer
+from importData.rawDataParser import modify_feature_forBestTestSet
 
 
 class Project():
@@ -82,7 +83,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 150
+        self.nEpochs = 120
         self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -112,6 +113,7 @@ class Params:
         # ie enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer except the output for unclear reasons linked to gradient computations
 
+        self.visualizeSet = False
 
 
 def main():
@@ -123,7 +125,8 @@ def main():
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
     # tf.compat.v1.enable_eager_execution()
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -135,6 +138,8 @@ def main():
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
     spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
     params = Params(spikeDetector, windowSize)
+
+    modify_feature_forBestTestSet(projectPath.folder,1000)
 
     physical_devices = tf.config.list_physical_devices('GPU')
     try:
@@ -152,8 +157,6 @@ def main():
     params.usingMixedPrecision = False
 
     #tf.distribute.OneDeviceStrategy(device=tf.config.list_logical_devices('GPU')[0])
-
-
 
     if mode == "decode":
         spikeDetector.setThresholds(projectPath.thresholds)
@@ -188,7 +191,6 @@ def main():
                         params,
                         *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
 
-
     # Training, testing, and preparing network for online setup
     if mode=="full":
         from fullEncoder_v1 import nnNetwork2 as Training
@@ -196,6 +198,42 @@ def main():
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
     trainer = Training.LSTMandSpikeNetwork(projectPath, params)
+    # The data are now saved into a tfrec file,
+    # next we provide an efficient tool for selecting the training and testing step
+
+    if params.visualizeSet:
+        # we load training and testing data plotting the env variable,
+        # and the histrogram over the test set
+        datasetTrain = tf.data.TFRecordDataset(projectPath.tfrec["train"])
+        datasetTrain = datasetTrain.map(
+            lambda *vals: nnUtils.parseSerializedSequence(params, trainer.feat_desc, *vals, batched=False))
+        datasetPos = datasetTrain.map(lambda x: x["pos"])
+        fullFeatureTrue = list(datasetPos.as_numpy_iterator())
+        fullFeatureTrue = np.array(fullFeatureTrue)
+        datasetTest = tf.data.TFRecordDataset(projectPath.tfrec["test"])
+        datasetTest = datasetTest.map(
+            lambda *vals: nnUtils.parseSerializedSequence(params, trainer.feat_desc, *vals, batched=False))
+        datasetTestPos = datasetTest.map(lambda x: x["pos"])
+        fullFeatureTrueTest = list(datasetTestPos.as_numpy_iterator())
+        fullFeatureTrueTest = np.array(fullFeatureTrueTest)
+
+        # next we use our linearization tool:
+        from transformData.linearizer import  doubleArmMazeLinearization
+        path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
+        projPosTrue = doubleArmMazeLinearization(fullFeatureTrue,scale=True,path_to_folder=path_to_code)
+        projPosTest= doubleArmMazeLinearization(fullFeatureTrueTest,scale=True,path_to_folder=path_to_code)
+
+        fig,ax = plt.subplots(2,2)
+        ax[0,0].plot(projPosTrue[:,0])
+        ax[0,1].hist(projPosTrue[:, 0],bins=100)
+        ax[0,0].set_title("training data")
+        ax[1,0].plot(projPosTest[:, 0])
+        ax[1, 0].set_title("testing data")
+        ax[1,1].hist(projPosTest[:,0],bins=100)
+        fig.tight_layout()
+        fig.show()
+        fig.savefig(os.path.join(projectPath.resultsPath,"linearPosHist.png"))
+
     # trainLosses = trainer.train()
     # df = pd.DataFrame(trainLosses)
     # df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
@@ -209,11 +247,21 @@ def main():
     predLoss = outputs["predofLoss"]
     timeStepsPred = outputs["times"]
 
+    #project the prediction and true data into a line fit on the maze:
+    from transformData.linearizer import doubleArmMazeLinearization
+    path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
+    projPredPos = doubleArmMazeLinearization(predPos,scale=True,path_to_folder=path_to_code)
+    projTruePos = doubleArmMazeLinearization(truePos,scale=True,path_to_folder=path_to_code)
+
     # Saving files
     df = pd.DataFrame(predPos)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
     df = pd.DataFrame(truePos)
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
+    df = pd.DataFrame(projPredPos)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "projPredFeature.csv"))
+    df = pd.DataFrame(projTruePos)
+    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "projTrueFeature.csv"))
     df = pd.DataFrame(predLoss[:,0,0])
     df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossPred.csv"))
     df = pd.DataFrame(timeStepsPred)
@@ -275,8 +323,6 @@ def main():
     ax[1].plot(linearTrue[:,0],c="black")
     fig.show()
 
-    from fullEncoder_v1 import printResults
-    printResults.printResults(projectPath.resultsPath)
 
 if __name__=="__main__":
     # In this architecture we use a 2.0 tensorflow backend, predicting solely the position.

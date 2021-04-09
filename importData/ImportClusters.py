@@ -13,7 +13,7 @@ import tqdm as tqdm
 import pandas as pd
 
 
-def getBehavior(folder, bandwidth=None):
+def getBehavior(folder, bandwidth=None,getfilterSpeed = True):
 	# Extract behavior
 	f = tables.open_file(folder + 'nnBehavior.mat')
 	positions = f.root.behavior.positions
@@ -29,17 +29,30 @@ def getBehavior(folder, bandwidth=None):
 		trainEpochs = np.concatenate(f.root.behavior.trainEpochs)
 		testEpochs = np.concatenate(f.root.behavior.testEpochs)
 	elif len(f.root.behavior.trainEpochs.shape) == 1:
-		trainEpochs = f.root.behavior.trainEpochs
-		testEpochs= f.root.behavior.testEpochs
+		trainEpochs = f.root.behavior.trainEpochs[:]
+		testEpochs= f.root.behavior.testEpochs[:]
 	else:
 		raise Exception("bad train and test epochs format in mat file")
 	if bandwidth == None:
 		bandwidth = (np.max(positions) - np.min(positions))/20
-	learning_time = np.sum([trainEpochs[2*i+1]-trainEpochs[2*i] for i in range(len(trainEpochs)//2)])
 
-	behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
-		'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time}}
 
+	if getfilterSpeed:
+		speedFilter = f.root.behavior.speedMask[:]
+		samplingWindowPosition = (position_time[1:] - position_time[0:-1])[:,0]
+		#find index of at which epochs begin:
+		learning_epoch_index = [[np.argmin(np.abs(position_time-trainEpochs[2 * i + 1])),
+								 np.argmin(np.abs(position_time-trainEpochs[2 * i]))] for i in range(len(trainEpochs) // 2)]
+		learning_time = [np.sum(np.multiply(speedFilter[learning_epoch_index[i][1]:learning_epoch_index[i][0]],
+								samplingWindowPosition[learning_epoch_index[i][1]:learning_epoch_index[i][0]])) for i in range(len(learning_epoch_index))]
+		learning_time = np.sum(learning_time)
+		behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
+			'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time, "speedFilter":speedFilter}}
+	else:
+		learning_time = np.sum([trainEpochs[2 * i + 1] - trainEpochs[2 * i] for i in range(len(trainEpochs) // 2)])
+		behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
+						 'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time}}
+	f.close()
 	return behavior_data
 
 
@@ -71,8 +84,11 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				ss = (np.array([behavior_data['Speed'][np.min((np.argmin(np.abs(st[n]-behavior_data['Position_time'])),
 					len(behavior_data['Speed'])-1)),:] for n in range(len(st))]))
 
+				spindex = np.array([np.argmin(np.abs(st[n]-behavior_data['Position_time'])) for n in range(len(st))])
+
 				spike_time.append(st)
 				spike_positions.append(sp)
+				spike_pos_index.append(spindex)
 				spike_speed.append(ss)
 				labels.append(labels_temp)
 		else:
@@ -102,6 +118,8 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 			df.to_csv(os.path.join(cluster_save_path,"spike_time"+str(l)+".csv"))
 			df = pd.DataFrame(spike_positions[l])
 			df.to_csv(os.path.join(cluster_save_path,"spike_positions"+str(l)+".csv"))
+			df = pd.DataFrame(spike_pos_index[l])
+			df.to_csv(os.path.join(cluster_save_path, "spike_pos_index" + str(l) + ".csv"))
 			df = pd.DataFrame(spike_speed[l])
 			df.to_csv(os.path.join(cluster_save_path,"spike_speed"+str(l)+".csv"))
 		np.save(projectPath.folder + 'ClusterData.npy', cluster_data)

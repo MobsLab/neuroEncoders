@@ -76,6 +76,7 @@ class WaveformTranslator():
         # The convnet outputs spans over large real values
         # We normalize them  for each 36 ms window bin
         self.convNetNormalization = tf.keras.layers.LayerNormalization(axis=-1,center=False,scale=False, epsilon=1e-6)
+        self.denseForModelSize = tf.keras.layers.Dense(self.params.d_model)
 
         # Transformer Network:
         self.transformerEncoder = transformerNetwork.Encoder(self.params.num_layers_encoder_transformer,
@@ -196,6 +197,8 @@ class WaveformTranslator():
         combined_mask = tf.maximum(dec_target_padding_mask, look_ahead_mask)
         #Mask to prevent the transformer to look ahead of its output answer.
 
+        # projection from the result of the waveform to a space where the transformer acts:
+        allFeatures = self.denseForModelSize(allFeatures)
         allFeatures = self.convNetNormalization(allFeatures)
         encoding = self.transformerEncoder(allFeatures,mask=encoderMask[:, tf.newaxis, tf.newaxis, :])
         decoding = self.transformerDecoder([self.trueFeature,encoding, encoderMask[:, tf.newaxis, tf.newaxis, :], combined_mask])
@@ -421,8 +424,8 @@ class WaveformTranslator():
         plt.show()
         losses = tf.keras.losses.sparse_categorical_crossentropy(targetCellWord, output_test[1][:, 0, :],from_logits=True)
         fig,ax = plt.subplots(2,1)
-        ax[0].plot(targetCellWord[:,0],c="red")
-        ax[0].plot(tf.argmax(output_test[1],axis=-1)[:,0])
+        # ax[0].plot(targetCellWord[:,0],c="red")
+        ax[0].hist(tf.argmax(output_test[1],axis=-1)[:,0])
         ax[1].plot(losses)
         plt.show()
 

@@ -256,7 +256,7 @@ class LSTMandSpikeNetwork():
 
         ### Loading and inferring
         print("INFERRING")
-        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["train"])
+        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec["test"])
         dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
         #drop_remainder allows us to remove the last batch if it does not contain enough elements to form a batch.
         dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, self.feat_desc, *vals,batched=True))
