@@ -5,6 +5,7 @@ import tensorflow as tf
 from tqdm import tqdm
 import pandas as pd
 
+import importData.rawDataParser as rawDataParser
 
 
 class spikeNet:
@@ -76,7 +77,7 @@ def getSpikeSequences(params, generator):
 	times = []
 	groups = []
 	allSpikes = [[] for _ in range(params.nGroups)] # nGroups of array each containing the spike of a group
-	for train, grp, time, spike, pos in generator:
+	for pos_index, grp, time, spike, pos in generator:
 		if windowStart == None:
 			windowStart = time # at the first pass: initialize the windowStart on "time"
 
@@ -86,7 +87,7 @@ def getSpikeSequences(params, generator):
 				if allSpikes[g]==[] else np.stack(allSpikes[g], axis=0) \
 				for g in range(params.nGroups)] # stacks each list of array in allSpikes
 			# allSpikes then is composed of nGroups array of stacked "spike"
-			res = {"train": train, "pos": pos, "groups": groups, "length": length, "times": times}
+			res = {"pos_index": pos_index, "pos": pos, "groups": groups, "length": length, "times": times}
 			res.update({"spikes"+str(g): allSpikes[g] for g in range(params.nGroups)})
 			yield res
 			# increase the windowStart by one window length
@@ -116,12 +117,13 @@ def getSpikeSequences(params, generator):
 
 
 
-def serializeSpikeSequence(params, pos, groups, length, times, *spikes):
+def serializeSpikeSequence(params, pos_index,pos, groups, length, times, *spikes):
 	# Moves from the info obtained via the SpikeDetector -> spikeGenerator -> getSpikeSequences pipeline toward the
 	# tensorflow storing file. This take a specific format, which is here declared through the dic+tf.train.Feature
 	# organisation. We see that groups now correspond to the "spikes" we had before....
 
 	feat = {
+		"pos_index" : tf.train.Feature(int64_list =  tf.train.Int64List(value=[pos_index])),
 		"pos": tf.train.Feature(float_list = tf.train.FloatList(value=pos)), 
 		"length": tf.train.Feature(int64_list =  tf.train.Int64List(value=[length])),
 		"groups": tf.train.Feature(int64_list = tf.train.Int64List(value=groups)),
@@ -145,12 +147,13 @@ def serializeSingleSpike(params, clu, spike):
 
 
 
-@tf.function
-def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
-	if batched:
-		tensors = tf.io.parse_example(serialized=ex_proto, features=feat_desc)
-	else:
-		tensors = tf.io.parse_single_example(serialized=ex_proto, features=feat_desc)
+
+# @tf.function
+def parseSerializedSequence(params, tensors, batched=False): #feat_desc, ex_proto,
+	# if batched:
+	# 	tensors = tf.io.parse_example(serialized=ex_proto, features=feat_desc)
+	# else:
+	# 	tensors = tf.io.parse_single_example(serialized=ex_proto, features=feat_desc)
 
 	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
 	# Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
@@ -177,7 +180,45 @@ def parseSerializedSequence(params, feat_desc, ex_proto, batched=False):
 
 	return tensors
 
-def parseSerializedSpike(params, feat_desc, ex_proto, batched=False):
+def parseSerializedSequence_shuffleGroups(params, tensors, batched=False): #feat_desc, ex_proto,
+	# if batched:
+	# 	tensors = tf.io.parse_example(serialized=ex_proto, features=feat_desc)
+	# else:
+	# 	tensors = tf.io.parse_single_example(serialized=ex_proto, features=feat_desc)
+
+	tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
+	# Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
+	# Probably because he wanted a variable length <> inputs sequences
+	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+	# with this reshape; batch and variable length of time window are merged.... empty values are assigned -1 !
+	for g in range(params.nGroups):
+		#here 32 correspond to the number of discretized time bin for a spike
+		zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
+		tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
+		tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
+		if batched:
+			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, -1, params.nChannels[g], 32])
+		# even if batched: gather all together
+		tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1, params.nChannels[g], 32])
+		# Pierre 12/03/2021: the batch_size and timesteps are gathered together
+		nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(input_tensor=tf.cast(tf.equal(
+			tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
+		# nonZeros: control that the voltage measured is not 0, at all channels and time bin inside the detected spike
+		tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
+		#I don't understand why it can then call [:,0,:,:] as the output tensor of gather should have the same
+		# shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
+
+	# Next we shuffle the groups in each time window:
+	tensors["groups"] = tf.transpose(tf.random_shuffle(tf.transpose(tensors["groups"])))
+	# Accordingly, we need to swap different values
+
+
+	return tensors
+
+
+
+def parseSerializedSpike( feat_desc, ex_proto, batched=False):
 	if batched:
 		tensors = tf.io.parse_example(serialized=ex_proto, features=feat_desc)
 	else:
@@ -205,14 +246,38 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		POS_train = Results['arr_6']
 		POS_test = Results['arr_7']
 
+		#Compute position_index:
+		positions, positions_time = rawDataParser.get_position(projectPath.folder)
+		pos_index_train = np.zeros(SPT_train.shape[0],dtype=np.int64)
+		pos_index_train[0] = np.argmin(np.abs(positions_time-SPT_train[0]))
+		best_index = pos_index_train[0]
+		for i,sp in tqdm(enumerate(SPT_train)):
+			if np.abs(positions_time[best_index]-sp) < np.abs(positions_time[best_index+1]-sp):
+				pos_index_train[i] = best_index
+			else:
+				assert np.abs(positions_time[best_index+1]-sp) < np.abs(positions_time[best_index+2]-sp)
+				pos_index_train[i] = best_index +1
+				best_index +=1
+
+		pos_index_test = np.zeros(SPT_test.shape[0],dtype=np.int64)
+		pos_index_test[0] = np.argmin(np.abs(positions_time-SPT_test[0]))
+		best_index = pos_index_test[0]
+		for i,sp in tqdm(enumerate(SPT_test)):
+			if np.abs(positions_time[best_index]-sp) < np.abs(positions_time[best_index+1]-sp):
+				pos_index_test[i] = best_index
+			else:
+				assert np.abs(positions_time[best_index+1]-sp) < np.abs(positions_time[best_index+2]-sp)
+				pos_index_test[i] = best_index +1
+				best_index +=1
+
 		print('data loaded')
 		def genFromOld():
 			pbar = tqdm(total=len(GRP_train)+len(GRP_test))
-			for args in zip(GRP_train, SPT_train, SPK_train, POS_train/maxPos):
-				yield (True,)+args
+			for args in zip(pos_index_train,GRP_train, SPT_train, SPK_train, POS_train/maxPos):
+				yield args
 				pbar.update(1)
-			for args in zip(GRP_test, SPT_test, SPK_test, POS_test/maxPos):
-				yield (False,)+args
+			for args in zip(pos_index_test,GRP_test, SPT_test, SPK_test, POS_test/maxPos):
+				yield args
 				pbar.update(1)
 			pbar.close()
 		return genFromOld
@@ -224,7 +289,7 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 					continue
 				# sort by the spike group, and provide a zip object giving tuple of size 5....
 				# We observe that the position is normalized here...
-				for args in sorted(zip(spikes["train"],spikes['group'],spikes['time'],spikes['spike'],[p/maxPos for p in spikes['position']]), key=lambda x:x[2]):
+				for args in sorted(zip(spikes["position_index"],spikes['group'],spikes['time'],spikes['spike'],[p/maxPos for p in spikes['position']]), key=lambda x:x[2]):
 					yield args
 		return genFromDet
 

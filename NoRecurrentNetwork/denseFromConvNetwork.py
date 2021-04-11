@@ -8,18 +8,18 @@ import pandas as pd
 from importData.ImportClusters import getBehavior
 from importData.rawDataParser import  inEpochsMask
 
-# Pierre 14/02/01:
-# Reorganization of the code:
-    # One class for the network
-    # One function for the training
-# We save the model every epoch during the training
+# Pierre 11/04/2021:
+# A network that runs the convnets over all spikes
+# Then sum the outputs of each convnet (so of a group) )over the time window
+# The results are concatenated over the different convnet (i.e groups)
+# to produce an array that is then densely projected 2 times to produce the position
+# prediction....
 
-# We generate a model with the functional Model interface in tensorflow
 
-class LSTMandSpikeNetwork():
+class DenseFromConvNetwork():
 
     def __init__(self, projectPath, params, device_name="/device:gpu:0"):
-        super(LSTMandSpikeNetwork, self).__init__()
+        super(DenseFromConvNetwork, self).__init__()
         self.projectPath = projectPath
         self.params = params
         self.device_name = device_name
@@ -72,10 +72,8 @@ class LSTMandSpikeNetwork():
 
             # 4 LSTM cell, we can't use the RNN interface
             # and stacked RNN cells if we want to use the LSTM improvements.
-            self.lstmsNets = [tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
-                         tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
-                         tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
-                         tf.keras.layers.LSTM(self.params.lstmSize)] #,,recurrent_dropout=self.params.lstmDropout
+            self.denseDecoder1 = tf.keras.layers.Dense(self.params.lstmSize)
+            self.denseDecoder2 = tf.keras.layers.Dense(self.params.lstmSize)
             self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output, activation=tf.keras.activations.hard_sigmoid, dtype=tf.float32)
             #tf.keras.activations.hard_sigmoid
 
@@ -134,43 +132,26 @@ class LSTMandSpikeNetwork():
             # So we reserve columns to each output of the spiking networks...
             allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
 
-            #We would like to mask timesteps that were added for batching purpose, before running the RNN
-            batchedInputGroups = tf.reshape(self.inputGroups,[self.params.batch_size,-1])
-            mymask = tf.not_equal(batchedInputGroups,-1)
 
             if self.params.shuffle_spike_order:
                 #Note: to activate this shuffling we will need to recompile the model again...
                 indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[0], dtype=tf.int32)
                 shuffled_indices = tf.random.shuffle(indices_shuffle)
                 allFeatures = tf.gather(allFeatures, shuffled_indices)
-                mymask = tf.gather(mymask, shuffled_indices)
+
             if self.params.shuffle_convnets_outputs:
                 indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[1], dtype=tf.int32)
                 shuffled_indices = tf.random.shuffle(indices_shuffle)
                 allFeatures = tf.gather(tf.transpose(allFeatures), shuffled_indices)
                 allFeatures = tf.transpose(allFeatures)
-                mymask = tf.transpose(tf.gather(tf.transpose(mymask),shuffled_indices))
 
-            # Next we try a simple strategy to reduce training time:
-            # We reduce in duration the sequence fed to the LSTM by summing convnets ouput
-            # over bins of 10 successive spikes.
-            if self.params.fasterRNN:
-                segment_ids = tf.range(tf.shape(allFeatures)[1])
-                segment_ids = tf.math.floordiv(segment_ids, 10)
-                allFeatures_transposed = tf.transpose(allFeatures,perm=[1,0,2])
-                allFeatures_transposed = tf.math.segment_sum(allFeatures_transposed,segment_ids)
-                allFeatures = tf.transpose(allFeatures_transposed,perm=[1,0,2])
-                tf.ensure_shape(allFeatures,[self.params.batch_size,None,allFeatures.shape[2]])
-                # true+true remains true, therefore as soon as a time step should have been ran
-                # we can use our mask.
-                mymaskFloat = tf.transpose(tf.math.segment_sum(tf.transpose(tf.cast(mymask,dtype=tf.float32)),segment_ids))
-                mymask = tf.math.greater_equal(mymaskFloat,1.0)
-                tf.ensure_shape(mymask, [self.params.batch_size, None])
+            # We simply sum the population vectors which was output by the
+            # convnets.
+            # Note that shuffling the spike order should therefore not change the result
+            allFeatures = tf.reduce_sum(allFeatures,axis=1)
 
-            output_seq = self.lstmsNets[0](allFeatures,mask=mymask)
-            output_seq = self.lstmsNets[1](output_seq, mask=mymask)
-            output_seq = self.lstmsNets[2](output_seq, mask=mymask)
-            output = self.lstmsNets[3](output_seq, mask=mymask)
+            output = self.denseDecoder1(allFeatures)
+            output = self.denseDecoder2(output)
 
             myoutputPos = self.denseFeatureOutput(output)
             outputLoss = self.denseLoss2(self.denseLoss1(tf.stop_gradient(output)))
