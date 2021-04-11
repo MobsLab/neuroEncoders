@@ -16,12 +16,8 @@ from sklearn.neighbors import KernelDensity
 
 from tqdm import tqdm
 
-def inEpochs(t,epochs):
-	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
-	# test if t is among at least one of these epochs
-	# Epochs are treated as closed interval [,]
-	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
-	return np.where(mask >= 1)
+from importData.rawDataParser import inEpochs
+
 
 
 

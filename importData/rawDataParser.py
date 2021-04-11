@@ -56,6 +56,20 @@ def get_params(pathToXml):
 	return list_channels, samplingRate, nChannels
 
 
+def inEpochs(t,epochs):
+	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
+	# test if t is among at least one of these epochs
+	# Epochs are treated as closed interval [,]
+	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
+	return np.where(mask >= 1)
+def inEpochsMask(t,epochs):
+	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
+	# test if t is among at least one of these epochs
+	# Epochs are treated as closed interval [,]
+	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
+	return mask >= 1
+
+
 def get_position(folder):
 
 	if not os.path.exists(folder + 'nnBehavior.mat'):
@@ -66,10 +80,10 @@ def get_position(folder):
 		positions = np.swapaxes(positions[:,:],1,0)
 		position_time = np.swapaxes(position_time[:,:],1,0)
 
-		trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
-		testEpochs = np.array(f.root.behavior.testEpochs).flatten()
+		# trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
+		# testEpochs = np.array(f.root.behavior.testEpochs).flatten()
 
-	return positions, position_time, list(trainEpochs), list(testEpochs)
+	return positions, position_time  #, list(trainEpochs), list(testEpochs)
 
 
 def speed_filter(folder,overWrite=True):
@@ -160,7 +174,7 @@ def speed_filter(folder,overWrite=True):
 
 
 
-def modify_feature_forBestTestSet(folder):
+def modify_feature_forBestTestSet(folder,plimits=[]):
 	# Find test set with most uniform covering of speed and environment variable.
 
 	if not os.path.exists(folder + 'nnBehavior.mat'):
@@ -171,16 +185,29 @@ def modify_feature_forBestTestSet(folder):
 
 		positions = f.root.behavior.positions
 		positions = np.swapaxes(positions[:, :], 1, 0)
-		positions = positions[speedMask,:]
 		speeds = f.root.behavior.speed
 		position_time = f.root.behavior.position_time
 		position_time = np.swapaxes(position_time[:,:],1,0)
 		speeds = np.swapaxes(speeds[:, :], 1, 0)
 		if speeds.shape[0]==position_time.shape[0]-1 :
 			speeds = np.append(speeds,speeds[-1]).reshape(position_time.shape[0],speeds.shape[1])
+
+
+		#if pmin and pmax are not None, we do not use some positions from the behaviour file
+		if plimits==[] :
+			pmin = 0
+			pmax = position_time[-1][0]
+		else:
+			pmin = position_time[plimits[0]][0]
+			pmax = position_time[plimits[1]][0]
+			positions = positions[plimits[0]:plimits[1]+1,:]
+			position_time = position_time[plimits[0]:plimits[1]+1,:]
+			speeds = speeds[plimits[0]:plimits[1]+1,:]
+			speedMask = speedMask[plimits[0]:plimits[1]+1]
+
+		positions = positions[speedMask, :]
 		speeds = speeds[speedMask,:]
 		position_time = position_time[speedMask,:]
-
 
 		sizeTest = position_time.shape[0]//10
 
@@ -204,29 +231,65 @@ def modify_feature_forBestTestSet(folder):
 		totEntropy = np.array(entropiesSpeeds) + np.array(entropiesPositions)
 		bestTestSet = np.argmax(totEntropy)
 
-		fig,ax = plt.subplots()
-		ax.plot(totEntropy)
-		fig.show()
+		testSetId = bestTestSet*sizeTest
+		# Next we provide a small tool to manually change the bestTest set position
+		# as well as its size:
+		fig,ax = plt.subplots(positions.shape[1]+2,1)
+		trainEpoch = np.array([pmin,position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0],pmax])
+		testEpochs = np.array(
+			[position_time[bestTestSet * sizeTest][0], position_time[bestTestSet * sizeTest + sizeTest][0]])
+		ls = []
+		for id in range(positions.shape[1]):
+			l1 = ax[id].scatter(position_time[inEpochs(position_time,trainEpoch)[0],0],positions[inEpochs(position_time,trainEpoch)[0],id],c="red",s=0.5)
+			l2 = ax[id].scatter(position_time[inEpochs(position_time, testEpochs)[0],0], positions[inEpochs(position_time, testEpochs)[0],id],c="black",s=0.5)
+			ls.append([l1,l2])
+		ax[0].set_ylabel("first feature")
+		#TODO add histograms here...
+		slider = plt.Slider(ax[-2], 'test starting index', 0, positions.shape[0]-sizeTest,
+							valinit=testSetId, valstep=1)
+		sliderSize = plt.Slider(ax[-1], 'test size', 0, positions.shape[0],
+							valinit= sizeTest, valstep=1)
+		def update(val):
+			testSetId = slider.val
+			sizeTest = sliderSize.val
+			trainEpoch = np.array(
+				[pmin, position_time[testSetId ][0], position_time[testSetId + sizeTest][0],
+				 pmax])
+			testEpochs = np.array(
+				[position_time[testSetId][0], position_time[testSetId + sizeTest][0]])
+			for id in range(len(ls)):
+				l1,l2=ls[id]
+				l1.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, trainEpoch)[0],0],
+										 positions[inEpochs(position_time, trainEpoch)[0],id]])))
+				l2.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, testEpochs)[0],0],
+										 positions[inEpochs(position_time, testEpochs)[0],id]])))
+			fig.canvas.draw_idle()
 
+		slider.on_changed(update)
+		sliderSize.on_changed(update)
+		plt.show()
+
+		testSetId = slider.val
+		sizeTest = sliderSize.val
 		children = [c.name for c in f.list_nodes("/behavior")]
 		if "testEpochs" in children:
 			f.remove_node("/behavior", "testEpochs")
-		f.create_array("/behavior","testEpochs",np.array([position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0]]))
+		f.create_array("/behavior","testEpochs",np.array([position_time[testSetId][0],position_time[testSetId+sizeTest][0]]))
 		if "trainEpochs" in children:
 			f.remove_node("/behavior", "trainEpochs")
-		f.create_array("/behavior", "trainEpochs", np.array([0,position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0],position_time[-1][0]]))
+		f.create_array("/behavior", "trainEpochs", np.array([pmin,position_time[testSetId][0],position_time[testSetId+sizeTest][0],pmax]))
 		f.flush() #effectively write down the modification we just made
 
-		# just a display of the first env variable and the histograms:
-		fig,ax = plt.subplots(2,2)
-		fig.suptitle("Test Set")
-		ax[0,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
-		ax[0,1].hist(positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
-		ax[0,0].set_ylabel("position")
-		ax[1,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
-		ax[1,1].hist(speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
-		ax[1,0].set_ylabel("speed")
-		fig.show()
+		# # just a display of the first env variable and the histograms:
+		# fig,ax = plt.subplots(2,2)
+		# fig.suptitle("Test Set")
+		# ax[0,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
+		# ax[0,1].hist(positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
+		# ax[0,0].set_ylabel("position")
+		# ax[1,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
+		# ax[1,1].hist(speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
+		# ax[1,0].set_ylabel("speed")
+		# fig.show()
 
 
 
@@ -298,28 +361,18 @@ class INTANFilter:
 		self.state = self.a * self.state + self.b * np.array(sample)[self.channelList]
 		return temp
 
-
-
-
-
-
-
-
-
-
-
-
-def isTrainingExample(epochs, time):
-	for e in range(len(epochs['train'])//2):
-		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
-			return True
-	for e in range(len(epochs['test'])//2):
-		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
-			return False
-	return None
+#
+# def isTrainingExample(epochs, time):
+# 	for e in range(len(epochs['train'])//2):
+# 		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
+# 			return True
+# 	for e in range(len(epochs['test'])//2):
+# 		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
+# 			return False
+# 	return None
 
 def emptyData():
-	return {'group':[], 'time':[], 'spike':[], 'position':[], 'train':[], 'position_index':[]}
+	return {'group':[], 'time':[], 'spike':[], 'position':[], 'position_index':[]} #'train':[]
 
 class SpikeDetector:
 	'''A processor class to go through raw data to filter and extract spikes. Synchronizes with position.'''
@@ -344,16 +397,17 @@ class SpikeDetector:
 			self.position_time = np.array([0], dtype=float)
 			self.startTime = 0
 			self.stopTime = float("inf")
-			self.epochs = {"train": [], "test": [0, float("inf")]}
+			# self.epochs = {"train": [], "test": [0, float("inf")]}
 		else:
 			self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
-			self.position, self.position_time, *epochs = get_position(self.path.folder)
-			self.epochs = {
-				"train": epochs[0],
-				"test":  epochs[1]
-			}
-			self.startTime = min(self.epochs["train"] + self.epochs["test"])
-			self.stopTime  = max(self.epochs["train"] + self.epochs["test"])
+			self.position, self.position_time = get_position(self.path.folder)
+			# self.epochs = {
+			# 	"train": epochs[0],
+			# 	"test":  epochs[1]
+			# }
+			# self.startTime = min(self.epochs["train"] + self.epochs["test"])
+			self.stopTime  = self.position_time[-1] # max(self.epochs["train"] + self.epochs["test"])
+			self.startTime = self.position_time[0]
 
 
 		if useOpenEphysFilter:
@@ -379,15 +433,15 @@ class SpikeDetector:
 		return [len(self.list_channels[n]) for n in range(self.nGroups())]
 	def maxPos(self):
 		return np.max(self.position) if self.mode != 'decode' else 1
-	def learningTime(self):
-		return sum([self.epochs["train"][2*n+1]-self.epochs["train"][2*n] for n in range(len(self.epochs["train"])//2)])
-	def trainingPositions(self):
-		selected = [False for _ in range(len(self.position_time))]
-		for idx in range(len(self.position_time)):
-			for e in range(len(self.epochs['train'])//2):
-				if self.position_time[idx] >= self.epochs['train'][2*e] and self.position_time[idx] < self.epochs['train'][2*e+1]:
-					selected[idx] = True
-		return self.position[np.where(selected)]/self.maxPos()
+	# def learningTime(self):
+	# 	return sum([self.epochs["train"][2*n+1]-self.epochs["train"][2*n] for n in range(len(self.epochs["train"])//2)])
+	# def trainingPositions(self):
+	# 	selected = [False for _ in range(len(self.position_time))]
+	# 	for idx in range(len(self.position_time)):
+	# 		for e in range(len(self.epochs['train'])//2):
+	# 			if self.position_time[idx] >= self.epochs['train'][2*e] and self.position_time[idx] < self.epochs['train'][2*e+1]:
+	# 				selected[idx] = True
+	# 	return self.position[np.where(selected)]/self.maxPos()
 
 
 	def dim_output(self):
@@ -468,7 +522,7 @@ class SpikeDetector:
 
 		self.inputQueue = ml.Queue()
 		self.outputQueue = ml.Queue()
-		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate, self.epochs, self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
+		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate , self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
 		for p in self.proc:
 			p.deamon = True
 			p.start()
@@ -536,7 +590,7 @@ class SpikeDetector:
 
 
 
-def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thresholdFactor, startTime, position, position_time):
+def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFactor, startTime, position, position_time):
 	"""
 		How it detect spikes:
 			moves with steps of size 15, ie dt= 15*1/sampling_rate
