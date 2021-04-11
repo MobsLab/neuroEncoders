@@ -140,16 +140,18 @@ class LSTMandSpikeNetwork():
 
             if self.params.shuffle_spike_order:
                 #Note: to activate this shuffling we will need to recompile the model again...
-                indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[0], dtype=tf.int32)
-                shuffled_indices = tf.random.shuffle(indices_shuffle)
-                allFeatures = tf.gather(allFeatures, shuffled_indices)
-                mymask = tf.gather(mymask, shuffled_indices)
-            if self.params.shuffle_convnets_outputs:
                 indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[1], dtype=tf.int32)
                 shuffled_indices = tf.random.shuffle(indices_shuffle)
-                allFeatures = tf.gather(tf.transpose(allFeatures), shuffled_indices)
-                allFeatures = tf.transpose(allFeatures)
-                mymask = tf.transpose(tf.gather(tf.transpose(mymask),shuffled_indices))
+                allFeatures_transposed = tf.transpose(allFeatures, perm=[1, 0, 2])
+                allFeatures = tf.transpose(tf.gather(allFeatures_transposed, shuffled_indices),perm=[1,0,2])
+                tf.ensure_shape(allFeatures, [self.params.batch_size, None, allFeatures.shape[2]])
+                mymask = tf.transpose(tf.gather(tf.transpose(mymask,perm=[1,0]), shuffled_indices),perm=[1,0])
+                tf.ensure_shape(mymask, [self.params.batch_size, None])
+            if self.params.shuffle_convnets_outputs:
+                indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[2], dtype=tf.int32)
+                shuffled_indices = tf.random.shuffle(indices_shuffle)
+                allFeatures = tf.transpose(tf.gather(tf.transpose(allFeatures,perm=[2,1,0]), shuffled_indices),perm=[2,1,0])
+                tf.ensure_shape(allFeatures, [self.params.batch_size, None, allFeatures.shape[2]])
 
             # Next we try a simple strategy to reduce training time:
             # We reduce in duration the sequence fed to the LSTM by summing convnets ouput
@@ -185,11 +187,11 @@ class LSTMandSpikeNetwork():
             lossFromOutputLoss = tf.identity(tf.math.reduce_mean(tf.losses.mean_squared_error(outputLoss, posLoss)),name="lossOfLossPredictor")
         return  myoutputPos, outputLoss, idmanifoldloss , lossFromOutputLoss
 
-    def mybuild(self, outputs):
+    def mybuild(self, outputs,modelName="model.png"):
         model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.iteratorLengthInput,self.truePos,self.inputGroups],
                                outputs=outputs)
         tf.keras.utils.plot_model(
-            model, to_file='model.png', show_shapes=True
+            model, to_file=modelName, show_shapes=True
         )
         model.compile(
             optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
@@ -348,6 +350,15 @@ class LSTMandSpikeNetwork():
         df = pd.DataFrame(times)
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "timeStepsPred.csv"))
 
+        fig, ax = plt.subplots(2, 1)
+        ax[1].scatter(times, featureTrue[:, 1], c="black", label="true Position")
+        ax[1].scatter(times, output_test[0][:, 1], c="red", label="predicted Position")
+        ax[1].set_xlabel("time")
+        ax[1].set_ylabel("Y")
+        ax[1].set_title("prediction with TF2.0's architecture")
+        ax[0].scatter(output_test[0][:, 1], featureTrue[:, 1], alpha=0.1)
+        fig.legend()
+        plt.show()
 
         return {"featurePred": output_test[0], "featureTrue": featureTrue,
                 "times": times, "predofLoss" : output_test[1],
