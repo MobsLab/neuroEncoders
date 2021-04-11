@@ -81,7 +81,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 120
+        self.nEpochs = 10
         # self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
@@ -178,14 +178,13 @@ def main():
 
     #first we find the first and last position index in the recording dataset
     # to set as limits in for the nnbehavior.mat
-    dataset = tf.data.TFRecordDataset(projectPath.tfrec)
-    dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(trainer.feat_desc, *vals))
-    pos_index = list(dataset.map(lambda x: x["pos_index"]).as_numpy_iterator())
+    # dataset = tf.data.TFRecordDataset(projectPath.tfrec)
+    # dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(trainer.feat_desc, *vals))
+    # pos_index = list(dataset.map(lambda x: x["pos_index"]).as_numpy_iterator())
+    # speed_filter(projectPath.folder,overWrite=False)
+    # modify_feature_forBestTestSet(projectPath.folder,plimits=[np.min(pos_index),np.max(pos_index)])
 
-    speed_filter(projectPath.folder,overWrite=False)
-    modify_feature_forBestTestSet(projectPath.folder,plimits=[np.min(pos_index),np.max(pos_index)])
-
-    trainLosses = trainer.train()
+    # trainLosses = trainer.train()
 
 
     #project the prediction and true data into a line fit on the maze:
@@ -198,57 +197,47 @@ def main():
     # predLoss = outputs["predofLoss"]
     # timeStepsPred = outputs["times"]
 
-
-    maxPos = spikeDetector.maxPos()
-    euclideanDistance = np.sqrt(np.sum(np.square(predPos * maxPos - truePos * maxPos), axis=1))
-    np.mean(euclideanDistance)
-    np.std(euclideanDistance)
-
-    fig, ax = plt.subplots(2,1)
-    ax[1].scatter(timeStepsPred,truePos[:, 1], c="black",label="true Position")
-    ax[1].scatter(timeStepsPred,predPos[:, 1], c="red", label="predicted Position")
-    ax[1].set_xlabel("time")
-    ax[1].set_ylabel("Y")
-    ax[1].set_title("prediction with TF2.0's architecture")
-    ax[0].scatter(predPos[:,1],truePos[:,1],alpha=0.1)
-    fig.legend()
-    fig.show()
-
-    fig, ax = plt.subplots()
-    ax.plot(timeStepsPred, truePos[:, 1]-predPos[:, 1], c="black", alpha=0.1, label="true Position")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    fig.legend()
-    fig.show()
-
-
-    fig, ax = plt.subplots()
-    ax.scatter(truePos[:, 0], truePos[:, 1], c="black", alpha=0.1, label="true Position")
-    ax.scatter(predPos[:, 0], predPos[:, 1], c="red", alpha=0.1, label="predicted Position")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("prediction with TF2.0's architecture")
-    fig.legend()
-    fig.show()
-    fig, ax = plt.subplots()
-    ax.scatter(linearTrue[:, 0], linearTrue[:, 1], c="black", alpha=0.1, label="true Position")
-    ax.scatter(linearPred[:, 0], linearPred[:, 1], c="red", alpha=0.1, label="predicted Position")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("prediction with TF2.0's architecture")
-    fig.legend()
-    fig.show()
-    fig.savefig(os.path.join(projectPath.resultsPath, "testSetPrediciton.png"))
+    #
+    # maxPos = spikeDetector.maxPos()
+    # euclideanDistance = np.sqrt(np.sum(np.square(predPos * maxPos - truePos * maxPos), axis=1))
+    # np.mean(euclideanDistance)
+    # np.std(euclideanDistance)
+    #
+    # fig, ax = plt.subplots()
+    # ax.plot(timeStepsPred, truePos[:, 1]-predPos[:, 1], c="black", alpha=0.1, label="true Position")
+    # ax.set_xlabel("X")
+    # ax.set_ylabel("Y")
+    # fig.legend()
+    # fig.show()
+    #
+    #
+    # fig, ax = plt.subplots()
+    # ax.scatter(truePos[:, 0], truePos[:, 1], c="black", alpha=0.1, label="true Position")
+    # ax.scatter(predPos[:, 0], predPos[:, 1], c="red", alpha=0.1, label="predicted Position")
+    # ax.set_xlabel("X")
+    # ax.set_ylabel("Y")
+    # ax.set_title("prediction with TF2.0's architecture")
+    # fig.legend()
+    # fig.show()
+    # fig, ax = plt.subplots()
+    # ax.scatter(linearTrue[:, 0], linearTrue[:, 1], c="black", alpha=0.1, label="true Position")
+    # ax.scatter(linearPred[:, 0], linearPred[:, 1], c="red", alpha=0.1, label="predicted Position")
+    # ax.set_xlabel("X")
+    # ax.set_ylabel("Y")
+    # ax.set_title("prediction with TF2.0's architecture")
+    # fig.legend()
+    # fig.show()
+    # fig.savefig(os.path.join(projectPath.resultsPath, "testSetPrediciton.png"))
 
     ## Test with shuflling of spikes in the window
     # We ask here if the algorithm uses the order of the spikes in the window
     params.shuffle_spike_order = True
-    trainer.model = trainer.mybuild(trainer.get_Model())
+    trainer.model = trainer.mybuild(trainer.get_Model(),modelName="spikeOrdershufflemodel.png")
     outputs = trainer.test(linearizationFunction,"result_spikeorderinwindow_shuffle")
 
     params.shuffle_spike_order = False
     params.shuffle_convnets_outputs = True
-    trainer.model = trainer.mybuild(trainer.get_Model())
+    trainer.model = trainer.mybuild(trainer.get_Model(),modelName="convNetOutputshufflemodel.png")
     outputs = trainer.test(linearizationFunction,"result_convOutputs_shuffle")
 
 

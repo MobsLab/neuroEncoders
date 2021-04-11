@@ -87,6 +87,11 @@ def get_position(folder):
 
 
 def speed_filter(folder,overWrite=True):
+	## A simple tool to set up a threshold on the speed value
+	# The speed threshold is then implemented through a speed_mask:
+	# a boolean array indicating for each index (i.e measured feature time step)
+	# if it is above threshold or not.
+
 	with tables.open_file(folder + 'nnBehavior.mat',"a") as f:
 
 		children = [c.name for c in f.list_nodes("/behavior")]
@@ -176,6 +181,11 @@ def speed_filter(folder,overWrite=True):
 
 def modify_feature_forBestTestSet(folder,plimits=[]):
 	# Find test set with most uniform covering of speed and environment variable.
+	# provides then a little manual tool to change the size of the window
+	# and its position.
+	# plimits can be used to constraint the range of search for the test sets
+	# to a certain time intervals. We added it because in some dataset
+	# the nnbehavior contained more measured timesteps than in the .dat files.
 
 	if not os.path.exists(folder + 'nnBehavior.mat'):
 		raise ValueError('this file does not exist :'+folder+'nnBehavior.mat')
