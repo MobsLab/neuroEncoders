@@ -70,6 +70,7 @@ class LSTMandSpikeNetwork():
             self.spikeNets = [nnUtils.spikeNet(nChannels=self.params.nChannels[group], device=self.device_name,
                                                nFeatures=self.params.nFeatures) for group in range(self.params.nGroups)]
 
+            self.dropoutLayer = tf.keras.layers.Dropout(0.2)
             # 4 LSTM cell, we can't use the RNN interface
             # and stacked RNN cells if we want to use the LSTM improvements.
             self.lstmsNets = [tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
@@ -168,6 +169,8 @@ class LSTMandSpikeNetwork():
                 mymaskFloat = tf.transpose(tf.math.segment_sum(tf.transpose(tf.cast(mymask,dtype=tf.float32)),segment_ids))
                 mymask = tf.math.greater_equal(mymaskFloat,1.0)
                 tf.ensure_shape(mymask, [self.params.batch_size, None])
+
+            allFeatures = self.dropoutLayer(allFeatures)
 
             output_seq = self.lstmsNets[0](allFeatures,mask=mymask)
             output_seq = self.lstmsNets[1](output_seq, mask=mymask)
@@ -293,18 +296,23 @@ class LSTMandSpikeNetwork():
         return trainLosses
 
 
-    def test(self,linearizationFunction,saveFolder="resultInference"):
-
+    def test(self,linearizationFunction,saveFolder="resultInference",useTrain=False,useSpeedFilter=True):
         self.model.load_weights(os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt"))
-
         ### Loading and inferring
         print("INFERRING")
         behavior_data = getBehavior(self.projectPath.folder, getfilterSpeed=True)
+
         speed_mask = behavior_data["Times"]["speedFilter"]
+        if not useSpeedFilter:
+            speed_mask = np.zeros_like(speed_mask) + 1
 
         dataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
         dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals))
-        epochMask = inEpochsMask(behavior_data['Position_time'][:, 0], behavior_data['Times']['testEpochs'])
+
+        if useTrain:
+            epochMask = inEpochsMask(behavior_data['Position_time'][:, 0], behavior_data['Times']['trainEpochs'])
+        else:
+            epochMask = inEpochsMask(behavior_data['Position_time'][:, 0], behavior_data['Times']['testEpochs'])
         tot_mask = speed_mask * epochMask
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(tot_mask)), dtype=tf.int64),
@@ -330,8 +338,8 @@ class LSTMandSpikeNetwork():
         featureTrue = np.reshape(fullFeatureTrue, [output_test[0].shape[0], output_test[0].shape[-1]])
         times = np.reshape(times, [output_test[0].shape[0]])
 
-        projPredPos = linearizationFunction(output_test[0][:,:2])
-        projTruePos = linearizationFunction(featureTrue)
+        projPredPos,linearPred = linearizationFunction(output_test[0][:,:2])
+        projTruePos,linearTrue = linearizationFunction(featureTrue)
 
         if not os.path.isdir(os.path.join(self.projectPath.resultsPath,saveFolder)):
             os.makedirs(os.path.join(self.projectPath.resultsPath,saveFolder))
@@ -345,6 +353,10 @@ class LSTMandSpikeNetwork():
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "projPredFeature.csv"))
         df = pd.DataFrame(projTruePos)
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "projTrueFeature.csv"))
+        df = pd.DataFrame(projPredPos)
+        df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "linearPred.csv"))
+        df = pd.DataFrame(projTruePos)
+        df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "linearTrue.csv"))
         df = pd.DataFrame(output_test[1])
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "lossPred.csv"))
         df = pd.DataFrame(times)
@@ -358,8 +370,9 @@ class LSTMandSpikeNetwork():
         ax[1].set_title("prediction with TF2.0's architecture")
         ax[0].scatter(output_test[0][:, 1], featureTrue[:, 1], alpha=0.1)
         fig.legend()
-        plt.show()
+        fig.show()
 
         return {"featurePred": output_test[0], "featureTrue": featureTrue,
                 "times": times, "predofLoss" : output_test[1],
-                "lossFromOutputLoss" : outLoss}
+                "lossFromOutputLoss" : outLoss, "projPred":projPredPos, "projTruePos":projTruePos,
+                "linearPred":linearPred,"linearTrue":linearTrue}

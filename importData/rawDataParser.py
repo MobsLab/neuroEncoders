@@ -136,10 +136,10 @@ def speed_filter(folder,overWrite=True):
 		l3, = ax[1].plot(myposTime[speedFilter], myspeed2[speedFilter],c="purple")
 		l5 = ax[0].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
 		l6 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
-		ax[2].hist(np.log(myspeed2), bins=200)
+		ax[2].hist(np.log(myspeed2+10**(-8)), bins=200)
 		ax[2].set_ylabel("speed histogram")
 		l8 = ax[2].axvline(speedThreshold, color="black")
-		slider = plt.Slider(ax[3], 'speed Threshold',np.min(np.log(myspeed2)),np.max(np.log(myspeed2)),valinit=speedThreshold,valstep=0.01)
+		slider = plt.Slider(ax[3], 'speed Threshold',np.min(np.log(myspeed2+10**(-8))),np.max(np.log(myspeed2+10**(-8))),valinit=speedThreshold,valstep=0.01)
 
 		def update(val):
 			speedThreshold = val
@@ -169,7 +169,7 @@ def speed_filter(folder,overWrite=True):
 		l3, = ax[1].plot(myposTime[speedFilter], myspeed2[speedFilter], c="purple")
 		l5 = ax[0].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
 		l6 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
-		ax[2].hist(np.log(myspeed2), bins=200)
+		ax[2].hist(np.log(myspeed2+10**(-8)), bins=200)
 		ax[2].axvline(slider.val, color="black")
 		plt.show()
 
@@ -338,7 +338,8 @@ class openEphysFilter:
 		"""
 		if sample.ndim==1:
 			return np.array(next(self.dataReader))[self.channelList]*0.195
-			# We might not want to read all channels, so we use "self.channelList" the list of channel to consider
+			# Pierre: Very suboptimal, because the .dat files and .fil array are both read here
+			# and the data in the .dat files is not used...
 			# to filter out uninteresting channels
 			# Here the channelList simply gather all channels (over different groups) that were acquired
 		else:
@@ -528,6 +529,10 @@ class SpikeDetector:
 		self.dataFile = open(self.path.dat, 'rb')
 		self.dataFile.__enter__()
 		self.dataReader = struct.iter_unpack(str(self.nChannels)+'h', self.dataFile.read())
+		#let us try with a mmap:
+		# number_timeSteps = os.stat(self.path.dat).st_size//(2*self.nChannels)
+		# memmapData = np.memmap(self.path.dat,dtype=np.int16,mode='r',shape=(number_timeSteps,self.nChannels))
+		# self.dataReader = map(lambda x:x,memmapData)
 		print('extracting spikes.')
 
 		self.inputQueue = ml.Queue()
@@ -568,6 +573,8 @@ class SpikeDetector:
 		spikesFound = self.getLateSpikes()
 
 		### copy end of previous buffer at the beginning of the filteredSignal
+		#As we will detect spike starting from time 0 in this new buffer, we need to know at least 15 ms of the
+		# signal just before so that we save all these spikes.
 		if self.endOfLastBuffer != []:
 			self.firstBuffer = False
 			self.filteredSignal = np.concatenate([self.endOfLastBuffer, self.filteredSignal], axis=0)
@@ -579,7 +586,7 @@ class SpikeDetector:
 		# Then sent on the inputQueue to be process by the function findSpikesInGroupParallel ran in parallel
 		for group in range(len(self.list_channels)):
 			filteredBuffer = self.filteredSignal[:,self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
-			thresholds	 = self.thresholds	  [self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
+			thresholds	 = self.thresholds[self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
 			self.inputQueue.put([self.pbar.n, group, thresholds, filteredBuffer])
 
 
@@ -659,7 +666,7 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 						time = (N * BUFFERSIZE + spl - 15) / samplingRate
 						maxSplTimeToUseInBuffer = BUFFERSIZE - 17 + 15
 					# train = isTrainingExample(epochs, time)
-					assert maxSplTimeToUseInBuffer == filteredBuffer.shape[0]-17
+					# assert maxSplTimeToUseInBuffer == filteredBuffer.shape[0]-17
 
 					# Do nothing unless after behaviour data has started
 					if time > startTime:
@@ -706,4 +713,21 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 			spl += 1
 
 		outputQueue.put([spikesFound, lateSpikes])
+
+
+
+def vectorize_spike_filter(filteredBuffer, N, group, thresholds):
+	## We vectorize the spike filtering to improve its speed:
+
+	possibleSpike = (filteredBuffer[15:, :] < -thresholds)*np.all(filteredBuffer[14:-1, :] > -thresholds)
+
+
+	return None
+
+
+
+
+
+
+
 

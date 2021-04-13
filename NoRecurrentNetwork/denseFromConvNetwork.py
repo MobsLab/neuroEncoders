@@ -72,8 +72,11 @@ class DenseFromConvNetwork():
 
             # 4 LSTM cell, we can't use the RNN interface
             # and stacked RNN cells if we want to use the LSTM improvements.
-            self.denseDecoder1 = tf.keras.layers.Dense(self.params.lstmSize)
-            self.denseDecoder2 = tf.keras.layers.Dense(self.params.lstmSize)
+            self.denseDecoder1 = tf.keras.layers.Dense(self.params.lstmSize*2,activation = tf.keras.activations.tanh)
+            self.denseDecoder3 = tf.keras.layers.Dense(self.params.lstmSize*2,activation = tf.keras.activations.tanh)
+            self.denseDecoder2 = tf.keras.layers.Dense(self.params.lstmSize*2,activation = tf.keras.activations.tanh)
+            self.denseDecoder4 = tf.keras.layers.Dense(self.params.lstmSize*2,activation = tf.keras.activations.tanh)
+
             self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output, activation=tf.keras.activations.hard_sigmoid, dtype=tf.float32)
             #tf.keras.activations.hard_sigmoid
 
@@ -132,18 +135,19 @@ class DenseFromConvNetwork():
             # So we reserve columns to each output of the spiking networks...
             allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
 
-
             if self.params.shuffle_spike_order:
                 #Note: to activate this shuffling we will need to recompile the model again...
-                indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[0], dtype=tf.int32)
-                shuffled_indices = tf.random.shuffle(indices_shuffle)
-                allFeatures = tf.gather(allFeatures, shuffled_indices)
-
-            if self.params.shuffle_convnets_outputs:
                 indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[1], dtype=tf.int32)
                 shuffled_indices = tf.random.shuffle(indices_shuffle)
-                allFeatures = tf.gather(tf.transpose(allFeatures), shuffled_indices)
-                allFeatures = tf.transpose(allFeatures)
+                allFeatures_transposed = tf.transpose(allFeatures, perm=[1, 0, 2])
+                allFeatures = tf.transpose(tf.gather(allFeatures_transposed, shuffled_indices),perm=[1,0,2])
+                tf.ensure_shape(allFeatures, [self.params.batch_size, None, allFeatures.shape[2]])
+            if self.params.shuffle_convnets_outputs:
+                indices_shuffle = tf.range(start=0, limit=tf.shape(allFeatures)[2], dtype=tf.int32)
+                shuffled_indices = tf.random.shuffle(indices_shuffle)
+                allFeatures = tf.transpose(tf.gather(tf.transpose(allFeatures,perm=[2,1,0]), shuffled_indices),perm=[2,1,0])
+                tf.ensure_shape(allFeatures, [self.params.batch_size, None, allFeatures.shape[2]])
+
 
             # We simply sum the population vectors which was output by the
             # convnets.
@@ -152,6 +156,8 @@ class DenseFromConvNetwork():
 
             output = self.denseDecoder1(allFeatures)
             output = self.denseDecoder2(output)
+            output = self.denseDecoder3(output)
+            output = self.denseDecoder4(output)
 
             myoutputPos = self.denseFeatureOutput(output)
             outputLoss = self.denseLoss2(self.denseLoss1(tf.stop_gradient(output)))
@@ -166,11 +172,11 @@ class DenseFromConvNetwork():
             lossFromOutputLoss = tf.identity(tf.math.reduce_mean(tf.losses.mean_squared_error(outputLoss, posLoss)),name="lossOfLossPredictor")
         return  myoutputPos, outputLoss, idmanifoldloss , lossFromOutputLoss
 
-    def mybuild(self, outputs):
+    def mybuild(self, outputs,modelName="model.png"):
         model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.iteratorLengthInput,self.truePos,self.inputGroups],
                                outputs=outputs)
         tf.keras.utils.plot_model(
-            model, to_file='model.png', show_shapes=True
+            model, to_file=modelName, show_shapes=True
         )
         model.compile(
             optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
@@ -329,6 +335,16 @@ class DenseFromConvNetwork():
         df = pd.DataFrame(times)
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "timeStepsPred.csv"))
 
+
+        fig, ax = plt.subplots(2, 1)
+        ax[1].scatter(times, featureTrue[:, 1], c="black", label="true Position")
+        ax[1].scatter(times, output_test[0][:, 1], c="red", label="predicted Position")
+        ax[1].set_xlabel("time")
+        ax[1].set_ylabel("Y")
+        ax[1].set_title("prediction with TF2.0's architecture")
+        ax[0].scatter(output_test[0][:, 1], featureTrue[:, 1], alpha=0.1)
+        fig.legend()
+        plt.show()
 
         return {"featurePred": output_test[0], "featureTrue": featureTrue,
                 "times": times, "predofLoss" : output_test[1],
