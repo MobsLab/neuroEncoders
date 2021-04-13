@@ -7,8 +7,10 @@ import scipy.interpolate as itp
 import os
 
 
-def uMazeLinearization(euclideanData):
-    nnPoints = np.array([[0.175,0],[0.175,0.4],[0.195,0.82],[0.4,0.875],[0.6,0.875],[0.805,0.82],[0.815,0.4],[0.815,0]])
+def uMazeLinearization2(euclideanData):
+    # nnPoints = np.array([[0.175,0],[0.175,0.4],[0.195,0.82],[0.4,0.875],[0.6,0.875],[0.805,0.82],[0.815,0.4],[0.815,0]])
+    nnPoints = np.array(
+        [[0.45, 0.40], [0.45, 0.65], [0.45, 0.9], [0.7, 0.9], [0.9, 0.9], [0.9, 0.7], [0.9, 0.4]])
     # create the interpolating object
     ts = np.arange(0, stop=1, step=1/nnPoints.shape[0])
     itpObject = itp.make_interp_spline(ts, nnPoints, k=2)
@@ -17,10 +19,12 @@ def uMazeLinearization(euclideanData):
     mazepoints = itpObject(tsProj)
 
     projectedPos = np.zeros([euclideanData.shape[0], 2])
+    linearFeature = np.zeros([euclideanData.shape[0]])
     for idp in range(euclideanData.shape[0]):
         bestPoint = np.argmin(np.sum(np.square(np.reshape(euclideanData[idp,:],[1,euclideanData.shape[1]]) - mazepoints),axis=1),axis=0)
         projectedPos[idp,:] = mazepoints[bestPoint,:]
-    return projectedPos
+        linearFeature[idp] = tsProj[bestPoint]
+    return projectedPos,linearFeature
 
 
 def doubleArmMazeLinearization(euclideanData,scale=True,path_to_folder=""):
