@@ -38,7 +38,7 @@ def linear_performance(outputs,foldersave,filter = 1):
         ax[id+1].set_ylabel("feature"+str(id))
         ax[id + 1].set_xlabel("time")
     fig.tight_layout()
-    fig.show()
+    # fig.show()
     fig.savefig(os.path.join(foldersave,"scatterPlots.png"))
 
 
@@ -80,7 +80,7 @@ def linear_performance(outputs,foldersave,filter = 1):
     ax[1].set_ylabel("true bin")
     ax[1].set_xlabel("predicted bin")
     fig.tight_layout()
-    fig.show()
+    # fig.show()
     fig.savefig(os.path.join(foldersave, "confusionPlots.png"))
     fig.savefig(os.path.join(foldersave, "confusionPlots.svg"))
 
@@ -94,5 +94,5 @@ def linear_performance(outputs,foldersave,filter = 1):
     ax[1].set_xlabel("predicted error")
     ax[1].set_ylabel("true linear error")
     fig.tight_layout()
-    fig.show()
+    # fig.show()
     fig.savefig(os.path.join(foldersave, "errorsScatter.png"))

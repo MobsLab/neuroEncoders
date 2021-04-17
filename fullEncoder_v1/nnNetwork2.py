@@ -247,14 +247,12 @@ class LSTMandSpikeNetwork():
         ### Training models
         dataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
         dataset = dataset.map(lambda *vals:nnUtils.parseSerializedSpike(self.feat_desc,*vals))
-
         epochMask  = inEpochsMask(behavior_data['Position_time'][:,0], behavior_data['Times']['trainEpochs'])
         tot_mask = speed_mask * epochMask
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(tot_mask)),dtype=tf.int64),
                                                 tf.constant(tot_mask,dtype=tf.float64)),default_value=0)
         dataset = dataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]),1.0))
-
         dataset = dataset.batch(self.params.batch_size,drop_remainder=True)
         dataset = dataset.map(
             lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=True)) #self.feat_desc, *
@@ -265,9 +263,7 @@ class LSTMandSpikeNetwork():
         dataset = dataset.map(self.createIndices, num_parallel_calls=4)
         dataset = dataset.shuffle(self.params.nSteps,reshuffle_each_iteration=True).cache() #.repeat() #
         dataset = dataset.prefetch(self.params.batch_size* 10) #
-        #
-        # data = list(dataset.take(1).map(lambda x,y:x["group1"]).as_numpy_iterator())
-        # The callbacks called during the training:
+
         callbackLR = tf.keras.callbacks.LearningRateScheduler(self.lr_schedule)
         csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.resultsPath,'training.log'))
         checkpoint_path = os.path.join(self.projectPath.resultsPath,"training_1/cp.ckpt")
@@ -361,16 +357,6 @@ class LSTMandSpikeNetwork():
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "lossPred.csv"))
         df = pd.DataFrame(times)
         df.to_csv(os.path.join(self.projectPath.resultsPath, saveFolder, "timeStepsPred.csv"))
-
-        fig, ax = plt.subplots(2, 1)
-        ax[1].scatter(times, featureTrue[:, 1], c="black", label="true Position")
-        ax[1].scatter(times, output_test[0][:, 1], c="red", label="predicted Position")
-        ax[1].set_xlabel("time")
-        ax[1].set_ylabel("Y")
-        ax[1].set_title("prediction with TF2.0's architecture")
-        ax[0].scatter(output_test[0][:, 1], featureTrue[:, 1], alpha=0.1)
-        fig.legend()
-        fig.show()
 
         return {"featurePred": output_test[0], "featureTrue": featureTrue,
                 "times": times, "predofLoss" : output_test[1],

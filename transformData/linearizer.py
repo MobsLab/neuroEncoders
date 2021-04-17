@@ -6,11 +6,27 @@ import pandas as pd
 import scipy.interpolate as itp
 import os
 
-
-def uMazeLinearization2(euclideanData):
+def verifyLinearization(ExampleEuclideanData):
+    ## A Function to set the linearizer
+    # (last project step/idea) TODO: Julia call to automatically extract the topology,
+    # and suggest a possible set of points that could be good starting point
+    # for the linearization.
+    # Allow the use to manually set the euclidean points he desire,
+    # and save them in a csv file
+    # to implement, for now we manually set them:
     # nnPoints = np.array([[0.175,0],[0.175,0.4],[0.195,0.82],[0.4,0.875],[0.6,0.875],[0.805,0.82],[0.815,0.4],[0.815,0]])
     nnPoints = np.array(
         [[0.45, 0.40], [0.45, 0.65], [0.45, 0.9], [0.7, 0.9], [0.9, 0.9], [0.9, 0.7], [0.9, 0.4]])
+    print("please verify linearization")
+    fig,ax = plt.subplots()
+    ax.scatter(ExampleEuclideanData[:,0],ExampleEuclideanData[:,1],alpha=0.2)
+    ax.scatter(nnPoints[:,0],nnPoints[:,1],c="black")
+    plt.show()
+
+def uMazeLinearization2(euclideanData):
+    nnPoints = np.array(
+        [[0.45, 0.40], [0.45, 0.65], [0.45, 0.9], [0.7, 0.9], [0.9, 0.9], [0.9, 0.7], [0.9, 0.4]])
+
     # create the interpolating object
     ts = np.arange(0, stop=1, step=1/nnPoints.shape[0])
     itpObject = itp.make_interp_spline(ts, nnPoints, k=2)
