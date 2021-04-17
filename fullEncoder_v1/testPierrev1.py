@@ -76,10 +76,10 @@ class Project():
 
 
 class Params:
-    def __init__(self, detector, windowSize):
-        self.nGroups = detector.nGroups()
-        self.dim_output = detector.dim_output()
-        self.nChannels = detector.numChannelsPerGroup()
+    def __init__(self,list_channels,dim_output, windowSize):
+        self.nGroups = len(list_channels)
+        self.dim_output = dim_output
+        self.nChannels = [len(list_channels[n]) for n in range(self.nGroups)]
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
@@ -141,15 +141,12 @@ def main():
     #                  "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
 
     datPath = ''
-    useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
     mode = "full"
-    split = 0.1
 
     #tf.debugging.set_log_device_placement(True)
 
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
-    #
     # f = np.load(os.path.join(projectPath.folder, "results", "inferring.npz"), allow_pickle=True)
     # outputs = {}
     # outputs["featurePred"]  = f["inferring"][:,0:2]
@@ -164,40 +161,17 @@ def main():
     # outputs["projTruePos"] = projTrueTF10
     # outputs["linearPred"] = linearPredTF10
     # outputs["linearTrue"] = linearTrueTF10
-    #
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.folder,"results","nofilter"),1)
     # performancePlots.linear_performance(outputs, os.path.join(projectPath.folder, "results","filter"),0.1)
 
-
-    spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
-    params = Params(spikeDetector, windowSize)
-    # Try faster spike detection
-    spikeDetector.mmap_spike_filter(projectPath,spikeDetector.nChannels,window_length=params.windowLength)
+    list_channels, samplingRate, nChannels = rawDataParser.get_params(projectPath.xml)
+    positions,_ = rawDataParser.get_position(projectPath.folder)
+    params = Params(list_channels,positions.shape[1], windowSize)
 
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
     #mixed_precision.experimental.set_policy('mixed_float16')
     params.usingMixedPrecision = False
-
-    if mode == "decode":
-        spikeDetector.setThresholds(projectPath.thresholds)
-
-    # Create data files if not present
-    if not os.path.isfile(projectPath.tfrec):
-        # setup data readers and writers meta data
-        spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
-        spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
-        writer = tf.io.TFRecordWriter(projectPath.tfrec)
-
-        with ExitStack() as stack:
-            # Open data files
-            writer = stack.enter_context(writer)
-            # generate spike sequences in windows of size params.windowLength
-            for example in spikeSequenceGen:
-                writer.write(nnUtils.serializeSpikeSequence(
-                    params,
-                    *tuple(example[k] for k in ["pos_index","pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-
 
     # Training, testing, and preparing network for online setup
     if mode=="full":
