@@ -387,6 +387,32 @@ class INTANFilter:
 def emptyData():
 	return {'group':[], 'time':[], 'spike':[], 'position':[], 'position_index':[]} #'train':[]
 
+
+#In case one want to use this spikeDetector rather than the Julia one,
+# one could use the following code snipet:
+# spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)vvvvvvvvvvvv
+# if mode == "decode":
+# 	spikeDetector.setThresholds(projectPath.thresholds)
+#
+# # Create data files if not present
+# if not os.path.isfile(projectPath.tfrec):
+# 	# setup data readers and writers meta data
+# 	spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
+# 	spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
+# 	writer = tf.io.TFRecordWriter(projectPath.tfrec)
+#
+# 	with ExitStack() as stack:
+# 		# Open data files
+# 		writer = stack.enter_context(writer)
+# 		# generate spike sequences in windows of size params.windowLength
+# 		for example in spikeSequenceGen:
+# 			writer.write(nnUtils.serializeSpikeSequence(
+# 				params,
+# 				*tuple(example[k] for k in
+# 					   ["pos_index", "pos", "groups", "length", "times"] + ["spikes" + str(g) for g in
+# 																			range(params.nGroups)])))
+#
+
 class SpikeDetector:
 	'''A processor class to go through raw data to filter and extract spikes. Synchronizes with position.'''
 	def __init__(self, path, useOpenEphysFilter, mode, jsonPath=None):
@@ -481,83 +507,6 @@ class SpikeDetector:
 	def setThresholds(self, thresholds):
 		assert([len(d) for d in thresholds] == [len(s) for s in self.list_channels])
 		self.thresholds = [i for d in thresholds for i in d]
-
-	def mmap_spike_filter(self,projectPath, nChannels,window_length = 0.036,eraseSpike=False,eraseTfData=False):
-		number_timeSteps = os.stat(projectPath.dat).st_size // (2 * nChannels)
-		memmapData = np.memmap(projectPath.dat, dtype=np.int16, mode='r', shape=(number_timeSteps,self.nChannels))
-		# memmapData = np.transpose(memmapData)
-
-		maxpos = np.max(self.position)
-		nGroups  = len(self.list_channels)
-
-		# Launch an extraction of the spikes in Julia:
-		if not os.path.exists(projectPath.folder + 'nnBehavior.mat'):
-			raise ValueError('this file does not exist :' + projectPath.folder + 'nnBehavior.mat')
-
-		if eraseSpike or not os.path.isfile((os.path.join(projectPath.folder,"spikeData_fromJulia.csv"))):
-			subprocess.run(["./../importData/JuliaData/executeFilter.sh",
-							"/home/mobs/Documents/PierreCode/neuroEncoders/importData/JuliaData/",
-							projectPath.xml,
-							projectPath.dat,
-							os.path.join(projectPath.folder,"nnBehavior.mat"),
-							os.path.join(projectPath.folder,"spikeData_fromJulia.csv"),
-							os.path.join(projectPath.folder,"dataset","dataset.tfrec"),
-							str(BUFFERSIZE)])
-
-		spikesFound = pd.read_csv(os.path.join(projectPath.folder,"spikeData_fromJulia.csv"),header=None).values
-		inEpoch = spikesFound[:,3] > -1
-		spikesFound = spikesFound[inEpoch,:]
-		#groups are stored from 1 to nGroups in Julia, we need to change that to 0 to nGroups-1
-		spikesFound[:,1] = spikesFound[:,1]-1
-		spikesFound[:,2] = spikesFound[:,2]-1
-		spikesFound[:, 3] = spikesFound[:,3] - 1
-
-		if not eraseTfData and os.path.isfile(projectPath.tfrec):
-			return
-		writer = tf.io.TFRecordWriter(projectPath.tfrec)
-		print("finished data filtering and spike extraction, converting into tensorflow dataset")
-		with ExitStack() as stack:
-			# Open data files
-			writer = stack.enter_context(writer)
-
-			#Gather spikes in 36ms window over all groups:
-			t0 = spikesFound[0,0] #time of first spike:
-			startindex = 0
-			lastindex = 1
-			for window_start in tqdm(np.arange(t0,stop=spikesFound[-1,0]+window_length,step=window_length)):
-				if spikesFound[startindex,0]>=window_start and spikesFound[startindex,0]<(window_start+window_length):
-					#find the first index where the spike time is beyond window_start
-					while spikesFound[lastindex,0]<(window_start+window_length) and lastindex<spikesFound.shape[0]-1:
-						lastindex = lastindex+1
-
-					spikeIndex = [spikesFound[startindex:lastindex,2][np.where(np.equal(spikesFound[startindex:lastindex,1],g))] for g in range(nGroups)]
-					spikes = [ np.zeros([0, len(self.list_channels[g]), 32]) if spikeIndex[g].shape[0]==0
-								else np.stack([np.transpose(memmapData[int(s)-15:int(s)+17,self.list_channels[g]])  for s in spikeIndex[g]],axis=0) for g in range(nGroups)]
-					# save into tensorflow the spike window:
-					feat = {
-						"pos_index": tf.train.Feature(int64_list=tf.train.Int64List(value=[int(spikesFound[lastindex-1,3])])),
-						"pos": tf.train.Feature(float_list=tf.train.FloatList(value=self.position[int(spikesFound[lastindex-1,3]),:]/maxpos)),
-						"length": tf.train.Feature(int64_list=tf.train.Int64List(value=[lastindex-startindex])),
-						"groups": tf.train.Feature(int64_list=tf.train.Int64List(value=spikesFound[startindex:lastindex,1].astype(np.int64))),
-						"time": tf.train.Feature(float_list=tf.train.FloatList(value=[np.mean(spikesFound[startindex:lastindex, 0])]))
-					}
-					# Pierre: convert the spikes dic into a tf.train.Feature, used for the tensorflow protocol.
-					# their is no reason to change the key name but still done here.
-					for g in range(nGroups):
-						feat.update(
-							{"group" + str(g): tf.train.Feature(float_list=tf.train.FloatList(value=spikes[g].ravel()*0.128))})
-
-					example_proto = tf.train.Example(features=tf.train.Features(feature=feat))
-
-					writer.write(example_proto.SerializeToString())
-					# next round will start at last index:
-					startindex = lastindex
-		print("Finished writing to tfrec dataset.")
-
-
-
-
-
 
 	def getFilteredBuffer(self, bufferSize):
 		"""
