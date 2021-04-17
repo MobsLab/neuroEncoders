@@ -44,7 +44,7 @@ class Project():
         self.tfrec =  self.folder + 'dataset/dataset.tfrec'
 
         #To change at every experiment:
-        self.resultsPath = self.folder + 'results_confMatrix'
+        self.resultsPath = self.folder + 'results_tf20_pythondata'
         # self.resultsNpz = self.resultsPath + '/inferring.npz'
         # self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -130,12 +130,16 @@ def main():
     # tf.compat.v1.enable_eager_execution()
 
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199/amplifier.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-monday/continuous.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1604/signal.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1404/signal.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
     # subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
-    #                 "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
+    #                  "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
+
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -145,8 +149,30 @@ def main():
     #tf.debugging.set_log_device_placement(True)
 
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
+    #
+    # f = np.load(os.path.join(projectPath.folder, "results", "inferring.npz"), allow_pickle=True)
+    # outputs = {}
+    # outputs["featurePred"]  = f["inferring"][:,0:2]
+    # outputs["featureTrue"] = f["pos"]
+    # outputs["times"] = f["times"]
+    # from transformData.linearizer import uMazeLinearization2
+    # linearizationFunction = uMazeLinearization2
+    # projPredTF10,linearPredTF10 = uMazeLinearization2(outputs["featurePred"][:,0:2])
+    # projTrueTF10,linearTrueTF10 = uMazeLinearization2(outputs["featureTrue"][:,0:2])
+    # outputs["predofLoss"] = f["inferring"][:,2].reshape([f["inferring"].shape[0],1])
+    # outputs["projPred"] = projPredTF10
+    # outputs["projTruePos"] = projTrueTF10
+    # outputs["linearPred"] = linearPredTF10
+    # outputs["linearTrue"] = linearTrueTF10
+    #
+    # performancePlots.linear_performance(outputs,os.path.join(projectPath.folder,"results","nofilter"),1)
+    # performancePlots.linear_performance(outputs, os.path.join(projectPath.folder, "results","filter"),0.1)
+
+
     spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
     params = Params(spikeDetector, windowSize)
+    # Try faster spike detection
+    spikeDetector.mmap_spike_filter(projectPath,spikeDetector.nChannels,window_length=params.windowLength)
 
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
@@ -189,19 +215,22 @@ def main():
     # to set as limits in for the nnbehavior.mat
     # dataset = tf.data.TFRecordDataset(projectPath.tfrec)
     # dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(trainer.feat_desc, *vals))
-    # pos_index = list(dataset.map(lambda x: x["pos_index"]).as_numpy_iterator())
-
-    # speed_filter(projectPath.folder,overWrite=True)
+    # pos_index = list(dataset.take(10).map(lambda x: x["times"]).as_numpy_iterator())
+    #
+    speed_filter(projectPath.folder,overWrite=False)
     # modify_feature_forBestTestSet(projectPath.folder) #plimits=[np.min(pos_index),np.max(pos_index)]
-    # #
+
     trainLosses = trainer.train()
 
 
     #project the prediction and true data into a line fit on the maze:
     from transformData.linearizer import doubleArmMazeLinearization
-    from transformData.linearizer import uMazeLinearization2
+    from transformData.linearizer import uMazeLinearization2,verifyLinearization
+    from importData.ImportClusters import getBehavior
     path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
     # linearizationFunction = lambda x: doubleArmMazeLinearization(x,scale=True,path_to_folder=path_to_code)
+    behave_data = getBehavior(projectPath.folder,getfilterSpeed=False)
+    verifyLinearization(behave_data["positions"])
     linearizationFunction = uMazeLinearization2
 
     name_save = "resultTest"

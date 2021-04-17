@@ -12,11 +12,15 @@ import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
+import tensorflow as tf
+from contextlib import ExitStack
+import pandas as pd
+import csv
+import math
+
+import subprocess
 
 BUFFERSIZE=10000
-
-
-
 
 def get_params(pathToXml):
 	list_channels = []
@@ -305,8 +309,6 @@ def modify_feature_forBestTestSet(folder,plimits=[]):
 
 
 
-
-
 class openEphysFilter:
 	'''reads the open-ephys filtered data'''
 	"""
@@ -480,6 +482,81 @@ class SpikeDetector:
 		assert([len(d) for d in thresholds] == [len(s) for s in self.list_channels])
 		self.thresholds = [i for d in thresholds for i in d]
 
+	def mmap_spike_filter(self,projectPath, nChannels,window_length = 0.036,eraseSpike=False,eraseTfData=False):
+		number_timeSteps = os.stat(projectPath.dat).st_size // (2 * nChannels)
+		memmapData = np.memmap(projectPath.dat, dtype=np.int16, mode='r', shape=(number_timeSteps,self.nChannels))
+		# memmapData = np.transpose(memmapData)
+
+		maxpos = np.max(self.position)
+		nGroups  = len(self.list_channels)
+
+		# Launch an extraction of the spikes in Julia:
+		if not os.path.exists(projectPath.folder + 'nnBehavior.mat'):
+			raise ValueError('this file does not exist :' + projectPath.folder + 'nnBehavior.mat')
+
+		if eraseSpike or not os.path.isfile((os.path.join(projectPath.folder,"spikeData_fromJulia.csv"))):
+			subprocess.run(["./../importData/JuliaData/executeFilter.sh",
+							"/home/mobs/Documents/PierreCode/neuroEncoders/importData/JuliaData/",
+							projectPath.xml,
+							projectPath.dat,
+							os.path.join(projectPath.folder,"nnBehavior.mat"),
+							os.path.join(projectPath.folder,"spikeData_fromJulia.csv"),
+							os.path.join(projectPath.folder,"dataset","dataset.tfrec"),
+							str(BUFFERSIZE)])
+
+		spikesFound = pd.read_csv(os.path.join(projectPath.folder,"spikeData_fromJulia.csv"),header=None).values
+		inEpoch = spikesFound[:,3] > -1
+		spikesFound = spikesFound[inEpoch,:]
+		#groups are stored from 1 to nGroups in Julia, we need to change that to 0 to nGroups-1
+		spikesFound[:,1] = spikesFound[:,1]-1
+		spikesFound[:,2] = spikesFound[:,2]-1
+		spikesFound[:, 3] = spikesFound[:,3] - 1
+
+		if not eraseTfData and os.path.isfile(projectPath.tfrec):
+			return
+		writer = tf.io.TFRecordWriter(projectPath.tfrec)
+		print("finished data filtering and spike extraction, converting into tensorflow dataset")
+		with ExitStack() as stack:
+			# Open data files
+			writer = stack.enter_context(writer)
+
+			#Gather spikes in 36ms window over all groups:
+			t0 = spikesFound[0,0] #time of first spike:
+			startindex = 0
+			lastindex = 1
+			for window_start in tqdm(np.arange(t0,stop=spikesFound[-1,0]+window_length,step=window_length)):
+				if spikesFound[startindex,0]>=window_start and spikesFound[startindex,0]<(window_start+window_length):
+					#find the first index where the spike time is beyond window_start
+					while spikesFound[lastindex,0]<(window_start+window_length) and lastindex<spikesFound.shape[0]-1:
+						lastindex = lastindex+1
+
+					spikeIndex = [spikesFound[startindex:lastindex,2][np.where(np.equal(spikesFound[startindex:lastindex,1],g))] for g in range(nGroups)]
+					spikes = [ np.zeros([0, len(self.list_channels[g]), 32]) if spikeIndex[g].shape[0]==0
+								else np.stack([np.transpose(memmapData[int(s)-15:int(s)+17,self.list_channels[g]])  for s in spikeIndex[g]],axis=0) for g in range(nGroups)]
+					# save into tensorflow the spike window:
+					feat = {
+						"pos_index": tf.train.Feature(int64_list=tf.train.Int64List(value=[int(spikesFound[lastindex-1,3])])),
+						"pos": tf.train.Feature(float_list=tf.train.FloatList(value=self.position[int(spikesFound[lastindex-1,3]),:]/maxpos)),
+						"length": tf.train.Feature(int64_list=tf.train.Int64List(value=[lastindex-startindex])),
+						"groups": tf.train.Feature(int64_list=tf.train.Int64List(value=spikesFound[startindex:lastindex,1].astype(np.int64))),
+						"time": tf.train.Feature(float_list=tf.train.FloatList(value=[np.mean(spikesFound[startindex:lastindex, 0])]))
+					}
+					# Pierre: convert the spikes dic into a tf.train.Feature, used for the tensorflow protocol.
+					# their is no reason to change the key name but still done here.
+					for g in range(nGroups):
+						feat.update(
+							{"group" + str(g): tf.train.Feature(float_list=tf.train.FloatList(value=spikes[g].ravel()*0.128))})
+
+					example_proto = tf.train.Example(features=tf.train.Features(feature=feat))
+
+					writer.write(example_proto.SerializeToString())
+					# next round will start at last index:
+					startindex = lastindex
+		print("Finished writing to tfrec dataset.")
+
+
+
+
 
 
 	def getFilteredBuffer(self, bufferSize):
@@ -604,8 +681,11 @@ class SpikeDetector:
 		return spikesFound
 
 
-
-
+def findTime(position_time,lastBestTime,time):
+							for i in range(len(position_time)-lastBestTime-1):
+								if np.abs(position_time[lastBestTime+i]-time)<np.abs(position_time[lastBestTime+i+1]-time):
+									return lastBestTime+i
+							return len(position_time)-1
 
 def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFactor, startTime, position, position_time):
 	"""
@@ -631,6 +711,8 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 		spikesFound = emptyData()
 		lateSpikes = emptyData()
 
+		lastBestTime = 0
+
 		spl = 15
 		#the spike looking time starts at 15, therefore a spike initiating at time t=0, i.e for the first buffer
 		# will not be considered !
@@ -644,7 +726,7 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 				# and the voltage goes below the threshold (so with a slight delay) after the buffer limit in the current channel
 				# therefore we change the second  test to np.all(filteredBuffer[spl-1,:] > -thresholds)
 				# rather than  filteredBuffer[spl-1, chnl] > -thresholds[chnl]
-				if filteredBuffer[spl,chnl] < -thresholds[chnl] and np.all(filteredBuffer[spl-1,:] > -thresholds):
+				if filteredBuffer[spl,chnl] < -thresholds[chnl] and np.all(filteredBuffer[spl-1,:] >= -thresholds):
 					triggered = True
 					positiveTrigger = False
 
@@ -690,7 +772,10 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 							#Note: no transpose of the filteredBuffer because it will then be concatenated with the
 							# beginning of the next buffer to create a nice spike window.
 							lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
-							lateSpikes['position_index'].append(np.argmin(np.abs(position_time - time)))
+
+							#finding the argmin is a potentially very slow operations.
+							lastBestTime = findTime(position_time,lastBestTime,time)
+							lateSpikes['position_index'].append(lastBestTime)
 							lateSpikes['position'].append( position[lateSpikes['position_index'][-1]] )
 							# lateSpikes['train'].   append(train)
 
@@ -703,7 +788,8 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 								spikesFound['time'].	append(time)
 								#note: here the reshape does not bring anything...
 								spikesFound['spike'].   append( np.array(spike).reshape([32,filteredBuffer.shape[1]]).transpose() )
-								spikesFound['position_index'].append(np.argmin(np.abs(position_time - time)))
+								lastBestTime = findTime(position_time, lastBestTime, time)
+								spikesFound['position_index'].append(lastBestTime)
 								spikesFound['position'].append(position[spikesFound['position_index'][-1]])
 								# spikesFound['train'].   append(train)
 
@@ -713,17 +799,6 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 			spl += 1
 
 		outputQueue.put([spikesFound, lateSpikes])
-
-
-
-def vectorize_spike_filter(filteredBuffer, N, group, thresholds):
-	## We vectorize the spike filtering to improve its speed:
-
-	possibleSpike = (filteredBuffer[15:, :] < -thresholds)*np.all(filteredBuffer[14:-1, :] > -thresholds)
-
-
-	return None
-
 
 
 
