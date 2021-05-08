@@ -12,6 +12,7 @@ import pandas as pd
 import transformData.linearizer
 from importData.rawDataParser import modify_feature_forBestTestSet,speed_filter
 from resultAnalysis import performancePlots
+from importData.JuliaData.juliaDataParser import julia_spike_filter
 
 
 
@@ -42,9 +43,10 @@ class Project():
             self.graphMeta = self.graph + '.meta'
 
         self.tfrec =  self.folder + 'dataset/dataset.tfrec'
+        self.tfrecSleep = self.folder + 'dataset/datasetSleep.tfrec'
 
         #To change at every experiment:
-        self.resultsPath = self.folder + 'results_tf20_pythondata'
+        self.resultsPath = self.folder + 'results_tf20_quick'
         # self.resultsNpz = self.resultsPath + '/inferring.npz'
         # self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -84,7 +86,6 @@ class Params:
 
         self.nSteps = int(10000 * 0.036 / windowSize)
         self.nEpochs = 150
-        # self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
         ### from units encoder params
@@ -111,13 +112,11 @@ class Params:
 
         self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
         self.lossLearningRate = 0.00003
-        self.lossActivation = None
+        self.lossActivation = tf.nn.relu
 
         self.usingMixedPrecision = True # this boolean indicates weither tensorflow uses mixed precision
         # ie enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer except the output for unclear reasons linked to gradient computations
-
-        self.visualizeSet = False
 
 
 def main():
@@ -133,7 +132,8 @@ def main():
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199/amplifier.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-monday/continuous.xml"
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/LisaRouxDataset/M007_S07_07222015.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1604/signal.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1404/signal.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
@@ -147,6 +147,10 @@ def main():
     #tf.debugging.set_log_device_placement(True)
 
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
+
+    if not os.path.exists(os.path.join(projectPath.folder,"nnBehavior.mat")):
+        subprocess.run(["./getTsdFeature.sh", projectPath.folder])
+
     # f = np.load(os.path.join(projectPath.folder, "results", "inferring.npz"), allow_pickle=True)
     # outputs = {}
     # outputs["featurePred"]  = f["inferring"][:,0:2]
@@ -168,6 +172,8 @@ def main():
     positions,_ = rawDataParser.get_position(projectPath.folder)
     params = Params(list_channels,positions.shape[1], windowSize)
 
+    julia_spike_filter(projectPath)
+
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
     #mixed_precision.experimental.set_policy('mixed_float16')
@@ -180,6 +186,13 @@ def main():
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
 
+    #Since TF 2.4.1, too much memory seems to be allocated for the LSTM, and the programm would
+    # throw an error if we don't manually prevent it from full memory growth. Before it was an issue
+    # that only existed for windows, but it seems to have now spread to linux as well...
+    gpu_devices = tf.config.experimental.list_physical_devices("GPU")
+    for device in gpu_devices:
+        tf.config.experimental.set_memory_growth(device, True)
+
     # params.shuffle_spike_order = True
     trainer = Training.LSTMandSpikeNetwork(projectPath, params)
     # The data are now saved into a tfrec file,
@@ -190,11 +203,11 @@ def main():
     # dataset = tf.data.TFRecordDataset(projectPath.tfrec)
     # dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(trainer.feat_desc, *vals))
     # pos_index = list(dataset.take(10).map(lambda x: x["times"]).as_numpy_iterator())
-    #
-    speed_filter(projectPath.folder,overWrite=False)
-    # modify_feature_forBestTestSet(projectPath.folder) #plimits=[np.min(pos_index),np.max(pos_index)]
 
-    trainLosses = trainer.train()
+    speed_filter(projectPath.folder,overWrite=False)
+    modify_feature_forBestTestSet(projectPath.folder,overWrite=False) #plimits=[np.min(pos_index),np.max(pos_index)]
+
+    # trainLosses = trainer.train()
 
 
     #project the prediction and true data into a line fit on the maze:
@@ -204,21 +217,26 @@ def main():
     path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
     # linearizationFunction = lambda x: doubleArmMazeLinearization(x,scale=True,path_to_folder=path_to_code)
     behave_data = getBehavior(projectPath.folder,getfilterSpeed=False)
-    verifyLinearization(behave_data["positions"])
+    verifyLinearization(behave_data["Positions"])
     linearizationFunction = uMazeLinearization2
-
-    name_save = "resultTest"
-    outputs = trainer.test(linearizationFunction,name_save,useTrain=False)
-    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
-    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
     name_save = "resultTrain"
     outputs = trainer.test(linearizationFunction,name_save,useTrain=True)
     performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
     performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
-    name_save = "resultTest_full"
+    name_save = "resultTest"
     outputs = trainer.test(linearizationFunction,name_save,useTrain=False)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+
+    ## sleep decoding
+    name_save = "resultSleep"
+    stimuleZone = [[0.0,0.35],[0.35,0.35],[0.435,0.0]] #to change
+    outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,stimuleZone,name_save,batch=True)
+
+    name_save = "resultTest_full"
+    outputs = trainer.test(linearizationFunction,name_save,useTrain=False,useSpeedFilter=False)
     performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
     performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
@@ -238,15 +256,6 @@ def main():
     outputs_shuffle_convoutputs = trainer.test(linearizationFunction,name_save)
     performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
     performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
-
-
-    # f = np.load(os.path.join(projectPath.folder,"resultsMondayOne","inferring.npz"),allow_pickle=True)
-    # predFeature  = f["inferring"]
-    # truefeature = f["pos"]
-    # timeold = f["times"]
-    # # Quickly let us make a confusion matrix:
-    # # projPredTF10,linearPredTF10 = uMazeLinearization2(predFeature[bestPred_tf1,0:2])
-    # # projTrueTF10,linearTrueTF10 = uMazeLinearization2(truefeature[bestPred_tf1,0:2])
 
 
 if __name__=="__main__":

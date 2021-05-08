@@ -12,6 +12,42 @@ import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 
+from interval import interval
+# a few tool to help do difference of intervals as sets:
+def obtainComplementary(p1,boundInterval,dt):
+	# we obtain the open complentary by a adding a/subtracting very small number dt to each boundary
+	assert isinstance(p1,interval)
+	assert isinstance(boundInterval,interval)
+	assert len(boundInterval)==1
+	compInterval = interval([boundInterval[0][0],p1[0][0]-dt])
+	for i in range(len(p1)-1):
+		compInterval = compInterval | interval([p1[i][1]+dt,p1[i+1][0]-dt])
+	compInterval = compInterval |  interval([p1[-1][1]+dt,boundInterval[0][1]])
+	return compInterval
+
+def filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time):
+	# we go through the different removed session epoch, and if a train epoch or a test epoch intersect with it we remove it
+	# from the train and test epochs
+	trainEpochInterval = interval()
+	for i in range(len(trainEpoch) // 2):
+		trainEpochInterval = trainEpochInterval | interval([trainEpoch[2 * i], trainEpoch[2 * i + 1]])
+	testEpochInterval = interval()
+	for i in range(len(testEpochs) // 2):
+		testEpochInterval = testEpochInterval | interval([testEpochs[2 * i], testEpochs[2 * i + 1]])
+
+	excludeInterval = interval()
+	for id, keptS in enumerate(keptSession):
+		if not keptS:
+			excludeInterval = excludeInterval | interval([sessionStart[id], sessionStop[id]])
+	if len(excludeInterval) > 0:
+		dt = 10 ** (-9)
+		sessionKeptInterval = obtainComplementary(excludeInterval,
+												  interval([position_time[0] - dt, position_time[-1] + dt]), dt)
+		trainEpochInterval = trainEpochInterval & sessionKeptInterval
+		testEpochInterval = testEpochInterval & sessionKeptInterval
+		trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainEpochInterval]))
+		testEpochs = np.ravel(np.array([[p[0], p[1]] for p in testEpochInterval]))
+	return trainEpoch,testEpochs
 import tensorflow as tf
 from contextlib import ExitStack
 import pandas as pd
@@ -64,12 +100,14 @@ def inEpochs(t,epochs):
 	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
 	# test if t is among at least one of these epochs
 	# Epochs are treated as closed interval [,]
+	# returns the index where it is the case
 	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
 	return np.where(mask >= 1)
 def inEpochsMask(t,epochs):
 	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
 	# test if t is among at least one of these epochs
 	# Epochs are treated as closed interval [,]
+	# return the mask
 	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
 	return mask >= 1
 
@@ -183,7 +221,7 @@ def speed_filter(folder,overWrite=True):
 
 
 
-def modify_feature_forBestTestSet(folder,plimits=[]):
+def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 	# Find test set with most uniform covering of speed and environment variable.
 	# provides then a little manual tool to change the size of the window
 	# and its position.
@@ -194,6 +232,10 @@ def modify_feature_forBestTestSet(folder,plimits=[]):
 	if not os.path.exists(folder + 'nnBehavior.mat'):
 		raise ValueError('this file does not exist :'+folder+'nnBehavior.mat')
 	with tables.open_file(folder + 'nnBehavior.mat',"a") as f:
+		children = [c.name for c in f.list_nodes("/behavior")]
+		if overWrite==False and "trainEpochs" in children and "testEpochs" in children:
+			return
+
 
 		speedMask = f.root.behavior.speedMask[:]
 
@@ -206,6 +248,14 @@ def modify_feature_forBestTestSet(folder,plimits=[]):
 		if speeds.shape[0]==position_time.shape[0]-1 :
 			speeds = np.append(speeds,speeds[-1]).reshape(position_time.shape[0],speeds.shape[1])
 
+		#We extract session names:
+		sessionNames = ["".join([chr(c) for c in l[0][:,0]]) for l in f.root.behavior.SessionNames[:,0]]
+		sessionStart = f.root.behavior.SessionStart[:,:][:,0]
+		sessionStop = f.root.behavior.SessionStop[:,:][:,0]
+
+		sessionValue = np.zeros(speedMask.shape[0])
+		for k in range(len(sessionNames)):
+			sessionValue[inEpochs(position_time[:,0],[sessionStart[k],sessionStop[k]])] = k
 
 		#if pmin and pmax are not None, we do not use some positions from the behaviour file
 		if plimits==[] :
@@ -222,6 +272,7 @@ def modify_feature_forBestTestSet(folder,plimits=[]):
 		positions = positions[speedMask, :]
 		speeds = speeds[speedMask,:]
 		position_time = position_time[speedMask,:]
+		sessionValue = sessionValue[speedMask]
 
 		sizeTest = position_time.shape[0]//10
 
@@ -248,50 +299,94 @@ def modify_feature_forBestTestSet(folder,plimits=[]):
 		testSetId = bestTestSet*sizeTest
 		# Next we provide a small tool to manually change the bestTest set position
 		# as well as its size:
-		fig,ax = plt.subplots(positions.shape[1]+2,1)
+		cmSessValue = plt.get_cmap("nipy_spectral")
+		colorSess = cmSessValue(np.arange(len(sessionNames))/(len(sessionNames)))
+		keptSession = np.zeros(len(colorSess)) + 1 # a mask for the session
+
+		# fig,ax = plt.subplots(positions.shape[1]+2+len(colorSess),1)
+		fig = plt.figure()
+		gs = plt.GridSpec(positions.shape[1]+3, len(colorSess), figure=fig)
+		ax = [fig.add_subplot(gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
+		ax += [fig.add_subplot(gs[-3,id]) for id in range(len(colorSess))]
+		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])]
 		trainEpoch = np.array([pmin,position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0],pmax])
 		testEpochs = np.array(
 			[position_time[bestTestSet * sizeTest][0], position_time[bestTestSet * sizeTest + sizeTest][0]])
 		ls = []
+
 		for id in range(positions.shape[1]):
 			l1 = ax[id].scatter(position_time[inEpochs(position_time,trainEpoch)[0],0],positions[inEpochs(position_time,trainEpoch)[0],id],c="red",s=0.5)
 			l2 = ax[id].scatter(position_time[inEpochs(position_time, testEpochs)[0],0], positions[inEpochs(position_time, testEpochs)[0],id],c="black",s=0.5)
 			ls.append([l1,l2])
+			# display the sessions positions at the bottom:
+			for idk,k in enumerate(range(len(colorSess))):
+				if len(np.where(np.equal(sessionValue,k))[0])>0:
+					ax[id].hlines(np.min(positions[:,id])-3,
+								  xmin=position_time[np.min(np.where(np.equal(sessionValue,k))),0],
+								  xmax=position_time[np.max(np.where(np.equal(sessionValue,k))),0],color=colorSess[idk],linewidth=3.0)
+
 		ax[0].set_ylabel("first feature")
 		#TODO add histograms here...
 		slider = plt.Slider(ax[-2], 'test starting index', 0, positions.shape[0]-sizeTest,
 							valinit=testSetId, valstep=1)
 		sliderSize = plt.Slider(ax[-1], 'test size', 0, positions.shape[0],
 							valinit= sizeTest, valstep=1)
+		# Next we add buttons to select the sessions we would like to keep:
+		butts = [plt.Button(ax[len(ax)-k-3],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
+
 		def update(val):
-			testSetId = slider.val
-			sizeTest = sliderSize.val
-			trainEpoch = np.array(
-				[pmin, position_time[testSetId ][0], position_time[testSetId + sizeTest][0],
-				 pmax])
-			testEpochs = np.array(
-				[position_time[testSetId][0], position_time[testSetId + sizeTest][0]])
-			for id in range(len(ls)):
-				l1,l2=ls[id]
-				l1.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, trainEpoch)[0],0],
-										 positions[inEpochs(position_time, trainEpoch)[0],id]])))
-				l2.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, testEpochs)[0],0],
-										 positions[inEpochs(position_time, testEpochs)[0],id]])))
-			fig.canvas.draw_idle()
+				testSetId = slider.val
+				sizeTest = sliderSize.val
+				trainEpoch = np.array(
+					[pmin, position_time[testSetId ][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0],
+					 pmax])
+				testEpochs = np.array(
+					[position_time[testSetId][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0]])
+
+				trainEpoch,testEpochs  = filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time)
+
+				for id in range(len(ls)):
+					l1,l2=ls[id]
+					l1.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, trainEpoch)[0],0],
+											 positions[inEpochs(position_time, trainEpoch)[0],id]])))
+					l2.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, testEpochs)[0],0],
+											 positions[inEpochs(position_time, testEpochs)[0],id]])))
+				fig.canvas.draw_idle()
 
 		slider.on_changed(update)
 		sliderSize.on_changed(update)
+
+		def buttUpdate(id):
+			def buttUpdate(val):
+				if keptSession[id]:
+					butts[id].color = [0,0,0,0]
+					keptSession[id] = 0
+				else:
+					keptSession[id] = 1
+					butts[id].color = colorSess[id]
+			update(0)
+			return buttUpdate
+		[b.on_clicked(buttUpdate(id)) for id,b in enumerate(butts)]
+
 		plt.show()
 
 		testSetId = slider.val
 		sizeTest = sliderSize.val
-		children = [c.name for c in f.list_nodes("/behavior")]
+
 		if "testEpochs" in children:
 			f.remove_node("/behavior", "testEpochs")
-		f.create_array("/behavior","testEpochs",np.array([position_time[testSetId][0],position_time[testSetId+sizeTest][0]]))
+
+		trainEpoch = np.array(
+			[pmin, position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0],
+			 pmax])
+		testEpochs = np.array(
+			[position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0]])
+		trainEpoch, testEpochs = filter_train_test_by_session(trainEpoch, testEpochs, keptSession, sessionStart,
+															  sessionStop, position_time)
+		f.create_array("/behavior","testEpochs",testEpochs)
 		if "trainEpochs" in children:
 			f.remove_node("/behavior", "trainEpochs")
-		f.create_array("/behavior", "trainEpochs", np.array([pmin,position_time[testSetId][0],position_time[testSetId+sizeTest][0],pmax]))
+		f.create_array("/behavior", "trainEpochs", trainEpoch)
 		f.flush() #effectively write down the modification we just made
 
 		# # just a display of the first env variable and the histograms:

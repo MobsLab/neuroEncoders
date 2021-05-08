@@ -96,3 +96,4 @@ def linear_performance(outputs,foldersave,filter = 1):
     fig.tight_layout()
     # fig.show()
     fig.savefig(os.path.join(foldersave, "errorsScatter.png"))
+
