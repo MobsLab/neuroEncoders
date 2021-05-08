@@ -7,13 +7,56 @@ import numpy as np
 import xml.etree.ElementTree as ET
 import multiprocessing as ml
 
+import SimpleBayes.butils as butils
+import matplotlib.pyplot as plt
+
 from tqdm import tqdm
 
+from interval import interval
+# a few tool to help do difference of intervals as sets:
+def obtainComplementary(p1,boundInterval,dt):
+	# we obtain the open complentary by a adding a/subtracting very small number dt to each boundary
+	assert isinstance(p1,interval)
+	assert isinstance(boundInterval,interval)
+	assert len(boundInterval)==1
+	compInterval = interval([boundInterval[0][0],p1[0][0]-dt])
+	for i in range(len(p1)-1):
+		compInterval = compInterval | interval([p1[i][1]+dt,p1[i+1][0]-dt])
+	compInterval = compInterval |  interval([p1[-1][1]+dt,boundInterval[0][1]])
+	return compInterval
+
+def filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time):
+	# we go through the different removed session epoch, and if a train epoch or a test epoch intersect with it we remove it
+	# from the train and test epochs
+	trainEpochInterval = interval()
+	for i in range(len(trainEpoch) // 2):
+		trainEpochInterval = trainEpochInterval | interval([trainEpoch[2 * i], trainEpoch[2 * i + 1]])
+	testEpochInterval = interval()
+	for i in range(len(testEpochs) // 2):
+		testEpochInterval = testEpochInterval | interval([testEpochs[2 * i], testEpochs[2 * i + 1]])
+
+	excludeInterval = interval()
+	for id, keptS in enumerate(keptSession):
+		if not keptS:
+			excludeInterval = excludeInterval | interval([sessionStart[id], sessionStop[id]])
+	if len(excludeInterval) > 0:
+		dt = 10 ** (-9)
+		sessionKeptInterval = obtainComplementary(excludeInterval,
+												  interval([position_time[0] - dt, position_time[-1] + dt]), dt)
+		trainEpochInterval = trainEpochInterval & sessionKeptInterval
+		testEpochInterval = testEpochInterval & sessionKeptInterval
+		trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainEpochInterval]))
+		testEpochs = np.ravel(np.array([[p[0], p[1]] for p in testEpochInterval]))
+	return trainEpoch,testEpochs
+import tensorflow as tf
+from contextlib import ExitStack
+import pandas as pd
+import csv
+import math
+
+import subprocess
 
 BUFFERSIZE=10000
-
-
-
 
 def get_params(pathToXml):
 	list_channels = []
@@ -53,6 +96,22 @@ def get_params(pathToXml):
 	return list_channels, samplingRate, nChannels
 
 
+def inEpochs(t,epochs):
+	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
+	# test if t is among at least one of these epochs
+	# Epochs are treated as closed interval [,]
+	# returns the index where it is the case
+	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
+	return np.where(mask >= 1)
+def inEpochsMask(t,epochs):
+	# for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
+	# test if t is among at least one of these epochs
+	# Epochs are treated as closed interval [,]
+	# return the mask
+	mask =  np.sum([(t>=epochs[2*i]) * (t<=epochs[2*i+1]) for i in range(len(epochs)//2)],axis=0)
+	return mask >= 1
+
+
 def get_position(folder):
 
 	if not os.path.exists(folder + 'nnBehavior.mat'):
@@ -63,14 +122,283 @@ def get_position(folder):
 		positions = np.swapaxes(positions[:,:],1,0)
 		position_time = np.swapaxes(position_time[:,:],1,0)
 
-		trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
-		testEpochs = np.array(f.root.behavior.testEpochs).flatten()
+		# trainEpochs = np.array(f.root.behavior.trainEpochs).flatten()
+		# testEpochs = np.array(f.root.behavior.testEpochs).flatten()
 
-	return positions, position_time, list(trainEpochs), list(testEpochs)
-
-
+	return positions, position_time  #, list(trainEpochs), list(testEpochs)
 
 
+def speed_filter(folder,overWrite=True):
+	## A simple tool to set up a threshold on the speed value
+	# The speed threshold is then implemented through a speed_mask:
+	# a boolean array indicating for each index (i.e measured feature time step)
+	# if it is above threshold or not.
+
+	with tables.open_file(folder + 'nnBehavior.mat',"a") as f:
+
+		children = [c.name for c in f.list_nodes("/behavior")]
+		if "speedMask" in children:
+			print("speedMask already created")
+			if overWrite:
+				f.remove_node("/behavior","speedMask")
+			else:
+				return
+
+		positions = f.root.behavior.positions
+		speed = f.root.behavior.speed
+		position_time = f.root.behavior.position_time
+		positions = np.swapaxes(positions[:, :], 1, 0)
+		speed = np.swapaxes(speed[:, :], 1, 0)
+		posTime = np.swapaxes(position_time[:, :], 1, 0)
+		if speed.shape[0]==posTime.shape[0]-1 :
+			speed = np.append(speed,speed[-1])
+		speed = np.reshape(speed,[speed.shape[0],1])
+		tmin = 0
+		tmax = posTime[-1]
+		myposTime = posTime[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+		mybehave = positions[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+		myspeed = speed[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+
+		window_len = 40
+		s = np.r_[myspeed[window_len - 1:0:-1], myspeed, myspeed[-2:-window_len - 1:-1]]
+		w = eval('np.' + "hamming" + '(window_len)')
+		myspeed2 = np.convolve(w / w.sum(), s[:, 0], mode='valid')[(window_len // 2 - 1):-(window_len // 2)]
+
+		speedThreshold = np.mean(np.log(myspeed2+10**(-8)))
+		speedFilter = myspeed2 > np.exp(speedThreshold)
+
+
+		fig, ax = plt.subplots(4, 1)
+		fig.suptitle("Speed threshold selection")
+		l1, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 0],c="red")
+		ax[0].set_ylabel("environmental \n variable")
+		ax[1].set_ylabel("speed")
+		l2, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 1],c="orange")
+		l4, = ax[1].plot(myposTime[speedFilter], myspeed[speedFilter],c="blue")
+		l3, = ax[1].plot(myposTime[speedFilter], myspeed2[speedFilter],c="purple")
+		l5 = ax[0].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+		l6 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+		ax[2].hist(np.log(myspeed2+10**(-8)), bins=200)
+		ax[2].set_ylabel("speed histogram")
+		l8 = ax[2].axvline(speedThreshold, color="black")
+		slider = plt.Slider(ax[3], 'speed Threshold',np.min(np.log(myspeed2+10**(-8))),np.max(np.log(myspeed2+10**(-8))),valinit=speedThreshold,valstep=0.01)
+
+		def update(val):
+			speedThreshold = val
+			speedFilter = myspeed2 > np.exp(speedThreshold)
+			l1.set_ydata(mybehave[speedFilter, 0])
+			l2.set_ydata(mybehave[speedFilter, 1])
+			l1.set_xdata(myposTime[speedFilter])
+			l2.set_xdata(myposTime[speedFilter])
+			l5.set_offsets(np.transpose(np.stack([myposTime[speedFilter][:,0],np.zeros(myposTime[speedFilter].shape[0]) - 4])))
+			l6.set_offsets(np.transpose(np.stack([myposTime[speedFilter][:,0],np.zeros(myposTime[speedFilter].shape[0]) - 4])))
+			l3.set_ydata(myspeed2[speedFilter])
+			l4.set_ydata(myspeed[speedFilter])
+			l3.set_xdata(myposTime[speedFilter])
+			l4.set_xdata(myposTime[speedFilter])
+			l8.set_xdata(val)
+			fig.canvas.draw_idle()
+
+
+		slider.on_changed(update)
+		plt.show()
+
+		speedFilter = myspeed2 > np.exp(slider.val)
+		fig, ax = plt.subplots(3, 1)
+		l1, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 0], c="red")
+		l2, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 1], c="orange")
+		l4, = ax[1].plot(myposTime[speedFilter], myspeed[speedFilter], c="blue")
+		l3, = ax[1].plot(myposTime[speedFilter], myspeed2[speedFilter], c="purple")
+		l5 = ax[0].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+		l6 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+		ax[2].hist(np.log(myspeed2+10**(-8)), bins=200)
+		ax[2].axvline(slider.val, color="black")
+		plt.show()
+
+		f.create_array("/behavior","speedMask",speedFilter)
+		f.flush()
+		f.close()
+
+
+
+def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
+	# Find test set with most uniform covering of speed and environment variable.
+	# provides then a little manual tool to change the size of the window
+	# and its position.
+	# plimits can be used to constraint the range of search for the test sets
+	# to a certain time intervals. We added it because in some dataset
+	# the nnbehavior contained more measured timesteps than in the .dat files.
+
+	if not os.path.exists(folder + 'nnBehavior.mat'):
+		raise ValueError('this file does not exist :'+folder+'nnBehavior.mat')
+	with tables.open_file(folder + 'nnBehavior.mat',"a") as f:
+		children = [c.name for c in f.list_nodes("/behavior")]
+		if overWrite==False and "trainEpochs" in children and "testEpochs" in children:
+			return
+
+
+		speedMask = f.root.behavior.speedMask[:]
+
+		positions = f.root.behavior.positions
+		positions = np.swapaxes(positions[:, :], 1, 0)
+		speeds = f.root.behavior.speed
+		position_time = f.root.behavior.position_time
+		position_time = np.swapaxes(position_time[:,:],1,0)
+		speeds = np.swapaxes(speeds[:, :], 1, 0)
+		if speeds.shape[0]==position_time.shape[0]-1 :
+			speeds = np.append(speeds,speeds[-1]).reshape(position_time.shape[0],speeds.shape[1])
+
+		#We extract session names:
+		sessionNames = ["".join([chr(c) for c in l[0][:,0]]) for l in f.root.behavior.SessionNames[:,0]]
+		sessionStart = f.root.behavior.SessionStart[:,:][:,0]
+		sessionStop = f.root.behavior.SessionStop[:,:][:,0]
+
+		sessionValue = np.zeros(speedMask.shape[0])
+		for k in range(len(sessionNames)):
+			sessionValue[inEpochs(position_time[:,0],[sessionStart[k],sessionStop[k]])] = k
+
+		#if pmin and pmax are not None, we do not use some positions from the behaviour file
+		if plimits==[] :
+			pmin = 0
+			pmax = position_time[-1][0]
+		else:
+			pmin = position_time[plimits[0]][0]
+			pmax = position_time[plimits[1]][0]
+			positions = positions[plimits[0]:plimits[1]+1,:]
+			position_time = position_time[plimits[0]:plimits[1]+1,:]
+			speeds = speeds[plimits[0]:plimits[1]+1,:]
+			speedMask = speedMask[plimits[0]:plimits[1]+1]
+
+		positions = positions[speedMask, :]
+		speeds = speeds[speedMask,:]
+		position_time = position_time[speedMask,:]
+		sessionValue = sessionValue[speedMask]
+
+		sizeTest = position_time.shape[0]//10
+
+		print("Evaluating the entropy of each possible test set")
+		entropiesPositions = []
+		entropiesSpeeds = []
+		for id in tqdm(np.arange(0,stop=positions.shape[0]-sizeTest,step=sizeTest)):
+			# The environmental variable are discretized by equally space bins
+			# such that there is 45*...*45 bins per dimension
+			# we then fit over the test set a kernel estimation of the probability distribution
+			# and evaluate it over the bins
+			_ , probaFeatures = butils.kdenD(positions[id:id+sizeTest,:],bandwidth=1.0)
+			# We then compute the entropy of the obtained distribution:
+			epsilon = 10**(-9)
+			entropiesPositions += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
+
+			_ , probaFeatures = butils.kdenD(speeds[id:id+sizeTest,:],bandwidth=1.0)
+			# We then compute the entropy of the obtained distribution:
+			epsilon = 10**(-9)
+			entropiesSpeeds += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
+		totEntropy = np.array(entropiesSpeeds) + np.array(entropiesPositions)
+		bestTestSet = np.argmax(totEntropy)
+
+		testSetId = bestTestSet*sizeTest
+		# Next we provide a small tool to manually change the bestTest set position
+		# as well as its size:
+		cmSessValue = plt.get_cmap("nipy_spectral")
+		colorSess = cmSessValue(np.arange(len(sessionNames))/(len(sessionNames)))
+		keptSession = np.zeros(len(colorSess)) + 1 # a mask for the session
+
+		# fig,ax = plt.subplots(positions.shape[1]+2+len(colorSess),1)
+		fig = plt.figure()
+		gs = plt.GridSpec(positions.shape[1]+3, len(colorSess), figure=fig)
+		ax = [fig.add_subplot(gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
+		ax += [fig.add_subplot(gs[-3,id]) for id in range(len(colorSess))]
+		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])]
+		trainEpoch = np.array([pmin,position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0],pmax])
+		testEpochs = np.array(
+			[position_time[bestTestSet * sizeTest][0], position_time[bestTestSet * sizeTest + sizeTest][0]])
+		ls = []
+
+		for id in range(positions.shape[1]):
+			l1 = ax[id].scatter(position_time[inEpochs(position_time,trainEpoch)[0],0],positions[inEpochs(position_time,trainEpoch)[0],id],c="red",s=0.5)
+			l2 = ax[id].scatter(position_time[inEpochs(position_time, testEpochs)[0],0], positions[inEpochs(position_time, testEpochs)[0],id],c="black",s=0.5)
+			ls.append([l1,l2])
+			# display the sessions positions at the bottom:
+			for idk,k in enumerate(range(len(colorSess))):
+				if len(np.where(np.equal(sessionValue,k))[0])>0:
+					ax[id].hlines(np.min(positions[:,id])-3,
+								  xmin=position_time[np.min(np.where(np.equal(sessionValue,k))),0],
+								  xmax=position_time[np.max(np.where(np.equal(sessionValue,k))),0],color=colorSess[idk],linewidth=3.0)
+
+		ax[0].set_ylabel("first feature")
+		#TODO add histograms here...
+		slider = plt.Slider(ax[-2], 'test starting index', 0, positions.shape[0]-sizeTest,
+							valinit=testSetId, valstep=1)
+		sliderSize = plt.Slider(ax[-1], 'test size', 0, positions.shape[0],
+							valinit= sizeTest, valstep=1)
+		# Next we add buttons to select the sessions we would like to keep:
+		butts = [plt.Button(ax[len(ax)-k-3],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
+
+		def update(val):
+				testSetId = slider.val
+				sizeTest = sliderSize.val
+				trainEpoch = np.array(
+					[pmin, position_time[testSetId ][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0],
+					 pmax])
+				testEpochs = np.array(
+					[position_time[testSetId][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0]])
+
+				trainEpoch,testEpochs  = filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time)
+
+				for id in range(len(ls)):
+					l1,l2=ls[id]
+					l1.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, trainEpoch)[0],0],
+											 positions[inEpochs(position_time, trainEpoch)[0],id]])))
+					l2.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, testEpochs)[0],0],
+											 positions[inEpochs(position_time, testEpochs)[0],id]])))
+				fig.canvas.draw_idle()
+
+		slider.on_changed(update)
+		sliderSize.on_changed(update)
+
+		def buttUpdate(id):
+			def buttUpdate(val):
+				if keptSession[id]:
+					butts[id].color = [0,0,0,0]
+					keptSession[id] = 0
+				else:
+					keptSession[id] = 1
+					butts[id].color = colorSess[id]
+			update(0)
+			return buttUpdate
+		[b.on_clicked(buttUpdate(id)) for id,b in enumerate(butts)]
+
+		plt.show()
+
+		testSetId = slider.val
+		sizeTest = sliderSize.val
+
+		if "testEpochs" in children:
+			f.remove_node("/behavior", "testEpochs")
+
+		trainEpoch = np.array(
+			[pmin, position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0],
+			 pmax])
+		testEpochs = np.array(
+			[position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0]])
+		trainEpoch, testEpochs = filter_train_test_by_session(trainEpoch, testEpochs, keptSession, sessionStart,
+															  sessionStop, position_time)
+		f.create_array("/behavior","testEpochs",testEpochs)
+		if "trainEpochs" in children:
+			f.remove_node("/behavior", "trainEpochs")
+		f.create_array("/behavior", "trainEpochs", trainEpoch)
+		f.flush() #effectively write down the modification we just made
+
+		# # just a display of the first env variable and the histograms:
+		# fig,ax = plt.subplots(2,2)
+		# fig.suptitle("Test Set")
+		# ax[0,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
+		# ax[0,1].hist(positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
+		# ax[0,0].set_ylabel("position")
+		# ax[1,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
+		# ax[1,1].hist(speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
+		# ax[1,0].set_ylabel("speed")
+		# fig.show()
 
 
 
@@ -107,7 +435,8 @@ class openEphysFilter:
 		"""
 		if sample.ndim==1:
 			return np.array(next(self.dataReader))[self.channelList]*0.195
-			# We might not want to read all channels, so we use "self.channelList" the list of channel to consider
+			# Pierre: Very suboptimal, because the .dat files and .fil array are both read here
+			# and the data in the .dat files is not used...
 			# to filter out uninteresting channels
 			# Here the channelList simply gather all channels (over different groups) that were acquired
 		else:
@@ -140,28 +469,44 @@ class INTANFilter:
 		self.state = self.a * self.state + self.b * np.array(sample)[self.channelList]
 		return temp
 
-
-
-
-
-
-
-
-
-
-
-
-def isTrainingExample(epochs, time):
-	for e in range(len(epochs['train'])//2):
-		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
-			return True
-	for e in range(len(epochs['test'])//2):
-		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
-			return False
-	return None
+#
+# def isTrainingExample(epochs, time):
+# 	for e in range(len(epochs['train'])//2):
+# 		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
+# 			return True
+# 	for e in range(len(epochs['test'])//2):
+# 		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
+# 			return False
+# 	return None
 
 def emptyData():
-	return {'group':[], 'time':[], 'spike':[], 'position':[], 'train':[]}
+	return {'group':[], 'time':[], 'spike':[], 'position':[], 'position_index':[]} #'train':[]
+
+
+#In case one want to use this spikeDetector rather than the Julia one,
+# one could use the following code snipet:
+# spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)vvvvvvvvvvvv
+# if mode == "decode":
+# 	spikeDetector.setThresholds(projectPath.thresholds)
+#
+# # Create data files if not present
+# if not os.path.isfile(projectPath.tfrec):
+# 	# setup data readers and writers meta data
+# 	spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
+# 	spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
+# 	writer = tf.io.TFRecordWriter(projectPath.tfrec)
+#
+# 	with ExitStack() as stack:
+# 		# Open data files
+# 		writer = stack.enter_context(writer)
+# 		# generate spike sequences in windows of size params.windowLength
+# 		for example in spikeSequenceGen:
+# 			writer.write(nnUtils.serializeSpikeSequence(
+# 				params,
+# 				*tuple(example[k] for k in
+# 					   ["pos_index", "pos", "groups", "length", "times"] + ["spikes" + str(g) for g in
+# 																			range(params.nGroups)])))
+#
 
 class SpikeDetector:
 	'''A processor class to go through raw data to filter and extract spikes. Synchronizes with position.'''
@@ -186,16 +531,17 @@ class SpikeDetector:
 			self.position_time = np.array([0], dtype=float)
 			self.startTime = 0
 			self.stopTime = float("inf")
-			self.epochs = {"train": [], "test": [0, float("inf")]}
+			# self.epochs = {"train": [], "test": [0, float("inf")]}
 		else:
 			self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
-			self.position, self.position_time, *epochs = get_position(self.path.folder)
-			self.epochs = {
-				"train": epochs[0],
-				"test":  epochs[1]
-			}
-			self.startTime = min(self.epochs["train"] + self.epochs["test"])
-			self.stopTime  = max(self.epochs["train"] + self.epochs["test"])
+			self.position, self.position_time = get_position(self.path.folder)
+			# self.epochs = {
+			# 	"train": epochs[0],
+			# 	"test":  epochs[1]
+			# }
+			# self.startTime = min(self.epochs["train"] + self.epochs["test"])
+			self.stopTime  = self.position_time[-1] # max(self.epochs["train"] + self.epochs["test"])
+			self.startTime = self.position_time[0]
 
 
 		if useOpenEphysFilter:
@@ -221,15 +567,15 @@ class SpikeDetector:
 		return [len(self.list_channels[n]) for n in range(self.nGroups())]
 	def maxPos(self):
 		return np.max(self.position) if self.mode != 'decode' else 1
-	def learningTime(self):
-		return sum([self.epochs["train"][2*n+1]-self.epochs["train"][2*n] for n in range(len(self.epochs["train"])//2)])
-	def trainingPositions(self):
-		selected = [False for _ in range(len(self.position_time))]
-		for idx in range(len(self.position_time)):
-			for e in range(len(self.epochs['train'])//2):
-				if self.position_time[idx] >= self.epochs['train'][2*e] and self.position_time[idx] < self.epochs['train'][2*e+1]:
-					selected[idx] = True
-		return self.position[np.where(selected)]/self.maxPos()
+	# def learningTime(self):
+	# 	return sum([self.epochs["train"][2*n+1]-self.epochs["train"][2*n] for n in range(len(self.epochs["train"])//2)])
+	# def trainingPositions(self):
+	# 	selected = [False for _ in range(len(self.position_time))]
+	# 	for idx in range(len(self.position_time)):
+	# 		for e in range(len(self.epochs['train'])//2):
+	# 			if self.position_time[idx] >= self.epochs['train'][2*e] and self.position_time[idx] < self.epochs['train'][2*e+1]:
+	# 				selected[idx] = True
+	# 	return self.position[np.where(selected)]/self.maxPos()
 
 
 	def dim_output(self):
@@ -256,8 +602,6 @@ class SpikeDetector:
 	def setThresholds(self, thresholds):
 		assert([len(d) for d in thresholds] == [len(s) for s in self.list_channels])
 		self.thresholds = [i for d in thresholds for i in d]
-
-
 
 	def getFilteredBuffer(self, bufferSize):
 		"""
@@ -306,11 +650,15 @@ class SpikeDetector:
 		self.dataFile = open(self.path.dat, 'rb')
 		self.dataFile.__enter__()
 		self.dataReader = struct.iter_unpack(str(self.nChannels)+'h', self.dataFile.read())
+		#let us try with a mmap:
+		# number_timeSteps = os.stat(self.path.dat).st_size//(2*self.nChannels)
+		# memmapData = np.memmap(self.path.dat,dtype=np.int16,mode='r',shape=(number_timeSteps,self.nChannels))
+		# self.dataReader = map(lambda x:x,memmapData)
 		print('extracting spikes.')
 
 		self.inputQueue = ml.Queue()
 		self.outputQueue = ml.Queue()
-		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate, self.epochs, self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
+		self.proc = [ml.Process(target=findSpikesInGroupParallel, args=(self.inputQueue, self.outputQueue, self.samplingRate , self.thresholdFactor, self.startTime, self.position, self.position_time)) for _ in range(len(self.list_channels))]
 		for p in self.proc:
 			p.deamon = True
 			p.start()
@@ -346,6 +694,8 @@ class SpikeDetector:
 		spikesFound = self.getLateSpikes()
 
 		### copy end of previous buffer at the beginning of the filteredSignal
+		#As we will detect spike starting from time 0 in this new buffer, we need to know at least 15 ms of the
+		# signal just before so that we save all these spikes.
 		if self.endOfLastBuffer != []:
 			self.firstBuffer = False
 			self.filteredSignal = np.concatenate([self.endOfLastBuffer, self.filteredSignal], axis=0)
@@ -357,7 +707,7 @@ class SpikeDetector:
 		# Then sent on the inputQueue to be process by the function findSpikesInGroupParallel ran in parallel
 		for group in range(len(self.list_channels)):
 			filteredBuffer = self.filteredSignal[:,self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
-			thresholds	 = self.thresholds	  [self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
+			thresholds	 = self.thresholds[self.previousChannels[group]:self.previousChannels[group]+len(self.list_channels[group])]
 			self.inputQueue.put([self.pbar.n, group, thresholds, filteredBuffer])
 
 
@@ -375,10 +725,13 @@ class SpikeDetector:
 		return spikesFound
 
 
+def findTime(position_time,lastBestTime,time):
+							for i in range(len(position_time)-lastBestTime-1):
+								if np.abs(position_time[lastBestTime+i]-time)<np.abs(position_time[lastBestTime+i+1]-time):
+									return lastBestTime+i
+							return len(position_time)-1
 
-
-
-def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thresholdFactor, startTime, position, position_time):
+def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFactor, startTime, position, position_time):
 	"""
 		How it detect spikes:
 			moves with steps of size 15, ie dt= 15*1/sampling_rate
@@ -402,6 +755,8 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 		spikesFound = emptyData()
 		lateSpikes = emptyData()
 
+		lastBestTime = 0
+
 		spl = 15
 		#the spike looking time starts at 15, therefore a spike initiating at time t=0, i.e for the first buffer
 		# will not be considered !
@@ -415,7 +770,7 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 				# and the voltage goes below the threshold (so with a slight delay) after the buffer limit in the current channel
 				# therefore we change the second  test to np.all(filteredBuffer[spl-1,:] > -thresholds)
 				# rather than  filteredBuffer[spl-1, chnl] > -thresholds[chnl]
-				if filteredBuffer[spl,chnl] < -thresholds[chnl] and np.all(filteredBuffer[spl-1,:] > -thresholds):
+				if filteredBuffer[spl,chnl] < -thresholds[chnl] and np.all(filteredBuffer[spl-1,:] >= -thresholds):
 					triggered = True
 					positiveTrigger = False
 
@@ -436,8 +791,8 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 					else:
 						time = (N * BUFFERSIZE + spl - 15) / samplingRate
 						maxSplTimeToUseInBuffer = BUFFERSIZE - 17 + 15
-					train = isTrainingExample(epochs, time)
-					assert maxSplTimeToUseInBuffer == filteredBuffer.shape[0]-17
+					# train = isTrainingExample(epochs, time)
+					# assert maxSplTimeToUseInBuffer == filteredBuffer.shape[0]-17
 
 					# Do nothing unless after behaviour data has started
 					if time > startTime:
@@ -461,8 +816,13 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 							#Note: no transpose of the filteredBuffer because it will then be concatenated with the
 							# beginning of the next buffer to create a nice spike window.
 							lateSpikes['spike'].   append(filteredBuffer[spl-15:, :])
-							lateSpikes['position'].append( position[np.argmin(np.abs(position_time-time))] )
-							lateSpikes['train'].   append(train)
+
+							#finding the argmin is a potentially very slow operations.
+							lastBestTime = findTime(position_time,lastBestTime,time)
+							lateSpikes['position_index'].append(lastBestTime)
+							lateSpikes['position'].append( position[lateSpikes['position_index'][-1]] )
+							# lateSpikes['train'].   append(train)
+
 
 						else:
 							spike = filteredBuffer[spl-15:spl+17, :].copy()
@@ -472,8 +832,10 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 								spikesFound['time'].	append(time)
 								#note: here the reshape does not bring anything...
 								spikesFound['spike'].   append( np.array(spike).reshape([32,filteredBuffer.shape[1]]).transpose() )
-								spikesFound['position'].append( position[np.argmin(np.abs(position_time-time))] )
-								spikesFound['train'].   append(train)
+								lastBestTime = findTime(position_time, lastBestTime, time)
+								spikesFound['position_index'].append(lastBestTime)
+								spikesFound['position'].append(position[spikesFound['position_index'][-1]])
+								# spikesFound['train'].   append(train)
 
 					spl += 15
 					triggered = False
@@ -481,4 +843,10 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, epochs, thr
 			spl += 1
 
 		outputQueue.put([spikesFound, lateSpikes])
+
+
+
+
+
+
 

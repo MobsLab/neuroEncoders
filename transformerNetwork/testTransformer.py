@@ -96,9 +96,9 @@ class Params:
         # over each axis of the output_variable space (but together the discretization form a grid mesh)
         # If we want bin = 20 for example we can use:
 
-        self.d_model = 128**(self.dim_output)
-        assert self.d_model//self.nGroups == self.d_model/self.nGroups
-        self.nFeatures = int(self.d_model/self.nGroups)
+        self.d_model = 32**(self.dim_output)
+        # assert self.d_model//self.nGroups == self.d_model/self.nGroups
+        self.nFeatures = 128 #int(self.d_model/self.nGroups)
         # The output of each convernet is concatenated to form the input to the model.
         ### full Tranformer params
         self.num_layers_encoder_transformer = 4
@@ -110,7 +110,7 @@ class Params:
         # While the transformer will operate with a wider language, in a higher dimensional space
         # we can force the loss to be a cross-entropy loss by using a restricted vocabulary
         # if this voc is too large, the network does not seem to be able to learn.
-        self.placeCellVocSize = 8
+        self.placeCellVocSize = 32**(self.dim_output)
 
         #For the positional encoding: the maximal sequence length
         # I.e the maximal number of spike we could detect
@@ -138,7 +138,8 @@ def main():
 
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
     datPath = ''
     useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
@@ -296,8 +297,6 @@ def main():
     plt.savefig(os.path.join(projectPath.folder, "results", "loss.png"))
 
 if __name__=="__main__":
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
-
     main()
 
     print()
