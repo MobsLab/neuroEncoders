@@ -10,6 +10,10 @@ from contextlib import ExitStack
 import matplotlib.pyplot as plt
 import pandas as pd
 import transformData.linearizer
+from importData.rawDataParser import modify_feature_forBestTestSet,speed_filter
+from resultAnalysis import performancePlots
+from importData.JuliaData.juliaDataParser import julia_spike_filter
+
 
 
 class Project():
@@ -38,19 +42,18 @@ class Project():
             self.thresholds, self.graph = self.getThresholdsAndGraph()
             self.graphMeta = self.graph + '.meta'
 
-        self.tfrec = {
-            "train": self.folder + 'dataset/trainingDataset.tfrec',
-            "test": self.folder + 'dataset/testingDataset.tfrec'}
+        self.tfrec =  self.folder + 'dataset/dataset.tfrec'
+        self.tfrecSleep = self.folder + 'dataset/datasetSleep.tfrec'
 
-        #TO change at every experiment:
-        self.resultsPath = self.folder + 'results_TF20_NoDropoutSlowRNNhardsigmoid_Euclidean_blockloss'
-        self.resultsNpz = self.resultsPath + '/inferring.npz'
-        self.resultsMat = self.resultsPath + '/inferring.mat'
+        #To change at every experiment:
+        self.resultsPath = self.folder + 'results_tf20_quick'
+        # self.resultsNpz = self.resultsPath + '/inferring.npz'
+        # self.resultsMat = self.resultsPath + '/inferring.mat'
 
         if not os.path.isdir(self.folder + 'dataset'):
             os.makedirs(self.folder + 'dataset')
-        if not os.path.isdir(self.folder + 'graph'):
-            os.makedirs(self.folder + 'graph')
+        # if not os.path.isdir(self.folder + 'graph'):
+        #     os.makedirs(self.folder + 'graph')
         if not os.path.isdir(self.resultsPath):
             os.makedirs(self.resultsPath )
         if not os.path.isdir(os.path.join(self.resultsPath, "resultInference")):
@@ -75,15 +78,14 @@ class Project():
 
 
 class Params:
-    def __init__(self, detector, windowSize):
-        self.nGroups = detector.nGroups()
-        self.dim_output = detector.dim_output()
-        self.nChannels = detector.numChannelsPerGroup()
+    def __init__(self,list_channels,dim_output, windowSize):
+        self.nGroups = len(list_channels)
+        self.dim_output = dim_output
+        self.nChannels = [len(list_channels[n]) for n in range(self.nGroups)]
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize)
         self.nEpochs = 150
-        self.learningTime = detector.learningTime()
         self.windowLength = windowSize # in seconds, as all things should be
 
         ### from units encoder params
@@ -102,16 +104,19 @@ class Params:
         # by the lstm.
         self.fasterRNN = False
 
+        ##Test param:
+        self.shuffle_spike_order = False
+        self.shuffle_convnets_outputs = False
+
         self.batch_size = 52 #previously 52
 
         self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
         self.lossLearningRate = 0.00003
-        self.lossActivation = None
+        self.lossActivation = tf.nn.relu
 
         self.usingMixedPrecision = True # this boolean indicates weither tensorflow uses mixed precision
         # ie enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer except the output for unclear reasons linked to gradient computations
-
 
 
 def main():
@@ -123,71 +128,56 @@ def main():
     # to set as env variable: TF_GPU_THREAD_MODE=gpu_private
     # tf.compat.v1.enable_eager_execution()
 
-    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_testV1/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/_encoders_test/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199/amplifier.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-monday/continuous.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+    xmlPath = "/home/mobs/Documents/PierreCode/dataTest/LisaRouxDataset/M007_S07_07222015.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1604/signal.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1404/signal.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/RatCataneseOld/rat122-20090731.xml"
+    # subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
+    #                  "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
+
     datPath = ''
-    useOpenEphysFilter = False # false if we don't have a .fil file
     windowSize = 0.036
     mode = "full"
-    split = 0.1
 
     #tf.debugging.set_log_device_placement(True)
 
     projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=None)
-    spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
-    params = Params(spikeDetector, windowSize)
 
-    physical_devices = tf.config.list_physical_devices('GPU')
-    try:
-        # Disable first GPU
-        #tf.config.set_visible_devices([], 'GPU')
-        logical_devices = tf.config.list_logical_devices('GPU')
-    except:
-        # Invalid device or cannot modify virtual devices once initialized.
-        print("FAILED")
-        pass
+    if not os.path.exists(os.path.join(projectPath.folder,"nnBehavior.mat")):
+        subprocess.run(["./getTsdFeature.sh", projectPath.folder])
+
+    # f = np.load(os.path.join(projectPath.folder, "results", "inferring.npz"), allow_pickle=True)
+    # outputs = {}
+    # outputs["featurePred"]  = f["inferring"][:,0:2]
+    # outputs["featureTrue"] = f["pos"]
+    # outputs["times"] = f["times"]
+    # from transformData.linearizer import uMazeLinearization2
+    # linearizationFunction = uMazeLinearization2
+    # projPredTF10,linearPredTF10 = uMazeLinearization2(outputs["featurePred"][:,0:2])
+    # projTrueTF10,linearTrueTF10 = uMazeLinearization2(outputs["featureTrue"][:,0:2])
+    # outputs["predofLoss"] = f["inferring"][:,2].reshape([f["inferring"].shape[0],1])
+    # outputs["projPred"] = projPredTF10
+    # outputs["projTruePos"] = projTrueTF10
+    # outputs["linearPred"] = linearPredTF10
+    # outputs["linearTrue"] = linearTrueTF10
+    # performancePlots.linear_performance(outputs,os.path.join(projectPath.folder,"results","nofilter"),1)
+    # performancePlots.linear_performance(outputs, os.path.join(projectPath.folder, "results","filter"),0.1)
+
+    list_channels, samplingRate, nChannels = rawDataParser.get_params(projectPath.xml)
+    positions,_ = rawDataParser.get_position(projectPath.folder)
+    params = Params(list_channels,positions.shape[1], windowSize)
+
+    julia_spike_filter(projectPath)
 
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
     #mixed_precision.experimental.set_policy('mixed_float16')
     params.usingMixedPrecision = False
-
-    #tf.distribute.OneDeviceStrategy(device=tf.config.list_logical_devices('GPU')[0])
-
-
-
-    if mode == "decode":
-        spikeDetector.setThresholds(projectPath.thresholds)
-
-    # Create data files if not present
-    if not os.path.isfile(projectPath.tfrec["test"]):
-        # setup data readers and writers meta data
-        spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
-        spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
-        readers = {}
-        writers = {"testSequences": tf.io.TFRecordWriter(projectPath.tfrec["test"])}
-        writers.update({"trainSequences": tf.io.TFRecordWriter(projectPath.tfrec["train"])})
-
-        with ExitStack() as stack:
-            # Open data files
-            for k,v in writers.items():
-                writers[k] = stack.enter_context(v)
-            for k,v in readers.items():
-                readers[k] = stack.enter_context(v)
-
-            # generate spike sequences in windows of size params.windowLength
-            for example in spikeSequenceGen:
-                if example["train"] == None:
-                    print("None example found")
-                    continue
-                if example["train"]:
-                    writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
-                        params,
-                        *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-                else:
-                    writers["testSequences"].write(nnUtils.serializeSpikeSequence(
-                        params,
-                        *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-
 
     # Training, testing, and preparing network for online setup
     if mode=="full":
@@ -195,91 +185,80 @@ def main():
     elif mode=="decode":
         from decoder import decodeTraining as Training
     # todo: modify this loading of code files as we changed names!!
+
+    #Since TF 2.4.1, too much memory seems to be allocated for the LSTM, and the programm would
+    # throw an error if we don't manually prevent it from full memory growth. Before it was an issue
+    # that only existed for windows, but it seems to have now spread to linux as well...
+    gpu_devices = tf.config.experimental.list_physical_devices("GPU")
+    for device in gpu_devices:
+        tf.config.experimental.set_memory_growth(device, True)
+
+    # params.shuffle_spike_order = True
     trainer = Training.LSTMandSpikeNetwork(projectPath, params)
+    # The data are now saved into a tfrec file,
+    # next we provide an efficient tool for selecting the training and testing step
+
+    #first we find the first and last position index in the recording dataset
+    # to set as limits in for the nnbehavior.mat
+    # dataset = tf.data.TFRecordDataset(projectPath.tfrec)
+    # dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(trainer.feat_desc, *vals))
+    # pos_index = list(dataset.take(10).map(lambda x: x["times"]).as_numpy_iterator())
+
+    speed_filter(projectPath.folder,overWrite=False)
+    modify_feature_forBestTestSet(projectPath.folder,overWrite=False) #plimits=[np.min(pos_index),np.max(pos_index)]
+
     # trainLosses = trainer.train()
-    # df = pd.DataFrame(trainLosses)
-    # df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossTraining.csv"))
-    # fog,ax = plt.subplots()
-    # ax.plot(trainLosses[:,0])
-    # plt.show()
-
-    outputs = trainer.test()
-    predPos = outputs["featurePred"][:, 0:2]
-    truePos = outputs["featureTrue"]
-    predLoss = outputs["predofLoss"]
-    timeStepsPred = outputs["times"]
-
-    # Saving files
-    df = pd.DataFrame(predPos)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featurePred.csv"))
-    df = pd.DataFrame(truePos)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "featureTrue.csv"))
-    df = pd.DataFrame(predLoss[:,0,0])
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "lossPred.csv"))
-    df = pd.DataFrame(timeStepsPred)
-    df.to_csv(os.path.join(projectPath.resultsPath, "resultInference", "timeStepsPred.csv"))
-
-    # linearize the results:
-    linearPred = transformData.linearizer.uMazeLinearization(predPos)
-    linearTrue = transformData.linearizer.uMazeLinearization(truePos)
 
 
-    maxPos = spikeDetector.maxPos()
-    euclideanDistance = np.sqrt(np.sum(np.square(predPos * maxPos - truePos * maxPos), axis=1))
-    np.mean(euclideanDistance)
-    np.std(euclideanDistance)
+    #project the prediction and true data into a line fit on the maze:
+    from transformData.linearizer import doubleArmMazeLinearization
+    from transformData.linearizer import uMazeLinearization2,verifyLinearization
+    from importData.ImportClusters import getBehavior
+    path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
+    # linearizationFunction = lambda x: doubleArmMazeLinearization(x,scale=True,path_to_folder=path_to_code)
+    behave_data = getBehavior(projectPath.folder,getfilterSpeed=False)
+    verifyLinearization(behave_data["Positions"])
+    linearizationFunction = uMazeLinearization2
 
-    fig, ax = plt.subplots()
-    ax.scatter(truePos[:, 0], truePos[:, 1], c="black", alpha=0.1, label="true Position")
-    ax.scatter(predPos[:, 0], predPos[:, 1], c="red", alpha=0.1, label="predicted Position")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("prediction with TF2.0's architecture")
-    fig.legend()
-    fig.show()
-    fig, ax = plt.subplots()
-    ax.scatter(linearTrue[:, 0], linearTrue[:, 1], c="black", alpha=0.1, label="true Position")
-    ax.scatter(linearPred[:, 0], linearPred[:, 1], c="red", alpha=0.1, label="predicted Position")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("prediction with TF2.0's architecture")
-    fig.legend()
-    fig.show()
-    fig.savefig(os.path.join(projectPath.resultsPath, "testSetPrediciton.png"))
-    fig, ax = plt.subplots()
-    ax.plot(trainLosses[:, 0], c="red")
-    ax2 = ax.twinx()
-    ax2.plot(trainLosses[:, 1], c="black")
-    ax.set_title("1 epochs = 1018 time steps")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("position loss", c="red")
-    ax2.set_ylabel("loss of loss", c="black")
-    fig.show()
-    fig, ax = plt.subplots()
-    ax.hist(euclideanDistance, bins=100)
-    fig.show()
+    name_save = "resultTrain"
+    outputs = trainer.test(linearizationFunction,name_save,useTrain=True)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
+    name_save = "resultTest"
+    outputs = trainer.test(linearizationFunction,name_save,useTrain=False)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
-    # TO do : create a python file for automatic projection of the results...
-    # so that Dima can use it easily.
-    bestPred = predLoss < np.quantile(predLoss,0.9)
-    fig,ax = plt.subplots()
-    ax.plot(predPos[bestPred[:,0,0],1],c="orange")
-    ax.plot(truePos[bestPred[:,0,0],1],c="black")
-    fig.show()
+    ## sleep decoding
+    name_save = "resultSleep"
+    stimuleZone = [[0.0,0.35],[0.35,0.35],[0.435,0.0]] #to change
+    outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,stimuleZone,name_save,batch=True)
 
-    fig,ax = plt.subplots(2,1)
-    ax[0].plot(predPos[:, 0], c="orange")
-    ax[0].plot(truePos[:, 0], c="black")
-    ax[1].plot(linearPred[:,0],c="orange")
-    ax[1].plot(linearTrue[:,0],c="black")
-    fig.show()
+    name_save = "resultTest_full"
+    outputs = trainer.test(linearizationFunction,name_save,useTrain=False,useSpeedFilter=False)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
-    from fullEncoder_v1 import printResults
-    printResults.printResults(projectPath.resultsPath)
+    ## Test with shuflling of spikes in the window
+    # We ask here if the algorithm uses the order of the spikes in the window
+    params.shuffle_spike_order = True
+    trainer.model = trainer.mybuild(trainer.get_Model(),modelName="spikeOrdershufflemodel.png")
+    name_save = "result_spikeorderinwindow_shuffle"
+    output_shuffle_spikeorder = trainer.test(linearizationFunction,name_save)
+    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+
+    params.shuffle_spike_order = False
+    params.shuffle_convnets_outputs = True
+    trainer.model = trainer.mybuild(trainer.get_Model(),modelName="convNetOutputshufflemodel.png")
+    name_save = "result_convOutputs_shuffle"
+    outputs_shuffle_convoutputs = trainer.test(linearizationFunction,name_save)
+    performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+
 
 if __name__=="__main__":
     # In this architecture we use a 2.0 tensorflow backend, predicting solely the position.
-    # I.E without using the simpler feature strategy based on stratified spaces.
-
+    # I.E without using the simpler feature strategy based on stratified spaces
     main()

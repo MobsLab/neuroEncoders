@@ -4,29 +4,6 @@ from scipy import signal
 from functools import reduce
 from sklearn.neighbors import KernelDensity
 
-
-def exp256(x):
-
-	"""This function is supposedly 330 times faster than a classic exponential.
-	This is an approximation, theoretically very good if x<5.
-	It was also tested to be working normally here."""
-
-	temp = 1 + x/1024
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	temp = temp * temp
-	return temp
-	# return np.exp(x)
-
-
-
 def epanech_kernel_1d(size_kernel):
 	values = np.ones(2*size_kernel)
 	for n in range(-size_kernel, size_kernel):
