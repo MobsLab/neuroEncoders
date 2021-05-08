@@ -42,11 +42,11 @@ class LSTMandSpikeNetwork():
 
         # TODO: initialization of the networks
         with tf.device(self.device_name):
-            self.iteratorLengthInput = tf.keras.layers.Input(shape=(),name="length")
+            # self.iteratorLengthInput = tf.keras.layers.Input(shape=(),name="length")
             if self.params.usingMixedPrecision:
-                self.inputsToSpikeNets = [tf.keras.layers.Input(shape=(None,None),name="group"+str(group),dtype=tf.float16) for group in range(self.params.nGroups)]
+                self.inputsToSpikeNets = [tf.keras.layers.Input(shape=(self.params.nChannels[group],32),name="group"+str(group),dtype=tf.float16) for group in range(self.params.nGroups)]
             else:
-                self.inputsToSpikeNets = [tf.keras.layers.Input(shape=(None,None),name="group"+str(group)) for group in range(self.params.nGroups)]
+                self.inputsToSpikeNets = [tf.keras.layers.Input(shape=(self.params.nChannels[group],32),name="group"+str(group)) for group in range(self.params.nGroups)]
 
             self.inputGroups = tf.keras.layers.Input(shape=(),name="groups")
             # The spike nets acts on each group separately; to reorganize all these computations we use
@@ -55,9 +55,10 @@ class LSTMandSpikeNetwork():
 
             self.indices = [tf.keras.layers.Input(shape=(),name="indices"+str(group),dtype=tf.int32) for group in range(self.params.nGroups)]
             if self.params.usingMixedPrecision:
-                self.zeroForGather = tf.zeros([1,self.params.nFeatures],dtype=tf.float16)
+                zeroForGather = tf.constant(tf.zeros([1, self.params.nFeatures], dtype=tf.float16))
             else:
-                self.zeroForGather = tf.zeros([1, self.params.nFeatures])
+                zeroForGather = tf.constant(tf.zeros([1, self.params.nFeatures]))
+            self.zeroForGather = tf.keras.layers.Input(tensor=zeroForGather,name="zeroForGather")
             # What is the role of the completionTensor?
             # The id matrix dimension is the total number of spikes encoded inside the spike window
             # Indeed iterators["groups"] is the list of group that were emitted during each spike sequence merged into the spike window
@@ -77,7 +78,7 @@ class LSTMandSpikeNetwork():
                          tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
                          tf.keras.layers.LSTM(self.params.lstmSize,return_sequences=True),
                          tf.keras.layers.LSTM(self.params.lstmSize)] #,,recurrent_dropout=self.params.lstmDropout
-            self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output, activation=tf.keras.activations.hard_sigmoid, dtype=tf.float32)
+            self.denseFeatureOutput = tf.keras.layers.Dense(self.params.dim_output, activation=tf.keras.activations.hard_sigmoid, dtype=tf.float32,name="feature_output")
             #tf.keras.activations.hard_sigmoid
 
 
@@ -85,14 +86,14 @@ class LSTMandSpikeNetwork():
             # Potential issue: the backprop will go to both student (loss pred network) and teacher (pos pred network...)
             self.truePos = tf.keras.layers.Input(shape=(self.params.dim_output), name="pos")
             self.denseLoss1 = tf.keras.layers.Dense(self.params.lstmSize, activation=tf.nn.relu)
-            self.denseLoss2 = tf.keras.layers.Dense(1, activation=self.params.lossActivation)
+            self.denseLoss2 = tf.keras.layers.Dense(1, activation=self.params.lossActivation,name="predicted_loss")
 
             outputs = self.get_Model()
 
             self.model = self.mybuild(outputs)
 
     def get_Model(self):
-        # generate and compile the model, lr is the chosen learning rate
+        # generate and compile the model
         # CNN plus dense on every group independently
         with tf.device(self.device_name):
             # Optimization: could we not perform this foor loop more efficiently?
@@ -133,7 +134,7 @@ class LSTMandSpikeNetwork():
 
             # The concatenation is made over axis 2, which is the Feature axis
             # So we reserve columns to each output of the spiking networks...
-            allFeatures = tf.concat(allFeatures, axis=2, name="concat1")
+            allFeatures = tf.concat(allFeatures, axis=2) #, name="concat1"
 
             #We would like to mask timesteps that were added for batching purpose, before running the RNN
             batchedInputGroups = tf.reshape(self.inputGroups,[self.params.batch_size,-1])
@@ -170,7 +171,7 @@ class LSTMandSpikeNetwork():
                 mymask = tf.math.greater_equal(mymaskFloat,1.0)
                 tf.ensure_shape(mymask, [self.params.batch_size, None])
 
-            allFeatures = self.dropoutLayer(allFeatures)
+            # allFeatures = self.dropoutLayer(allFeatures)
 
             output_seq = self.lstmsNets[0](allFeatures,mask=mymask)
             output_seq = self.lstmsNets[1](output_seq, mask=mymask)
@@ -187,11 +188,13 @@ class LSTMandSpikeNetwork():
             posLoss = tf.losses.mean_squared_error(myoutputPos,self.truePos)[:,tf.newaxis]
 
             idmanifoldloss = tf.identity(tf.math.reduce_mean(posLoss),name="lossOfManifold")
-            lossFromOutputLoss = tf.identity(tf.math.reduce_mean(tf.losses.mean_squared_error(outputLoss, posLoss)),name="lossOfLossPredictor")
+            #remark: we need to also stop the gradient to progagate from posLoss to the network at the stage of
+            # the computations for the loss of the loss predictor
+            lossFromOutputLoss = tf.identity(tf.math.reduce_mean(tf.losses.mean_squared_error(outputLoss,tf.stop_gradient(posLoss))),name="lossOfLossPredictor")
         return  myoutputPos, outputLoss, idmanifoldloss , lossFromOutputLoss
 
     def mybuild(self, outputs,modelName="model.png"):
-        model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.iteratorLengthInput,self.truePos,self.inputGroups],
+        model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.truePos,self.inputGroups,self.zeroForGather],
                                outputs=outputs)
         tf.keras.utils.plot_model(
             model, to_file=modelName, show_shapes=True
@@ -199,10 +202,51 @@ class LSTMandSpikeNetwork():
         model.compile(
             optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
             loss={
-                "tf_op_layer_lossOfManifold" : lambda x,y:y,
-                "tf_op_layer_lossOfLossPredictor" : lambda x,y:y,
+                "tf.identity" : lambda x,y:y, #tf_op_layer_lossOfManifold
+                "tf.identity_1" : lambda x,y:y, #tf_op_layer_lossOfLossPredictor
             },
         )
+        return model
+
+
+    def get_model_for_onlineInference(self,modelName="onlineDecodingModel.png",batch=False):
+        # the online inference model, it works as the training model but with a batch_size of 1 or params.batch_size
+        batch_size = 1
+        if batch:
+            batch_size = self.params.batch_size
+
+        with tf.device(self.device_name):
+            allFeatures = []  # store the result of the computation for each group
+            for group in range(self.params.nGroups):
+                x = self.inputsToSpikeNets[group]
+                x = self.spikeNets[group].apply(x)
+                filledFeatureTrain = tf.gather(tf.concat([self.zeroForGather, x], axis=0), self.indices[group],
+                                               axis=0)
+                filledFeatureTrain = tf.reshape(filledFeatureTrain,
+                                                [batch_size, -1, self.params.nFeatures])
+                allFeatures.append(filledFeatureTrain)
+            allFeatures = tf.tuple(
+                tensors=allFeatures)
+            allFeatures = tf.concat(allFeatures, axis=2)
+
+            # We would like to mask timesteps that were added for batching purpose, before running the RNN
+            batchedInputGroups = tf.reshape(self.inputGroups, [batch_size, -1])
+            mymask = tf.not_equal(batchedInputGroups, -1)
+
+            output_seq = self.lstmsNets[0](allFeatures, mask=mymask)
+            tf.ensure_shape(output_seq, [batch_size, None, self.params.lstmSize])
+            output_seq = self.lstmsNets[1](output_seq, mask=mymask)
+            output_seq = self.lstmsNets[2](output_seq, mask=mymask)
+            output = self.lstmsNets[3](output_seq, mask=mymask)
+            myoutputPos = self.denseFeatureOutput(output)
+            outputLoss = self.denseLoss2(self.denseLoss1(tf.stop_gradient(output)))
+
+        model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.inputGroups,self.zeroForGather],
+                               outputs=[myoutputPos,outputLoss])
+        tf.keras.utils.plot_model(
+            model, to_file=modelName, show_shapes=True
+        )
+        model.compile()
         return model
 
     def lr_schedule(self,epoch):
@@ -213,7 +257,7 @@ class LSTMandSpikeNetwork():
                 return lr
         return self.params.learningRates[0]
 
-    def createIndices(self, vals, valsout):
+    def createIndices(self, vals):
         # vals.update({"completionMatrix" : tf.eye(tf.shape(vals["groups"])[0])})
         for group in range(self.params.nGroups):
             spikePosition = tf.where(tf.equal(vals["groups"], group))
@@ -228,13 +272,19 @@ class LSTMandSpikeNetwork():
             indices = tf.cast(tf.sparse.to_dense(indices), dtype=tf.int32)
             vals.update({"indices" + str(group): indices})
 
+            if self.params.usingMixedPrecision:
+                zeroForGather = tf.zeros([1,self.params.nFeatures],dtype=tf.float16)
+            else:
+                zeroForGather = tf.zeros([1, self.params.nFeatures])
+            vals.update({"zeroForGather":zeroForGather})
+
             # changing the dtype to allow faster computations
             if self.params.usingMixedPrecision:
                 vals.update({"group" + str(group): tf.cast(vals["group" + str(group)], dtype=tf.float16)})
 
         if self.params.usingMixedPrecision:
             vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
-        return vals, valsout
+        return vals
 
 
 
@@ -245,24 +295,40 @@ class LSTMandSpikeNetwork():
         speed_mask = behavior_data["Times"]["speedFilter"]
 
         ### Training models
-        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
-        dataset = dataset.map(lambda *vals:nnUtils.parseSerializedSpike(self.feat_desc,*vals))
+        ndataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
+        ndataset = ndataset.map(lambda *vals:nnUtils.parseSerializedSpike(self.feat_desc,*vals),
+                              num_parallel_calls=tf.data.AUTOTUNE)
         epochMask  = inEpochsMask(behavior_data['Position_time'][:,0], behavior_data['Times']['trainEpochs'])
         tot_mask = speed_mask * epochMask
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(tot_mask)),dtype=tf.int64),
                                                 tf.constant(tot_mask,dtype=tf.float64)),default_value=0)
-        dataset = dataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]),1.0))
+        dataset = ndataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]),1.0))
+
+        # the train epochs selection is made on top of the data where we have position measurement
+        # we might additionnaly want to remove particular recording sessions, for example when the animal was
+        # in a particular position of the arena.
+        # next we filter by spike time inside the chosen data epochs
+        #TODO
+        # potentially save the dataset from here on as a smaller filtered dataset
+        # if not os.path.exists(os.path.join(self.projectPath.resultsPath,"dataset_experiment","trainedData")):
+        #     os.mkdir(os.path.join(self.projectPath.resultsPath,"dataset_experiment","trainedData"))
+        # tf.data.experimental.save(ndataset,os.path.join(self.projectPath.resultsPath,"dataset_experiment","trainedData"))
+        # dataset= tf.data.experimental.load(os.path.join(self.projectPath.resultsPath,"dataset_experiment","trainedData"),ndataset.element_spec)
+
         dataset = dataset.batch(self.params.batch_size,drop_remainder=True)
         dataset = dataset.map(
-            lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=True)) #self.feat_desc, *
+            lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=True),
+            num_parallel_calls=tf.data.AUTOTUNE) #self.feat_desc, *
         # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
         # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
-        dataset = dataset.map(lambda vals: (vals,{"tf_op_layer_lossOfManifold": tf.zeros(self.params.batch_size),
-                                                  "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
-        dataset = dataset.map(self.createIndices, num_parallel_calls=4)
+        dataset = dataset.map(self.createIndices, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(lambda vals: (vals,{"tf.identity": tf.zeros(self.params.batch_size),
+                                                  "tf.identity_1": tf.zeros(self.params.batch_size)}),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+
         dataset = dataset.shuffle(self.params.nSteps,reshuffle_each_iteration=True).cache() #.repeat() #
-        dataset = dataset.prefetch(self.params.batch_size* 10) #
+        dataset = dataset.prefetch(tf.data.AUTOTUNE) #
 
         callbackLR = tf.keras.callbacks.LearningRateScheduler(self.lr_schedule)
         csv_logger = tf.keras.callbacks.CSVLogger(os.path.join(self.projectPath.resultsPath,'training.log'))
@@ -271,16 +337,19 @@ class LSTMandSpikeNetwork():
         cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                          save_weights_only=True,
                                                          verbose=1)
-        #tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(self.projectPath.folder+"results","profiling"),
-        #                                             profile_batch = '200,210')
+        # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(self.projectPath.folder,"profiling"),
+        #                                             profile_batch = '100,110')
+
+        #We can quickly have an idea of weither there is a bottlneck issue in the data pipeline using this:
+        # dataset = dataset.take(1).cache().repeat(len(dataset))
 
         hist = self.model.fit(dataset,
                   epochs=self.params.nEpochs,
                   callbacks=[callbackLR, csv_logger, cp_callback], # , tb_callback,cp_callback
                               ) #steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
 
-        trainLosses = np.transpose(np.stack([hist.history["tf_op_layer_lossOfManifold_loss"],
-                                      hist.history["tf_op_layer_lossOfLossPredictor_loss"]]))
+        trainLosses = np.transpose(np.stack([hist.history["tf.identity"], #tf_op_layer_lossOfManifold
+                                      hist.history["tf.identity_1"]]))  #tf_op_layer_lossOfLossPredictor_loss
 
         df = pd.DataFrame(trainLosses)
         df.to_csv(os.path.join(self.projectPath.resultsPath, "resultInference", "lossTraining.csv"))
@@ -288,6 +357,11 @@ class LSTMandSpikeNetwork():
         ax.plot(trainLosses[:,0])
         plt.show()
         fig.savefig(os.path.join(self.projectPath.resultsPath, "lossTraining.png"))
+
+        # print("saving model in savedmodel format, for c++")
+        # if not os.path.isdir(os.path.join(self.projectPath.resultsPath,"training_1","savedir")):
+        #     os.makedirs(os.path.join(self.projectPath.resultsPath,"training_1","savedir"))
+        # tf.saved_model.save(self.onlineDecodingModel, os.path.join(self.projectPath.resultsPath,"training_1","savedir"))
 
         return trainLosses
 
@@ -303,7 +377,8 @@ class LSTMandSpikeNetwork():
             speed_mask = np.zeros_like(speed_mask) + 1
 
         dataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
-        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals))
+        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals),
+                              num_parallel_calls=tf.data.AUTOTUNE)
 
         if useTrain:
             epochMask = inEpochsMask(behavior_data['Position_time'][:, 0], behavior_data['Times']['trainEpochs'])
@@ -316,19 +391,21 @@ class LSTMandSpikeNetwork():
         dataset = dataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]), 1.0))
         dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
         #drop_remainder allows us to remove the last batch if it does not contain enough elements to form a batch.
-        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals,batched=True))
+        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals,batched=True),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(self.createIndices, num_parallel_calls=tf.data.AUTOTUNE)
         dataset = dataset.map(lambda vals: ( vals, {"tf_op_layer_lossOfManifold": tf.zeros(self.params.batch_size),
-                                                    "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),num_parallel_calls=4)
-        dataset = dataset.map(self.createIndices,num_parallel_calls=4)
+                                                    "tf_op_layer_lossOfLossPredictor": tf.zeros(self.params.batch_size)}),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+        output_test = self.model.predict(dataset,verbose=1) #
 
-        datasetPos = dataset.map(lambda x, y: x["pos"])
+        print("gathering true feature")
+        datasetPos = dataset.map(lambda x, y: x["pos"],num_parallel_calls=tf.data.AUTOTUNE)
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
-
-        datasetTimes = dataset.map(lambda x, y: x["time"])
+        print("gathering exact time of spikes")
+        datasetTimes = dataset.map(lambda x, y: x["time"],num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
-
-        output_test = self.model.predict(dataset) #
 
         outLoss = np.expand_dims(output_test[2], axis=1)
         featureTrue = np.reshape(fullFeatureTrue, [output_test[0].shape[0], output_test[0].shape[-1]])
@@ -362,3 +439,35 @@ class LSTMandSpikeNetwork():
                 "times": times, "predofLoss" : output_test[1],
                 "lossFromOutputLoss" : outLoss, "projPred":projPredPos, "projTruePos":projTruePos,
                 "linearPred":linearPred,"linearTrue":linearTrue}
+
+
+    def sleep_decoding(self,linearizationFunction,areaSimulation,saveFolder="resultSleepDecoding",batch=False):
+        # linearizationFunction: function to get the linear variable
+        # areaSimulation: a sham simulation is declared of the decoding is made in the areaSimulation
+        self.onlineDecodingModel = self.get_model_for_onlineInference(batch=batch)
+        dataset = tf.data.TFRecordDataset(self.projectPath.tfrec)
+        dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+        if batch:
+            dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
+        dataset = dataset.map(
+            lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=batch),
+            num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(self.createIndices, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset.cache()
+        dataset.prefetch(tf.data.AUTOTUNE)
+        # we filter out spike of length 0
+        # todo: find why there is such spike in the dataset
+        # dataset = dataset.filter(lambda val:val["length"]>0)
+        output_test = self.onlineDecodingModel.predict(dataset,verbose=1)
+
+        fig,ax = plt.subplots()
+        eps = 10**(-6)
+        ax.hist(np.log(output_test[1]+eps),bins=100)
+        # ax.set_xscale("log")
+        fig.show()
+        fig,ax = plt.subplots()
+        ax.scatter(output_test[0][:,0],output_test[0][:,1])
+        fig.show()
+
+

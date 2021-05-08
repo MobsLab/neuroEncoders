@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-BUFFERSIZE = 10000
+BUFFERSIZE = 72000
 def julia_spike_filter(projectPath,window_length = 0.036,eraseSpike=False):
     # Launch an extraction of the spikes in Julia:
     if not os.path.exists(projectPath.folder + 'nnBehavior.mat'):
@@ -18,5 +18,6 @@ def julia_spike_filter(projectPath,window_length = 0.036,eraseSpike=False):
                         os.path.join(projectPath.folder,"nnBehavior.mat"),
                         os.path.join(projectPath.folder,"spikeData_fromJulia.csv"),
                         os.path.join(projectPath.folder,"dataset","dataset.tfrec"),
+                        os.path.join(projectPath.folder, "dataset", "datasetSleep.tfrec"),
                         str(BUFFERSIZE)])
 
