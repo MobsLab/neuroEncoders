@@ -73,38 +73,11 @@ def main():
     xml_path = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K168/M1168_20210122_UMaze.xml"
     projectPath = Project(xml_path)
 
-
-
-    cluster_save_path = os.path.join(projectPath.resultsPath, 'ClusterData')
-    if os.path.isfile(os.path.join(cluster_save_path, 'Spike_labels0.csv')):
-        cluster_data = {"Spike_labels":[],"Spike_times":[],"Spike_positions":[],"Spike_speed":[],"Spike_pos_index":[]}
-        print("Reading saved cluster csv file")
-        for l in tqdm(range(4)):
-            df = pd.read_csv(os.path.join(cluster_save_path, "Spike_labels"+str(l)+".csv"))
-            cluster_data["Spike_labels"].append(df.values[:,1:])
-            df = pd.read_csv(os.path.join(cluster_save_path, "spike_time"+str(l)+".csv"))
-            cluster_data["Spike_times"].append(df.values[:,1:])
-            df = pd.read_csv(os.path.join(cluster_save_path, "spike_positions"+str(l)+".csv"))
-            cluster_data["Spike_positions"].append(df.values[:,1:])
-
-            # behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=False)
-            # pos_index = [np.argmin(np.abs(st - behavior_data["Position_time"])) for st in tqdm(cluster_data["Spike_times"][l])]
-            # df = pd.DataFrame(np.array(pos_index))
-            # df.to_csv(os.path.join(cluster_save_path, "spike_pos_index"+str(l)+".csv"))
-            df = pd.read_csv(os.path.join(cluster_save_path, "spike_pos_index"+str(l)+".csv"))
-            cluster_data["Spike_pos_index"].append(df.values[:,1:])
-
-            df = pd.read_csv(os.path.join(cluster_save_path, "spike_speed" + str(l) + ".csv"))
-            cluster_data["Spike_speed"].append(df.values[:, 1:])
-
-        print("finished reading")
-    else:
-        behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=False)
-        cluster_data = ImportClusters.getSpikesfromClu(projectPath, behavior_data)
+    cluster_data = ImportClusters.load_spike_sorting(projectPath)
 
     from importData.rawDataParser import modify_feature_forBestTestSet, speed_filter
-    speed_filter(projectPath.folder,False)
-    modify_feature_forBestTestSet(projectPath.folder)
+    speed_filter(projectPath.folder,overWrite=False)
+    modify_feature_forBestTestSet(projectPath.folder,overWrite=False)
     behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=True)
 
     print('Number of clusters:')

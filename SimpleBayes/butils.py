@@ -19,7 +19,7 @@ def epanech_kernel_2d(size_kernel):
 def kde2D(x, y, bandwidth, xbins=45j, ybins=45j, **kwargs):
 	"""Build 2D kernel density estimate (KDE)."""
 
-	kernel       = kwargs.get('kernel',       'epanechnikov')
+	kernel       = kwargs.get('kernel', 'gaussian'     ) # 'epanechnikov'
 	if ('edges' in kwargs):
 		xx = kwargs['edges'][0]
 		yy = kwargs['edges'][1]
@@ -49,7 +49,7 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
 
 	feature = feature.reshape([feature.shape[0],-1]) # make sure feature is of the shape [N,n]
 
-	kernel       = kwargs.get('kernel',       'epanechnikov')
+	kernel       = kwargs.get('kernel', 'gaussian'      ) #'epanechnikov'
 	if ('edges' in kwargs):
 		gridFeature = kwargs['edges']
 	else:
@@ -68,6 +68,16 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
 	zz = np.reshape(z, gridFeature[0].shape)
 	return gridFeature, zz/np.sum(zz)
 
+def hist2D(feature, nbins=None):
+	"""
+		A simple 2D histogram estimate
+	"""
+	if nbins ==None:
+		nbins = [45 for j in range(feature.shape[1])]
+	# create grid of sample locations (default: 150x150x...x150)
+	lspace = [np.linspace(np.min(feature[:,i]),np.max(feature[:,i]),nbins[i]+1) for i in range(feature.shape[1])]
+	feature = feature.reshape([feature.shape[0],-1])
+	return np.histogram2d(feature[:,0],feature[:,1],bins=[lspace[0],lspace[1]],density=True)[0]
 
 def be_sure_about(bin_probas):
 	"""Turns an array of probabilities into an array of zeros and ones"""
