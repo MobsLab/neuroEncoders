@@ -14,40 +14,34 @@ from tqdm import tqdm
 
 from interval import interval
 # a few tool to help do difference of intervals as sets:
-def obtainComplementary(p1,boundInterval,dt):
-	# we obtain the open complentary by a adding a/subtracting very small number dt to each boundary
+def obtainCloseComplementary(epochs,boundInterval):
+	# we obtain the close complementary ( intervals share their bounds )
+	# Note: to obtain the open complementary, one would need to add some dt to end and start of intervals....
+	p1 = interval()
+	for i in range(len(epochs)//2):
+		p1 = p1 | interval([epochs[2*i],epochs[2*i+1]])
 	assert isinstance(p1,interval)
 	assert isinstance(boundInterval,interval)
 	assert len(boundInterval)==1
-	compInterval = interval([boundInterval[0][0],p1[0][0]-dt])
+	compInterval = interval([boundInterval[0][0],p1[0][0]])
 	for i in range(len(p1)-1):
-		compInterval = compInterval | interval([p1[i][1]+dt,p1[i+1][0]-dt])
-	compInterval = compInterval |  interval([p1[-1][1]+dt,boundInterval[0][1]])
+		compInterval = compInterval | interval([p1[i][1],p1[i+1][0]])
+	compInterval = compInterval |  interval([p1[-1][1],boundInterval[0][1]])
 	return compInterval
 
-def filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time):
+def intersect_with_session(epochs,keptSession,sessionStart,sessionStop,position_time):
 	# we go through the different removed session epoch, and if a train epoch or a test epoch intersect with it we remove it
 	# from the train and test epochs
 	trainEpochInterval = interval()
-	for i in range(len(trainEpoch) // 2):
-		trainEpochInterval = trainEpochInterval | interval([trainEpoch[2 * i], trainEpoch[2 * i + 1]])
-	testEpochInterval = interval()
-	for i in range(len(testEpochs) // 2):
-		testEpochInterval = testEpochInterval | interval([testEpochs[2 * i], testEpochs[2 * i + 1]])
-
-	excludeInterval = interval()
+	for i in range(len(epochs) // 2):
+		trainEpochInterval = trainEpochInterval | interval([epochs[2 * i], epochs[2 * i + 1]])
+	includeInterval = interval()
 	for id, keptS in enumerate(keptSession):
-		if not keptS:
-			excludeInterval = excludeInterval | interval([sessionStart[id], sessionStop[id]])
-	if len(excludeInterval) > 0:
-		dt = 10 ** (-9)
-		sessionKeptInterval = obtainComplementary(excludeInterval,
-												  interval([position_time[0] - dt, position_time[-1] + dt]), dt)
-		trainEpochInterval = trainEpochInterval & sessionKeptInterval
-		testEpochInterval = testEpochInterval & sessionKeptInterval
-		trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainEpochInterval]))
-		testEpochs = np.ravel(np.array([[p[0], p[1]] for p in testEpochInterval]))
-	return trainEpoch,testEpochs
+		if keptS:
+			includeInterval = includeInterval | interval([sessionStart[id], sessionStop[id]])
+	trainEpochInterval = trainEpochInterval & includeInterval
+	trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainEpochInterval]))
+	return trainEpoch
 import tensorflow as tf
 from contextlib import ExitStack
 import pandas as pd
@@ -128,6 +122,59 @@ def get_position(folder):
 	return positions, position_time  #, list(trainEpochs), list(testEpochs)
 
 
+def select_sleep_gui(folder,overWrite=False):
+	# A simple GUI to select the sleep epochs.
+	# These epochs will be saved in a separate dataset to reduce the training time (bigger dataset mean more filtering time in tensorflow)
+	if not os.path.exists(folder + 'nnBehavior.mat'):
+		raise ValueError('this file does not exist :'+folder+'nnBehavior.mat')
+	with tables.open_file(folder + 'nnBehavior.mat',"a") as f:
+		children = [c.name for c in f.list_nodes("/behavior")]
+
+		if overWrite==False and "sleepPeriods" in children and "sessionSleepNames" in children:
+			return
+
+		#We extract session names:
+		sessionNames = ["".join([chr(c) for c in l[0][:,0]]) for l in f.root.behavior.SessionNames[:,0]]
+		sessionStart = f.root.behavior.SessionStart[:,:][:,0]
+		sessionStop = f.root.behavior.SessionStop[:,:][:,0]
+
+		cmSessValue = plt.get_cmap("nipy_spectral")
+		colorSess = cmSessValue(np.arange(len(sessionNames))/(len(sessionNames)))
+		keptSession = np.zeros(len(colorSess)) + 1 # a mask for the session
+		fig = plt.figure()
+		gs = plt.GridSpec(len(colorSess),1, figure=fig)
+		ax = [fig.add_subplot(gs[id,0]) for id in range(len(colorSess))]
+		ax[0].set_title("Please click on sleep sessions")
+		butts = [plt.Button(ax[len(ax) - k - 6], sessionNames[k], color=colorSess[k]) for k in range(len(colorSess))]
+		def buttUpdate(id):
+			def buttUpdate(val):
+				if keptSession[id]:
+					butts[id].color = [0,0,0,0]
+					keptSession[id] = 0
+				else:
+					keptSession[id] = 1
+					butts[id].color = colorSess[id]
+			return buttUpdate
+		[b.on_clicked(buttUpdate(id)) for id,b in enumerate(butts)]
+		plt.show()
+
+		sessionSleepNames =[]
+		sessionSleepEpochs = []
+		for id,k in enumerate(keptSession):
+			if not k:
+				sessionSleepNames += [sessionNames[id]]
+				sessionSleepEpochs += [sessionStart[id],sessionStop[id]]
+
+		if "sleepPeriods" in children:
+			f.remove_node("/behavior", "sleepPeriods")
+		if "sessionSleepNames" in children:
+			f.remove_node("/behavior", "sessionSleepNames")
+		f.create_array("/behavior", "sleepPeriods", sessionSleepEpochs)
+		f.create_array("/behavior", "sessionSleepNames", sessionSleepNames)
+
+		f.flush()
+
+
 def speed_filter(folder,overWrite=True):
 	## A simple tool to set up a threshold on the speed value
 	# The speed threshold is then implemented through a speed_mask:
@@ -159,16 +206,16 @@ def speed_filter(folder,overWrite=True):
 		mybehave = positions[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
 		myspeed = speed[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
 
-		window_len = 40
+		window_len = 6
 		s = np.r_[myspeed[window_len - 1:0:-1], myspeed, myspeed[-2:-window_len - 1:-1]]
 		w = eval('np.' + "hamming" + '(window_len)')
 		myspeed2 = np.convolve(w / w.sum(), s[:, 0], mode='valid')[(window_len // 2 - 1):-(window_len // 2)]
 
-		speedThreshold = np.mean(np.log(myspeed2+10**(-8)))
+		speedThreshold = np.mean(np.log(myspeed2[myspeed2>=0]+10**(-8)))
 		speedFilter = myspeed2 > np.exp(speedThreshold)
 
 
-		fig, ax = plt.subplots(4, 1)
+		fig, ax = plt.subplots(5, 1)
 		fig.suptitle("Speed threshold selection")
 		l1, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 0],c="red")
 		ax[0].set_ylabel("environmental \n variable")
@@ -178,10 +225,15 @@ def speed_filter(folder,overWrite=True):
 		l3, = ax[1].plot(myposTime[speedFilter], myspeed2[speedFilter],c="purple")
 		l5 = ax[0].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
 		l6 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
-		ax[2].hist(np.log(myspeed2+10**(-8)), bins=200)
+		ax[2].hist(np.log(myspeed2[myspeed2>0]+10**(-8)),histtype="step", bins=200,color="purple")
+		ax[2].hist(np.log(myspeed[np.not_equal(myspeed,0)] + 10**(-8)), histtype="step", bins=200,color="blue")
 		ax[2].set_ylabel("speed histogram")
 		l8 = ax[2].axvline(speedThreshold, color="black")
-		slider = plt.Slider(ax[3], 'speed Threshold',np.min(np.log(myspeed2+10**(-8))),np.max(np.log(myspeed2+10**(-8))),valinit=speedThreshold,valstep=0.01)
+		ax[3].hist(myspeed2,histtype="step", bins=200,color="purple")
+		ax[3].hist(myspeed[myspeed>=0], histtype="step", bins=200,color="blue")
+		ax[3].set_ylabel("speed histogram")
+		l9 = ax[3].axvline(np.exp(speedThreshold), color="black")
+		slider = plt.Slider(ax[4], 'speed Threshold',np.min(np.log(myspeed2[myspeed2>=0]+10**(-8))),np.max(np.log(myspeed2[myspeed2>=0]+10**(-8))),valinit=speedThreshold,valstep=0.01)
 
 		def update(val):
 			speedThreshold = val
@@ -197,6 +249,7 @@ def speed_filter(folder,overWrite=True):
 			l3.set_xdata(myposTime[speedFilter])
 			l4.set_xdata(myposTime[speedFilter])
 			l8.set_xdata(val)
+			l9.set_xdata(np.exp(val))
 			fig.canvas.draw_idle()
 
 
@@ -218,8 +271,6 @@ def speed_filter(folder,overWrite=True):
 		f.create_array("/behavior","speedMask",speedFilter)
 		f.flush()
 		f.close()
-
-
 
 def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 	# Find test set with most uniform covering of speed and environment variable.
@@ -274,29 +325,69 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 		position_time = position_time[speedMask,:]
 		sessionValue = sessionValue[speedMask]
 
+		def get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet, keptSession, useLossPred):
+			# given the slider values, as well as the selected session, we extract the different sets
+			testEpochs = np.array(
+				[position_time[testSetId][0],
+				 position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0]])
+
+			if useLossPred:
+				lossPredSetEpochs = np.array([position_time[lossPredSetId][0],
+											  position_time[
+												  min(lossPredSetId + sizelossPredSet, position_time.shape[0] - 1)][
+												  0]])
+				lossPredsetinterval = interval(lossPredSetEpochs)
+				lossPredsetinterval = lossPredsetinterval & obtainCloseComplementary(testEpochs, interval([pmin, pmax]))
+				lossPredSetEpochs = np.ravel(np.array([[p[0], p[1]] for p in lossPredsetinterval]))
+
+				trainInterval = obtainCloseComplementary(testEpochs, interval([pmin, pmax])) & obtainCloseComplementary(lossPredSetEpochs, interval([pmin, pmax]))
+			else:
+				trainInterval = obtainCloseComplementary(testEpochs, interval([pmin, pmax]))
+
+			trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainInterval]))
+
+			trainEpoch = intersect_with_session(trainEpoch, keptSession, sessionStart,
+												sessionStop, position_time)
+			testEpochs = intersect_with_session(testEpochs, keptSession, sessionStart,
+												sessionStop, position_time)
+			if useLossPred:
+				lossPredSetEpochs = intersect_with_session(lossPredSetEpochs, keptSession, sessionStart,
+													   sessionStop, position_time)
+				return trainEpoch, testEpochs, lossPredSetEpochs
+			else:
+				return trainEpoch,testEpochs,None
+
 		sizeTest = position_time.shape[0]//10
 
-		print("Evaluating the entropy of each possible test set")
-		entropiesPositions = []
-		entropiesSpeeds = []
-		for id in tqdm(np.arange(0,stop=positions.shape[0]-sizeTest,step=sizeTest)):
-			# The environmental variable are discretized by equally space bins
-			# such that there is 45*...*45 bins per dimension
-			# we then fit over the test set a kernel estimation of the probability distribution
-			# and evaluate it over the bins
-			_ , probaFeatures = butils.kdenD(positions[id:id+sizeTest,:],bandwidth=1.0)
-			# We then compute the entropy of the obtained distribution:
-			epsilon = 10**(-9)
-			entropiesPositions += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
+		# print("Evaluating the entropy of each possible test set")
+		# entropiesPositions = []
+		# entropiesSpeeds = []
+		# for id in tqdm(np.arange(0,stop=positions.shape[0]-sizeTest,step=sizeTest)):
+		# 	# The environmental variable are discretized by equally space bins
+		# 	# such that there is 45*...*45 bins per dimension
+		# 	# we then fit over the test set a kernel estimation of the probability distribution
+		# 	# and evaluate it over the bins
+		# 	positionKde = positions[np.not_equal(np.isnan(positions[:,0]),True),:]
+		# 	_ , probaFeatures = butils.kdenD(positionKde[id:id+sizeTest,:],bandwidth=1.0)
+		# 	# We then compute the entropy of the obtained distribution:
+		# 	epsilon = 10**(-9)
+		# 	entropiesPositions += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
+		#
+		# 	_ , probaFeatures = butils.kdenD(speeds[id:id+sizeTest,:],bandwidth=1.0)
+		# 	# We then compute the entropy of the obtained distribution:
+		# 	epsilon = 10**(-9)
+		# 	entropiesSpeeds += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
+		# totEntropy = np.array(entropiesSpeeds) + np.array(entropiesPositions)
+		# bestTestSet = np.argmax(totEntropy)
 
-			_ , probaFeatures = butils.kdenD(speeds[id:id+sizeTest,:],bandwidth=1.0)
-			# We then compute the entropy of the obtained distribution:
-			epsilon = 10**(-9)
-			entropiesSpeeds += [-np.sum(probaFeatures*np.log(probaFeatures+epsilon))]
-		totEntropy = np.array(entropiesSpeeds) + np.array(entropiesPositions)
-		bestTestSet = np.argmax(totEntropy)
+		# testSetId = bestTestSet*sizeTest
+		testSetId = position_time.shape[0]//10
+		bestTestSet = 0
+		useLossPredTrainSet = [True]
+		lossPredSetId = 0
+		sizelossPredSet = position_time.shape[0]//10
 
-		testSetId = bestTestSet*sizeTest
+
 		# Next we provide a small tool to manually change the bestTest set position
 		# as well as its size:
 		cmSessValue = plt.get_cmap("nipy_spectral")
@@ -305,23 +396,27 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 
 		# fig,ax = plt.subplots(positions.shape[1]+2+len(colorSess),1)
 		fig = plt.figure()
-		gs = plt.GridSpec(positions.shape[1]+3, len(colorSess), figure=fig)
+		gs = plt.GridSpec(positions.shape[1]+5, len(colorSess), figure=fig)
 		ax = [fig.add_subplot(gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
-		ax += [fig.add_subplot(gs[-3,id]) for id in range(len(colorSess))]
-		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])]
-		trainEpoch = np.array([pmin,position_time[bestTestSet*sizeTest][0],position_time[bestTestSet*sizeTest+sizeTest][0],pmax])
-		testEpochs = np.array(
-			[position_time[bestTestSet * sizeTest][0], position_time[bestTestSet * sizeTest + sizeTest][0]])
+		ax += [fig.add_subplot(gs[-5,id]) for id in range(len(colorSess))]
+		ax += [fig.add_subplot(gs[-4,len(colorSess)-3:len(colorSess)])] # button to select if we use a separate training set to train the loss predictor.
+		ax += [fig.add_subplot(gs[-4, 0:len(colorSess)-4]), fig.add_subplot(gs[-3, :])]   #loss pred training set slider
+		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])] #test set.
+
+		trainEpoch,testEpochs,lossPredSetEpochs = get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet, keptSession, useLossPredTrainSet[0])
+
 		ls = []
 
 		for id in range(positions.shape[1]):
 			l1 = ax[id].scatter(position_time[inEpochs(position_time,trainEpoch)[0],0],positions[inEpochs(position_time,trainEpoch)[0],id],c="red",s=0.5)
 			l2 = ax[id].scatter(position_time[inEpochs(position_time, testEpochs)[0],0], positions[inEpochs(position_time, testEpochs)[0],id],c="black",s=0.5)
-			ls.append([l1,l2])
+			l3 = ax[id].scatter(position_time[inEpochs(position_time, lossPredSetEpochs)[0], 0],
+								positions[inEpochs(position_time, lossPredSetEpochs)[0], id], c="orange", s=0.5)
+			ls.append([l1,l2,l3])
 			# display the sessions positions at the bottom:
 			for idk,k in enumerate(range(len(colorSess))):
 				if len(np.where(np.equal(sessionValue,k))[0])>0:
-					ax[id].hlines(np.min(positions[:,id])-3,
+					ax[id].hlines(np.min(positions[np.logical_not(np.isnan(positions[:,id])),id])-np.std(positions[np.logical_not(np.isnan(positions[:,id])),id]),
 								  xmin=position_time[np.min(np.where(np.equal(sessionValue,k))),0],
 								  xmax=position_time[np.max(np.where(np.equal(sessionValue,k))),0],color=colorSess[idk],linewidth=3.0)
 
@@ -331,30 +426,48 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 							valinit=testSetId, valstep=1)
 		sliderSize = plt.Slider(ax[-1], 'test size', 0, positions.shape[0],
 							valinit= sizeTest, valstep=1)
+		buttLossPred = plt.Button(ax[-5],"lossPred",color="orange")
+		sliderLossPredTrain = plt.Slider(ax[-4],"loss network training \n set starting index",0,positions.shape[0],
+										 valinit=0,valstep=1)
+		sliderLossPredTrainSize = plt.Slider(ax[-3], "loss network training set size", 0, positions.shape[0],
+										 valinit=sizeTest, valstep=1)
+
 		# Next we add buttons to select the sessions we would like to keep:
-		butts = [plt.Button(ax[len(ax)-k-3],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
+		butts = [plt.Button(ax[len(ax)-k-6],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
 
 		def update(val):
 				testSetId = slider.val
 				sizeTest = sliderSize.val
-				trainEpoch = np.array(
-					[pmin, position_time[testSetId ][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0],
-					 pmax])
-				testEpochs = np.array(
-					[position_time[testSetId][0], position_time[min(testSetId+sizeTest,position_time.shape[0]-1)][0]])
+				lossPredSetId = sliderLossPredTrain.val
+				sizelossPredSet = sliderLossPredTrainSize.val
 
-				trainEpoch,testEpochs  = filter_train_test_by_session(trainEpoch,testEpochs,keptSession,sessionStart,sessionStop,position_time)
+				trainEpoch, testEpochs, lossPredSetEpochs = get_epochs(testSetId, sizeTest, lossPredSetId,
+																	   sizelossPredSet, keptSession,useLossPredTrainSet[0])
 
 				for id in range(len(ls)):
-					l1,l2=ls[id]
+					l1,l2,l3=ls[id]
 					l1.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, trainEpoch)[0],0],
 											 positions[inEpochs(position_time, trainEpoch)[0],id]])))
 					l2.set_offsets(np.transpose(np.stack([position_time[inEpochs(position_time, testEpochs)[0],0],
 											 positions[inEpochs(position_time, testEpochs)[0],id]])))
+					if useLossPredTrainSet[0]:
+						try:
+							ls[id][2].remove()
+						except:
+							pass
+						ls[id][2] = ax[id].scatter(position_time[inEpochs(position_time, lossPredSetEpochs)[0], 0],
+								positions[inEpochs(position_time, lossPredSetEpochs)[0], id], c="orange", s=0.5)
+					else:
+						try:
+							l3.remove()
+						except:
+							pass
 				fig.canvas.draw_idle()
 
 		slider.on_changed(update)
 		sliderSize.on_changed(update)
+		sliderLossPredTrain.on_changed(update)
+		sliderLossPredTrainSize.on_changed(update)
 
 		def buttUpdate(id):
 			def buttUpdate(val):
@@ -364,43 +477,44 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 				else:
 					keptSession[id] = 1
 					butts[id].color = colorSess[id]
-			update(0)
+				update(0)
 			return buttUpdate
 		[b.on_clicked(buttUpdate(id)) for id,b in enumerate(butts)]
+
+		def buttUpdateLossPred(val):
+			if useLossPredTrainSet[0]:
+				buttLossPred.color = [0, 0, 0, 0]
+				useLossPredTrainSet[0] = False
+			else:
+				useLossPredTrainSet[0] = True
+				buttLossPred.color = "orange"
+			update(0)
+			return useLossPredTrainSet
+		buttLossPred.on_clicked(buttUpdateLossPred)
 
 		plt.show()
 
 		testSetId = slider.val
 		sizeTest = sliderSize.val
 
+		trainEpoch, testEpochs, lossPredSetEpochs = get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet,
+															   keptSession,useLossPredTrainSet[0])
+
 		if "testEpochs" in children:
 			f.remove_node("/behavior", "testEpochs")
-
-		trainEpoch = np.array(
-			[pmin, position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0],
-			 pmax])
-		testEpochs = np.array(
-			[position_time[testSetId][0], position_time[min(testSetId + sizeTest, position_time.shape[0] - 1)][0]])
-		trainEpoch, testEpochs = filter_train_test_by_session(trainEpoch, testEpochs, keptSession, sessionStart,
-															  sessionStop, position_time)
 		f.create_array("/behavior","testEpochs",testEpochs)
 		if "trainEpochs" in children:
 			f.remove_node("/behavior", "trainEpochs")
 		f.create_array("/behavior", "trainEpochs", trainEpoch)
+
+		if "lossPredSetEpochs" in children:
+			f.remove_node("/behavior", "lossPredSetEpochs")
+		if useLossPredTrainSet[0]:
+			f.create_array("/behavior", "lossPredSetEpochs", lossPredSetEpochs)
+		else:
+			f.create_array("/behavior", "lossPredSetEpochs", [])
+
 		f.flush() #effectively write down the modification we just made
-
-		# # just a display of the first env variable and the histograms:
-		# fig,ax = plt.subplots(2,2)
-		# fig.suptitle("Test Set")
-		# ax[0,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
-		# ax[0,1].hist(positions[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
-		# ax[0,0].set_ylabel("position")
-		# ax[1,0].plot(position_time[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest],speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0])
-		# ax[1,1].hist(speeds[bestTestSet*sizeTest:bestTestSet*sizeTest+sizeTest,0],bins=100)
-		# ax[1,0].set_ylabel("speed")
-		# fig.show()
-
-
 
 
 
@@ -468,16 +582,6 @@ class INTANFilter:
 		temp = np.array(sample)[self.channelList] - self.state
 		self.state = self.a * self.state + self.b * np.array(sample)[self.channelList]
 		return temp
-
-#
-# def isTrainingExample(epochs, time):
-# 	for e in range(len(epochs['train'])//2):
-# 		if time >= epochs['train'][2*e] and time < epochs['train'][2*e+1]:
-# 			return True
-# 	for e in range(len(epochs['test'])//2):
-# 		if time >= epochs['test'][2*e] and time < epochs['test'][2*e+1]:
-# 			return False
-# 	return None
 
 def emptyData():
 	return {'group':[], 'time':[], 'spike':[], 'position':[], 'position_index':[]} #'train':[]

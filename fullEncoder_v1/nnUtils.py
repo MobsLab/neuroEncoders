@@ -294,4 +294,11 @@ def spikeGenerator(projectPath, spikeDetector, maxPos=1):
 		return genFromDet
 
 
-
+# sometime the feature value is wrong when we encoded the model
+# or we might want to swap feature for other without the need to reextract the spikes from the .dat file
+# a simple function can be apply to the dataset:
+def onthefly_feature_correction(feature):
+	def change_feature(vals):
+		vals["pos"] = tf.gather(feature,vals["pos_index"])
+		return vals
+	return change_feature
