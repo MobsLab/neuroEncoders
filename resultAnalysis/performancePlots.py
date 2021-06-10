@@ -519,11 +519,24 @@ def compare_linear_sleep_predictions(outputs1,outputs2,o1name="neural network",o
     # 3rd element: time step corresponding to the prediction.
     for sleepName in outputs1.keys():
         assert sleepName in outputs2.keys()
+
+        #TODO: move all this in another performance plots
+        ## Analysis of predictions and confidence during sleep:
+        cm = plt.get_cmap("turbo")
+        predictedConfidence = outputs1[sleepName][1]
+        thresh = 0.15
+        fig,ax = plt.subplots()
+        ax.scatter(outputs1[sleepName][2][predictedConfidence < thresh],outputs1[sleepName][0][predictedConfidence < thresh],
+                   s=1,c=cm(predictedConfidence[predictedConfidence < thresh]/np.max(predictedConfidence)))
+        plt.colorbar(plt.cm.ScalarMappable(plt.Normalize(0,np.max(outputs1[sleepName][1])),cmap=cm),label="predicted confidence")
+        fig.show()
+        #TODO: align with NREM...
+
         #Let us plot the predicted position as well as the trust in colors
         fig,ax = plt.subplots(2,1)
         cm = plt.get_cmap("turbo")
-        ax[0].scatter(outputs1[sleepName][2], outputs1[sleepName][0],c="black",s=1)
-        ax[0].scatter(outputs2[sleepName][2], outputs2[sleepName][0],c="red",s=1)
+        ax[0].scatter(outputs1[sleepName][2], outputs1[sleepName][0],c="black",s=1,label=o1name)
+        ax[0].scatter(outputs2[sleepName][2], outputs2[sleepName][0],c="red",s=1,label=o2name)
         ax[0].set_ylabel("linear position")
         fig.legend()
         fig.show()

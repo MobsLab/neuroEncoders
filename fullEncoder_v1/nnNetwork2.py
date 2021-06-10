@@ -9,6 +9,8 @@ import tensorflow_probability as tfp
 from importData.ImportClusters import getBehavior
 from importData.rawDataParser import  inEpochsMask
 
+import pykeops
+
 # Pierre 14/02/01:
 # Reorganization of the code:
     # One class for the network
@@ -93,7 +95,7 @@ class LSTMandSpikeNetwork():
             self.denseLoss2 = tf.keras.layers.Dense(1, activation=self.params.lossActivation,name="predicted_loss")
             self.epsilon = tf.constant(10 ** (-8))
 
-            self.predAbsoluteLinearErrorLayer = tf.keras.layers.Dense(self.params.nb_eval_dropout)
+            self.predAbsoluteLinearErrorLayer = tf.keras.layers.Dense(1)
 
             outputs = self.get_Model()
 
@@ -225,7 +227,6 @@ class LSTMandSpikeNetwork():
         )
         return model
 
-
     def build_second_training(self,outputs,modelName="modelSecondTraining.png"):
         # The training is divided in two step: on training on the training set
         # and an additional training on a second training set, where the network prediction error
@@ -245,9 +246,10 @@ class LSTMandSpikeNetwork():
 
     def fix_linearizer(self,mazePoints,tsProj):
         ## For the linearization we define two fixed inputs:
-        self.mazePoints = tf.keras.layers.Input(tensor=mazePoints, name="zeroForGather")
-        self.tsProj = tf.keras.layers.Input(tensor=tsProj, name="zeroForGather")
-
+        self.mazePoints_tensor = tf.convert_to_tensor(mazePoints[None,:],dtype=tf.float32)
+        self.mazePoints = tf.keras.layers.Input(tensor=self.mazePoints_tensor, name="mazePoints")
+        self.tsProj_tensor = tf.convert_to_tensor(tsProj[None,:],dtype=tf.float32)
+        self.tsProj = tf.keras.layers.Input(tensor=self.tsProj_tensor, name="tsProj")
 
     def get_model_for_uncertainty_estimate(self,modelName="uncertaintyModel.png",batch=False,batch_size = -1):
         # For each inputs we will run them 100 times through the model while keeping the dropout On
@@ -306,9 +308,6 @@ class LSTMandSpikeNetwork():
         model.compile()
         return model
 
-    # todo: :
-    # initialize a final layer with the result of the Ridge regression to project more efficiently during sleep
-    # ---> Problem: we will also need to run pykeops .
     def get_model_for_uncertainty_estimate_insleep(self,modelName="uncertaintyModel_sleep.png",batch=False,batch_size = -1):
         # For each inputs we will run them 100 times through the model while keeping the dropout On
         if batch and batch_size==-1:
@@ -350,14 +349,14 @@ class LSTMandSpikeNetwork():
                                                 (self.denseLoss1(tf.stop_gradient(tf.concat([output,sumFeatures],axis=1)))))))
 
             # Now we reduce to get the mean and variance of each estimate over the 100 droupouts:
-            myoutputPos = tf.reshape(myoutputPos,[1,self.params.nb_eval_dropout,batch_size,-1])
-            outputLoss = tf.reshape(outputLoss, [1,self.params.nb_eval_dropout, batch_size, -1])
+            myoutputPos = tf.reshape(myoutputPos,[self.params.nb_eval_dropout,batch_size,-1])
+            outputLoss = tf.reshape(outputLoss, [self.params.nb_eval_dropout, batch_size, -1])
 
             ## Next we find the linearization corresponding:
-            bestLinearPos = tf.argmin(tf.reduce_sum(tf.square(myoutputPos[1,None,:,:,:] - self.mazePoints[1,:,None,:,:]),axis=-1),axis=1)
-            LinearPos = tf.gather(self.tsProj,bestLinearPos)
-            med_linearPos = tfp.stats.percentile(LinearPos,50,axis=2) # compute the median!
-            pred_absoluteLinearError = self.predAbsoluteLinearErrorLayer(med_linearPos)
+            bestLinearPos = tf.argmin(tf.reduce_sum(tf.square(myoutputPos[None,:,:,:] - self.mazePoints[0,:,None,None,:]),axis=-1),axis=0)
+            LinearPos = tf.gather(self.tsProj[0,:],bestLinearPos)
+            med_linearPos = tfp.stats.percentile(LinearPos,50,axis=0)# compute the median!
+            pred_absoluteLinearError = self.predAbsoluteLinearErrorLayer(tf.transpose(tf.abs(LinearPos-med_linearPos[None,:])))
 
 
             # mean_outputPos = tf.math.reduce_mean(myoutputPos,axis=0)
@@ -365,14 +364,15 @@ class LSTMandSpikeNetwork():
             # mean_outputLoss = tf.math.reduce_mean(outputLoss,axis=0)
             # std_outputLoss = tf.math.reduce_mean(outputLoss,axis=0)
 
-        model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.inputGroups,self.zeroForGather],
-                               outputs=[myoutputPos,outputLoss]) #[mean_outputPos,std_outputPos,mean_outputLoss,std_outputLoss]
+        model = tf.keras.Model(inputs=self.inputsToSpikeNets+self.indices+[self.inputGroups,self.zeroForGather,self.mazePoints,self.tsProj],
+                               outputs=[med_linearPos, pred_absoluteLinearError]) #[mean_outputPos,std_outputPos,mean_outputLoss,std_outputLoss]
         tf.keras.utils.plot_model(
             model, to_file=modelName, show_shapes=True
         )
         model.compile()
         return model
 
+    # used for old confidence.
     def get_model_for_onlineInference(self,modelName="onlineDecodingModel.png",batch=False):
         # the online inference model, it works as the training model but with a batch_size of 1 or params.batch_size
         batch_size = 1
@@ -416,15 +416,17 @@ class LSTMandSpikeNetwork():
         model.compile()
         return model
 
+    # not used anymore
     def lr_schedule(self,epoch):
         # look for the learning rate for the given epoch.
-        for lr in self.params.learningRates:
-            if (epoch < (lr + 1) * self.params.nEpochs / len(self.params.learningRates)) and (
-                    epoch >= lr * self.params.nEpochs / len(self.params.learningRates)):
-                return lr
+        # for lr in self.params.learningRates:
+        #     if (epoch < (lr + 1) * self.params.nEpochs / len(self.params.learningRates)) and (
+        #             epoch >= lr * self.params.nEpochs / len(self.params.learningRates)):
+        #         return lr
         return self.params.learningRates[0]
 
-    def createIndices(self, vals):
+    # used in the data pipepline
+    def createIndices(self, vals,addLinearizationTensor=False):
         # vals.update({"completionMatrix" : tf.eye(tf.shape(vals["groups"])[0])})
         for group in range(self.params.nGroups):
             spikePosition = tf.where(tf.equal(vals["groups"], group))
@@ -449,10 +451,13 @@ class LSTMandSpikeNetwork():
             if self.params.usingMixedPrecision:
                 vals.update({"group" + str(group): tf.cast(vals["group" + str(group)], dtype=tf.float16)})
 
+            if addLinearizationTensor:
+                vals.update({"mazePoints":self.mazePoints_tensor})
+                vals.update({"tsProj":self.tsProj_tensor})
+
         if self.params.usingMixedPrecision:
             vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
         return vals
-
 
     def train(self,onTheFlyCorrection=False):
         ## read behavior matrix:
@@ -593,7 +598,6 @@ class LSTMandSpikeNetwork():
             # tf.saved_model.save(self.onlineDecodingModel, os.path.join(self.projectPath.resultsPath,"training_1","savedir"))
             return trainLosses
 
-
     def test(self,linearizationFunction,saveFolder="resultInference",useTrain=False,useSpeedFilter=True,onTheFlyCorrection=False,forceFirstTrainingWeight=False):
         ### Loading and inferring
         print("INFERRING")
@@ -705,7 +709,7 @@ class LSTMandSpikeNetwork():
         # Build the online decoding model with the layer already initialized:
         # self.onlineDecodingModel = self.get_model_for_onlineInference(batch=batch)
 
-        self.onlineDecodingModel = self.get_model_for_uncertainty_estimate(batch=batch,batch_size=batch_size)
+        self.onlineDecodingModel = self.get_model_for_uncertainty_estimate_insleep(batch=batch,batch_size=batch_size)
 
         #Remark: other solution: at training time, build and save the onlineDecodingModel
         # but now we can save these weights, so that they are used in c++....
@@ -715,35 +719,153 @@ class LSTMandSpikeNetwork():
         for idsleep,sleepName in enumerate(behavior_data["Times"]["sleepNames"]):
             timeSleepStart = behavior_data["Times"]["sleepEpochs"][2*idsleep]
             timeSleepStop = behavior_data["Times"]["sleepEpochs"][2*idsleep+1]
-            dataset = tf.data.TFRecordDataset(self.projectPath.tfrecSleep)
-            dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals),
-                                  num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.filter(lambda x: tf.math.logical_and(tf.math.less_equal(x["time"],timeSleepStop),
-                                                                   tf.math.greater_equal(x["time"],timeSleepStart)))
-            if batch:
-                dataset = dataset.batch(batch_size, drop_remainder=True)
-            bs_store = self.params.batch_size
-            self.params.batch_size = batch_size
-            dataset = dataset.map(
-                lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=batch),
-                num_parallel_calls=tf.data.AUTOTUNE)
-            self.params.batch_size = bs_store
-            dataset = dataset.map(self.createIndices, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset.cache()
-            dataset.prefetch(tf.data.AUTOTUNE)
-            # we filter out spike of length 0
-            # todo: find why there is such spike in the dataset --> Note: seems to have been solved....
-            # dataset = dataset.filter(lambda val:val["length"]>0)
-            output_test = self.onlineDecodingModel.predict(dataset,verbose=1)
 
-            dtime = dataset.map(lambda vals: vals["time"])
-            timePred = list(dtime.as_numpy_iterator())
-            timePreds = np.ravel(timePred)
-            # output_test += [timePreds]
+            if not os.path.exists(os.path.join(self.projectPath.resultsPath,sleepName)):
+                dataset = tf.data.TFRecordDataset(self.projectPath.tfrecSleep)
+                dataset = dataset.map(lambda *vals: nnUtils.parseSerializedSpike(self.feat_desc, *vals),
+                                      num_parallel_calls=tf.data.AUTOTUNE)
+                dataset = dataset.filter(lambda x: tf.math.logical_and(tf.math.less_equal(x["time"],timeSleepStop),
+                                                                       tf.math.greater_equal(x["time"],timeSleepStart)))
+                if batch:
+                    dataset = dataset.batch(batch_size, drop_remainder=True)
+                bs_store = self.params.batch_size
+                self.params.batch_size = batch_size
+                dataset = dataset.map(
+                    lambda *vals: nnUtils.parseSerializedSequence(self.params, *vals, batched=batch),
+                    num_parallel_calls=tf.data.AUTOTUNE)
+                self.params.batch_size = bs_store
+                dataset = dataset.map(lambda x:self.createIndices(x,True), num_parallel_calls=tf.data.AUTOTUNE)
+                dataset.cache()
+                dataset.prefetch(tf.data.AUTOTUNE)
 
-            medianLinearPos,confidence = self.sleep_uncertainty_estimate(output_test,linearizationFunction)
+                # we filter out spike of length 0
+                # todo: find why there is such spike in the dataset --> Note: seems to have been solved....
+                # dataset = dataset.filter(lambda val:val["length"]>0)
+                output_test = self.onlineDecodingModel.predict(dataset,verbose=1)
 
-            outputDic[sleepName] = [medianLinearPos,confidence,timePreds]
+                dtime = dataset.map(lambda vals: vals["time"])
+                timePred = list(dtime.as_numpy_iterator())
+                timePreds = np.ravel(timePred)
+
+                outputDic[sleepName] = [output_test[0],output_test[1][:,0],timePreds] #median linear pos, predicted errror, time Preds
+
+                df = pd.DataFrame(np.array([output_test[0],output_test[1][:,0],timePreds]))
+                df.to_csv(os.path.join(self.projectPath.resultsPath,sleepName))
+
+            outputDicDf = pd.read_csv(os.path.join(self.projectPath.resultsPath,sleepName)).values
+            output_test = [outputDicDf[0,1:],outputDicDf[1,1:,None],outputDicDf[2,1:]]
+
+            # todo: save in CSV format for each sleep epochs...
+            # and run another analysis to stop loosing time!
+
+            import tables
+            import subprocess
+            if not os.path.exists(os.path.join(self.projectPath.folder, "nnSWR.mat")):
+                subprocess.run(["./getRipple.sh", self.projectPath.folder])
+            with tables.open_file(self.projectPath.folder + 'nnSWR.mat', "a") as f:
+                ripples = f.root.ripple[:, :].transpose()
+
+                timePreds = output_test[2]
+
+                # cm = plt.get_cmap("turbo")
+                # fig, ax = plt.subplots()
+                # predConfidence = output_test[1][:,0]
+                # # ax.plot(timePreds,medianLinearPos,c="red",alpha=0.3)
+                # ax.scatter(timePreds, output_test[0], s=1, c=cm(predConfidence / np.max(predConfidence)))
+                # ax.vlines(ripples[ripples[:, 1] <= np.max(timePreds), 1], ymin=0, ymax=1, color="grey", linewidths=1)
+                # fig.show()
+                #
+                # # # let us find the closest timePreds to each ripple time:
+                # # rippleTime =ripples.astype(dtype=np.float32)[:,1][:,None]
+                # # predTime  = timePreds[:,None]
+                # # timeAbsdiff = np.abs(rippleTime-np.transpose(predTime))
+                # # bestTime = np.argmin(timeAbsdiff,axis=1)
+                # # print(bestTime.shape)
+                #
+                # rippleChoice = 1
+                # predTime = pykeops.numpy.Vi(timePreds.astype(dtype=np.float64)[:, None])
+                # rippleTime = pykeops.numpy.Vj(ripples[:,rippleChoice].astype(dtype=np.float64)[:, None])
+                # bestTime = ((predTime - rippleTime).abs().argmin(axis=0))[:,0]
+                # fig,ax = plt.subplots()
+                # ax.scatter(ripples[ripples[:,rippleChoice]<np.max(timePreds),rippleChoice],predConfidence[bestTime[ripples[:,rippleChoice]<np.max(timePreds)]],s=1)
+                # fig.show()
+                #
+                # fig,ax = plt.subplots()
+                # ax.hist(predConfidence[bestTime[ripples[:,rippleChoice]<np.max(timePreds)]],bins=50,density=True,alpha=0.4,label="ripple")
+                # # ax.hist(predConfidence,bins=50,density=True,alpha=0.4,label="all time")
+                # isRipple = np.isin(range(predConfidence.shape[0]),bestTime)
+                #
+                # ax.hist(predConfidence[np.logical_not(isRipple)], bins=50, density=True,
+                #         alpha=0.4, label="no ripple")
+                # ax.set_xlabel("predicted confidence")
+                # ax.legend()
+                # fig.show()
+                #
+                # #Let us build a density estimate of the number of ripples
+                # N= 200
+                # mvaIsRipple    = np.mean(np.stack([isRipple[i:(isRipple.shape[0]-N+i)] for i in range(N)]),axis=0)
+                #
+                # from scipy.ndimage import gaussian_filter1d
+                # gaussRippleDensity = gaussian_filter1d(isRipple.astype(dtype=np.float),30)
+                # fig,ax = plt.subplots()
+                # ax.plot(timePreds,isRipple,c="black")
+                # ax.plot(timePreds, gaussRippleDensity, c="red")
+                # fig.show()
+                #
+                # fig,ax = plt.subplots()
+                # ax.scatter(predConfidence,gaussRippleDensity,alpha=0.3,s=1)
+                # ax.set_xlabel("predicted confidence")
+                # ax.set_ylabel("Ripple density - gaussian filtered (20 bins of std)")
+                # binPredConf = ax.twinx().hist(predConfidence,bins=50,color="orange",alpha=0.2,label="confidence histogram")
+                # meanRippleDensity  = np.array([ np.mean(gaussRippleDensity[np.where((predConfidence>=binPredConf[1][e]) * (predConfidence<binPredConf[1][e+1]))])   for e in range(len(binPredConf[1])-1)])
+                # stdRippleDensity  = np.array([ np.std(gaussRippleDensity[np.where((predConfidence>=binPredConf[1][e]) * (predConfidence<binPredConf[1][e+1]))])   for e in range(len(binPredConf[1])-1)])
+                # ax.plot(binPredConf[1][:-1],meanRippleDensity,c="red",label="mean ripple density")
+                # ax.fill_between(binPredConf[1][:-1], meanRippleDensity+stdRippleDensity,np.max(meanRippleDensity-stdRippleDensity,0), color="red",alpha=0.1)
+                # fig.legend()
+                # fig.show()
+
+
+                # fig,ax = plt.subplots(5,1)
+                # sigma_gauss = [10,50,100,200,1000]
+                # for e in range(5):
+                #     gaussRippleDensity = gaussian_filter1d(isRipple.astype(dtype=np.float), sigma_gauss[e])
+                #     ax[e].scatter(predConfidence,gaussRippleDensity,s=1,alpha=0.05)
+                #     # ax[e].set_aspect(np.max(gaussRippleDensity)/0.015)
+                # fig.show()
+
+                if not os.path.exists(os.path.join(self.projectPath.folder, "nnREMEpochs.mat")):
+                    subprocess.run(["./getSleepState.sh", self.projectPath.folder])
+                with tables.open_file(self.projectPath.folder + 'nnREMEpochs.mat', "a") as f2:
+                    startRem = f2.root.rem.remStart[:,:][0,:]
+                    stopRem = f2.root.rem.remStop[:,:][0,:]
+
+                    # we compare the predicted confidence in REM and outside of REM:
+                    epochsRem = np.ravel(np.array([[startRem[i],stopRem[i]] for i in range(len(startRem))]))
+                    maskREM = inEpochsMask(timePreds,epochsRem)
+                    maskNonRem = np.logical_not(maskREM)
+
+                    predConfidence = output_test[1][:,0]
+
+                    fig,ax = plt.subplots()
+                    ax.hist(predConfidence[maskREM],color="red",label="REM",alpha=0.5,density=True,bins=200)
+                    ax.hist(predConfidence[maskNonRem],color="grey",label="Non-REM",alpha=0.5,density=True,bins=200)
+                    fig.legend()
+                    ax.set_xlabel("predicted confidence (trained to predict absolute linear error)")
+                    fig.show()
+
+                    cm = plt.get_cmap("turbo")
+                    fig,ax = plt.subplots()
+                    ax.hlines(np.zeros_like(startRem),startRem,stopRem,color="black")
+                    # ax.scatter(stopRem,np.zeros_like(stopRem),c="red",s=1)
+                    # ax.plot(timePreds,medianLinearPos,c="red",alpha=0.3)
+                    ax.scatter(timePreds, output_test[0], s=1, c=cm(predConfidence / np.max(predConfidence)))
+                    fig.show()
+
+
+
+
+
+
 
         #
         # fig,ax = plt.subplots(len(outputDic.keys()),2)
@@ -1042,6 +1164,8 @@ class LSTMandSpikeNetwork():
 
     def fit_uncertainty_estimate(self,linearizationFunction,batch=False,forceFirstTrainingWeight=False,
                           useSpeedFilter=False,useTrain=False,onTheFlyCorrection=True):
+
+        #todo: use the validation set here by default.
         behavior_data = getBehavior(self.projectPath.folder, getfilterSpeed=True)
         if len(behavior_data["Times"]["lossPredSetEpochs"]) > 0 and not forceFirstTrainingWeight:
             self.model.load_weights(os.path.join(self.projectPath.resultsPath, "training_2/cp.ckpt"))
@@ -1122,10 +1246,19 @@ class LSTMandSpikeNetwork():
         X_train,X_test,Y_train,Y_test = train_test_split(AbsErrorToMedian,linearEnsembleError,train_size=0.3)
         clf.fit(X_train,Y_train)
         self.LinearNetworkConfidence = clf
-        self.predAbsoluteLinearErrorLayer.set_weights(self.LinearNetworkConfidence.coef_)
+        # to set the weights of the Linear Error Layer we need to call it first...
+        self.predAbsoluteLinearErrorLayer(tf.convert_to_tensor(X_train[0:2,:]))
+        self.predAbsoluteLinearErrorLayer.set_weights([self.LinearNetworkConfidence.coef_[:,None],np.array([self.LinearNetworkConfidence.intercept_])])
 
-        clf.predict(X_test)
+        # test:
+        predFromNN = self.predAbsoluteLinearErrorLayer(tf.convert_to_tensor(X_test[:,:]))
         predfromTrain2 = clf.predict(X_test)
+
+        fig,ax = plt.subplots()
+        ax.scatter(predFromNN,predfromTrain2)
+        fig.show()
+
+
         fig,ax = plt.subplots(2,1)
         ax[0].scatter(predfromTrain2,Y_test,alpha=0.5,s=1,c="black")
         ax[1].hist(predfromTrain2,bins=50,color="blue",alpha=0.5,density=True)
@@ -1147,6 +1280,28 @@ class LSTMandSpikeNetwork():
         ax.set_title("wake set predicted linear pos")
         fig.show()
 
+        import tables
+        import subprocess
+        if not os.path.exists(os.path.join(self.projectPath.folder, "nnSWR.mat")):
+            subprocess.run(["./getRipple.sh", self.projectPath.folder])
+        with tables.open_file(self.projectPath.folder + 'nnSWR.mat', "a") as f:
+            ripples = f.root.ripple[:,:].transpose()
+
+            dtime = dataset.map(lambda vals,valsout: vals["time"])
+            timePred = list(dtime.as_numpy_iterator())
+            timePreds = np.ravel(timePred)
+
+            predConfidence = clf.predict(AbsErrorToMedian)
+            cm = plt.get_cmap("turbo")
+            fig,ax = plt.subplots()
+            # ax.plot(timePreds,medianLinearPos,c="red",alpha=0.3)
+            ax.plot(timePreds,trueLinearPos,c="grey",alpha=0.3)
+            ax.scatter(timePreds,medianLinearPos,s=1,c=cm(predConfidence/np.max(predConfidence)))
+            ax.vlines(ripples[ripples[:,2]<=np.max(timePreds),2],ymin=0,ymax=1,color="grey",linewidths=1)
+            fig.show()
+
+
+
     def sleep_uncertainty_estimate(self,output_test,linearizationFunction):
         #output_test: euclid_data,lossPred (not used anymore),time steps
         euclidData = np.reshape(output_test[0],[np.prod(output_test[0].shape[0:3]),2])
@@ -1164,10 +1319,11 @@ class LSTMandSpikeNetwork():
 
     def study_sleep_uncertainty_estimate(self,output_test,linearizationFunction):
         #output_test: euclid_data,lossPred (not used anymore),time steps
-        euclidData = np.reshape(output_test[0],[np.prod(output_test[0].shape[0:3]),2])
-        projectedPos,linearPos = linearizationFunction(euclidData.astype(np.float64))
-        linearPos = np.reshape(linearPos,output_test[0].shape[0:3])
-        medianLinearPos = np.median(linearPos,axis=1)
+        # euclidData = np.reshape(output_test[0],[np.prod(output_test[0].shape[0:3]),2])
+        # projectedPos,linearPos = linearizationFunction(euclidData.astype(np.float64))
+        # linearPos = np.reshape(linearPos,output_test[0].shape[0:3])
+        # medianLinearPos = np.median(linearPos,axis=1)
+        medianLinearPos,predictedConfidence,timePreds =output_test
 
         fig,ax = plt.subplots()
         [ax.scatter(output_test[-1][1:1000:1],np.ravel(linearPos[:,id,:])[1:1000:1],c="orange",s=1,alpha=0.2) for id in range(linearPos.shape[1])]
@@ -1177,11 +1333,11 @@ class LSTMandSpikeNetwork():
         ax.set_title("beginning of sleep")
         fig.show()
 
-        # next we estimate the error made, by using the Linear projection of the distance to the median:
-        linearTranspose = np.transpose(linearPos,axes=[0,2,1])
-        linearTranspose = linearTranspose.reshape([linearTranspose.shape[0]*linearTranspose.shape[1],linearTranspose.shape[2]])
-        AbsErrorToMedian = np.abs(linearTranspose - np.median(linearTranspose,axis=1)[:,None])
-        predictedConfidence = self.LinearNetworkConfidence.predict(AbsErrorToMedian)
+        # # next we estimate the error made, by using the Linear projection of the distance to the median:
+        # linearTranspose = np.transpose(linearPos,axes=[0,2,1])
+        # linearTranspose = linearTranspose.reshape([linearTranspose.shape[0]*linearTranspose.shape[1],linearTranspose.shape[2]])
+        # AbsErrorToMedian = np.abs(linearTranspose - np.median(linearTranspose,axis=1)[:,None])
+        # predictedConfidence = self.LinearNetworkConfidence.predict(AbsErrorToMedian)
 
         cm = plt.get_cmap("turbo")
         fig,ax = plt.subplots()
