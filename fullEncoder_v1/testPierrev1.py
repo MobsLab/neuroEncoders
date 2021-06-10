@@ -86,8 +86,8 @@ class Params:
         self.nChannels = [len(list_channels[n]) for n in range(self.nGroups)]
         self.length = 0
 
-        self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 150
+        self.nSteps = int(10000 * 0.036 / windowSize) #not important anymore
+        self.nEpochs = 150 #
         self.windowLength = windowSize # in seconds, as all things should be
 
         ### from units encoder params
@@ -115,7 +115,7 @@ class Params:
         self.nb_eval_dropout = 100
 
         self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
-        self.lossLearningRate = 0.00003
+        self.lossLearningRate = 0.00003 #not used anymore
         self.lossActivation = None #tf.nn.relu
 
         self.usingMixedPrecision = True # this boolean indicates weither tensorflow uses mixed precision
@@ -185,6 +185,7 @@ def main():
     # The data are now saved into a tfrec file,
     # next we provide an efficient tool for selecting the training and testing step
 
+    #GUI selections:
     speed_filter(projectPath.folder,overWrite=False)
     modify_feature_forBestTestSet(projectPath.folder,overWrite=False)
 
@@ -204,13 +205,15 @@ def main():
 
     linearizationFunction = umazeLinearizer.pykeopsLinearization
 
-    trainer.fix_linearizer(umazeLinearizer.mazepoints,umazeLinearizer.tsProj)
     #
+    trainer.fix_linearizer(umazeLinearizer.mazepoints,umazeLinearizer.tsProj)
+
     # name_save = "resultTrain"
     # outputs = trainer.test(linearizationFunction,name_save,useTrain=True,onTheFlyCorrection=True)
+    # # TODO: change the filtering done here!!!! <--------
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
-    #
+
     # name_save = "resultTest-Full-NoLossPredTraining"
     # outputs = trainer.test(linearizationFunction,name_save,useSpeedFilter=False,useTrain=False,onTheFlyCorrection=True,forceFirstTrainingWeight=True)
     # behave_data = getBehavior(projectPath.folder, getfilterSpeed=True)
@@ -233,23 +236,24 @@ def main():
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
 
-    #
+
     #Study outputs of neural networks:
     # trainer.study_CNN_outputs(batch=True, forceFirstTrainingWeight=False,
     #                   useSpeedFilter=False, useTrain=False, onTheFlyCorrection=True)
+
     # trainer.study_uncertainty_estimate(batch=True, forceFirstTrainingWeight=False,
     #                                              useSpeedFilter=True, useTrain=False, onTheFlyCorrection=True)
     # trainer.study_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
     #                                              useSpeedFilter=False, useTrain=False, onTheFlyCorrection=True)
-    trainer.fit_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
-                                                 useSpeedFilter=False, useTrain=True, onTheFlyCorrection=True)
-    # trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder="resultSleep",batch=True,batch_size=10)
+    # trainer.fit_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
+    #                                              useSpeedFilter=False, useTrain=True, onTheFlyCorrection=True)
+    trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder="resultSleep",batch=True,batch_size=52)
 
-
-    # #Bayesian decoding
-    print("loading spike sorting")
-    cluster_data = ImportClusters.load_spike_sorting(projectPath)
-    behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=True)
+    #
+    # ## Bayesian decoding
+    # print("loading spike sorting")
+    # cluster_data = ImportClusters.load_spike_sorting(projectPath)
+    # behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=True)
     # print('Number of clusters:')
     # n_clusters = np.sum(
     #     [np.shape(cluster_data['Spike_labels'][tetrode])[1] for tetrode in range(len(cluster_data['Spike_labels']))])
@@ -257,10 +261,10 @@ def main():
     # #
     # # #Hyperparameter optimization through a grid-search:
     # # # Remark: to do with the validation dataset...
-    truePos = behavior_data["Positions"][
-              decodebayes.inEpochs(behavior_data["Position_time"][:, 0], behavior_data['Times']['testEpochs'])[
-                  0], :]
-    goodIndex = np.equal(np.sum(np.isnan(truePos), axis=-1),0)
+    # truePos = behavior_data["Positions"][
+    #           decodebayes.inEpochs(behavior_data["Position_time"][:, 0], behavior_data['Times']['testEpochs'])[
+    #               0], :]
+    # goodIndex = np.equal(np.sum(np.isnan(truePos), axis=-1),0)
     #
     # R2score = []
     # for bandwith in tqdm(np.arange(0.01,stop=0.1,step=0.01)):
@@ -304,13 +308,13 @@ def main():
     # fig.savefig(os.path.join(projectPath.resultsPath,"bayesianDecoding","optimBayesianWindowSize.png"))
 
     #
-    #
-    print("training Bayesian decoder from spike sorting ")
-    trainerBayes = decodebayes.Trainer(projectPath)
-    trainerBayes.bandwidth = 0.05
-    # wsBest = 1
-    bayesMatrices = trainerBayes.train(behavior_data, cluster_data)
-    #
+    # # #
+    # print("training Bayesian decoder from spike sorting ")
+    # trainerBayes = decodebayes.Trainer(projectPath)
+    # trainerBayes.bandwidth = 0.05
+    # # wsBest = 1
+    # bayesMatrices = trainerBayes.train(behavior_data, cluster_data)
+    # #
     # fig,ax = plt.subplots()
     # ax.imshow(bayesMatrices["Occupation"])
     # fig.show()
@@ -352,14 +356,14 @@ def main():
     # performancePlots.compare_bayes_network(outputs, outputsBayes, behavior_data)
 
     # First of, we compare the sleep decoding using the same temporal window for the bayesian network and the neural network
-    outputsBayesSleep = trainerBayes.sleep_decoding(bayesMatrices,behavior_data,cluster_data,windowSize=windowSize)
-
+    # outputsBayesSleep = trainerBayes.sleep_decoding(bayesMatrices,behavior_data,cluster_data,windowSize=windowSize)
+    #
     # sleep decoding
     name_save = "resultSleep"
     stimuleZone = [[0.0,0.35],[0.35,0.35],[0.435,0.0]] #todo change
-    outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder=name_save,batch=True,batch_size=10)
+    outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder=name_save,batch=True,batch_size=52)
     ##Next up: we compare the decoding of the bayesian network and the neural network during sleep.
-    performancePlots.compare_linear_sleep_predictions(outputs_sleep_decoding,outputsBayesSleep)
+    # performancePlots.compare_linear_sleep_predictions(outputs_sleep_decoding,outputsBayesSleep)
 
 
     ## Let us compare the training of 2 bayesian algorithm, with slightly different window size:
