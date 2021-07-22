@@ -271,25 +271,7 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
 								header=["t", "group", "spike_id","pos_id"])
 			#indicate that the last spikes were saved and can be used to forbid early spikes in the next buffer
 			map(id->old_possibleSpike_sum[id] .= possibleSpike_sum[id][end-13:end],1:1:nGroups)
-			#saving as a tensorflow tf.rec:
 
-		    window_length = WINDOWSIZE
-		    function stack_spikes(spIndex,g)
-		    	if size(spIndex,1) ==0
-		    		return zeros((0,size(list_channels[g],1),32))
-		    	else
-					spIndex = spIndex .- (idBuff-1)*BUFFERSIZE .+15 #correct to set at the right position in the buffer
-		    		catspike = cat(map(s->buffer_mmap[Int(s)-15:Int(s)+16,list_channels[g]],spIndex)...,dims=3)
-					# Julia and python do not ravel a tensor similarly,
-					# For Julia, it progressively increases index from left to right gathering: [A[1,1,1],A[2,1,1],A[1,2,1],A[2,2,1],...]
-					# Whereas Python starts from the end.
-					# So that python reshape our array we thus store it by raveling from [32timsStepVoltageMeasure,NChannel,NspikesIn36msWindow]
-					# And it will be read as [NspikesIn36msWindow,NChannel,32timsStepVoltageMeasure] in python!
-					# So we don't permutedims!
-					#permutedims(catspike,[3,2,1])
-		    		return catspike
-		    	end
-		    end
 	    	inBehaveEpoch = spikesFound[:,4] .> -1
 	    	spikesBehaveFound = spikesFound[inBehaveEpoch,:]
 			inSleepEpoch = spikesFound[:,4] .== -2
@@ -301,50 +283,36 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
 			if size(spikesFound,1)>0 #if there is any spike to extract:
 			    #🔥 : the group will be indexed from 0 to nGroups-1 in python
 			    # so we need to do the same in Julia
-				t0 = 1
-				#we assume that the buffer size is a multiple of window_length*samplingRate,
-				# so we don't worry about merging together spikes from different buffer
-				startindex = 1
-				lastindex = 2
-				for window_start in (t0:window_length:spikesFound[end,1]+window_length)
-					if spikesFound[startindex,1]>=window_start && spikesFound[startindex,1]<(window_start+window_length)
-						#find the first index where the spike time is beyond window_start
-						lastindex = min(startindex+1,size(spikesFound,1))
-						while spikesFound[lastindex,1]<(window_start+window_length) && lastindex<(size(spikesFound,1)-1)
-							lastindex = lastindex+1
-						end
-						spikeIndex = [spikesFound[startindex:lastindex-1,3][spikesFound[startindex:lastindex-1,2].==g] for g in 1:1:nGroups]
-						spikes = [stack_spikes(spikeIndex[g],g) for g in 1:1:nGroups]
-
-						# save into tensorflow the spike window:
-						if spikesFound[lastindex-1,4] == -2
+				for id in 1:1:size(spikesFound,1)
+				        # save into tensorflow the spike window:
+						if spikesFound[id,4] == -2
 							feat = Dict(
 								"pos_index" => [-2],
 								"pos" => Float32.([0,0]),
-								"length" =>[lastindex-startindex],
-								"groups" => Int.(spikesFound[startindex:(lastindex-1),2] .-1),
-								"time" => [Float32.(mean(spikesFound[startindex:(lastindex-1), 1]))],
-								"indexInDat" => Int.(spikesFound[startindex:(lastindex-1),3] .-1)
+								"groups" => [Int(spikesFound[id,2]-1)],
+								"time" => [Float32((spikesFound[id, 1]))],
+								"indexInDat" => [Int(spikesFound[id,3]-1)]
 							)
 						else
 							feat = Dict(
-								"pos_index" => [Int(spikesFound[lastindex-1,4])-1],
-								"pos" => Float32.(positions[Int(spikesFound[lastindex-1,4]),:]/maxpos),
-								"length" =>[lastindex-startindex],
-								"groups" => Int.(spikesFound[startindex:(lastindex-1),2] .-1),
-								"time" => [Float32.(mean(spikesFound[startindex:(lastindex-1), 1]))],
-								"indexInDat" => Int.(spikesFound[startindex:(lastindex-1),3] .-1)
+								"pos_index" => [Int(spikesFound[id,4])-1],
+								"pos" => Float32.(positions[Int(spikesFound[id,4]),:]/maxpos),
+								"groups" => [Int(spikesFound[id,2] -1)],
+								"time" => [Float32(spikesFound[id, 1])],
+								"indexInDat" => [Int(spikesFound[id,3]-1)]
 							)
 						end
 						# Pierre: convert the spikes dic into a tf.train.Feature, used for the tensorflow protocol.
 						# their is no reason to change the key name but still done here.
 						for g in 1:1:nGroups
-							feat[string("group",g-1)] =  Array{Float32}(vcat(spikes[g]...).*0.195)
-						end
+						    if g == spikesFound[id,2]
+						        s = spikesFound[id,3] - (idBuff-1)*BUFFERSIZE +15
+							    feat[string("group",g-1)] = Array{Float32}(vcat(buffer_mmap[Int(s)-15:Int(s)+16,list_channels[g]].*0.195...))
+							else
+							    feat[string("group",g-1)] = Array{Float32}(vcat(zeros(Float32,(32,size(list_channels[g],1)))...))
+			            end
+			            append!(feats,[feat])
 
-						# next round will start at last index:
-						startindex = lastindex
-						append!(feats,[feat])
 
 					end
 				end
