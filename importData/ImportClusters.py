@@ -22,9 +22,11 @@ def getBehavior(folder, bandwidth=None,getfilterSpeed = True):
 	positions = np.swapaxes(positions[:,:],1,0)
 	speed = np.swapaxes(speed[:,:],1,0)
 	position_time = np.swapaxes(position_time[:,:],1,0)
+	keptSession = f.root.behavior.keptSession[:]
 
 	sleepPeriods = f.root.behavior.sleepPeriods[:]
 	sleepNames = ["".join([chr(c) for c in l]) for l in f.root.behavior.sessionSleepNames[:]]
+	sessionNames = ["".join([chr(c) for c in l[0][:, 0]]) for l in f.root.behavior.SessionNames[:, 0]]
 
 	#  Pierre 04/04/2021: train Epochs should be a continuous array, and test epochs too.
 	# odd indices indicate end of training,
@@ -59,7 +61,8 @@ def getBehavior(folder, bandwidth=None,getfilterSpeed = True):
 		learning_time = np.sum(learning_time)
 		behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
 			'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time, "speedFilter":speedFilter,
-					  'lossPredSetEpochs': lossPredSetEpochs, 'sleepEpochs':sleepPeriods, 'sleepNames':sleepNames}}
+					  'lossPredSetEpochs': lossPredSetEpochs, 'sleepEpochs':sleepPeriods, 'sleepNames':sleepNames,
+					  'sessionNames':sessionNames,'keptSession':keptSession}}
 	else:
 		learning_time = np.sum([trainEpochs[2 * i + 1] - trainEpochs[2 * i] for i in range(len(trainEpochs) // 2)])
 
@@ -70,7 +73,8 @@ def getBehavior(folder, bandwidth=None,getfilterSpeed = True):
 
 		behavior_data = {'Positions': positions, 'Position_time': position_time, 'Speed': speed, 'Bandwidth': bandwidth,
 						 'Times': {'trainEpochs': trainEpochs, 'testEpochs': testEpochs, 'learning': learning_time,
-								   'lossPredSetEpochs': lossPredSetEpochs,'sleepEpochs':sleepPeriods, 'sleepNames':sleepNames}}
+								   'lossPredSetEpochs': lossPredSetEpochs,'sleepEpochs':sleepPeriods, 'sleepNames':sleepNames,
+								   'sessionNames':sessionNames,'keptSession':keptSession}}
 	f.close()
 	return behavior_data
 
@@ -104,6 +108,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				n_clu = int(clu_str[0])-1
 
 				# Clusters only with labels >= 1
+				# otherwise all labels are set to 0 (represent cluster 0)
 				labels_temp = butils.modify_labels(np.array([[1. if int(clu_str[n+1])==l else 0. for l in range(1, n_clu+1)] for n in range(len(clu_str)-1)]), cluster_modifier)
 				st = (np.array([[float(res_str[n])/samplingRate] for n in tqdm.tqdm(range(len(clu_str)-1))]))
 
@@ -158,13 +163,17 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 		# np.save(projectPath.folder + 'ClusterData.npy', cluster_data)
 	return cluster_data
 
+import glob
+
 def load_spike_sorting(projectPath):
 	cluster_save_path = os.path.join(projectPath.folder,"dataset","clusterData")
 	if os.path.isfile(os.path.join(cluster_save_path, 'Spike_labels0.csv')):
+		lfiles = glob.glob(os.path.join(cluster_save_path, 'Spike_labels*.csv'))
+		num_files = len(lfiles)
 		cluster_data = {"Spike_labels": [], "Spike_times": [], "Spike_positions": [], "Spike_speed": [],
 						"Spike_pos_index": []}
 		print("Reading saved cluster csv file")
-		for l in tqdm.tqdm(range(4)):
+		for l in tqdm.tqdm(range(num_files)):
 			df = pd.read_csv(os.path.join(cluster_save_path, "Spike_labels" + str(l) + ".csv"))
 			cluster_data["Spike_labels"].append(df.values[:, 1:])
 			df = pd.read_csv(os.path.join(cluster_save_path, "spike_time" + str(l) + ".csv"))
@@ -181,3 +190,9 @@ def load_spike_sorting(projectPath):
 		behavior_data = getBehavior(projectPath.folder, getfilterSpeed=False)
 		cluster_data = getSpikesfromClu(projectPath, behavior_data)
 	return cluster_data
+
+
+
+
+
+

@@ -7,20 +7,14 @@ function extractTsd=extractTsd(folderData)
 	Behavior=importdata(strcat(folderData,'behavResources.mat'));
 	disp('Data Loaded.')
     
-    X = Data(Behavior.("CleanAlignedXtsd"));
-    Y = Data(Behavior.("CleanAlignedYtsd"));
+    X = Data(Behavior.("AlignedXtsd"));
+    Y = Data(Behavior.("AlignedYtsd"));
     V = Data(Behavior.("Vtsd"));
     behavior.positions     = [X Y];
-    behavior.position_time = Range(Behavior.Xtsd)/10000;
+    behavior.position_time = Range(Behavior.("AlignedXtsd"))/10000;
     behavior.speed = V;
 
     if isfield(Behavior,'SessionEpoch')
-//         startPreSleep = Start(Behavior.SessionEpoch.PreSleep)/10000
-//         startPostSleep = Start(Behavior.SessionEpoch.PostSleep)/10000
-//         stopPreSleep = Stop(Behavior.SessionEpoch.PreSleep)/10000
-//         stopPostSleep = Stop(Behavior.SessionEpoch.PostSleep)/10000
-//         behavior.sleepPeriods = [startPreSleep stopPreSleep startPostSleep stopPostSleep]
-
         sessionNames = fieldnames(Behavior.SessionEpoch)
         behavior.SessionNames =  {}
         behavior.SessionStart = []
@@ -37,6 +31,6 @@ function extractTsd=extractTsd(folderData)
         behavior.Start = [Start(behavior.position_time)]
         behavior.Stop = [Stop(behavior.position_time)]
         behavior.sleepPeriods = []
-
+    end
     save(strcat(folderData,'nnBehavior.mat'),'behavior','-v7.3');
 end
