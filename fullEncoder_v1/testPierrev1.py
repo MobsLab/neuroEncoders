@@ -18,6 +18,10 @@ from SimpleBayes import decodebayes
 from fullEncoder_v1 import nnNetwork2 as Training
 from tqdm import  tqdm
 
+# from transformData.linearizer import doubleArmMazeLinearization
+from transformData.linearizer import UMazeLinearizer
+from importData.ImportClusters import getBehavior
+
 class Project():
     def __init__(self, xmlPath, datPath='', jsonPath=None):
         if xmlPath[-3:] != "xml": #change the last character to xml if it was not and checks that it exists
@@ -45,10 +49,11 @@ class Project():
             self.graphMeta = self.graph + '.meta'
 
         self.tfrec =  self.folder + 'dataset/dataset.tfrec'
+        self.tfdata = self.folder+'dataset/dataset'
         self.tfrecSleep = self.folder + 'dataset/datasetSleep.tfrec'
 
         #To change at every experiment:
-        self.resultsPath = self.folder + 'result_restrictedSpeedValidSet'
+        self.resultsPath = self.folder + 'dataForKarim_withOldFilter'
         # self.resultsNpz = self.resultsPath + '/inferring.npz'
         # self.resultsMat = self.resultsPath + '/inferring.mat'
 
@@ -87,7 +92,7 @@ class Params:
         self.length = 0
 
         self.nSteps = int(10000 * 0.036 / windowSize) #not important anymore
-        self.nEpochs = 150 #
+        self.nEpochs = 30 #
         self.windowLength = windowSize # in seconds, as all things should be
 
         ### from units encoder params
@@ -110,12 +115,11 @@ class Params:
         self.shuffle_spike_order = False
         self.shuffle_convnets_outputs = False
 
-        self.batch_size = 52 #previously 52
+        self.batch_size = 52 #5 #52 #previously 52
 
         self.nb_eval_dropout = 100
 
         self.learningRates = [0.0003] #  0.00003  ,    0.00003, 0.00001]
-        self.lossLearningRate = 0.00003 #not used anymore
         self.lossActivation = None #tf.nn.relu
 
         self.usingMixedPrecision = True # this boolean indicates weither tensorflow uses mixed precision
@@ -144,13 +148,15 @@ def main():
     # xmlPath = "/media/nas6/ProjetERC2/Mouse-K199/20210408/_Concatenated/M1199_20210408_UMaze_SpikeRef.xml"
     # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-K199-2/M1199_20210408_UMaze_SpikeRef.xml"
     xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-reversal/M1199_20210416_Reversal.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-Reversal-1sWindow//M1199_20210416_Reversal.xml"
     # xmlPath = "/media/nas6/ProjetERC3/M1199/Reversal/M1199_20210416_Reversal.xml"
+    # xmlPath = "/home/mobs/Documents/PierreCode/dataTest/LisaRouxNewDataset/M007_S07_07222015.xml"
 
     # subprocess.run(["./getTsdFeature.sh", os.path.expanduser(xmlPath.strip('\'')), "\"" + "pos" + "\"",
     #                  "\"" + str(0.1) + "\"", "\"" + "end" + "\""])
 
     datPath = ''
-    windowSize = 0.036
+    windowSize = 7*0.036 #1 #corresponds to 30 windows of 36 ms # 0.036
 
     #tf.debugging.set_log_device_placement(True)
 
@@ -166,7 +172,7 @@ def main():
     positions,_ = rawDataParser.get_position(projectPath.folder)
     params = Params(list_channels,positions.shape[1], windowSize)
 
-    julia_spike_filter(projectPath)
+    julia_spike_filter(projectPath,window_length=windowSize,singleSpike=False)
 
     # OPTIMIZATION of tensorflow
     #tf.config.optimizer.set_jit(True) # activate the XLA compilation
@@ -183,18 +189,26 @@ def main():
     # params.shuffle_spike_order = True
     trainer = Training.LSTMandSpikeNetwork(projectPath, params)
     # The data are now saved into a tfrec file,
+
+    # fig,ax = plt.subplots()
+    # ax.scatter(noWindowinputNN/wfc.samplingRate,noWindowinputNN/wfc.samplingRate,c="black",s=1,label="NN input spikes",alpha=0.5)
+    # # separate cluster 0 and other
+    # cluster0mask = np.equal(np.sum(spikeMat_labels,axis=1),0)
+    # ax.scatter(spikeMat_times[wakeMask[:,0]*cluster0mask],spikeMat_times[wakeMask[:,0]*cluster0mask]+1,c="red",s=1,label="spike sorting, cluster 0")
+    # otherclustermask = np.logical_not(cluster0mask)
+    # ax.scatter(spikeMat_times[wakeMask[:,0] * otherclustermask], spikeMat_times[wakeMask[:,0] * otherclustermask] + 0.75, c="orange", s=1,label="spike sorting, other cluster")
+    # ax.scatter(spikeMat_times[wakeMask],spikeMat_times[wakeMask]+0.5,c="grey",s=1,label="spike sorting, all")
+    # fig.legend(loc="center left")
+    # fig.show()
     # next we provide an efficient tool for selecting the training and testing step
 
     #GUI selections:
     speed_filter(projectPath.folder,overWrite=False)
     modify_feature_forBestTestSet(projectPath.folder,overWrite=False)
 
-    # trainLosses = trainer.train(onTheFlyCorrection=True)
+    windowSizeMS = 7*36
+    trainLosses = trainer.train(onTheFlyCorrection=True,windowsizeMS=252)
 
-    #project the prediction and true data into a line fit on the maze:
-    from transformData.linearizer import doubleArmMazeLinearization
-    from transformData.linearizer import UMazeLinearizer
-    from importData.ImportClusters import getBehavior
     path_to_code = os.path.join(projectPath.folder, "../../neuroEncoders/transformData")
     # linearizationFunction = lambda x: doubleArmMazeLinearization(x,scale=True,path_to_folder=path_to_code)
     behave_data = getBehavior(projectPath.folder,getfilterSpeed=False)
@@ -202,23 +216,26 @@ def main():
     behavePos = behave_data["Positions"]
     umazeLinearizer = UMazeLinearizer(projectPath.folder)
     umazeLinearizer.verifyLinearization(behavePos/maxPos,projectPath.folder)
-
     linearizationFunction = umazeLinearizer.pykeopsLinearization
-
-    #
     trainer.fix_linearizer(umazeLinearizer.mazepoints,umazeLinearizer.tsProj)
-
+    #
+    # #
     # name_save = "resultTrain"
     # outputs = trainer.test(linearizationFunction,name_save,useTrain=True,onTheFlyCorrection=True)
     # # TODO: change the filtering done here!!!! <--------
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
-
+    # name_save = "resultTrain_full"
+    # outputs = trainer.test(linearizationFunction,name_save,useTrain=True,useSpeedFilter=False,onTheFlyCorrection=True)
+    # # TODO: change the filtering done here!!!! <--------
+    # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
+    # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
+    # #
     # name_save = "resultTest-Full-NoLossPredTraining"
     # outputs = trainer.test(linearizationFunction,name_save,useSpeedFilter=False,useTrain=False,onTheFlyCorrection=True,forceFirstTrainingWeight=True)
     # behave_data = getBehavior(projectPath.folder, getfilterSpeed=True)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
-    # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
+    # # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
     #
     # name_save = "resultTest-NoLossPredTraining"
     # outputs = trainer.test(linearizationFunction,name_save,useTrain=False,onTheFlyCorrection=True,forceFirstTrainingWeight=True)
@@ -230,12 +247,12 @@ def main():
     # outputs = trainer.test(linearizationFunction,name_save,useTrain=False,onTheFlyCorrection=True)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
-    # #
+    # # #
     # name_save = "resultTest_full"
     # outputs = trainer.test(linearizationFunction,name_save,useTrain=False,useSpeedFilter=False,onTheFlyCorrection=True)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
     # performancePlots.linear_performance(outputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
-
+    #
 
     #Study outputs of neural networks:
     # trainer.study_CNN_outputs(batch=True, forceFirstTrainingWeight=False,
@@ -247,92 +264,73 @@ def main():
     #                                              useSpeedFilter=False, useTrain=False, onTheFlyCorrection=True)
     # trainer.fit_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
     #                                              useSpeedFilter=False, useTrain=True, onTheFlyCorrection=True)
-    trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder="resultSleep",batch=True,batch_size=52)
 
+    # predPos = outputs["featurePred"]
+    # truePos =  outputs["featureTrue"]
     #
+    # fig,ax = plt.subplots(2,1)
+    # ax[0].plot(truePos[:,0],truePos[:,1])
+    # ax[1].plot(predPos[:, 0], predPos[:, 1])
+    # fig.show()
+
     # ## Bayesian decoding
-    # print("loading spike sorting")
-    # cluster_data = ImportClusters.load_spike_sorting(projectPath)
-    # behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=True)
-    # print('Number of clusters:')
-    # n_clusters = np.sum(
-    #     [np.shape(cluster_data['Spike_labels'][tetrode])[1] for tetrode in range(len(cluster_data['Spike_labels']))])
-    # print(n_clusters)
-    # #
-    # # #Hyperparameter optimization through a grid-search:
-    # # # Remark: to do with the validation dataset...
-    # truePos = behavior_data["Positions"][
-    #           decodebayes.inEpochs(behavior_data["Position_time"][:, 0], behavior_data['Times']['testEpochs'])[
-    #               0], :]
-    # goodIndex = np.equal(np.sum(np.isnan(truePos), axis=-1),0)
-    #
-    # R2score = []
-    # for bandwith in tqdm(np.arange(0.01,stop=0.1,step=0.01)):
-    #     trainerBayes = decodebayes.Trainer(projectPath)
-    #     trainerBayes.bandwidth = bandwith
-    #     bayesMatrices = trainerBayes.train(behavior_data,cluster_data)
-    #     R2score_eachWindow = []
-    #     for windowSize in tqdm(np.arange(0.01, stop=1, step=0.1)):
-    #         outputsBayes = trainerBayes.test_Pierre(bayesMatrices, behavior_data,cluster_data, windowSize=windowSize)
-    #         predPos = outputsBayes["inferring"][:, 0:2]
-    #         R2score_eachWindow += [np.mean(np.sum(np.square(predPos[goodIndex,:] - truePos[goodIndex,:]), axis=-1))]
-    #     R2score += [R2score_eachWindow]
-    #
-    # bw = np.arange(0.01,stop=0.1,step=0.01)
-    # ws = np.arange(0.01, stop=1, step=0.1)
-    # cm = plt.get_cmap("turbo")
-    # g = np.array(R2score)
-    # fig,ax = plt.subplots()
-    # [ax.plot(bw,g[:,id],c=cm(id/len(R2score))) for id in range(g.shape[1])]
-    # ax.set_xlabel("bandwidth")
-    # ax.set_ylabel("R2 score on test")
-    # fig.colorbar(plt.cm.ScalarMappable(norm=plt.Normalize(vmin=ws[0],vmax=ws[-1]),cmap=cm), label="Window size" ,ax=ax)
-    # fig.show()
-    # fig.savefig(os.path.join(projectPath.resultsPath,"bayesianDecoding","optimBayesianParameter.png"))
 
-    # bestParams = np.argwhere(np.min(np.array(R2score))==np.array(R2score))[0]
-    # bwBest = bw[bestParams[0]]
-    # trainerBayes = decodebayes.Trainer(projectPath)
-    # trainerBayes.bandwidth = 0.05 #bwBest
-    # bayesMatrices = trainerBayes.train(behavior_data, cluster_data)
-    # R2score_eachWindow = []
-    # for windowSize in tqdm(np.arange(0.5, stop=10, step=0.2)):
-    #     outputsBayes = trainerBayes.test_Pierre(bayesMatrices, behavior_data,cluster_data, windowSize=windowSize)
-    #     predPos = outputsBayes["inferring"][:, 0:2]
-    #     R2score_eachWindow += [np.mean(np.sum(np.square(predPos[goodIndex, :] - truePos[goodIndex, :]), axis=-1))]
-    #
-    # fig,ax = plt.subplots()
-    # ax.plot(np.arange(0.5, stop=4, step=0.2),R2score_eachWindow)
-    # ax.set_xlabel("window size")
-    # ax.set_ylabel("R2 score on test set")
-    # fig.savefig(os.path.join(projectPath.resultsPath,"bayesianDecoding","optimBayesianWindowSize.png"))
+    #decodebayes.bayesian_parameter_grid_search(projectPath, cluster_data, behavior_data)
 
-    #
-    # # #
     # print("training Bayesian decoder from spike sorting ")
-    # trainerBayes = decodebayes.Trainer(projectPath)
+    trainerBayes = decodebayes.Trainer(projectPath)
+    print("ordering cluster spike by prefered position")
+    trainerBayes.get_spike_ordered_by_prefPos(linearizationFunction)
+    #
+    # # we can compare the waveforms resulting in the offline (before spike sorting) filtering
+    # # and the filtering for the online strategy:
+    from importData import  ImportClusters
+    behavior_data = ImportClusters.getBehavior(projectPath.folder,getfilterSpeed=True)
+    #
+    from importData.compareSpikeFiltering import waveFormComparator
+    wfc = waveFormComparator(projectPath,params,behavior_data, useTrain=True)
+    wfc.save_alignment_tools(trainerBayes,linearizationFunction)
+    wfc = waveFormComparator(projectPath,params,behavior_data, useTrain=False)
+    wfc.save_alignment_tools(trainerBayes,linearizationFunction)
+    wfc = waveFormComparator(projectPath,params,behavior_data, useTrain=False,useSleep=True)
+    wfc.save_alignment_tools(trainerBayes,linearizationFunction)
+    # trainer.fit_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
+    #                                              useSpeedFilter=False, useTrain=False, onTheFlyCorrection=True)
+
+    behavior_data = getBehavior(projectPath.folder, getfilterSpeed=True)
+    # trainer.sleep_decoding(linearizationFunction, [], behavior_data, saveFolder="resultSleep", batch=True,
+    #                        batch_size=52)
+
+    from resultAnalysis import paperFigures
+    from resultAnalysis import paperFigure_sleep
+    # paperFigure_sleep.paperFigure_sleep(projectPath, params, linearizationFunction, behavior_data, "PreSleep")
+    paperFigures.paperFigure(trainerBayes, projectPath, params, linearizationFunction, usetrain=False)
+
+
+    # trainer.sleep_decoding(linearizationFunction,[],behavior_data,saveFolder="resultSleep",batch=True,batch_size=52)
+
     # trainerBayes.bandwidth = 0.05
-    # # wsBest = 1
     # bayesMatrices = trainerBayes.train(behavior_data, cluster_data)
-    # #
-    # fig,ax = plt.subplots()
-    # ax.imshow(bayesMatrices["Occupation"])
-    # fig.show()
+    # performancePlots.quick_place_field_display(bayesMatrices)
+
+    # trainerBayes = decodebayes.Trainer(projectPath)
+    # spikeMat_labels,spikeMat_times,linearPreferredPos = trainerBayes.get_spike_ordered_by_prefPos(linearizationFunction)
+    # from importData.compareSpikeFiltering import waveFormComparator
+    # wfc = waveFormComparator(projectPath, params, behavior_data)
+    # wfc.save_alignment_tools(trainerBayes, linearizationFunction)
+
+    # from resultAnalysis.NNpredAnalysis import compare_nn_popVector
+    # compare_nn_popVector(trainerBayes,projectPath, params, linearizationFunction, usetrain=False)
     #
-    # cm = plt.get_cmap("turbo")
-    # for idGroup,rateGroup in enumerate(bayesMatrices["Rate functions"]):
-    #     fig,ax = plt.subplots(len(rateGroup)//4+1,4)
-    #     for id in range(len(rateGroup)//2+1):
-    #         for idy in range(4):
-    #             if 4*id+idy<len(rateGroup):
-    #                 ax[id,idy].imshow(np.transpose(rateGroup[4*id+idy][:,:]),origin="lower",cmap=cm)
-    #                 ax[id, idy].set_title("mutual_info:" + str(round(bayesMatrices["Mutual_info"][idGroup][4*id+idy],2)))
-    #     [[a2.axes.get_yaxis().set_visible(False) for a2 in a] for a in ax]
-    #     [[a2.axes.get_xaxis().set_visible(False) for a2 in a] for a in ax]
-    #     fig.suptitle("Group: " + str(idGroup))
-    #     fig.tight_layout()
-    #     fig.show()
+    # name_save = "resultSleep"
+    # outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,[],behavior_data,saveFolder=name_save,batch=True,batch_size=52)
     #
+    # trainer.fit_uncertainty_estimate(linearizationFunction,batch=True, forceFirstTrainingWeight=False,
+    #                                              useSpeedFilter=False, useTrain=True, onTheFlyCorrection=True) #spikeMat_labels,spikeMat_times,trainerBayes.linearPreferredPos
+    #
+    # print("loading spike sorting")
+
+
     # for idGroup,rateGroup in enumerate(bayesMatrices["Spike_positions"]):
     #     fig,ax = plt.subplots(len(rateGroup)//4+1,4)
     #     for id in range(len(rateGroup)//2+1):
@@ -359,19 +357,25 @@ def main():
     # outputsBayesSleep = trainerBayes.sleep_decoding(bayesMatrices,behavior_data,cluster_data,windowSize=windowSize)
     #
     # sleep decoding
-    name_save = "resultSleep"
-    stimuleZone = [[0.0,0.35],[0.35,0.35],[0.435,0.0]] #todo change
-    outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder=name_save,batch=True,batch_size=52)
+    # name_save = "resultSleep"
+    # outputs_sleep_decoding = trainer.sleep_decoding(linearizationFunction,[],behave_data,saveFolder=name_save,batch=True,batch_size=52)
     ##Next up: we compare the decoding of the bayesian network and the neural network during sleep.
     # performancePlots.compare_linear_sleep_predictions(outputs_sleep_decoding,outputsBayesSleep)
 
 
     ## Let us compare the training of 2 bayesian algorithm, with slightly different window size:
-    trainerBayes2 = decodebayes.Trainer(projectPath)
-    trainerBayes2.bandwidth = 0.06
-    bayesMatrices2 = trainerBayes2.train(behavior_data, cluster_data)
-    outputsBayes2sleep = trainerBayes2.sleep_decoding(bayesMatrices2, behavior_data, cluster_data, windowSize=0.1)
-    performancePlots.compare_sleep_predictions(outputsBayes2sleep, outputsBayesSleep,"bayesian 0.3","bayesian 0.1")
+    # trainerBayes2 = decodebayes.Trainer(projectPath)
+    # trainerBayes2.bandwidth = 0.06
+    # bayesMatrices2 = trainerBayes2.train(behavior_data, cluster_data)
+    # outputsBayes = trainerBayes2.test_Pierre(bayesMatrices2,behavior_data,cluster_data,windowSize=20)
+    # proba = outputsBayes["inferring"][:,2]
+    # fig,ax = plt.subplots()
+    # ax.hist(proba,bins=100)
+    # fig.show()
+
+    #
+    # outputsBayes2sleep = trainerBayes2.sleep_decoding(bayesMatrices2, behavior_data, cluster_data, windowSize=0.1)
+    # performancePlots.compare_sleep_predictions(outputsBayes2sleep, outputsBayesSleep,"bayesian 0.3","bayesian 0.1")
 
 
     ### Next: We compare the convnets feature outputs to the bayesian network decoding.
@@ -384,21 +388,21 @@ def main():
     trainer.model = trainer.mybuild(trainer.get_Model(),modelName="spikeOrdershufflemodel.png")
     name_save = "result_spikeorderinwindow_shuffle"
     output_shuffle_spikeorder = trainer.test(linearizationFunction,name_save,onTheFlyCorrection=True)
-    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
-    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
+    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
 
-    name_save = "result_spikeorderinwindow_shuffle_train"
-    output_shuffle_spikeorder = trainer.test(linearizationFunction,name_save,useTrain=True,onTheFlyCorrection=True)
-    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
-    performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+    # name_save = "result_spikeorderinwindow_shuffle_train"
+    # output_shuffle_spikeorder = trainer.test(linearizationFunction,name_save,useTrain=True,onTheFlyCorrection=True)
+    # performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1,behave_data=behave_data)
+    # performancePlots.linear_performance(output_shuffle_spikeorder,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1,behave_data=behave_data)
 
-    params.shuffle_spike_order = False
-    params.shuffle_convnets_outputs = True
-    trainer.model = trainer.mybuild(trainer.get_Model(),modelName="convNetOutputshufflemodel.png")
-    name_save = "result_convOutputs_shuffle"
-    outputs_shuffle_convoutputs = trainer.test(linearizationFunction,name_save,onTheFlyCorrection=True)
-    performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
-    performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
+    # params.shuffle_spike_order = False
+    # params.shuffle_convnets_outputs = True
+    # trainer.model = trainer.mybuild(trainer.get_Model(),modelName="convNetOutputshufflemodel.png")
+    # name_save = "result_convOutputs_shuffle"
+    # outputs_shuffle_convoutputs = trainer.test(linearizationFunction,name_save,onTheFlyCorrection=True)
+    # performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"nofilter"),filter=1)
+    # performancePlots.linear_performance(outputs_shuffle_convoutputs,os.path.join(projectPath.resultsPath,name_save,"filter"), filter=0.1)
 
 
 if __name__=="__main__":

@@ -20,6 +20,7 @@ from importData.rawDataParser import inEpochs
 
 from pykeops.numpy import LazyTensor as LazyTensor_np
 import pykeops as pykeops
+import matplotlib.pyplot as plt
 
 
 # trainer class
@@ -28,8 +29,11 @@ class Trainer():
 		self.projectPath = projectPath
 		self.bandwidth = bandwidth
 		self.kernel = kernel
+		self.cluster_data  = ImportClusters.load_spike_sorting(self.projectPath)
 
 	def train(self, behavior_data, cluster_data, speed_cut=0, masking_factor=20, rand_param=0):
+		#todo: remove cluster_data argument everywhere....
+
 		# Check for bandwidth
 		if self.bandwidth == None:
 			self.bandwidth = behavior_data['Bandwidth']
@@ -54,6 +58,11 @@ class Trainer():
 			(np.where(behavior_data['Times']['speedFilter']),
 			inEpochs(behavior_data['Position_time'][:,0], behavior_data['Times']['trainEpochs']),
 			))]
+		# setting the position to be between 0 and 1:
+		maxPos = np.max(
+			behavior_data["Positions"][np.logical_not(np.isnan(np.sum(behavior_data["Positions"], axis=1)))])
+		selected_positions = selected_positions/maxPos
+
 		# Remove NaN: i:e problem with feature recording
 		selected_positions = selected_positions[np.logical_not(np.isnan(np.sum(selected_positions,axis=1))),:]
 		# xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
@@ -79,12 +88,23 @@ class Trainer():
 		Mutual_info = []
 
 		n_tetrodes = len(cluster_data['Spike_labels'])
+		### Let us align the positions time with the spike_times
+		# so that we can speed filter each spike times.
+		pos_times = pykeops.numpy.Vj(behavior_data['Position_time'][:,0][:,None])
+		tetrode_speed_filter_spiketimes = []
+		for tetrode in tqdm(range(n_tetrodes)):
+			spike_times = pykeops.numpy.LazyTensor(cluster_data['Spike_times'][tetrode][:,0][:,None],axis=0)
+			matching_pos_time = (pos_times - spike_times).abs().argmin_reduction(axis=1)
+			speed_mask = behavior_data['Times']['speedFilter'][matching_pos_time]
+			tetrode_speed_filter_spiketimes += [speed_mask]
+
 		for tetrode in tqdm(range(n_tetrodes)):
 			### MARGINAL RATE FUNCTION
 			selected_positions = cluster_data['Spike_positions'][tetrode][reduce(np.intersect1d,
-				(np.where(behavior_data['Times']['speedFilter']),
+				(np.where(tetrode_speed_filter_spiketimes[tetrode]),
 				inEpochs(cluster_data['Spike_times'][tetrode][:,0], behavior_data['Times']['trainEpochs'])))]
 			# Remove NaN: i:e problem with feature recording
+			selected_positions = selected_positions / maxPos
 			selected_positions = selected_positions[np.logical_not(np.isnan(np.sum(selected_positions, axis=1))), :]
 			# xEdges, yEdges, MRF = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
 			gridFeature, MRF = butils.kdenD(selected_positions, self.bandwidth,
@@ -100,9 +120,11 @@ class Trainer():
 		### LOCAL RATE FUNCTION FOR EACH CLUSTER
 			for label in range(np.shape(cluster_data['Spike_labels'][tetrode])[1]):
 				selected_positions = cluster_data['Spike_positions'][tetrode][reduce(np.intersect1d,
-					(np.where(behavior_data['Times']['speedFilter']),
+					(np.where(tetrode_speed_filter_spiketimes[tetrode]),
 					np.where(cluster_data['Spike_labels'][tetrode][:,label] == 1),
 					inEpochs(cluster_data['Spike_times'][tetrode][:,0], behavior_data['Times']['trainEpochs'])))]
+				selected_positions = selected_positions / maxPos
+				selected_positions = selected_positions[np.logical_not(np.isnan(np.sum(selected_positions, axis=1))), :]
 				if np.shape(selected_positions)[0]!=0:
 					# xEdges, yEdges, LRF =  butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
 					gridFeature, LRF = butils.kdenD(selected_positions, self.bandwidth,
@@ -143,6 +165,9 @@ class Trainer():
 			inEpochs(behavior_data['Position_time'][:,0], behavior_data['Times']['trainEpochs']),
 			))]
 		# Remove NaN: i:e problem with feature recording
+		maxPos = np.max(
+			behavior_data["Positions"][np.logical_not(np.isnan(np.sum(behavior_data["Positions"], axis=1)))])
+		selected_positions = selected_positions / maxPos
 		selected_positions = selected_positions[np.logical_not(np.isnan(np.sum(selected_positions,axis=1))),:]
 		# xEdges, yEdges, Occupation = butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, kernel=self.kernel)
 		#Remark: todo optimize for the bandwith
@@ -168,6 +193,7 @@ class Trainer():
 					(np.where(behavior_data['Times']['speedFilter']),
 					np.where(cluster_data['Spike_labels'][tetrode][:,label] == 1),
 					inEpochs(cluster_data['Spike_times'][tetrode][:,0], behavior_data['Times']['trainEpochs'])))]
+				selected_positions = selected_positions/maxPos
 				if np.shape(selected_positions)[0]!=0:
 					# xEdges, yEdges, LRF =  butils.kde2D(selected_positions[:,0], selected_positions[:,1], self.bandwidth, edges=[xEdges,yEdges], kernel=self.kernel)
 					gridFeature, LRF = butils.kdenD(selected_positions, bandwidth,
@@ -185,15 +211,20 @@ class Trainer():
 			Mutual_info.append(np.mean(LocalMutualInfo))
 		return np.mean(Mutual_info)
 
-	def test(self, bayes_matrices, behavior_data, windowSize=0.036, masking_factor=20):
+	def test(self, bayes_matrices,cluster_data, behavior_data, windowSize=0.036, masking_factor=20):
 
 		print('\nBUILDING POSITION PROBAS')
 
-		### Format matrices
-		guessed_clusters_info = bayes_matrices['guessed' \
-											   '_clusters_info']
+		guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+										 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												  behavior_data['Times']['testEpochs'])]
+								 for tetrode in range(len(cluster_data['Spike_times']))]
+		guessed_clusters= [ cluster_data['Spike_labels'][tetrode][
+														  inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+																   behavior_data['Times']['testEpochs'])]
+							for tetrode in range(len(cluster_data['Spike_times']))]
+
 		Occupation, Marginal_rate_functions, Rate_functions = [bayes_matrices[key] for key in ['Occupation','Marginal rate functions','Rate functions']]
-		guessed_clusters, guessed_clusters_time = [guessed_clusters_info[key] for key in ['clusters','time']]
 		mask = Occupation > (np.max(Occupation)/masking_factor)
   
 		### Build Poisson term
@@ -342,7 +373,7 @@ class Trainer():
 		# For now the pykeops speed increase is not working, trouble with the install....
 		print("Parallel pykeops bayesian test")
 		outputPos_pykeops = parallelize_prediction( timeStepPred, windowSize, All_Poisson_term, guessed_clusters,
-							   guessed_clusters_time, log_RF)
+							   guessed_clusters_time, log_RF,Occupation)
 		print("finished bayesian guess")
 
 		# for bin in range(n_bins):
@@ -502,7 +533,7 @@ class Trainer():
 
 			print("Parallel pykeops bayesian test")
 			outputPos_pykeops = parallelize_prediction(timeStepPred, windowSize, All_Poisson_term, guessed_clusters,
-													   guessed_clusters_time, log_RF)
+													   guessed_clusters_time, log_RF,Occupation)
 			print("finished bayesian guess")
 
 			tpl_position_guessed_pykeops = np.unravel_index(outputPos_pykeops[1], shape=All_Poisson_term.shape)
@@ -537,11 +568,236 @@ class Trainer():
 					tetrodes_contributions.append(spike_pattern)
 				# Guessed probability map
 				position_proba = reduce(np.multiply, tetrodes_contributions)
+				position_proba = np.multiply(position_proba, Occupation)  # prior: Occupation deduced from training!!
 				position_proba = position_proba / np.sum(position_proba)
 				inferResults_pykeops[bin, 2] = np.max(position_proba)
 			inferResults_dic[sleepName] = [inferResults_pykeops[:,0:2],inferResults_pykeops[:,2],timeStepPred[:,0]]
 
 		return inferResults_dic
+
+	def get_spike_ordered_by_prefPos(self,linearizationFunction,bandwidth=0.05):
+		cluster_data = self.cluster_data
+		behavior_data = ImportClusters.getBehavior(self.projectPath.folder, getfilterSpeed=True)
+		# let us bin the spike times by 36 ms windows:
+		nbSpikes = [a.shape[0] for a in cluster_data["Spike_labels"]]
+		nbNeurons = [a.shape[1] for a in cluster_data["Spike_labels"]]
+		spikeMat_labels = np.zeros([np.sum(nbSpikes), np.sum(nbNeurons)])
+		spikeMat_times = np.zeros([np.sum(nbSpikes), 1])
+		cnbSpikes = np.cumsum(nbSpikes)
+		cnbNeurons = np.cumsum(nbNeurons)
+		for id, n in enumerate(nbSpikes):
+			if id > 0:
+				spikeMat_labels[cnbSpikes[id - 1]:cnbSpikes[id], cnbNeurons[id - 1]:cnbNeurons[id]] = \
+				cluster_data["Spike_labels"][id]
+				spikeMat_times[cnbSpikes[id - 1]:cnbSpikes[id], :] = cluster_data["Spike_times"][id]
+			else:
+				spikeMat_labels[0:cnbSpikes[id], 0:cnbNeurons[id]] = cluster_data["Spike_labels"][id]
+				spikeMat_times[0:cnbSpikes[id], :] = cluster_data["Spike_times"][id]
+
+		spikeorder = np.argsort(spikeMat_times[:, 0])
+		spikeMat_labels = spikeMat_labels[spikeorder, :]
+		spikeMat_times = spikeMat_times[spikeorder, :]
+
+		self.bandwidth = bandwidth
+		bayesMatrices = self.train(behavior_data, cluster_data)
+		preferredPos = []
+		for idGroup, rateGroup in enumerate(bayesMatrices["Rate functions"]):
+			for id in range(len(rateGroup) // 2 + 1):
+				for idy in range(4):
+					if 4 * id + idy < len(rateGroup):
+						trRateGroup = np.transpose(rateGroup[4 * id + idy][:, :])
+						posX = np.unravel_index(np.argmax(trRateGroup), shape=trRateGroup.shape)
+						preferredPos = preferredPos + [
+							[bayesMatrices["Bins"][0][posX[1]], bayesMatrices["Bins"][1][posX[0]]]]
+		preferredPos = np.array(preferredPos)
+		_, linearPreferredPos = linearizationFunction(preferredPos)
+		self.linearPosArgSort = np.argsort(linearPreferredPos)
+		self.linearPreferredPos =linearPreferredPos[self.linearPosArgSort]
+		spikeMat_labels = spikeMat_labels[:, self.linearPosArgSort]
+
+		bs = [np.stack(b) for b in bayesMatrices["Rate functions"]]
+		placefields = np.concatenate(bs)
+		self.reorderdePlaceFields = placefields[self.linearPosArgSort,:]
+
+		return spikeMat_labels,spikeMat_times,self.linearPreferredPos,self.reorderdePlaceFields
+
+	def test_as_NN(self, timeStepPred,bayes_matrices, behavior_data, cluster_data, windowSize=0.036, masking_factor=20,useTrain=True,sleepEpochs=[]):
+
+		if useTrain:
+			guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+										 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												  behavior_data['Times']['trainEpochs'])]
+									 for tetrode in range(len(cluster_data['Spike_times']))]
+			guessed_clusters = [cluster_data['Spike_labels'][tetrode][
+									inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+											 behavior_data['Times']['trainEpochs'])]
+								for tetrode in range(len(cluster_data['Spike_times']))]
+		else:
+			if len(sleepEpochs)>0:
+				guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+											 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+													  sleepEpochs)]
+										 for tetrode in range(len(cluster_data['Spike_times']))]
+				guessed_clusters = [cluster_data['Spike_labels'][tetrode][
+										inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												 sleepEpochs)]
+									for tetrode in range(len(cluster_data['Spike_times']))]
+			else:
+				guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+											 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+													  behavior_data['Times']['testEpochs'])]
+										 for tetrode in range(len(cluster_data['Spike_times']))]
+				guessed_clusters = [cluster_data['Spike_labels'][tetrode][
+										inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												 behavior_data['Times']['testEpochs'])]
+									for tetrode in range(len(cluster_data['Spike_times']))]
+		# print('\nBUILDING POSITION PROBAS')
+		Occupation, Marginal_rate_functions, Rate_functions = [bayes_matrices[key] for key in
+															   ['Occupation', 'Marginal rate functions',
+																'Rate functions']]
+		mask = Occupation > (np.max(Occupation) / masking_factor)
+
+		### Build Poisson term
+		All_Poisson_term = [np.exp((-windowSize) * Marginal_rate_functions[tetrode]) for tetrode in
+							range(len(guessed_clusters))]
+		All_Poisson_term = reduce(np.multiply, All_Poisson_term)
+
+		### Log of rate functions
+		log_RF = []
+		for tetrode in range(np.shape(Rate_functions)[0]):
+			temp = []
+			for cluster in range(np.shape(Rate_functions[tetrode])[0]):
+				temp.append(np.log(Rate_functions[tetrode][cluster] + np.min(
+					Rate_functions[tetrode][cluster][Rate_functions[tetrode][cluster] != 0])))
+			log_RF.append(temp)
+
+		n_bins = timeStepPred.shape[0]
+		### Decoding loop
+		position_proba = [np.ones(np.shape(Occupation))] * n_bins
+		nSpikes = []
+
+		# For now the pykeops speed increase is not working, trouble with the install....
+		# print("Parallel pykeops bayesian test")
+		outputPos_pykeops = parallel_pred_as_NN(timeStepPred, windowSize, All_Poisson_term, guessed_clusters,
+												guessed_clusters_time, log_RF,Occupation)
+		# print("finished bayesian guess")
+
+		tpl_position_guessed_pykeops = np.unravel_index(outputPos_pykeops[1], shape=All_Poisson_term.shape)
+		pos_guess_pykeops = np.array(
+			[bayes_matrices['Bins'][i][tpl_position_guessed_pykeops[i][:, 0]] for i in range(len(bayes_matrices['Bins']))])
+		proba_guess_pykeops = outputPos_pykeops[0]
+		inferResults_pykeops = np.concatenate([np.transpose(pos_guess_pykeops), proba_guess_pykeops], axis=-1)
+
+		# NOTE: A few values of probability predictions present NaN in pykeops....
+		# print("Resolving nan issue from pykeops over a few bins")
+		badBins = np.where(np.isnan(inferResults_pykeops[:, 2]))[0]
+		for bin in badBins:
+			bin_start_time = timeStepPred[bin]
+			bin_stop_time = bin_start_time + windowSize
+			binSpikes = 0
+			tetrodes_contributions = []
+			tetrodes_contributions.append(All_Poisson_term)
+			for tetrode in range(len(guessed_clusters)):
+				bin_probas = guessed_clusters[tetrode][np.intersect1d(
+					np.where(guessed_clusters_time[tetrode][:, 0] > bin_start_time),
+					np.where(guessed_clusters_time[tetrode][:, 0] < bin_stop_time))]
+				# Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+				# because some spike might be closest to one position further away than windowSize, yet themselves be close to the spike time
+				bin_clusters = np.sum(bin_probas, 0)
+				# Terms that come from spike information
+				if np.sum(bin_clusters) > 0.5:
+					spike_pattern = reduce(np.multiply,
+										   [np.exp(log_RF[tetrode][cluster] * bin_clusters[cluster])
+											for cluster in range(np.shape(bin_clusters)[0])])
+				else:
+					spike_pattern = np.multiply(np.ones(np.shape(Occupation)), mask)
+				tetrodes_contributions.append(spike_pattern)
+				# Guessed probability map
+				position_proba = reduce(np.multiply, tetrodes_contributions)
+				position_proba = np.multiply(position_proba,Occupation) #prior: Occupation deduced from training!!
+				position_proba = position_proba / np.sum(position_proba)
+				inferResults_pykeops[bin, 2] = np.max(position_proba)
+
+		outputResults = {"inferring": inferResults_pykeops, 'nSpikes': np.array(nSpikes)}  # , "probaMaps": position_proba
+		return outputResults
+
+	## sometimes we want to have access to the full probability decoded at each time step:
+
+	def full_proba_decoding(self, timeStepPred,bayes_matrices, behavior_data, cluster_data, windowSize=0.036, masking_factor=20,useTrain=True):
+
+		if useTrain:
+			guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+										 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												  behavior_data['Times']['trainEpochs'])]
+									 for tetrode in range(len(cluster_data['Spike_times']))]
+			guessed_clusters = [cluster_data['Spike_labels'][tetrode][
+									inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+											 behavior_data['Times']['trainEpochs'])]
+								for tetrode in range(len(cluster_data['Spike_times']))]
+		else:
+			guessed_clusters_time = [cluster_data['Spike_times'][tetrode][
+										 inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+												  behavior_data['Times']['testEpochs'])]
+									 for tetrode in range(len(cluster_data['Spike_times']))]
+			guessed_clusters = [cluster_data['Spike_labels'][tetrode][
+									inEpochs(cluster_data['Spike_times'][tetrode][:, 0],
+											 behavior_data['Times']['testEpochs'])]
+								for tetrode in range(len(cluster_data['Spike_times']))]
+		# print('\nBUILDING POSITION PROBAS')
+		Occupation, Marginal_rate_functions, Rate_functions = [bayes_matrices[key] for key in
+															   ['Occupation', 'Marginal rate functions',
+																'Rate functions']]
+		mask = Occupation > (np.max(Occupation) / masking_factor)
+
+		### Build Poisson term
+		All_Poisson_term = [np.exp((-windowSize) * Marginal_rate_functions[tetrode]) for tetrode in
+							range(len(guessed_clusters))]
+		All_Poisson_term = reduce(np.multiply, All_Poisson_term)
+
+		### Log of rate functions
+		log_RF = []
+		for tetrode in range(np.shape(Rate_functions)[0]):
+			temp = []
+			for cluster in range(np.shape(Rate_functions[tetrode])[0]):
+				temp.append(np.log(Rate_functions[tetrode][cluster] + np.min(
+					Rate_functions[tetrode][cluster][Rate_functions[tetrode][cluster] != 0])))
+			log_RF.append(temp)
+
+		n_bins = timeStepPred.shape[0]
+		### Decoding loop
+		position_probas = []
+		nSpikes = []
+		for bin in tqdm(timeStepPred):
+			bin_start_time = bin
+			bin_stop_time = bin_start_time + windowSize
+			binSpikes = 0
+			tetrodes_contributions = []
+			tetrodes_contributions.append(All_Poisson_term)
+			for tetrode in range(len(guessed_clusters)):
+				bin_probas = guessed_clusters[tetrode][np.intersect1d(
+					np.where(guessed_clusters_time[tetrode][:, 0] > bin_start_time),
+					np.where(guessed_clusters_time[tetrode][:, 0] < bin_stop_time))]
+				# Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+				# because some spike might be closest to one position further away than windowSize, yet themselves be close to the spike time
+				bin_clusters = np.sum(bin_probas, 0)
+				# Terms that come from spike information
+				if np.sum(bin_clusters) > 0.5:
+					spike_pattern = reduce(np.multiply,
+										   [np.exp(log_RF[tetrode][cluster] * bin_clusters[cluster])
+											for cluster in range(np.shape(bin_clusters)[0])])
+				else:
+					spike_pattern = np.multiply(np.ones(np.shape(Occupation)), mask)
+				tetrodes_contributions.append(spike_pattern)
+			# Guessed probability map
+			position_proba = reduce(np.multiply, tetrodes_contributions)
+			position_proba = np.multiply(position_proba, Occupation)
+			position_proba = position_proba / np.sum(position_proba)
+			position_probas.append(position_proba)
+		return position_probas
+
+
+
+
 
 def find_next_bin(times,clusters,start,stop,start_time,stop_time):
 	# times: array of times
@@ -558,12 +814,12 @@ def find_next_bin(times,clusters,start,stop,start_time,stop_time):
 	newStopId = newStopId-1
 	return newStartID,newStopId,clusters[newStartID:newStopId+1]
 
-def parallelize_prediction(timeStepPred,windowSize,All_Poisson_term,guessed_clusters,guessed_clusters_time,log_RF):
+def parallelize_prediction(timeStepPred,windowSize,All_Poisson_term,guessed_clusters,guessed_clusters_time,log_RF,Occupancy):
 	# Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
 	# Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
 
 	bin_start_times = timeStepPred - windowSize/2
-	bin_stop_times = bin_start_times + windowSize/2
+	bin_stop_times = timeStepPred + windowSize/2
 
 	# we will progressively add each tetrode contribution
 	tetrode_contribs = 1
@@ -598,6 +854,120 @@ def parallelize_prediction(timeStepPred,windowSize,All_Poisson_term,guessed_clus
 	poisson_reshape = np.reshape(All_Poisson_term,newshape=[np.prod(All_Poisson_term.shape)])[:,None]
 	poisson_contrib_Vj = pykeops.numpy.Vj(poisson_reshape)
 	tetrode_contribs = tetrode_contribs*poisson_contrib_Vj
+
+	occupancy_reshape = np.reshape(Occupancy,newshape=[np.prod(Occupancy.shape)])[:,None]
+	occupancy_contrib = pykeops.numpy.Vj(occupancy_reshape)
+	tetrode_contribs = tetrode_contribs * occupancy_contrib
+
+	# If we had only one electrode:
+	# ... but we need to sum over the different electrodes.
+	outputPos = tetrode_contribs.max_argmax_reduction(axis=1)
+	# We also need to normalize the probability:
+	sumProba = tetrode_contribs.sum_reduction(axis=1)
+	outputPos = (outputPos[0]/sumProba,outputPos[1])
+
+	return outputPos
+
+def bayesian_parameter_grid_search(projectPath,cluster_data,behavior_data):
+	print('Number of clusters:')
+	n_clusters = np.sum(
+	    [np.shape(cluster_data['Spike_labels'][tetrode])[1] for tetrode in range(len(cluster_data['Spike_labels']))])
+	print(n_clusters)
+	#
+	# #Hyperparameter optimization through a grid-search:
+	# # Remark: to do with the validation dataset...
+	truePos = behavior_data["Positions"][
+	          inEpochs(behavior_data["Position_time"][:, 0], behavior_data['Times']['testEpochs'])[
+	              0], :]
+	goodIndex = np.equal(np.sum(np.isnan(truePos), axis=-1),0)
+
+	R2score = []
+	for bandwith in tqdm(np.arange(0.01,stop=0.1,step=0.01)):
+		trainerBayes = Trainer(projectPath)
+		trainerBayes.bandwidth = bandwith
+		bayesMatrices = trainerBayes.train(behavior_data,cluster_data)
+		R2score_eachWindow = []
+		for windowSize in tqdm(np.arange(0.01, stop=1, step=0.1)):
+			outputsBayes = trainerBayes.test_Pierre(bayesMatrices, behavior_data,cluster_data, windowSize=windowSize)
+			predPos = outputsBayes["inferring"][:, 0:2]
+			R2score_eachWindow += [np.mean(np.sum(np.square(predPos[goodIndex,:] - truePos[goodIndex,:]), axis=-1))]
+		R2score += [R2score_eachWindow]
+
+	bw = np.arange(0.01,stop=0.1,step=0.01)
+	ws = np.arange(0.01, stop=1, step=0.1)
+	cm = plt.get_cmap("turbo")
+	g = np.array(R2score)
+	fig,ax = plt.subplots()
+	[ax.plot(bw,g[:,id],c=cm(id/len(R2score))) for id in range(g.shape[1])]
+	ax.set_xlabel("bandwidth")
+	ax.set_ylabel("R2 score on test")
+	fig.colorbar(plt.cm.ScalarMappable(norm=plt.Normalize(vmin=ws[0],vmax=ws[-1]),cmap=cm), label="Window size" ,ax=ax)
+	fig.show()
+	fig.savefig(os.path.join(projectPath.resultsPath,"bayesianDecoding","optimBayesianParameter.png"))
+
+	bestParams = np.argwhere(np.min(np.array(R2score))==np.array(R2score))[0]
+	bwBest = bw[bestParams[0]]
+	trainerBayes = Trainer(projectPath)
+	trainerBayes.bandwidth = 0.05 #bwBest
+	bayesMatrices = trainerBayes.train(behavior_data, cluster_data)
+	R2score_eachWindow = []
+	for windowSize in tqdm(np.arange(0.5, stop=10, step=0.2)):
+		outputsBayes = trainerBayes.test_Pierre(bayesMatrices, behavior_data,cluster_data, windowSize=windowSize)
+		predPos = outputsBayes["inferring"][:, 0:2]
+		R2score_eachWindow += [np.mean(np.sum(np.square(predPos[goodIndex, :] - truePos[goodIndex, :]), axis=-1))]
+
+	fig,ax = plt.subplots()
+	ax.plot(np.arange(0.5, stop=4, step=0.2),R2score_eachWindow)
+	ax.set_xlabel("window size")
+	ax.set_ylabel("R2 score on test set")
+	fig.savefig(os.path.join(projectPath.resultsPath,"bayesianDecoding","optimBayesianWindowSize.png"))
+
+
+def parallel_pred_as_NN(firstSpikeNNtime,windowSize,All_Poisson_term,guessed_clusters,guessed_clusters_time,log_RF,Occupancy):
+	# Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
+	# Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
+
+	bin_start_times = firstSpikeNNtime
+	bin_stop_times = bin_start_times + windowSize
+
+	# we will progressively add each tetrode contribution
+	tetrode_contribs = 1
+	for tetrode in range(len(guessed_clusters)):
+
+		gct_lazy = LazyTensor_np(guessed_clusters_time[tetrode][:,None])
+		bin_start_times_lazy = LazyTensor_np(bin_start_times[None,:])
+		bin_stop_times_lazy = LazyTensor_np(bin_stop_times[None,:])
+		good_start = (gct_lazy - bin_start_times_lazy).relu().sign() # similar to gct_lazy > bin_start_times.lazy
+		good_stop = (bin_stop_times_lazy - gct_lazy).relu().sign()
+		# size: (Number of signal time step,Number of prediction bin,1), indicate for each bin the time step in the bin.
+		good_bins = good_start*good_stop
+		gc_lazy = LazyTensor_np(guessed_clusters[tetrode][:,None,:])
+		# For each bin, we gather for each cluster in the tetrode the number of spike detected in signal measurements inside this bin.
+		# gathering can be effectively implemented by a element wise matrix multiplication with the mask good_bins
+		bin_clusters = (gc_lazy*good_bins).sum(axis=0)
+		# # transform into an array of size (Nb bin,Nb cluster in tetrode)
+
+		# Prepare for pykeops operations:
+		log_RF_reshape = np.transpose(np.array(log_RF[tetrode]), axes=[1, 2, 0])
+		log_RF_reshape = np.reshape(log_RF_reshape,newshape=[np.prod(log_RF_reshape.shape[0:-1]),log_RF_reshape.shape[-1]])
+		log_RF_lazy = LazyTensor_np(log_RF_reshape[None,:,:])
+		bin_clusters_lazy = LazyTensor_np(bin_clusters[:,None,:])
+
+		# the Log firing rate of each cluster is multiplied by the number of bin cluster, and the sum is performed over the
+		# number of cluster in the tetrode
+		res = (log_RF_lazy*bin_clusters_lazy).sum(dim=-1).exp()
+		tetrode_contribs = tetrode_contribs*res
+
+	#Finally we need to add the Poisson terms common to all tetrode finalS
+	# position posterior estimation:
+	poisson_reshape = np.reshape(All_Poisson_term,newshape=[np.prod(All_Poisson_term.shape)])[:,None]
+	poisson_contrib_Vj = pykeops.numpy.Vj(poisson_reshape)
+	tetrode_contribs = tetrode_contribs*poisson_contrib_Vj
+
+	# The probability need to be weighted by the position probabilities:
+	occupancy_reshape = np.reshape(Occupancy,newshape=[np.prod(Occupancy.shape)])[:,None]
+	occupancy_contrib = pykeops.numpy.Vj(occupancy_reshape)
+	tetrode_contribs = tetrode_contribs * occupancy_contrib
 
 	# If we had only one electrode:
 	# ... but we need to sum over the different electrodes.
