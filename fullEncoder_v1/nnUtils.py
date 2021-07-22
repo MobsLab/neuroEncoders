@@ -159,6 +159,10 @@ def parseSerializedSequence(params, tensors, batched=False): #feat_desc, ex_prot
 	# Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
 	# Probably because he wanted a variable length <> inputs sequences
 	tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+
+	tensors["indexInDat"] = tf.sparse.to_dense(tensors["indexInDat"], default_value=-1)
+	tensors["indexInDat"] = tf.reshape(tensors["indexInDat"], [-1])
+
 	# with this reshape; batch and variable length of time window are merged.... empty values are assigned -1 !
 	for g in range(params.nGroups):
 		#here 32 correspond to the number of discretized time bin for a spike
@@ -179,6 +183,31 @@ def parseSerializedSequence(params, tensors, batched=False): #feat_desc, ex_prot
 		# shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
 
 	return tensors
+
+def parseSerializedSequence_singleSpike(params, tensors, batched=False): #feat_desc, ex_proto,
+	# with this reshape; batch and variable length of time window are merged.... empty values are assigned -1 !
+	for g in range(params.nGroups):
+		#here 32 correspond to the number of discretized time bin for a spike
+		# zeros = tf.constant(np.zeros([params.nChannels[g], 32]), tf.float32)
+		# tensors["group"+str(g)] = tf.sparse.reshape(tensors["group"+str(g)], [-1])
+		# tensors["group"+str(g)] = tf.sparse.to_dense(tensors["group"+str(g)])
+		# tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1])
+		if batched:
+			tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [params.batch_size, params.nChannels[g], 32])
+
+
+
+		# # even if batched: gather all together
+		# # tensors["group"+str(g)] = tf.reshape(tensors["group"+str(g)], [-1,params.nChannels[g], 32])
+		# Pierre 12/03/2021: the batch_size and timesteps are gathered together
+		# nonZeros  = tf.logical_not(tf.equal(tf.reduce_sum(input_tensor=tf.cast(tf.equal(
+		# 	tensors["group"+str(g)], zeros), tf.int32), axis=[1,2]), 32*params.nChannels[g]))
+		# # nonZeros: control that the voltage measured is not 0, at all channels and time bin inside the detected spike
+		# tensors["group"+str(g)] = tf.gather(tensors["group"+str(g)], tf.where(nonZeros))[:,0,:,:]
+		# #I don't understand why it can then call [:,0,:,:] as the output tensor of gather should have the same
+		# # shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
+	return tensors
+
 
 def parseSerializedSequence_shuffleGroups(params, tensors, batched=False): #feat_desc, ex_proto,
 	# if batched:

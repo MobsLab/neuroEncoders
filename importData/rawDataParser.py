@@ -145,7 +145,8 @@ def select_sleep_gui(folder,overWrite=False):
 		gs = plt.GridSpec(len(colorSess),1, figure=fig)
 		ax = [fig.add_subplot(gs[id,0]) for id in range(len(colorSess))]
 		ax[0].set_title("Please click on sleep sessions")
-		butts = [plt.Button(ax[len(ax) - k - 6], sessionNames[k], color=colorSess[k]) for k in range(len(colorSess))]
+
+		butts = [plt.Button(ax[len(ax) - k -1], sessionNames[k], color=colorSess[k]) for k in range(len(colorSess))]
 		def buttUpdate(id):
 			def buttUpdate(val):
 				if keptSession[id]:
@@ -206,7 +207,7 @@ def speed_filter(folder,overWrite=True):
 		mybehave = positions[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
 		myspeed = speed[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
 
-		window_len = 6
+		window_len = 14 #changed following Dima's advice
 		s = np.r_[myspeed[window_len - 1:0:-1], myspeed, myspeed[-2:-window_len - 1:-1]]
 		w = eval('np.' + "hamming" + '(window_len)')
 		myspeed2 = np.convolve(w / w.sum(), s[:, 0], mode='valid')[(window_len // 2 - 1):-(window_len // 2)]
@@ -215,7 +216,13 @@ def speed_filter(folder,overWrite=True):
 		speedFilter = myspeed2 > np.exp(speedThreshold)
 
 
-		fig, ax = plt.subplots(5, 1)
+		fig = plt.figure()
+		ax0 = fig.add_subplot(5,1,1)
+		ax1 = fig.add_subplot(5, 1, 2,sharex=ax0)
+		ax2 = fig.add_subplot(5, 1, 3)
+		ax3 = fig.add_subplot(5, 1, 4)
+		ax4 = fig.add_subplot(5, 1, 5)
+		ax = [ax0,ax1,ax2,ax3,ax4]
 		fig.suptitle("Speed threshold selection")
 		l1, = ax[0].plot(myposTime[speedFilter], mybehave[speedFilter, 0],c="red")
 		ax[0].set_ylabel("environmental \n variable")
@@ -272,6 +279,75 @@ def speed_filter(folder,overWrite=True):
 		f.flush()
 		f.close()
 
+		df = pd.DataFrame([np.exp(slider.val)])
+		df.to_csv(folder+"speedFilterValue.csv") #save the speed filter value
+
+
+def manual_speed_epoch_selections(folder, overWrite=True):
+	#TODO, in progress...
+	with tables.open_file(folder + 'nnBehavior.mat', "a") as f:
+		children = [c.name for c in f.list_nodes("/behavior")]
+		if "speedMask" in children:
+			print("speedMask already created")
+			if overWrite:
+				f.remove_node("/behavior", "speedMask")
+			else:
+				return
+		positions = f.root.behavior.positions
+		speed = f.root.behavior.speed
+		position_time = f.root.behavior.position_time
+		positions = np.swapaxes(positions[:, :], 1, 0)
+		speed = np.swapaxes(speed[:, :], 1, 0)
+		posTime = np.swapaxes(position_time[:, :], 1, 0)
+		if speed.shape[0] == posTime.shape[0] - 1:
+			speed = np.append(speed, speed[-1])
+		speed = np.reshape(speed, [speed.shape[0], 1])
+
+		def get_persistence(mspeed,timeSteps):
+			changeTime = []
+			current=mspeed[0]
+			for i in range(mspeed.shape[0]):
+				if mspeed[i]!=current:
+					changeTime+=[timeSteps[i]]
+					current = mspeed[i]
+			return np.array(changeTime)
+		window_len = 14 #changed following Dima's advice
+		s = np.r_[speed[window_len - 1:0:-1], speed, speed[-2:-window_len - 1:-1]]
+		w = eval('np.' + "hamming" + '(window_len)')
+		myspeed2 = np.convolve(w / w.sum(), s[:, 0], mode='valid')[(window_len // 2 - 1):-(window_len // 2)]
+
+
+		tmin = 0
+		tmax = posTime[-1]
+		myposTime = posTime[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+		mybehave = positions[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+		myspeed = speed[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+
+		## new GUI to select speed: the user visually select epochs of high and low speed.
+		speedFilter = np.zeros(myspeed.shape[0])
+		cm = plt.get_cmap("turbo")
+		fig = plt.figure()
+		ax0 = fig.add_subplot(3, 2, 1)
+		ax1 = fig.add_subplot(3, 2, 2)
+		ax3 = fig.add_subplot(3, 2, 4, sharex=ax1)
+		ax2 = fig.add_subplot(3, 2, 3)
+		ax4 = fig.add_subplot(3, 2, 5)
+		ax = [ax0, ax1, ax2, ax3, ax4]
+		fig.suptitle("Speed threshold selection")
+		l1 = ax[0].scatter(mybehave[speedFilter, 0], mybehave[speedFilter, 1], c=cm(myspeed/np.max(speed)))
+		ax[0].set_ylabel("Y")
+		ax[0].set_xlabel("X")
+		ax[1].set_ylabel("positions coordinates")
+		ax[1].set_xlabel("time")
+		l2, = ax[1].plot(myposTime[speedFilter], mybehave[speedFilter, 0], c="orange")
+		l3, = ax[1].plot(myposTime[speedFilter], mybehave[speedFilter, 1], c="blue")
+		l4 = ax[3].scatter(myposTime[speedFilter], myspeed[speedFilter], c="violet")
+		ax[3].set_ylabel("speed")
+		ax[3].set_xlabel("time")
+		l5 = ax[1].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+		l6 = ax[3].scatter(myposTime[speedFilter], np.zeros(myposTime[speedFilter].shape[0]) - 4, c="black", s=0.2)
+
+
 def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 	# Find test set with most uniform covering of speed and environment variable.
 	# provides then a little manual tool to change the size of the window
@@ -320,10 +396,10 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 			speeds = speeds[plimits[0]:plimits[1]+1,:]
 			speedMask = speedMask[plimits[0]:plimits[1]+1]
 
-		positions = positions[speedMask, :]
-		speeds = speeds[speedMask,:]
-		position_time = position_time[speedMask,:]
-		sessionValue = sessionValue[speedMask]
+		# positions = positions[speedMask, :]
+		# speeds = speeds[speedMask,:]
+		# position_time = position_time[speedMask,:]
+		# sessionValue = sessionValue[speedMask]
 
 		def get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet, keptSession, useLossPred):
 			# given the slider values, as well as the selected session, we extract the different sets
@@ -396,11 +472,11 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 
 		# fig,ax = plt.subplots(positions.shape[1]+2+len(colorSess),1)
 		fig = plt.figure()
-		gs = plt.GridSpec(positions.shape[1]+5, len(colorSess), figure=fig)
+		gs = plt.GridSpec(positions.shape[1]+5, max(len(colorSess),2), figure=fig)
 		ax = [fig.add_subplot(gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
 		ax += [fig.add_subplot(gs[-5,id]) for id in range(len(colorSess))]
-		ax += [fig.add_subplot(gs[-4,len(colorSess)-3:len(colorSess)])] # button to select if we use a separate training set to train the loss predictor.
-		ax += [fig.add_subplot(gs[-4, 0:len(colorSess)-4]), fig.add_subplot(gs[-3, :])]   #loss pred training set slider
+		ax += [fig.add_subplot(gs[-4,max(len(colorSess)-3,1):max(len(colorSess),2)])] # button to select if we use a separate training set to train the loss predictor.
+		ax += [fig.add_subplot(gs[-4, 0:max(len(colorSess)-4,1)]), fig.add_subplot(gs[-3, :])]   #loss pred training set slider
 		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])] #test set.
 
 		trainEpoch,testEpochs,lossPredSetEpochs = get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet, keptSession, useLossPredTrainSet[0])
@@ -497,6 +573,9 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 		testSetId = slider.val
 		sizeTest = sliderSize.val
 
+		lossPredSetId = sliderLossPredTrain.val
+		sizelossPredSet = sliderLossPredTrainSize.val
+
 		trainEpoch, testEpochs, lossPredSetEpochs = get_epochs(testSetId, sizeTest, lossPredSetId, sizelossPredSet,
 															   keptSession,useLossPredTrainSet[0])
 
@@ -507,6 +586,10 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 			f.remove_node("/behavior", "trainEpochs")
 		f.create_array("/behavior", "trainEpochs", trainEpoch)
 
+		if "keptSession" in children:
+			f.remove_node("/behavior","keptSession")
+		f.create_array("/behavior","keptSession",keptSession)
+
 		if "lossPredSetEpochs" in children:
 			f.remove_node("/behavior", "lossPredSetEpochs")
 		if useLossPredTrainSet[0]:
@@ -515,6 +598,15 @@ def modify_feature_forBestTestSet(folder,plimits=[],overWrite=False):
 			f.create_array("/behavior", "lossPredSetEpochs", [])
 
 		f.flush() #effectively write down the modification we just made
+
+		fig,ax = plt.subplots()
+		trainMask = inEpochsMask(position_time,trainEpoch)[:,0]
+		testMask = inEpochsMask(position_time, testEpochs)[:,0]
+		lossPredMask = inEpochsMask(position_time, lossPredSetEpochs)[:,0]
+		ax.scatter(position_time[trainMask],positions[trainMask,0],c="red")
+		ax.scatter(position_time[testMask], positions[testMask, 0], c="black")
+		ax.scatter(position_time[lossPredMask], positions[lossPredMask, 0], c="orange")
+		fig.show()
 
 
 
@@ -901,7 +993,7 @@ def findSpikesInGroupParallel(inputQueue, outputQueue, samplingRate, thresholdFa
 					# Do nothing unless after behaviour data has started
 					if time > startTime:
 
-						#OLD PROBLEM: modified by Puere on 23/03/21
+						#OLD PROBLEM: modified by Pierre on 23/03/21
 						# That's a late spike, we'll have to wait till next buffer
 						# why -18 here??
 						# if spl = BUFFERSIZE - 17 + 15, spl+17 =  BUFFERSIZE + 15

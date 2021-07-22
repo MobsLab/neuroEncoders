@@ -627,3 +627,23 @@ def compare_linear_sleep_predictions(outputs1,outputs2,o1name="neural network",o
 
     return
 
+
+def quick_place_field_display(bayesMatrices):
+    fig,ax = plt.subplots()
+    ax.imshow(bayesMatrices["Occupation"])
+    fig.show()
+    cm = plt.get_cmap("turbo")
+    for idGroup, rateGroup in enumerate(bayesMatrices["Rate functions"]):
+        fig, ax = plt.subplots(len(rateGroup) // 4 + 1, 4)
+        for id in range(len(rateGroup) // 2 + 1):
+            for idy in range(4):
+                if 4 * id + idy < len(rateGroup):
+                    trRateGroup = np.transpose(rateGroup[4 * id + idy][:, :])
+                    ax[id, idy].imshow(trRateGroup, origin="lower", cmap=cm)
+                    ax[id, idy].set_title(
+                        "mutual_info:" + str(round(bayesMatrices["Mutual_info"][idGroup][4 * id + idy], 2)))
+        [[a2.axes.get_yaxis().set_visible(False) for a2 in a] for a in ax]
+        [[a2.axes.get_xaxis().set_visible(False) for a2 in a] for a in ax]
+        fig.suptitle("Group: " + str(idGroup))
+        fig.tight_layout()
+        fig.show()

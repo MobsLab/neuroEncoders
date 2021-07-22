@@ -60,6 +60,11 @@ class UMazeLinearizer:
         b1 = plt.Button(ax[1],"reset",color="grey")
         def b1update(n):
             self.nnPoints = [[0.45, 0.40], [0.45, 0.65], [0.45, 0.9], [0.7, 0.9], [0.9, 0.9], [0.9, 0.7], [0.9, 0.4]]
+            # create the interpolating object
+            ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
+            itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            self.tsProj = np.arange(0, stop=1, step=1 / 100)
+            self.mazepoints = itpObject(self.tsProj)
             try:
                 self.lPoints.remove()
                 fig.canvas.draw()
@@ -74,6 +79,12 @@ class UMazeLinearizer:
         def b2update(n):
             if len(self.nnPoints)>0:
                 self.nnPoints = self.nnPoints[0:len(self.nnPoints)-1]
+                # create the interpolating object
+                ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
+                itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+                self.tsProj = np.arange(0, stop=1, step=1 / 100)
+                self.mazepoints = itpObject(self.tsProj)
+
                 self.lPoints.remove()
                 fig.canvas.draw()
 
@@ -104,6 +115,12 @@ class UMazeLinearizer:
                 except:
                     pass
                 if (len(self.nnPoints) > 2):
+                    # create the interpolating object
+                    ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
+                    itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+                    self.tsProj = np.arange(0, stop=1, step=1 / 100)
+                    self.mazepoints = itpObject(self.tsProj)
+
                     self.l0s = tryLinearization(ax, self.l0s)
                 else:
                     self.l0s[1] = ax[0].scatter(euclidData[:, 0], euclidData[:, 1], c="blue")
@@ -112,6 +129,12 @@ class UMazeLinearizer:
         [a.set_aspect(1) for a in ax]
         fig.canvas.mpl_connect('button_press_event', onclick)
         plt.show()
+
+        # create the interpolating object
+        ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
+        itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+        self.tsProj = np.arange(0, stop=1, step=1 / 100)
+        self.mazepoints = itpObject(self.tsProj)
 
         # plot the exact linearization variable:
         projTruePos, linearTrue = self.applyLinearization(euclidData)
@@ -146,6 +169,9 @@ class UMazeLinearizer:
         return projectedPos,linearFeature
 
     def pykeopsLinearization(self,euclideanData):
+        if euclideanData.dtype != self.mazepoints.dtype:
+            euclideanData = euclideanData.astype(self.mazepoints.dtype)
+
         euclidData_lazy = LazyTensor_np(euclideanData[None,:,:])
         mazePoint_lazy = LazyTensor_np(self.mazepoints[:,None,:])
 
