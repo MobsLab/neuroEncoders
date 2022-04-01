@@ -23,7 +23,7 @@ The application is written in four languages: the main one is Python, the three 
 * Julia requires separate installation (make sure Julia interpreter is contained in the PATH)
 * neuroEncoders was tested on 3.6 <= Python <= 3.8.8 
 
-Running the following command will install the CPU version of tensorflow (tested on Python 3.8.8)
+Running the following command will install the CPU version of tensorflow (tested on Python >= 3.8)
 ```
 sudo ./install.sh
 ```
