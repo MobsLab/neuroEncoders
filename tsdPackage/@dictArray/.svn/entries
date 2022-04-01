@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="1"
+   name=""
+   committed-date="2006-05-25T10:43:10.993826Z"
+   url="file:///home/battagli/svn/matlab/trunk/@dictArray"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="subsasgn.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="e2fbb75ea3fa533624b0e0d245bab65d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="clear.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="94c4afbbc52745ebba2c6db23f35bf0e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="values.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7bc70ad88640495e420d4f25118c7270"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="del.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="76a75e89d80d093f66685ed1ac48a3ea"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="display.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f9eb233d7f405b0c3e134c6a98e97cf1"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="subsref.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="022a779b310a67ef89795f4b713bd1a0"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="keys.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="cc1a8651495f216a997f8d6e4f3aef02"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="len.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7378c69dd91d2146d4c6307ad6576fbb"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="get.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5af49e69c24bb89183070ab649f5aea6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   name="private"
+   kind="dir"/>
+<entry
+   committed-rev="1"
+   name="numel.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f9d8ae99f440733455a13644fe1ab7ab"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="items.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="b35eaef3c4a650fb82c497c48ea30a93"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="length.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6476a7ead821486a693d752fe8395f3f"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="dictArray.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="107d334626bd0438edf6f5787774c9a2"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="update.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="cec3e149fdfd745d5ac9afe302b16600"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="has_key.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="eeaa66346dbcc92103a5781da5601bfb"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+</wc-entries>

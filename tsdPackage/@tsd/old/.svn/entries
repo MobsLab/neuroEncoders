@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="1"
+   name=""
+   committed-date="2006-05-25T10:43:10.993826Z"
+   url="file:///home/battagli/svn/matlab/trunk/@tsd/old"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="CheckTS.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="e7b66dc37b4fc901bb236d5f264315ee"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Restrict_adr.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="34619965b70885a40a334824b009d8fb"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="DT.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9acfd83691b9dfe1ec0cbeeef6aa1af2"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Restrict_int.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5074cdf557ae830b6f82ef0ed71d39f5"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="TestSelf.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6c7c687875f2117a4e20909860298ad2"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Mask.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a82a31c655483211f06785b1268d9b82"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="findAlignment.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0f7b39cac3591f0d2a8cd6b64383f633"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="findTime.m"
+   text-time="2006-06-01T11:59:02.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5cf6b69793f2c4b7d3974c998375c48b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+</wc-entries>

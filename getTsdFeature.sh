@@ -2,20 +2,16 @@
 
 # If some files are missing, run some matlab code to generate them
 path=$(dirname "$1")
-path="$path/"
-log=mlog.out
-prjpath="$HOME/Dropbox/Kteam/PrgMatlab/OnlinePlaceDecoding"
+path="${path}/"
+log="mlog.out"
 if [ ! -f "$path""nnBehavior.mat" ] || [ ! -f "$path""$log" ]
 then
 
         rm -f $path$log
         echo
-        echo MATLAB is now exporting behavior data, please see $log for more infos.
+        echo MATLAB is now exporting behavior data, please see $path$log for more info
 cat <<EOF | matlab -nodesktop -nosplash -nodisplay /> $path$log
-        cd $prjpath
-        LoadPATHencoder $USER;
-        cd $path;
-        export_spikes($2, $3, $4);
+        extractTsd $path $2;
         exit
 EOF
 

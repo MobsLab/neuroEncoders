@@ -1,0 +1,38 @@
+function O = diff(varargin)
+% O = diff(O1, O2) compute the set difference of intervalSet's
+%
+% INPUTS:
+% O1, O2: intervalSet objects
+% OUTPUTS:
+% O:  intervalSet object corresponding to O1 - O2
+
+% batta 2001 
+% starting version
+  
+  
+if nargin ~= 2
+  error('Call with two arguments');
+end
+
+for i = 1:nargin
+  if ~isa(varargin{i}, 'intervalSet')
+    error('Arguments must be intervalSet');
+  end
+end
+
+
+do_string = '[start, stop] = do_diff(';
+for i = 1:nargin
+  do_string = [do_string 'Start(varargin{' num2str(i) ...
+	       '}, ''ts''), End(varargin{' num2str(i) '}, ''ts''), ' ...
+	      ];
+end
+
+do_string = [do_string(1:(end-2)) ' );'];
+
+eval(do_string);
+
+O = intervalSet(start, stop);
+
+  
+  

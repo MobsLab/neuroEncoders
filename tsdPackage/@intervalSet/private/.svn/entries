@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="11"
+   name=""
+   committed-date="2006-06-05T15:43:32.457573Z"
+   url="file:///home/battagli/svn/matlab/trunk/@intervalSet/private"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   prop-time="2006-06-06T06:42:18.000000Z"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="do_intersect.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ac3fea5e594ed46e9aac5a01ce716ac9"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="inIntervalSet_c.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="42b5a628e597496222b4c45b5d5ef22d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="do_diff.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="63a050825f60e88c6b23ce759369292c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="do_union.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a836db3bfa9098b6755f35ebad14152b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+</wc-entries>
