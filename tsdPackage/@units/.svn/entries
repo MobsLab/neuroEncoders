@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="1"
+   name=""
+   committed-date="2006-05-25T10:43:10.993826Z"
+   url="file:///home/battagli/svn/matlab/trunk/@units"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="unit_string.m"
+   text-time="2006-06-01T11:59:11.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="3be601948257798a104a3f97fc25afe6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:11.000000Z"/>
+<entry
+   committed-rev="1"
+   name="quantity.m"
+   text-time="2006-06-01T11:59:11.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7b3d7afe742b2d8b352a699e0c94d3fd"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:11.000000Z"/>
+<entry
+   name="private"
+   kind="dir"/>
+<entry
+   committed-rev="1"
+   name="convert.m"
+   text-time="2006-06-01T11:59:11.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4776f1e2e12e0f978b01b83ae97efb57"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:11.000000Z"/>
+<entry
+   committed-rev="1"
+   name="time_units.m"
+   text-time="2006-06-01T11:59:11.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9197403548b116f9a912f0ed878ef32b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:11.000000Z"/>
+<entry
+   committed-rev="1"
+   name="units.m"
+   text-time="2006-06-01T11:59:11.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a750454e1516b93eae6a6bacc46aa733"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:11.000000Z"/>
+</wc-entries>

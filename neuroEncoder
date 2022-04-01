@@ -1,345 +1,234 @@
 #!env/bin/python3
-# neuroEncoder bys the MOBS team.
-# may 2020
-# t.balenbois@gmail.com
+# neuroEncoder by the Memory, Oscillations and Brain States (MOBS) team
+# 2017-2022
+# by Thibault Balenbois, Pierre Orhan and Dmitri Bryzgalov
+# t.balenbois@gmail.com; brygalovdm@gmail.com
 
+# Load standard libs
 import sys
-import os.path
+import os
 import subprocess
-import numpy as np
-import tensorflow as tf
-from contextlib import ExitStack
-
-
-class Project():
-    def __init__(self, xmlPath, datPath='', jsonPath=None):
-        if xmlPath[-3:] != "xml":
-            if os.path.isfile(xmlPath[:-3]+"xml"):
-                xmlPath = xmlPath[:-3]+"xml"
-            else:
-                raise ValueError("the path "+xmlPath+" doesn't match a .xml file")
-        self.xml = xmlPath
-        self.baseName = xmlPath[:-4]
-        if datPath == '':
-            self.dat = self.baseName + '.dat'
-        else:
-            self.dat = datPath
-        findFolder = lambda path: path if path[-1]=='/' or len(path)==0 else findFolder(path[:-1]) 
-        self.folder = findFolder(self.dat)
-        self.fil = self.dat[:-4] + '.fil'
-        if jsonPath == None:
-            self.json = self.baseName + '.json'
-            self.graph = self.folder + 'graph/decoder'
-            self.graphMeta = self.folder + 'graph/decoder.meta'
-        else:
-            print('using file:',jsonPath)
-            self.json = jsonPath
-            self.thresholds, self.graph = self.getThresholdsAndGraph()
-            self.graphMeta = self.graph + '.meta'
-
-        self.tfrec = {
-            "train": self.folder + 'dataset/trainingDataset.tfrec',
-            "test": self.folder + 'dataset/testingDataset.tfrec'}
-
-        self.resultsNpz = self.folder + 'results/inferring.npz'
-        self.resultsMat = self.folder + 'results/inferring.mat'
-
-        if not os.path.isdir(self.folder + 'dataset'):
-            os.makedirs(self.folder + 'dataset')
-        if not os.path.isdir(self.folder + 'graph'):
-            os.makedirs(self.folder + 'graph')
-        if not os.path.isdir(self.folder + 'results'):
-            os.makedirs(self.folder + 'results')
-
-    def clu(self, g):
-        return self.baseName + ".clu." + str(g+1)
-
-    def res(self, g):
-        return self.baseName + ".res." + str(g+1)
-
-    def spk(self, g):
-        return self.baseName + ".spk." + str(g+1)
-
-    def pos(self, g):
-        return self.folder + "dataset/pos." + str(g+1) + ".npz"
-
-    def getThresholdsAndGraph(self):
-        import json
-        with open(self.json, 'r') as f:
-            info = json.loads(f.read())
-        return [[abs(info[d][f]) for f in ['threshold'+str(c) for c in range(info[d]['nChannels'])]] \
-                for d in ['group'+str(g) for g in range(info['nGroups'])]], \
-            info['encodingPrefix']
-
-
-class Params:
-    def __init__(self, detector, windowSize):
-        self.nGroups = detector.nGroups()
-        self.dim_output = detector.dim_output()
-        self.nChannels = detector.numChannelsPerGroup()
-        self.length = 0
-
-        self.nSteps = int(10000 * 0.036 / windowSize)
-        self.nEpochs = 10
-        self.learningTime = detector.learningTime()
-        self.windowLength = windowSize # in seconds, as all things should be
-
-        ### from units encoder params
-        self.validCluWindow = 0.0005
-        self.kernel = 'epanechnikov'
-        self.bandwidth = 0.1
-        self.masking = 20
-
-        ### full encoder params
-        self.nFeatures = 128
-        self.lstmLayers = 3
-        self.lstmSize = 128
-        self.lstmDropout = 0.3
-
-        self.batch_size = 52
-        self.timeMajor = True
-
-        self.learningRates = [0.0003, 0.00003, 0.00001]
-        self.lossLearningRate = 0.00003
-        self.lossActivation = None
-
+# Load custum code
+from utils.global_classes import Project, Params
 
 
 def main(args):
-    from importData import rawDataParser
-    from fullEncoder import nnUtils
-    from unitClassifier import bayesUtils
+	# Manage inputs
+	if not args.mode == 'bayes':
+		if args.gpu:
+			from utils import management
+			deviceName = management.manage_devices('GPU')
+		else:
+			os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+			os.environ["CUDA_VISIBLE_DEVICES"] = ""
+			from utils import management
+			deviceName = management.manage_devices('CPU')			
+	if args.mode=="decode":
+		jsonPath = os.path.expanduser(args.jsonPath)
+	else:
+		jsonPath = None
+  
+	from importData import rawdata_parser
+	from transformData.linearizer import UMazeLinearizer
+	from resultAnalysis import print_results
 
-    if args.mode=="decode":
-        jsonPath = os.path.expanduser(args.jsonPath)
-    else:
-        jsonPath = None
-    if args.gpu:
-        device_name = "/gpu:0"
-    else:
-        device_name = "/cpu:0"
-    print('NEUROENCODER: DEVICE', device_name)
-    xmlPath = args.path.strip('\'')
-    datPath = args.dat
-    print('NEUROENCODER: PATH', xmlPath)
-    useOpenEphysFilter = not args.filter
-    print('NEUROENCODER: FILTERING', not useOpenEphysFilter)
-    windowSize = args.window
-    print('NEUROENCODER: WINDOW', windowSize)
-    mode = args.mode
-    print('NEUROENCODER: MODE', mode)
-    split = args.split
-    print('NEUROENCODER: TEST SPLIT', split)
-    print()
+	# Output to shell
+	print()
+	if not args.mode == 'bayes':
+		print('NEUROENCODER: DEVICE', deviceName)
+	xmlPath = args.path.strip('\'')
+	print('NEUROENCODER: PATH', xmlPath)
+	windowSize = int(args.window*1000)
+	print(f'NEUROENCODER: WINDOW {windowSize} ms')
+	mode = args.mode
+	print('NEUROENCODER: MODE', mode)
+	if mode != 'bayes':
+		isPL = args.predicted_loss
+		if isPL:
+			print('Two networks will be tested: one full on training set and '
+         				'one with predLoss only on a separate part of data')
+	print()
+	
+	# Get behavior and tune parameters
+	ProjectPath = Project(os.path.expanduser(xmlPath), jsonPath=jsonPath)
+	# Select the data for testing
+	if mode != 'decode':
+		rawdata_parser.speed_filter(ProjectPath.folder)
+		rawdata_parser.select_epochs(ProjectPath.folder)
+	# Create parameters
+	DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
+	Parameters = Params(DataHelper, args.window)
+	# Create linearization function
+	Linearizer = UMazeLinearizer(ProjectPath.folder)
+	Linearizer.verify_linearization(DataHelper.position/DataHelper.maxPos(),
+                                		ProjectPath.folder, overwrite=False)
+	l_function = Linearizer.pykeops_linearization
 
-    if mode=='simpleBayes':
-        from importData import ImportClusters
-        projectPath = Project(os.path.expanduser(xmlPath))
-        # Get behavior for bayes
-        behavior_data = ImportClusters.getBehavior(projectPath.folder)
-        # Get clusters for bayes
-        if os.path.isfile(projectPath.folder + 'ClusterData.npy'):
-            cluster_data = np.load(projectPath.folder + 'ClusterData.npy',allow_pickle='TRUE').item()
-        else:
-            cluster_data = ImportClusters.getSpikesfromClu(projectPath, behavior_data)
-    else:
-        trainLosses = []
-        projectPath = Project(os.path.expanduser(xmlPath), datPath=os.path.expanduser(datPath), jsonPath=jsonPath)
-        spikeDetector = rawDataParser.SpikeDetector(projectPath, useOpenEphysFilter, mode)
-        params = Params(spikeDetector, windowSize)
-        if mode == "decode":
-            spikeDetector.setThresholds(projectPath.thresholds)
+	# Training, testing, and preparing network for online setup
+	if mode == 'bayes':        
+		from simpleBayes import decode_bayes as Training
+		
+		TrainerBayes = Training.Trainer(ProjectPath)
+		bayesMatrices = TrainerBayes.train_order_by_pos(DataHelper.fullBehavior,
+                                                  				l_function)
+		outputs = TrainerBayes.test_parallel(DataHelper.fullBehavior, bayesMatrices,
+                                       			windowSizeMS=windowSize)
+		print_results.print_results(TrainerBayes.folderResult, typeDec='bayes',
+                            			results = outputs, windowSizeMS=windowSize)
 
-        # Create data files if not present
-        if not os.path.isfile(projectPath.tfrec["test"]) or args.B:
+	elif mode == 'ann':
+		from importData.juliaData.julia_data_parser import julia_spike_filter
+		from fullEncoder import an_network as Training
+		from openEphysExport.generate_json import generate_json
+		
+		# Create data
+		folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+		julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+		# Network
+		NNTrainer = Training.LSTMandSpikeNetwork(ProjectPath, Parameters,
+                                           		deviceName=deviceName)
+		NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
+		NNTrainer.test(DataHelper.fullBehavior, l_function=l_function,
+                 							windowsizeMS=windowSize)
+		print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSize)
+		# Create json
+		if isPL:
+			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
+                            				'savedModels', 'predLossModel')
+		else:
+			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
+                            				'savedModels', 'fullModel')
+		generate_json(ProjectPath, modelPath, DataHelper.list_channels)
 
-            # setup data readers and writers meta data
-            spikeGen = nnUtils.spikeGenerator(projectPath, spikeDetector, maxPos=spikeDetector.maxPos())
-            spikeSequenceGen = nnUtils.getSpikeSequences(params, spikeGen())
-            readers = {}
-            writers = {"testSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["test"])}
-            if mode=="full":
-                writers.update({"trainSequences": tf.python_io.TFRecordWriter(projectPath.tfrec["train"])})
-            elif mode=="fromUnits":
-                readers.update({"clu"+str(g): open(projectPath.clu(g), 'r') for g in range(params.nGroups)})
-                readers.update({"res"+str(g): open(projectPath.res(g), 'r') for g in range(params.nGroups)})
-                writers.update({"trainGroup"+str(g): tf.python_io.TFRecordWriter(projectPath.tfrec["train"]+"."+str(g)) for g in range(params.nGroups)})
+	elif mode == 'decode':
+			from importData.juliaData.julia_data_parser import julia_spike_filter
+			from decoder import decode
 
-            with ExitStack() as stack:
-                # Open data files
-                for k,v in writers.items():
-                    writers[k] = stack.enter_context(v)
-                for k,v in readers.items():
-                    readers[k] = stack.enter_context(v)
+			if not os.path.isfile(ProjectPath.json):
+				sys.exit("No .json file was found to pick up the network to decode." + 
+						 " Please verify that you encoded the weights, and that " +
+       					 "you json file has the same name as basefile.dat")
+			else:
+				# Create data
+				folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+				 # Right now, the thresholds are not the same
+				julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+				# Decode
+				Decoder = decode.Decoder(ProjectPath, Parameters)
+				outputs = Decoder.test(DataHelper.fullBehavior,l_function=l_function,
+                           					windowsizeMS=windowSize)
+				print_results.print_results(Decoder.folderResult, windowSizeMS=windowSize)
+	
+	elif mode == 'compare':
+		from simpleBayes import decode_bayes as BayesTrainer
+		from importData.juliaData.julia_data_parser import julia_spike_filter
+		from fullEncoder import an_network as Training
+		from openEphysExport.generate_json import generate_json
+		from importData.compareSpikeFiltering import WaveFormComparator
+		from resultAnalysis import paper_figures
+  
+		### Bayes
+		TrainerBayes = BayesTrainer.Trainer(ProjectPath)
+		bayesMatrices = TrainerBayes.train_order_by_pos(DataHelper.fullBehavior,
+                                                			l_function)
 
-                if mode=="fromUnits":
-                    nClusters = [int(readers["clu"+str(g)].readline()) for g in range(params.nGroups)]
-                    params.nClusters = nClusters
-                    clusterPositions = [{"clu"+str(n):[] for n in range(params.nClusters[g])} for g in range(params.nGroups)]
-                    clusterReaders = [bayesUtils.ClusterReader(readers["clu"+str(g)], readers["res"+str(g)], spikeDetector.samplingRate) \
-                        for g in range(params.nGroups)]
-                    [clusterReaders[g].getNext() for g in range(params.nGroups)]
-
-                # generate spike sequences in windows of size params.windowLength
-                for example in spikeSequenceGen:
-                    if example["train"] == None:
-                        continue
-                    if example["train"]:
-                        if mode=="full":
-                            writers["trainSequences"].write(nnUtils.serializeSpikeSequence(
-                                params,
-                                *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-                        else:
-                            # If decoding from units, we need to find a sorted spike with corresponding timestamp
-                            for spk in range(example["length"]):
-                                group = example["groups"][spk]
-                                while clusterReaders[group].res < example["times"][spk] - params.validCluWindow:
-                                    clusterReaders[group].getNext()
-                                if clusterReaders[group].res > example["times"][spk] + params.validCluWindow:
-                                    continue
-                                clusterPositions[group]["clu"+str(clusterReaders[group].clu)].append(example["pos"])
-                                writers["trainGroup"+str(group)].write(nnUtils.serializeSingleSpike(
-                                    params,
-                                    clusterReaders[group].clu,
-                                    example["spikes"+str(group)][(np.array(example["groups"])==group)[:spk+1].sum()-1]))
-                                clusterReaders[group].getNext()
-
-                    else:
-                        writers["testSequences"].write(nnUtils.serializeSpikeSequence(
-                            params,
-                            *tuple(example[k] for k in ["pos", "groups", "length", "times"]+["spikes"+str(g) for g in range(params.nGroups)])))
-
-            if mode=="fromUnits":
-                for g in range(params.nGroups):
-                    for c in range(params.nClusters[g]):
-                        clusterPositions[g]["clu"+str(c)] = np.array(clusterPositions[g]["clu"+str(c)])
-                    np.savez(projectPath.pos(g), **clusterPositions[g])
+		### ANN TODO: if exists
+		folder_code = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+		julia_spike_filter(ProjectPath, folder_code, windowSize=args.window)
+		# Network
+		NNTrainer = Training.LSTMandSpikeNetwork(ProjectPath, Parameters,
+                                           			deviceName=deviceName)
+		NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
+		NNTrainer.test(DataHelper.fullBehavior, l_function=l_function,
+                 			windowsizeMS=windowSize)
+		if isPL:
+			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
+                            		'savedModels', 'predLossModel')
+		else:
+			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
+                            		'savedModels', 'fullModel')
+		generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+  
+		### Compare and align waveforms
+		WFCTrain = WaveFormComparator(ProjectPath, Parameters, DataHelper.fullBehavior,
+                                		useTrain=True, windowsizeMS=windowSize)
+		WFCTrain.save_alignment_tools(TrainerBayes,l_function,windowsizeMS=windowSize)
+		WFCTest = WaveFormComparator(ProjectPath, Parameters, DataHelper.fullBehavior,
+                               			useTrain=False, windowsizeMS=windowSize)
+		WFCTest.save_alignment_tools(TrainerBayes,l_function,windowsizeMS=windowSize)
+		
+		### Figures
+		figures = paper_figures.PaperFigures(ProjectPath, DataHelper.fullBehavior,
+                                       	TrainerBayes, l_function, bayesMatrices=bayesMatrices)
+		figures.load_data()
+		figures.test_bayes()
+		figures.fig_example_linear()
+		figures.hist_linerrors()
+		figures.nnVSbayes()
+		figures.predLoss_vs_trueLoss()
+		figures.fig_example_2d()
+		figures.predLoss_linError()
+		figures.predLoss_linError()
+		figures.fig_example_linear_filtered()
 
 
-    # Training, testing, and preparing network for online setup
-    if mode!='simpleBayes':
-        if mode=="full":
-            from fullEncoder import nnTraining as Training
-        elif mode=="fromUnits":
-            from unitClassifier import bayesTraining as Training
-        elif mode=="decode":
-            from decoder import decodeTraining as Training
-        trainer = Training.Trainer(projectPath, params, spikeDetector, device_name=device_name)
-        trainLosses = trainer.train()
-        outputs = trainer.test()
 
-        # Saving files
-        np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
-
-        import scipy.io
-        scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
-
-        import json
-        outjsonStr = {};
-        outjsonStr['encodingPrefix'] = projectPath.graph
-        outjsonStr['defaultFilter'] = not useOpenEphysFilter
-        outjsonStr['mousePort'] = 0
-
-        outjsonStr['nGroups'] = int(params.nGroups)
-        idx=0
-        for group in range(len(spikeDetector.list_channels)):
-            outjsonStr['group'+str(group-idx)]={}
-            outjsonStr['group'+str(group-idx)]['nChannels'] = len(spikeDetector.list_channels[group])
-            for chnl in range(len(spikeDetector.list_channels[group])):
-                outjsonStr['group'+str(group-idx)]['channel'+str(chnl)]=int(spikeDetector.list_channels[group][chnl])
-                outjsonStr['group'+str(group-idx)]['threshold'+str(chnl)]=int(spikeDetector.getThresholds()[group][chnl])
-
-        outjsonStr['nStimConditions'] = 1
-        outjsonStr['stimCondition0'] = {}
-        outjsonStr['stimCondition0']['stimPin'] = 14
-        outjsonStr['stimCondition0']['lowerX'] = 0.0
-        outjsonStr['stimCondition0']['higherX'] = 0.0
-        outjsonStr['stimCondition0']['lowerY'] = 0.0
-        outjsonStr['stimCondition0']['higherY'] = 0.0
-        outjsonStr['stimCondition0']['lowerDev'] = 0.0
-        outjsonStr['stimCondition0']['higherDev'] = 0.0
-
-        outjson = json.dumps(outjsonStr, indent=4)
-        with open(projectPath.json,"w") as json_file:
-            json_file.write(outjson)
-
-        subprocess.run(["./createOpenEphysTemplateFromJson.sh", projectPath.json])
-
-        from fullEncoder import printResults
-        printResults.printResults(projectPath.folder)
-    else:
-        from SimpleBayes import decodebayes
-        trainer = decodebayes.Trainer(projectPath)
-        bayes_matrices = trainer.train(behavior_data, cluster_data)
-        outputs = trainer.test(bayes_matrices, behavior_data, windowSize=windowSize)
-        trainLosses=[]
-        
-         # Saving files
-        np.savez(projectPath.resultsNpz, trainLosses=trainLosses, **outputs)
-
-        import scipy.io
-        scipy.io.savemat(projectPath.resultsMat, np.load(projectPath.resultsNpz, allow_pickle=True))
-        
-        from fullEncoder import printResults
-        printResults.printResults(projectPath.folder, bayes=True)
 
 if __name__=="__main__":
-    print()
-    import argparse
-    parser = argparse.ArgumentParser(description="Creating and training an agent to decode high level features from electrophysiology data")
-    subparsers = parser.add_subparsers(dest='mode', title='modes', description='all existing modes of encoding', help='selects an encoding mode')
-    for cmd in ['full', 'fromUnits', 'decode', 'simpleBayes']:
-        p = subparsers.add_parser(cmd)
-        p.add_argument('path', type=str, help="path to xml file")
-        if cmd != 'simpleBayes':
-            if cmd == 'decode':
-                p.add_argument('jsonPath', type=str, help="path to json file")
-            p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
-            p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
-            p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
-            p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
-            p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
-            p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
-            p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
-            p.add_argument('-B', action='store_true', help="rebuilds dataset, even if present.")
-        else:
-            p.add_argument('-p', '--path', type=str, default='', help="path to folder with .clu, .res and .spk files, and behavResources.mat.")
-            p.add_argument('-d', '--dat', type=str, default='', help="path to .dat file. If not provided, default will be same name as xml in same folder")
-            p.add_argument('-g', '--gpu', action='store_true', help="run computations on gpu. Requires specific installation.")
-            p.add_argument('-f', '--filter', action='store_true', help="signify that neuroEncoder should filter itself, and not rely on previously filtered data.")
-            p.add_argument('-w', '--window', type=float, help='defines window size, in seconds. Defaults to 0.036', default=0.036)
-            p.add_argument('-s', '--split', type=float, help='defines how much data goes to test epoch, the rest goes to train epoch. Defaults to 0.1', default=0.1)
-            p.add_argument('-wh', '--whichsplit', type=str, help='defines where in the data test split is taken from: beginning ("beg") or end ("end"). Defaults to "end"', default='end')
-            p.add_argument('-t', '--target', type=str, help='name of feature to be decoded. Defaults are Xtsd and Ytsd. Must be a tsd variable from behavResources.mat', default='pos')
-    args = parser.parse_args()
+	print()
+	import argparse
+	Parser = argparse.ArgumentParser(description="Creating and training an agent "
+                + "to decode high level features from electrophysiology data")
+	subparsers = Parser.add_subparsers(dest='mode', title='modes',
+        description='all existing modes of encoding',
+        help='selects an encoding mode' + 
+		'. For more information type the mode name between neuroencoder and -h')
 
-    print()
-    import shutil
-    rows, columns = shutil.get_terminal_size()
-    print("|| neuroEncoder by MOBS ||".center(rows))
-    print("may 2020".center(rows))
-    print("email: t.balenbois@gmail.com".center(rows))
-    print()
+	for cmd in ['ann', 'bayes', 'compare', 'decode']:
+		p = subparsers.add_parser(cmd)
+		p.add_argument('path', type=str, help="path to xml file")
+		if cmd == 'decode':
+			p.add_argument('jsonPath', type=str, help="path to json file")
+		if cmd != 'bayes':
+			p.add_argument('-g', '--gpu', action='store_true',
+                help="run computations on gpu. Requires specific installation.")
+			p.add_argument('-w', '--window', type=float,
+                help='defines window size, in seconds. Defaults to 0.036',
+                default=0.036)
+			p.add_argument('-pl', '--predicted_loss', action='store_true',
+                help='defines whether another, predLoss only, '
+                + 'network will be train on the piece of data')
+			p.add_argument('-t', '--target', type=str,
+                help='name of feature to be decoded. Defaults are Xtsd and Ytsd. '
+                + 'Must be a tsd variable from behavResources.mat', default="pos")
+		else:
+			p.add_argument('-w', '--window', type=float,
+                help='defines window size, in seconds. Defaults to 0.036',
+                default=0.036)
+	args = Parser.parse_args()
 
-    # Check if split is not too optimistic
-    if args.mode == 'decode':
-        print('Decoding of full dataset \n')
-    else:
-        if args.split > 0.4:
-            ii = input('Are you sure you want to leave 40% of data as test set? Seems too much. (y/n)')
-            if ii == 'n':
-                sys.exit('Stop \n')
-            elif ii == 'y':
-                print('Ok to big test set \n')
-            else:
-                raise ValueError('The answer is y or n. Try again \n')
+	print()
+	import shutil
+	rows, columns = shutil.get_terminal_size()
+	print("|| neuroEncoder by MOBS ||".center(rows))
+	print("may 2020 - march 2022".center(rows))
+	print("email: t.balenbois@gmail.com && bryzgalovdm@gmail.com".center(rows))
+	print()
 
-    if not(os.path.isfile(os.path.expanduser(os.path.split(args.path)[0] + os.path.sep + 'nnBehavior.mat'))):
-        subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')), "\""+args.target+"\"", "\""+str(args.split)+"\"", "\""+args.whichsplit+"\""])
-    print()
+	# Check if split is not too optimistic
+	if args.mode=="decode":
+		print('Decoding of full dataset \n')
 
-    main(args)
+	if not(os.path.isfile(os.path.expanduser(os.path.split(args.path)[0] + 
+                                          os.path.sep + 'nnBehavior.mat'))):
+		subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')),
+                  						'\''+args.target+'\''])
+	print()
 
-    print()
-    print()
-    print('Encoding over.')
+	main(args)
+
+	print()
+	print()
+	print('Algo has done what it wanted to do.')

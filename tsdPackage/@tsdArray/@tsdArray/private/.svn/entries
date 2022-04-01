@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="1"
+   name=""
+   committed-date="2006-05-25T10:43:10.993826Z"
+   url="file:///home/battagli/svn/matlab/trunk/@tsdArray/@tsdArray/private"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="expand_cmd_string.m"
+   text-time="2006-06-01T11:59:00.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="c0a9a4ed08bc6b69fdf40f4382074b44"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:00.000000Z"/>
+</wc-entries>

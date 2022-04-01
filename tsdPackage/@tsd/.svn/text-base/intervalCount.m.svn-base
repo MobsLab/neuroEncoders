@@ -1,0 +1,51 @@
+function ic = intervalCount(tsa, is, varargin)
+% ic = intervalCount(tsa, is, options) count instances of tsa in each of the intervals in is
+%
+% INPUTS:
+% tsa: a tsd object
+% is: an intervalSet
+% OUTPUTS: 
+% ic: a tsd object, where the timestamps correspond to each interval (see
+% OPTIONS for possibilities) and the data gives the number of points in
+% the tsd in each one of the intervals
+% OPTIONS:
+% 'time': determines which time is selected for each interval, possible
+% values are 
+%     'start' (default): use start of intervals
+%     'end': use end of intervals
+%     'middle': use middle point of intervals
+  
+  
+% copyright (c) 2004 Francesco P. Battaglia
+% This software is released under the GNU GPL
+% www.gnu.org/copyleft/gpl.html
+  
+  opt_varargin = varargin;
+  
+  
+  time_opt_values = dictArray({ { 'start', []},
+		                { 'end', []}, 
+		                { 'middle', []} });
+  defined_options = dictArray({ { 'time', {'start', {'char'} } } } );
+  
+  getOpt;
+
+    if ~isempty(tsa.t)
+        ic = Histogram_intervals(tsa.t, Start(is, tsa.time_unit), End(is, ...
+            					  tsa.time_unit));
+    else 
+        ic = zeros(length(Start(is, tsa.time_unit)), 1);
+    end
+    
+   switch time
+   case 'start'
+    t_ic = Start(is, tsa.time_unit);
+   case 'end'
+    t_ic = End(is, tsa.time_unit);
+   case 'middle'
+    t_ic = ( Start(is, tsa.time_unit) + End(is, tsa.time_unit) ) / 2;
+  end
+  
+  ic = tsd(t_ic, ic);
+  
+  

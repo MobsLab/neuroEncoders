@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="1"
+   name=""
+   committed-date="2006-05-25T10:43:10.993826Z"
+   url="file:///home/battagli/svn/matlab/trunk/@ts"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="ts.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="54ab8dc66e8ba8bab069544edfdae84d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="vertcat.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5b69fbf5c1825287ef0b610223484741"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Data.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4b88db82a021a1e04cbaa4bd9f2a8ba9"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="horzcat.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="43b035c8becdfb8d430a16a91f88b4e4"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+<entry
+   committed-rev="1"
+   name="size.m"
+   text-time="2006-06-01T11:58:59.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="1cfb2859de13104ff4a18f9971eda99d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:59.000000Z"/>
+</wc-entries>
