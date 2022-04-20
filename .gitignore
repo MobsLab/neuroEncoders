@@ -4,6 +4,7 @@
 # Python-related folders and files
 __pycache__/
 *.pyc
+*.ipynb
 
 # JNotebook-related folders
 .ipynb_checkpoints/
@@ -23,3 +24,5 @@ venv.bak
 *.tiff
 *.csv
 
+# Codes for not pushing them
+test_script.py

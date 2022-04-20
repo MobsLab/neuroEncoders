@@ -1,0 +1,9 @@
+### Version 2.0.1 modifications
+
+20 april 2022
+* Added possibility to name the result folder differently
+* Changed default learning rate schedule to 'decay'
+* Added early stopping callback (not used by default)
+* Added number of epochs to trian as optional parameter in Params class
+* Changed loss function to the sum of two logs (instead of sum of posLoss and log of lossLoss)
+* Minor bug fixes

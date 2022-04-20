@@ -60,19 +60,19 @@ class Project():
 
 		
 class Params:
-	def __init__(self, helper, windowSize):
+	def __init__(self, helper, windowSize, nEpochs=150):
 		self.nGroups = helper.nGroups()
 		self.dimOutput = helper.dim_output()
 		self.nChannelsPerGroup = helper.numChannelsPerGroup()
 		self.length = 0
 
 		self.nSteps = int(10000 * 0.036 / windowSize) # ?
-		self.nEpochs = 50
+		self.nEpochs = nEpochs
 		self.windowLength = windowSize # in seconds
 
 		### from units encoder params
 		self.validCluWindow = 0.0005
-		self.kernel = 'epanechnikov'
+		self.kernel = 'epanechnikov' # is not connected
 		self.bandwidth = 0.1
 		self.masking = 20
 
