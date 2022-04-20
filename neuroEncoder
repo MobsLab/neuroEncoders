@@ -50,7 +50,7 @@ def main(args):
 	print()
 	
 	# Get behavior and tune parameters
-	ProjectPath = Project(os.path.expanduser(xmlPath), jsonPath=jsonPath)
+	ProjectPath = Project(os.path.expanduser(xmlPath), jsonPath=jsonPath, nameExp=args.name)
 	# Select the data for testing
 	if mode != 'decode':
 		rawdata_parser.speed_filter(ProjectPath.folder)
@@ -203,6 +203,9 @@ if __name__=="__main__":
 			p.add_argument('-t', '--target', type=str,
                 help='name of feature to be decoded. Defaults are Xtsd and Ytsd. '
                 + 'Must be a tsd variable from behavResources.mat', default="pos")
+			p.add_argument('-n', '--name', type=str,
+                help='name of the folder where all models and results will be stored', 
+                default="Network")
 		else:
 			p.add_argument('-w', '--window', type=float,
                 help='defines window size, in seconds. Defaults to 0.036',

@@ -13,13 +13,15 @@ function extractTsd(folderData, target)
         try
             X = Data(Behavior.("AlignedXtsd"));
             Y = Data(Behavior.("AlignedYtsd"));
+            T = Range(Behavior.("AlignedXtsd"), 's');
         catch
             X = Data(Behavior.("Xtsd"));
             Y = Data(Behavior.("Ytsd"));
+            T = Range(Behavior.("Xtsd"), 's');
         end
         V = Data(Behavior.("Vtsd"));
 		behavior.positions     = [X Y];
-		behavior.position_time = Range(Behavior.Xtsd, 's');
+		behavior.position_time = T;
         behavior.speed = V;
 	else
 		behavior.positions     = Data(Behavior.(target));

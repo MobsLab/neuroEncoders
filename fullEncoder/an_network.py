@@ -172,7 +172,7 @@ class LSTMandSpikeNetwork():
                                                 (self.denseLoss1(tf.stop_gradient(tf.concat([output,sumFeatures],axis=1)))))))
             ### Losses
             tempPL = tf.losses.mean_squared_error(myoutputPos,self.truePos)[:,tf.newaxis]
-            posLoss = tf.identity(tf.math.reduce_mean(tempPL),name="posLoss")
+            posLoss = tf.identity(tf.math.log(tf.math.reduce_mean(tempPL),name="posLoss"))
             #remark: we need to also stop the gradient to progagate from posLoss to the network at the stage of
             # the computations for the loss of the loss predictor
             logposLoss = tf.math.log(tf.add(tempPL,self.epsilon)) # minimizing difference between losposLoss and outpredloss
@@ -190,11 +190,13 @@ class LSTMandSpikeNetwork():
         # Compile the model
         if not predLossOnly:
             model.compile(
-                # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.: TODOL LR schedule
-                optimizer=tf.keras.optimizers.RMSprop(learning_rate=self.params.learningRates[0]), # Initially compile with first lr.: TODOL LR schedule
+                # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
+                optimizer=tf.keras.optimizers.RMSprop(learning_rate=self.params.learningRates[0]), # Initially compile with first lr.
                 loss={
-                    outputs[2].name.split("/Identity")[0] : lambda x,y:y, #tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
-                    outputs[3].name.split("/Identity")[0] : lambda x,y:y, #tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    #tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
+                    outputs[2].name.split("/Identity")[0] : lambda x,y:y,
+                    #tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    outputs[3].name.split("/Identity")[0] : lambda x,y:y, 
                 },
             )
             # Get internal names of losses
@@ -247,7 +249,8 @@ class LSTMandSpikeNetwork():
             self.cplusplusModel, to_file=(os.path.join(self.projectPath.resultsPath, "FullModel_Cplusplus.png")), 
                                             show_shapes=True)
 
-    def train(self, behaviorData, onTheFlyCorrection=False, windowsizeMS=36, scheduler='fixed'):
+    def train(self, behaviorData, onTheFlyCorrection=False, windowsizeMS=36, scheduler='decay',
+                earlyStop=False):
         ### Create neccessary arrays
         epochMask = {}
         totMask = {}
@@ -339,19 +342,33 @@ class LSTMandSpikeNetwork():
             # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(self.projectPath.folder,"profiling"),
             #                                             profile_batch = '100,110')
             if key == 'predLoss':
-                self.predLossModel.load_weights(checkpointPath['full']) # Load weights from full network if we train         
+                self.predLossModel.load_weights(checkpointPath['full']) # Load weights from full network if we train
+                if earlyStop:
+                    es_callback = tf.keras.callbacks.EarlyStopping(monitor='tf.identity_1_loss',
+                                                               patience=1)
+                    callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
+                else:
+                    callbacks = [csvLogger[key], cp_callback, schedule]         
                 hist = self.model.fit(datasets['predLoss'],
                         epochs=self.params.nEpochs,
-                        callbacks=[csvLogger[key], cp_callback, schedule])
+                        callbacks=callbacks)
                 self.trainLosses[key] = np.transpose(np.stack([hist.history["loss"]]))  #tf_op_layer_lossOfLossPredictor_loss
-                self.losses_fig(self.trainLosses[key], os.path.join(self.folderModels, str(windowsizeMS)), fullModel=False)
+                self.losses_fig(self.trainLosses[key], os.path.join(self.folderModels, 
+                                    str(windowsizeMS)), fullModel=False)
                 # Save model for C++ decoder
                 print("saving full model in savedmodel format, for c++")
-                tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","predLossModel"))
+                tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, 
+                                    str(windowsizeMS), "savedModels","predLossModel"))
             else:
+                if earlyStop:
+                    es_callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
+                                                               patience=1)
+                    callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
+                else:
+                    callbacks = [csvLogger[key], cp_callback, schedule]   
                 hist = self.model.fit(datasets['train'],
                         epochs=self.params.nEpochs,
-                        callbacks=[csvLogger[key], cp_callback, schedule], # , tb_callback,cp_callback
+                        callbacks=callbacks, # , tb_callback,cp_callback
                         validation_data=datasets['test']) #steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
                 self.trainLosses[key] = np.transpose(np.stack([hist.history[self.outNames[0]+"_loss"], #tf_op_layer_lossOfManifold
                                         hist.history[self.outNames[1]+"_loss"]])) #tf_op_layer_lossOfLossPredictor_loss
@@ -537,9 +554,12 @@ class LSTMandSpikeNetwork():
             
         def schedule_decay(self, epoch, lr):
             if epoch < 10:
+                print(f'learning rate is {lr}')
                 return lr
             else:
-                return lr * tf.math.exp(-0.01)
+                new_lr = lr * tf.math.exp(-0.01)
+                print(f'learning rate is {new_lr}')
+                return new_lr
         
     def fix_linearizer(self,mazePoints,tsProj):
         ## For the linearization we define two fixed inputs:

@@ -13,7 +13,7 @@ def julia_spike_filter(projectPath, folderCode, windowSize = 0.036, singleSpike=
             raise ValueError('the behavior file does not exist :' + projectPath.folder + 'nnBehavior.mat')
         if not os.path.exists(projectPath.dat):
             raise ValueError('the dat file does not exist :' + projectPath.dat)
-        codepath = folderCode + "importData/JuliaData/"
+        codepath = folderCode + "importData/juliaData/"
         if singleSpike:
             subprocess.run([codepath + "executeFilter_singleSpike.sh",
                             codepath,
