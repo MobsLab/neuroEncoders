@@ -176,8 +176,9 @@ class LSTMandSpikeNetwork():
             #remark: we need to also stop the gradient to progagate from posLoss to the network at the stage of
             # the computations for the loss of the loss predictor
             logposLoss = tf.math.log(tf.add(tempPL,self.epsilon)) # minimizing difference between losposLoss and outpredloss
-            uncertaintyLoss = tf.identity(tf.math.reduce_mean(tf.losses.mean_squared_error(outputPredLoss, 
-                                                            tf.stop_gradient(logposLoss))),name="UncertaintyLoss")
+            preUncertaintyLoss = tf.math.reduce_mean(tf.losses.mean_squared_error(outputPredLoss, 
+                                                            tf.stop_gradient(logposLoss)))
+            uncertaintyLoss = tf.identity(tf.math.log(tf.add(preUncertaintyLoss, self.epsilon)), name='UncertaintyLoss')
             
         return  myoutputPos, outputPredLoss, posLoss , uncertaintyLoss
 
@@ -351,10 +352,12 @@ class LSTMandSpikeNetwork():
                     callbacks = [csvLogger[key], cp_callback, schedule]         
                 hist = self.model.fit(datasets['predLoss'],
                         epochs=self.params.nEpochs,
-                        callbacks=callbacks)
+                        callbacks=callbacks,
+                        validation_data=datasets['test'])
                 self.trainLosses[key] = np.transpose(np.stack([hist.history["loss"]]))  #tf_op_layer_lossOfLossPredictor_loss
+                valLosses = np.transpose(hist.history["val_"+self.outNames[1]+"_loss"])
                 self.losses_fig(self.trainLosses[key], os.path.join(self.folderModels, 
-                                    str(windowsizeMS)), fullModel=False)
+                                    str(windowsizeMS)), fullModel=False, valLosses=valLosses)
                 # Save model for C++ decoder
                 print("saving full model in savedmodel format, for c++")
                 tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, 
@@ -624,6 +627,8 @@ class LSTMandSpikeNetwork():
             # Plot the figure
             fig,ax = plt.subplots()
             ax.plot(trainLosses[:,0])
+            if valLosses:
+                ax.plot(valLosses)
             fig.savefig(os.path.join(folderModels, 'predLoss', "predLossModelLosses.png"))
             
     def saveResults(self, test_output, windowsizeMS=36, sleep=False, sleepName='Sleep'):

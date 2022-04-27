@@ -7,3 +7,9 @@
 * Added number of epochs to trian as optional parameter in Params class
 * Changed loss function to the sum of two logs (instead of sum of posLoss and log of lossLoss)
 * Minor bug fixes
+
+### Version 2.0.2 modifications
+
+27 april 2022
+* Corrected loss function (now sum of 2 logs, or just a product of two losses)
+* Added val_loss for the second network
