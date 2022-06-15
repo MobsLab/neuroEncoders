@@ -60,7 +60,7 @@ class Project():
 
 		
 class Params:
-	def __init__(self, helper, windowSize, nEpochs=150):
+	def __init__(self, helper, windowSize, nEpochs=100):
 		self.nGroups = helper.nGroups()
 		self.dimOutput = helper.dim_output()
 		self.nChannelsPerGroup = helper.numChannelsPerGroup()
@@ -77,12 +77,12 @@ class Params:
 		self.masking = 20
 
 		### full encoder params
-		self.nFeatures = 128 
-		self.lstmLayers = 4
-		self.dropoutCNN = 0.5
+		self.nFeatures = 64
+		self.lstmLayers = 2
+		self.dropoutCNN = 0.2
 		self.lstmSize = 128
 		self.lstmDropout = 0.3 # is not implemented(code uses self.dropout_CNN)
-		self.batchSize = 52
+		self.batchSize = 128 # Change that if your GPU (or CPU) is not powerful enough
 
 		self.learningRates = [0.0003] #  [0.00003, 0.00003, 0.00001]
 		self.lossActivation = None #tf.nn.relu

@@ -228,17 +228,30 @@ class LSTMandSpikeNetwork():
 
             sumFeatures = tf.math.reduce_sum(allFeatures,axis=1)
             allFeatures = self.dropoutLayer(allFeatures,training=True)
-            output_seq = self.lstmsNets[0](allFeatures)
-            # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-            output_seq = self.dropoutLayer(output_seq,training=True)
-            output_seq = self.lstmsNets[1](output_seq)
-            # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-            output_seq = self.dropoutLayer(output_seq,training=True)
-            output_seq = self.lstmsNets[2](output_seq)
-            # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-            output_seq = self.dropoutLayer(output_seq,training=True)
-            output = self.lstmsNets[3](output_seq)
-            # output = tf.ensure_shape(output, [self.params.batchSize, self.params.lstmSize])
+            # LSTM
+            for ilstm, lstmLayer in enumerate(self.lstmsNets):
+                if ilstm == 0:
+                    if len(self.lstmsNets) == 1:
+                        output = lstmLayer(allFeatures)
+                    else:
+                        outputSeq = lstmLayer(allFeatures,training=True)
+                        outputSeq = self.dropoutLayer(outputSeq)
+                elif ilstm == len(self.lstmsNets)-1:
+                    output = lstmLayer(outputSeq)
+                else:
+                    outputSeq = lstmLayer(outputSeq, training=True)
+                    outputSeq = self.dropoutLayer(outputSeq)
+                    output_seq = self.lstmsNets[0](allFeatures)
+                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
+                    output_seq = self.dropoutLayer(output_seq,training=True)
+                    output_seq = self.lstmsNets[1](output_seq)
+                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
+                    output_seq = self.dropoutLayer(output_seq,training=True)
+                    output_seq = self.lstmsNets[2](output_seq)
+                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
+                    output_seq = self.dropoutLayer(output_seq,training=True)
+                    output = self.lstmsNets[3](output_seq)
+            output = tf.ensure_shape(output, [self.params.batchSize, self.params.lstmSize])
             myoutputPos = self.denseFeatureOutput(output)
             outputLoss = self.denseLoss2(self.denseLoss3(self.denseLoss4(self.denseLoss5
                                                 (self.denseLoss1(tf.stop_gradient(tf.concat([output,sumFeatures],axis=1)))))))
@@ -251,7 +264,7 @@ class LSTMandSpikeNetwork():
                                             show_shapes=True)
 
     def train(self, behaviorData, onTheFlyCorrection=False, windowsizeMS=36, scheduler='decay',
-                earlyStop=False):
+                 isPredLoss=True, earlyStop=False):
         ### Create neccessary arrays
         epochMask = {}
         totMask = {}
@@ -271,7 +284,7 @@ class LSTMandSpikeNetwork():
         # Manage callbacks
         csvLogger['full'] = tf.keras.callbacks.CSVLogger(os.path.join(self.folderModels, str(windowsizeMS), 
                                                                       "full", "fullmodel.log"))
-        if len(behaviorData["Times"]["lossPredSetEpochs"])>0:
+        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
             csvLogger['predLoss'] = tf.keras.callbacks.CSVLogger(os.path.join(self.folderModels, str(windowsizeMS), 
                                                                               "predLoss", "predLossmodel.log"))  
         for key in csvLogger.keys():
@@ -288,7 +301,7 @@ class LSTMandSpikeNetwork():
         # Manage masks
         epochMask['train']  = inEpochsMask(behaviorData['positionTime'][:,0], behaviorData['Times']['trainEpochs'])
         epochMask['test']  = inEpochsMask(behaviorData['positionTime'][:,0], behaviorData['Times']['testEpochs'])
-        if len(behaviorData["Times"]["lossPredSetEpochs"])>0:
+        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
             epochMask['predLoss'] = inEpochsMask(behaviorData['positionTime'][:, 0], behaviorData['Times']['lossPredSetEpochs'])
         for key in epochMask.keys():
             totMask[key] = speedMask * epochMask[key]
@@ -324,7 +337,7 @@ class LSTMandSpikeNetwork():
         
         ### Train the model(s)
         # Initialize the model for C++ decoder
-        self.generate_model_Cplusplus()
+        # self.generate_model_Cplusplus()
         # Train
         for key in checkpointPath.keys():
             # Create a callback that saves the model's weights
@@ -339,9 +352,8 @@ class LSTMandSpikeNetwork():
                 schedule = tf.keras.callbacks.LearningRateScheduler(LRScheduler.schedule_decay)
             else:
                 raise ValueError('Learning rate schedule is either "fixed" or "decay"')
-            # In case you need debugging, uncomment this profiling line
-            # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(self.projectPath.folder,"profiling"),
-            #                                             profile_batch = '100,110')
+            # # In case you need debugging, uncomment this profiling line
+            # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=self.folderResult)
             if key == 'predLoss':
                 self.predLossModel.load_weights(checkpointPath['full']) # Load weights from full network if we train
                 if earlyStop:
@@ -359,9 +371,9 @@ class LSTMandSpikeNetwork():
                 self.losses_fig(self.trainLosses[key], os.path.join(self.folderModels, 
                                     str(windowsizeMS)), fullModel=False, valLosses=valLosses)
                 # Save model for C++ decoder
-                print("saving full model in savedmodel format, for c++")
-                tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, 
-                                    str(windowsizeMS), "savedModels","predLossModel"))
+                # print("saving full model in savedmodel format, for c++")
+                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, 
+                #                     str(windowsizeMS), "savedModels","predLossModel"))
             else:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
@@ -379,19 +391,19 @@ class LSTMandSpikeNetwork():
                                         hist.history["val_"+self.outNames[1]+"_loss"]]))
                 self.losses_fig(self.trainLosses[key], os.path.join(self.folderModels, str(windowsizeMS)), valLosses=valLosses)
                 # Save model for C++ decoder
-                self.cplusplusModel.predict(datasets['train'])        
-                print("saving full model in savedmodel format, for c++")
-                tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
+                # self.cplusplusModel.predict(datasets['train'])        
+                # print("saving full model in savedmodel format, for c++")
+                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
 
     def test(self, behaviorData, l_function=[], windowsizeMS=36,useSpeedFilter=True,
-             useTrain=False, onTheFlyCorrection=False, forceFirstTrainingWeight=False):
+             useTrain=False, onTheFlyCorrection=False, isPredLoss=True):
         
         # Create the folder
         if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
             os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
         # Loading the weights
         print('Loading the weights of the trained network')    
-        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and not forceFirstTrainingWeight:
+        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
             self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"))
         else:
             self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt"))
@@ -469,7 +481,7 @@ class LSTMandSpikeNetwork():
 
         return testOutput
 
-    def testSleep(self, behaviorData, windowsizeMS=36, forceFirstTrainingWeight=False):
+    def testSleep(self, behaviorData, windowsizeMS=36, isPredLoss=True):
         
         # Create the folder
         if not os.path.isdir(os.path.join(self.folderResultSleep, str(windowsizeMS))):
@@ -477,7 +489,7 @@ class LSTMandSpikeNetwork():
             
         # Loading the weights
         print('Loading the weights of the trained network')    
-        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and not forceFirstTrainingWeight:
+        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
             self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"))
         else:
             self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt"))
@@ -627,7 +639,7 @@ class LSTMandSpikeNetwork():
             # Plot the figure
             fig,ax = plt.subplots()
             ax.plot(trainLosses[:,0])
-            if valLosses:
+            if list(valLosses):
                 ax.plot(valLosses)
             fig.savefig(os.path.join(folderModels, 'predLoss', "predLossModelLosses.png"))
             
