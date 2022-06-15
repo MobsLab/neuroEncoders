@@ -88,9 +88,10 @@ def main(args):
 		NNTrainer = Training.LSTMandSpikeNetwork(ProjectPath, Parameters,
                                            		deviceName=deviceName)
 		NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
+		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize,
+                  			isPredLoss=isPL)
 		NNTrainer.test(DataHelper.fullBehavior, l_function=l_function,
-                 							windowsizeMS=windowSize)
+                 							windowsizeMS=windowSize, isPredLoss=isPL)
 		print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSize)
 		# Create json
 		if isPL:
@@ -197,7 +198,7 @@ if __name__=="__main__":
 			p.add_argument('-w', '--window', type=float,
                 help='defines window size, in seconds. Defaults to 0.036',
                 default=0.036)
-			p.add_argument('-pl', '--predicted_loss', action='store_true',
+			p.add_argument('-pl', '--predicted_loss', action='store_false',
                 help='defines whether another, predLoss only, '
                 + 'network will be train on the piece of data')
 			p.add_argument('-t', '--target', type=str,
