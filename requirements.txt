@@ -46,7 +46,7 @@ mkl-service==2.4.0
 mpmath==1.2.1
 multipledispatch==0.6.0
 mypy-extensions==0.4.3
-numpy==1.19.5
+numpy==1.22.0
 oauthlib==3.1.0
 olefile==0.46
 opt-einsum==3.3.0
