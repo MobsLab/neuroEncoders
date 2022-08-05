@@ -162,7 +162,7 @@ class WaveFormComparator():
         ans2[1][np.equal(ans2[0],0)] = -1
         spikeMat_times_window[:, 1] = ans2[1][:,0]
         # for the pop vector we add one label for the noisy cluster
-        spikeMat_window_popVector = np.zeros([len(inputNN), trainerBayes.spikeMat_labels.shape[1] + 1])
+        spikeMat_window_popVector = np.zeros([len(inputNN), trainerBayes.spikeMatLabels.shape[1] + 1])
         for idSpike, window in tqdm(enumerate(spikeMat_times_window[:, 1])):
             if window != -1:
                 cluster = np.where(np.equal(trainerBayes.spikeMatLabels[idSpike, :], 1))[0]

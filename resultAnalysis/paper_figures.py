@@ -117,7 +117,7 @@ class PaperFigures():
     def fig_example_linear(self):
         ## Figure 1: on habituation set, speed filtered, we plot an example of bayesian and neural network decoding
         # ANN results
-        fig,ax = plt.subplots(len(self.timeWindows), 2 ,sharex=True,figsize=(15,10),sharey=True)
+        fig,ax = plt.subplots(len(self.timeWindows), 2 ,sharex=True, figsize=(15,10),sharey=True)
         if len(self.timeWindows) == 1:
             ax[0].plot(self.resultsNN['time'][0],self.resultsNN['linTruePos'][0],c="black",alpha=0.3)
             ax[0].scatter(self.resultsNN['time'][0],self.resultsNN['linPred'][0],c=self.cm(12+0),alpha=0.9,label=(str(self.timeWindows[0])+ ' ms'),s=1)
@@ -147,8 +147,8 @@ class PaperFigures():
                     ax[i,1].set_title('Bayesian decoder \n' + str(self.timeWindows[i])  + ' window',fontsize="xx-large")
                 else:
                     ax[i,1].set_title(str(self.timeWindows[i]) + ' window',fontsize="xx-large")
-            ax[len(self.timeWindows),0].set_xlabel("time (s)",fontsize="xx-large")
-            ax[len(self.timeWindows),1].set_xlabel("time (s)",fontsize="xx-large")
+            ax[len(self.timeWindows)-1,0].set_xlabel("time (s)",fontsize="xx-large")
+            ax[len(self.timeWindows)-1,1].set_xlabel("time (s)",fontsize="xx-large")
             [a.set_ylabel("linear position",fontsize="xx-large") for a in ax[:,0]]
             [ax[i,0].set_yticks([0,0.4,0.8]) for i in range(len(self.timeWindows))]
         # Save figure
@@ -223,20 +223,20 @@ class PaperFigures():
         lErrorNN = [np.abs(self.resultsNN['linTruePos'][i]-self.resultsNN['linPred'][i]) for i in range(len(self.timeWindows))]
         lErrorBayes = [np.abs(self.resultsNN['linTruePos'][i]-self.resultsBayes['linPred'][i]) for i in range(len(self.timeWindows))]
         if speed == 'all':
-            lErrorNN_mean = [np.mean(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))]
-            lErrorNN_std = [np.std(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_mean = [np.mean(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_std = [np.std(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))]
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'fast':
-            lErrorNN_mean = [np.mean(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
-            lErrorNN_std = [np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_mean = [np.mean(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_std = [np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'slow':
-            lErrorNN_mean = [np.mean(lErrorNN[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))]
-            lErrorNN_std = [np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_mean = [np.mean(lErrorBayes[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))]
-            lErrorBayes_std = [np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))]
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
         else:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')        
         
@@ -440,8 +440,8 @@ class PaperFigures():
                     ax[i, 1].set_title('Best ' + str(fprop*100) + '% of predicitons \n' + str(self.timeWindows[0])  + ' ms window',fontsize="xx-large")
                 else:
                     ax[i,1].set_title(str(self.timeWindows[i]) + ' window',fontsize="xx-large")
-            ax[len(self.timeWindows),0].set_xlabel("time (s)",fontsize="xx-large")
-            ax[len(self.timeWindows),1].set_xlabel("time (s)",fontsize="xx-large")
+            ax[len(self.timeWindows)-1,0].set_xlabel("time (s)",fontsize="xx-large")
+            ax[len(self.timeWindows)-1,1].set_xlabel("time (s)",fontsize="xx-large")
             [a.set_ylabel("linear position",fontsize="xx-large") for a in ax[:,0]]
             [ax[i,0].set_yticks([0,0.4,0.8]) for i in range(len(self.timeWindows))]
         # Save figure

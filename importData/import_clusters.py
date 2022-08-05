@@ -44,7 +44,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				lastBestId = 0
 				posID = []
 				for n in tqdm.tqdm(range(len(st))):
-					lastBestId = rawdata_parser.findTime(behavior_data['Position_time'], 
+					lastBestId = rawdata_parser.findTime(behavior_data['positionTime'], 
                                           lastBestId, st[n])
 					posID += [lastBestId]
 
@@ -115,7 +115,7 @@ def load_spike_sorting(projectPath):
 
 		print("finished reading")
 	else:
-		behavior_data = rawdata_parser.getBehavior(projectPath.folder, getfilterSpeed=False)
+		behavior_data = rawdata_parser.get_behavior(projectPath.folder, getfilterSpeed=False)
 		cluster_data = getSpikesfromClu(projectPath, behavior_data)
 	return cluster_data
 

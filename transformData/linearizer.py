@@ -142,14 +142,14 @@ class UMazeLinearizer:
             if "linearizationPoints" in children:
                 print("Linearization points have been created before")
                 if overwrite:
-                    f.remove_node("/behavior","speedMask")
+                    f.remove_node("/behavior","linearizationPoints")
                     print("Overwriting linearization")
                 else:
                     return
             # Body            
             euclidData = ExampleEuclideanData[np.logical_not(np.isnan(
-                        np.sum(ExampleEuclideanData, axis=1))), :] #down sample a bit
-            euclidData = euclidData[1:-1:10,:]
+                        np.sum(ExampleEuclideanData, axis=1))), :]
+            euclidData = euclidData[1:-1:10,:] #down sample a bit
             projBin = np.arange(0, stop=1.2, step=0.2)
             self.l0s = [None for _ in projBin]
             
