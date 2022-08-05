@@ -27,5 +27,6 @@ venv.bak
 # Codes for not pushing them
 test_script.py
 script_get_allresults.py
+test_emergency.py
 utils/global_classes_ht.py
 fullEncoder/an_network_ht.py
