@@ -161,7 +161,7 @@ def parse_serialized_sequence(params, tensors, batched=False): #featDesc, ex_pro
 
 	return tensors
 
-def parse_serialized_spike( featDesc, ex_proto, batched=False):
+def parse_serialized_spike(featDesc, ex_proto, batched=False):
 	if batched:
 		tensors = tf.io.parse_example(serialized=ex_proto, features=featDesc)
 	else:
@@ -173,6 +173,6 @@ def parse_serialized_spike( featDesc, ex_proto, batched=False):
 
 def import_true_pos(feature):
 	def change_feature(vals):
-		vals["pos"] = tf.gather(feature,vals["pos_index"])
+		vals["pos"] = tf.gather(feature, vals["pos_index"])
 		return vals
 	return change_feature
