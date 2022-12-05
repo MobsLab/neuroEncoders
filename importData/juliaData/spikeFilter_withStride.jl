@@ -314,7 +314,7 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
                 currentFirstSpikeId = 1
                 startWind = []
                 for i in 1:1:size(spikesFound,1)
-                    if(spikesFound[i,1]>currentFirstSpikeTime+WINDOWSTRIDE) # we find the beginning of the next window
+                    if (spikesFound[i,1]>currentFirstSpikeTime+WINDOWSTRIDE) # we find the beginning of the next window
                         append!(startWind,[currentFirstSpikeId])
                         currentFirstSpikeId = i
                         currentFirstSpikeTime = spikesFound[i,1]
@@ -329,21 +329,19 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
                 #For each of these start we find the stopindex =(last spike id)+1 which is less than window_length from the starting spike
                 stopWind = []
 			    currentWindow = 1
-                for i in 1:1:size(spikesFound,1) #timeSpikesWake.shape[0]
-                    if(spikesFound[i,1]>spikesFound[startWind[currentWindow],1]+window_length) # we find the beginning of the next window
+			    lastSpikeId = size(spikesFound,1)
+                for i in 1:1:size(spikesFound,1)
+                    if (spikesFound[i,1]>spikesFound[startWind[currentWindow],1]+window_length) # we find the beginning of the next window
                         append!(stopWind,[i])
                         currentWindow= currentWindow + 1
-                    else
-                        if(i==size(spikesFound,1))
-                           #for each window overlapping with the buffer end:
-                           while(size(stopWind,1)!=size(startWind,1))
-                               append!(stopWind,[i+1])
-                               currentWindow= currentWindow + 1
-                            end
-                        #    println("unfinished longer window at buffer limit")
-                        end
                     end
                 end
+                # Account for situations when WINDOWSIZE > WINDOWSTRIDE (late windows in the buffer are shorter)
+                while (size(stopWind,1)!=size(startWind,1))
+                   append!(stopWind,[lastSpikeId+1])
+                   currentWindow= currentWindow + 1
+                end
+                # println("unfinished longer window at buffer limit")
 
                 for i in 1:1:size(stopWind,1)
                     startindex = startWind[i]

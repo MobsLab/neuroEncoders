@@ -420,14 +420,14 @@ class LSTMandSpikeNetwork():
         totMask = speedMask * epochMask
 
         # Load the and imfer dataset
-        dataset = tf.data.TFRecordDataset(os.path.join(self.projectPath.dataPath, 
+        dataset = tf.data.TFRecordDataset(os.path.join(self.projectPath.dataPath,
                                                         ('dataset'+"_stride"+str(windowsizeMS)+".tfrec")))
         dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_spike(self.featDesc, *vals),
-                                num_parallel_calls=tf.data.AUTOTUNE)    
+                                num_parallel_calls=tf.data.AUTOTUNE)
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(totMask)), dtype=tf.int64),
                                                 tf.constant(totMask, dtype=tf.float64)), default_value=0)
-        dataset = dataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]), 1.0))
+        dataset = dataset.filter(lambda x: tf.math.greater(table.lookup(x["pos_index"]), 0)) # Cut the dataset only to the test epoch
         if onTheFlyCorrection:
             maxPos = np.max(behaviorData["Positions"][np.logical_not(np.isnan(np.sum(behaviorData["Positions"], axis=1)))])
             posFeature = behaviorData["Positions"] / maxPos
@@ -448,10 +448,12 @@ class LSTMandSpikeNetwork():
         
         ### Post-inferring management
         print("gathering true feature")
-        datasetPos = dataset.map(lambda x, y: x["pos"],num_parallel_calls=tf.data.AUTOTUNE)
+        datasetPos = dataset.map(lambda x, y: x["pos"], num_parallel_calls=tf.data.AUTOTUNE)
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
         featureTrue = np.reshape(fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]])
+
+        return featureTrue
         print("gathering exact time of spikes")
         datasetTimes = dataset.map(lambda x, y: x["time"],num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
