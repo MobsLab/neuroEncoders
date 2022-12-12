@@ -23,7 +23,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 
 	nTetrodes = len(listChannels)
 	for tetrode in tqdm.tqdm(range(nTetrodes)):
-		print(f'Importing sorted spikes from Neuroscope files from tetrode #{tetrode}')
+		print(f'Importing sorted spikes from Neuroscope files from electrodes group #{tetrode}')
 		if os.path.isfile(projectPath.clu(tetrode)):
 			with open(
 					projectPath.clu(tetrode), 'r') as fClu, open(

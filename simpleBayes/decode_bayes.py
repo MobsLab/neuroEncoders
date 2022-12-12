@@ -143,6 +143,7 @@ class Trainer():
             bayesMatrices = self.train(behaviorData, onTheFlyCorrection=False)
         ### Get preferred position for each cluster
         preferredPos = []
+        # TODO: simplify this loop
         for _, rateGroup in enumerate(bayesMatrices["rateFunctions"]):
             for id in range(len(rateGroup) // 2 + 1):
                 for idy in range(4):
@@ -392,7 +393,7 @@ class Trainer():
         inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
 
         # NOTE: A few values of probability predictions present NaN in pykeops....
-        # print("Resolving nan issue from pykeops over a few bins")
+        print("Resolving nan issue from pykeops over a few bins")
         badBins = np.where(np.isnan(inferResults[:, 2]))[0]
         for bin in badBins:
             binStartTime = timeStepPred[bin] - windowSize / 2
@@ -415,11 +416,11 @@ class Trainer():
                 else:
                     spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
                 tetrodesContributions.append(spikePattern)
-                # Guessed probability map
-                positionProba = reduce(np.multiply, tetrodesContributions)
-                positionProba = np.multiply(positionProba, occupation) #prior: Occupation deduced from training!!
-                positionProba = positionProba / np.sum(positionProba)
-                inferResults[bin, 2] = np.max(positionProba)
+            # Guessed probability map
+            positionProba = reduce(np.multiply, tetrodesContributions)
+            positionProba = np.multiply(positionProba, occupation) #prior: Occupation deduced from training!!
+            positionProba = positionProba / np.sum(positionProba)
+            inferResults[bin, 2] = np.max(positionProba)
 
         outputResults = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2], 'times': timeStepPred,
                                            'speed_mask': behaviorData["Times"]["speedFilter"]}  # , "probaMaps": position_proba
@@ -738,7 +739,7 @@ class LegacyTrainer():
             position_proba[bin] = reduce(np.multiply, tetrodes_contributions)
             position_proba[bin] = position_proba[bin] / np.sum(position_proba[bin])
             # True position
-            position_true_mean = np.nanmean( behavior_data['Positions'][reduce(np.intersect1d,
+            position_true_mean = np.nanmean(behavior_data['Positions'][reduce(np.intersect1d,
                 (np.where(behavior_data['positionTime'][:,0] > bin_start_time),
                 np.where(behavior_data['positionTime'][:,0] < bin_stop_time)))], axis=0 )
             position_true[bin] = position_true[bin-1] if np.isnan(position_true_mean).any() else position_true_mean

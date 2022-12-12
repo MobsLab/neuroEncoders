@@ -395,7 +395,7 @@ class LSTMandSpikeNetwork():
                 # print("saving full model in savedmodel format, for c++")
                 # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
 
-    def test(self, behaviorData, l_function=[], windowsizeMS=36,useSpeedFilter=True,
+    def test(self, behaviorData, l_function=[], windowsizeMS=36, useSpeedFilter=False,
              useTrain=False, onTheFlyCorrection=False, isPredLoss=True):
         
         # Create the folder
@@ -427,7 +427,7 @@ class LSTMandSpikeNetwork():
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(totMask)), dtype=tf.int64),
                                                 tf.constant(totMask, dtype=tf.float64)), default_value=0)
-        dataset = dataset.filter(lambda x: tf.math.greater(table.lookup(x["pos_index"]), 1.0)) # Cut the dataset only to the test epoch
+        dataset = dataset.filter(lambda x: tf.math.greater(table.lookup(x["pos_index"]), 0)) # Check previous commits for this line
         if onTheFlyCorrection:
             maxPos = np.max(behaviorData["Positions"][np.logical_not(np.isnan(np.sum(behaviorData["Positions"], axis=1)))])
             posFeature = behaviorData["Positions"] / maxPos
@@ -452,8 +452,7 @@ class LSTMandSpikeNetwork():
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
         featureTrue = np.reshape(fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]])
-
-        print("gathering exact time of spikes")
+        print("gathering times of the centre in the tiw window")
         datasetTimes = dataset.map(lambda x, y: x["time"],num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
         times = np.reshape(times, [outputTest[0].shape[0]])
@@ -535,7 +534,7 @@ class LSTMandSpikeNetwork():
             
         # Save the results
         for key in predictions.keys():
-            self.saveResults(predictions[key], windowsizt eMS=windowsizeMS, sleep=True, sleepName=key)
+            self.saveResults(predictions[key], windowsizeMS=windowsizeMS, sleep=True, sleepName=key)
 
         return predictions
 ########### FULL NETWORK CLASS #####################
