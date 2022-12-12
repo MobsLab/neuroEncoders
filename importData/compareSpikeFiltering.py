@@ -80,38 +80,7 @@ class WaveFormComparator():
 
 
     def save_alignment_tools(self, trainerBayes, linearizationFunction, windowsizeMS=36):
-        """
-        Add up two integer numbers.
 
-        This function simply wraps the ``+`` operator, and does not
-        do anything interesting, except for illustrating what
-        the docstring of a very simple function looks like.
-
-        Parameters
-        ----------
-        num1 : int
-            First number to add.
-        num2 : int
-            Second number to add.
-
-        Returns
-        -------
-        int
-            The sum of ``num1`` and ``num2``.
-
-        See Also
-        --------
-        subtract : Subtract one integer from another.
-
-        Examples
-        --------
-        >>> add(2, 2)
-        4
-        >>> add(25, 0)
-        25
-        >>> add(10, -10)
-        0
-        """
         # Manage folder
         if self.useTrain:
             foldertosave = os.path.join(self.alignedDataPath, 'train')
@@ -138,11 +107,12 @@ class WaveFormComparator():
         startTimeWindow = [] # Start of windows
         for _, startTime in tqdm(enumerate(inputNN)):
             if len(startTime) > 0:
-                startTimeWindow += [startTime[0]]
+                startTimeWindow += [startTime[0] / self.samplingRate]
             else:
                 startTimeWindow += [np.nan] # we make sure these windows are never selected
             lenInputNN += [len(startTime)]
-            meanTimeWindow += [np.mean(startTime / self.samplingRate)]
+            timeWindowInSec = [sample / self.samplingRate for sample in startTime]
+            meanTimeWindow += [np.mean(timeWindowInSec)]
         lenInputNN = np.array(lenInputNN)
         meanTimeWindow = np.array(meanTimeWindow)
         startTimeWindow = np.array(startTimeWindow)
