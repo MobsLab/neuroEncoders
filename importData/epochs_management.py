@@ -56,13 +56,13 @@ def get_epochs(postime, SetData, keptSession, starts=np.empty(0), stops=np.empty
 		pmax = postime[-1]
   
 		testEpochs = np.array(
-			[postime[SetData['testsetId']],
-				postime[min(SetData['testsetId'] + SetData['sizeTest'], postime.shape[0] - 1)]])
+			[postime[SetData['testSetId']],
+				postime[min(SetData['testSetId'] + SetData['sizeTestSet'], postime.shape[0] - 1)]])
 
 		if SetData['useLossPredTrainSet']:
 			lossPredSetEpochs = np.array([postime[SetData['lossPredSetId']],
 											postime[
-												min(SetData['lossPredSetId'] + SetData['sizelossPredSet'], postime.shape[0] - 1)]])
+												min(SetData['lossPredSetId'] + SetData['sizeLossPredSet'], postime.shape[0] - 1)]])
 			lossPredsetinterval = interval(lossPredSetEpochs)
 			lossPredsetinterval = lossPredsetinterval & obtainCloseComplementary(testEpochs, interval([pmin, pmax]))
 			lossPredSetEpochs = np.ravel(np.array([[p[0], p[1]] for p in lossPredsetinterval]))

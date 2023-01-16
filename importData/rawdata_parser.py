@@ -1,16 +1,13 @@
 # Load libs
-import sys
-import os
-import re
-import tables
-import struct
+import sys, os, re, tables
 import numpy as np
+import pandas as pd
 import xml.etree.ElementTree as ET
 import matplotlib.pyplot as plt
 import matplotlib as mplt
-from brokenaxes import brokenaxes
-from contextlib import ExitStack
-import pandas as pd
+mplt.use("TkAgg")
+from tkinter import Tk, Toplevel, Entry, Label, Button
+
 # Custom codes
 from importData import epochs_management as ep
 
@@ -349,11 +346,11 @@ def select_epochs(folder,overWrite=False):
 		sizeTest = timeToShow.shape[0]//10
 		testSetId = timeToShow.shape[0] - timeToShow.shape[0]//10
 		bestTestSet = 0
-		useLossPredTrainSet = True
+		useLossPredTrainSet = False
 		lossPredSetId = 0
 		sizelossPredSet = timeToShow.shape[0]//10
-		SetData = {'sizeTest': sizeTest, 'testsetId': testSetId, 'bestTestSet': bestTestSet, 
-			  'useLossPredTrainSet': useLossPredTrainSet, 'lossPredSetId': lossPredSetId, 'sizelossPredSet': sizelossPredSet
+		SetData = {'sizeTestSet': sizeTest, 'testSetId': testSetId, 'bestTestSet': bestTestSet,
+			  'useLossPredTrainSet': useLossPredTrainSet, 'lossPredSetId': lossPredSetId, 'sizeLossPredSet': sizelossPredSet
 		   }
 
 		#### Next we provide a tool to manually change the bestTest set position
@@ -381,8 +378,10 @@ def select_epochs(folder,overWrite=False):
 			ax[0].get_shared_x_axes().join(ax[0], ax[1])
 		ax += [fig.add_subplot(gs[-5,id]) for id in range(len(sessionNames))]
 		ax += [fig.add_subplot(gs[-4,max(len(colorSess)-3,1):max(len(colorSess),2)])]
-		ax += [fig.add_subplot(gs[-4, 0:max(len(colorSess)-4,1)]), fig.add_subplot(gs[-3, :])]   #loss pred training set slider
-		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1,:])] #test set.
+		ax += [fig.add_subplot(gs[-4, 0:max(len(colorSess)-4,1)]), fig.add_subplot(gs[-3, 0:max(len(colorSess)-4,1)])]   #loss pred training set slider
+		ax += [fig.add_subplot(gs[-2,:]),fig.add_subplot(gs[-1, :max(len(colorSess)-4,1)])] #test set.
+		ax += [fig.add_subplot(gs[-3, max(len(colorSess)-3,1):max(len(colorSess),2)])] # buttons for manual range selection
+		ax += [fig.add_subplot(gs[-1,  max(len(colorSess)-3,1):max(len(colorSess),2)])] # buttons for manual range selection
 
 		if IsMultiSessions:
 			trainEpoch,testEpochs,lossPredSetEpochs = ep.get_epochs(timeToShow, SetData, keptSession, starts=sessionStart, stops=sessionStop)
@@ -391,13 +390,16 @@ def select_epochs(folder,overWrite=False):
 
 		ls = []
 		for dim in range(positions.shape[1]):
-			l1 = ax[dim].scatter(timeToShow[ep.inEpochs(timeToShow,trainEpoch)[0]],behToShow[ep.inEpochs(timeToShow,trainEpoch)[0],dim],c="red",s=0.5)
-			l2 = ax[dim].scatter(timeToShow[ep.inEpochs(timeToShow, testEpochs)[0]], behToShow[ep.inEpochs(timeToShow, testEpochs)[0],dim],c="black",s=0.5)
+			l1 = ax[dim].scatter(timeToShow[ep.inEpochs(timeToShow,trainEpoch)[0]],behToShow[ep.inEpochs(timeToShow,trainEpoch)[0],dim],c="black",s=0.5)
+			l2 = ax[dim].scatter(timeToShow[ep.inEpochs(timeToShow, testEpochs)[0]], behToShow[ep.inEpochs(timeToShow, testEpochs)[0],dim],c="red",s=0.5)
 			if SetData['useLossPredTrainSet']:
 				l3 = ax[dim].scatter(timeToShow[ep.inEpochs(timeToShow, lossPredSetEpochs)[0]],
 								behToShow[ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim], c="orange", s=0.5)
 			else:
 				l3 = ax[dim].scatter(timeToShow[0], behToShow[0,dim], c='orange', s=0.5)
+			ax[dim].get_yaxis().set_visible(False)
+			if dim == 0:
+				ax[dim].get_xaxis().set_visible(False)
 			ls.append([l1,l2,l3])
    
 			# display the sessions positions at the bottom:
@@ -409,35 +411,42 @@ def select_epochs(folder,overWrite=False):
 									xmax=timeToShow[np.max(np.where(np.equal(sessionValue_toshow,k)))],color=colorSess[idk],linewidth=3.0)
 
 		#TODO add histograms here...
-		slider = plt.Slider(ax[-2], 'test starting index', 0, behToShow.shape[0]-SetData['sizeTest'],
-							valinit=SetData['testsetId'], valstep=1)
-		sliderSize = plt.Slider(ax[-1], 'test size', 0, behToShow.shape[0],
-							valinit=SetData['sizeTest'], valstep=1)
+		sliderTest = plt.Slider(ax[-4], 'test starting index', 0, behToShow.shape[0]-SetData['sizeTestSet'],
+							valinit=SetData['testSetId'], valstep=1)
+		sliderTestSize = plt.Slider(ax[-3], 'test size', 0, behToShow.shape[0],
+							valinit=SetData['sizeTestSet'], valstep=1)
 		if SetData['useLossPredTrainSet']:
-			buttLossPred = plt.Button(ax[-5],"lossPred",color="orange")
+			buttLossPred = plt.Button(ax[-7],"lossPred",color="orange")
 		else:
-			buttLossPred = plt.Button(ax[-5],"lossPred",color="white")
-		sliderLossPredTrain = plt.Slider(ax[-4],"loss network training \n set starting index", 0, behToShow.shape[0],
+			buttLossPred = plt.Button(ax[-7],"lossPred",color="white")
+		sliderLossPredTrain = plt.Slider(ax[-6],"loss network training \n set starting index", 0, behToShow.shape[0],
 										 valinit=0,valstep=1)
-		sliderLossPredTrainSize = plt.Slider(ax[-3], "loss network training set size", 0, behToShow.shape[0],
-										 valinit=SetData['sizeTest'], valstep=1)
+		sliderLossPredTrainSize = plt.Slider(ax[-5], "loss network training set size", 0, behToShow.shape[0],
+										 valinit=SetData['sizeTestSet'], valstep=1)
+		ButtlPManual = mplt.widgets.Button(ax[-2], 'Choose lossPred set manually', color='sandybrown',
+											   hovercolor='peachpuff')
+		ButtTestManual = mplt.widgets.Button(ax[-1], 'Choose test set manually', color='lightcoral',
+										   hovercolor='mistyrose')
+		axesInst = fig.add_axes([0.45, 0.89, 0.1, 0.05])
+		buttInstructions = mplt.widgets.Button(axesInst, 'Instructions', color='lightgrey', hovercolor='lightyellow')
+
 
 		# Next we add buttons to select the sessions we would like to keep:
-		butts = [plt.Button(ax[len(ax)-k-6],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
+		butts = [plt.Button(ax[len(ax)-k-8],sessionNames[k],color=colorSess[k]) for k in range(len(colorSess))]
 		if IsMultiSessions:
 			for id in id_sleep:
-				ax[len(ax)-id-6].set_axis_off()				
+				ax[len(ax)-id-8].set_axis_off()
 
 		def update(val):
-				SetData['testsetId'] = slider.val
-				SetData['sizeTest'] = sliderSize.val 
+				SetData['testSetId'] = sliderTest.val
+				SetData['sizeTestSet'] = sliderTestSize.val
 				SetData['lossPredSetId'] = sliderLossPredTrain.val
-				SetData['sizelossPredSet'] = sliderLossPredTrainSize.val
+				SetData['sizeLossPredSet'] = sliderLossPredTrainSize.val
 
 				if IsMultiSessions:
 						trainEpoch,testEpochs,lossPredSetEpochs = ep.get_epochs(timeToShow, SetData, keptSession, starts=sessionStart, stops=sessionStop)
 				else:
-						trainEpoch,testEpochs,lossPredSetEpochs = ep.get_epochs(timeToShow, SetData, keptSession)
+						trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(timeToShow, SetData, keptSession)
 
 				for dim in range(len(ls)):
 					l1,l2,l3=ls[dim]
@@ -450,13 +459,11 @@ def select_epochs(folder,overWrite=False):
 							if SetData['useLossPredTrainSet']:
 								try:
 									ls[dim][2][iaxis].remove()
-									# l3[iaxis].remove()
 								except:
 									pass
 							else:
 								try:
 									ls[dim][2][iaxis].remove()
-									# l3[iaxis].remove()
 								except:
 									pass
 						if SetData['useLossPredTrainSet']:
@@ -481,8 +488,8 @@ def select_epochs(folder,overWrite=False):
 								pass
 				fig.canvas.draw_idle()
 
-		slider.on_changed(update)
-		sliderSize.on_changed(update)
+		sliderTest.on_changed(update)
+		sliderTestSize.on_changed(update)
 		sliderLossPredTrain.on_changed(update)
 		sliderLossPredTrainSize.on_changed(update)
 
@@ -509,16 +516,105 @@ def select_epochs(folder,overWrite=False):
 			return SetData['useLossPredTrainSet']
 		buttLossPred.on_clicked(buttUpdateLossPred)
 
-		suptitle_str = 'Please choose train and test sets. You can include validation set'
+		class rangeButton():
+			nameDict = {'test': 'test', 'lossPred': 'predicted loss'}
+
+			def __init__(self, typeButt='test', relevantSliders=None):
+				if typeButt == 'test' or typeButt == 'lossPred':
+					self.typeButt = typeButt
+				if relevantSliders is None:
+					raise ValueError('relevantSliders must be a list of 2 sliders')
+				else:
+					self.relevantSliders = relevantSliders
+
+			def __call__(self, val):
+				self.win = Toplevel()
+				self.win.title(f"Manual setting of the {self.nameDict[self.typeButt]} set")
+				self.win.geometry('400x200')
+
+				textLabel = self.construct_label()
+				self.rangeLabel = Label(self.win, text=textLabel)
+				self.rangeLabel.place(relx=0.5, y=30, anchor="center")
+
+				self.rangeEntry = Entry(self.win, width=18, bd=5)
+				defaultValues = self.update_def_values(SetData)
+				self.rangeEntry.insert(0, f'{defaultValues[0]}-{defaultValues[1]}')
+				self.rangeEntry.place(relx=0.5, y=90, anchor="center")
+
+				self.okButton = Button(self.win, width=5, height=1, text="Ok")
+				self.okButton.bind("<Button-1>", lambda event: self.set_sliders_and_close())
+				self.okButton.place(relx=0.5, y=175, anchor="center")
+
+				self.win.mainloop()
+
+			def construct_label(self):
+				text = f"Enter the range of the {self.nameDict[self.typeButt]} set in sec (e.g. 0-1000)"
+				return text
+
+			def update_def_values(self, SetData):
+				nameId = f'{self.typeButt}SetId'
+				nameSize = f'size{self.typeButt[0].upper()}{self.typeButt[1:]}Set'
+				firstTS = round(timeToShow[SetData[nameId]], 2)
+				lastId = round(timeToShow[SetData[nameId] + SetData[nameSize] - 1], 2)
+				return [firstTS, lastId]
+
+			def convert_entry_to_id(self):
+				strEntry = self.rangeEntry.get()
+				if len(strEntry) > 0:
+					try:
+						parsedRange = [float(num) for num in list(strEntry.split('-'))]
+						convertedRange = [self.closestId(timeToShow, num) for num in parsedRange]
+						startId = convertedRange[0]
+						sizeSetinId = convertedRange[1] - convertedRange[0]
+
+						return startId, sizeSetinId
+					except ValueError:
+						self.okButton.configure(bg='red')
+						raise ValueError("Please enter a valid range in the format 'start-end'")
+
+			def set_sliders_and_close(self):
+				valuesForSlider = self.convert_entry_to_id()
+				for ivalue, slider in enumerate(self.relevantSliders):
+					slider.set_val(valuesForSlider[ivalue])
+				self.win.destroy()
+
+			def closestId(self, arr, valToFind):
+				return (np.abs(arr - valToFind)).argmin()
+
+		ButtlPManual.on_clicked(rangeButton(typeButt='lossPred', relevantSliders=[sliderLossPredTrain, sliderLossPredTrainSize]))
+		ButtTestManual.on_clicked(rangeButton(typeButt='test', relevantSliders=[sliderTest, sliderTestSize]))
+
+
+		def buttInstructionsShow(val):
+			intructions_str = 'Black will become train dataset, red will become test dataset, ' + \
+							  'and orange (if lossPred button is pressed) will become a set ' + \
+							  'to fine-tune predicted loss.\n \n By pressing button with session names ' + \
+							  'you can choose which sessions to include in the analysis. ' + \
+							  'Either use sliders to regulate size and position of test and fine-tuning sets.\n \n' + \
+				              'Or click on manual setter for test or fine-tuning sets \n \n' + \
+							  'USE ZOOM TOOL OF THE FIGURE WINDOW TO AVOID GAPS IF YOU HAVE ANY \n \n' + \
+							  'Simply close the window when you are satisfied with your choice.'
+
+			win = Toplevel()
+			win.title('Instructions')
+			instLabel = Label(win, text=intructions_str, font=("Helvetica", 16))
+			instLabel.pack()
+			win.mainloop()
+
+		buttInstructions.on_clicked(buttInstructionsShow)
+
+		suptitle_str = "Please choose train (black) and test (red) sets. You can add a set (orange) to " \
+					   "fine-tune predicted loss (by pressing lossPred button)"
 		plt.suptitle(suptitle_str, fontsize=22)
-		plt.get_current_fig_manager().window.showMaximized()
+		plt.text(x=0.93, y=0.82, s='X', fontsize=36, ha="center", transform=fig.transFigure)
+		plt.text(x=0.93, y=0.71, s='Y', fontsize=36, ha="center", transform=fig.transFigure)
+
+		if mplt.get_backend() == 'QtAgg':
+			plt.get_current_fig_manager().window.showMaximized()
+		elif mplt.get_backend() == 'TkAgg':
+			plt.get_current_fig_manager().resize(*plt.get_current_fig_manager().window.maxsize())
+			# plt.get_current_fig_manager().window.state('zoomed') # on windows
 		plt.show()
-
-		testSetId = slider.val
-		sizeTest = sliderSize.val
-
-		lossPredSetId = sliderLossPredTrain.val
-		sizelossPredSet = sliderLossPredTrainSize.val
 
 		if IsMultiSessions:
 			trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(timeToShow, SetData, keptSession, starts=sessionStart, stops=sessionStop)
@@ -548,8 +644,9 @@ def select_epochs(folder,overWrite=False):
 		fig,ax = plt.subplots()
 		trainMask = ep.inEpochsMask(positionTime,trainEpoch)[:,0]
 		testMask = ep.inEpochsMask(positionTime, testEpochs)[:,0]
-		ax.scatter(positionTime[trainMask],positions[trainMask,0],c="red")
-		ax.scatter(positionTime[testMask], positions[testMask, 0], c="black")
+		ax.scatter(positionTime[trainMask],positions[trainMask,0],c="black")
+		ax.scatter(positionTime[testMask], positions[testMask, 0], c="red")
+		ax.set_title("Linearized coordinate of the animal")
 		if SetData['useLossPredTrainSet']:
 			lossPredMask = ep.inEpochsMask(positionTime, lossPredSetEpochs)[:,0]
 			ax.scatter(positionTime[lossPredMask], positions[lossPredMask, 0], c="orange")
