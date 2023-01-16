@@ -29,6 +29,53 @@ class Trainer():
         if not os.path.isdir(self.folderResult):
             os.makedirs(self.folderResult)
 
+    def train_order_by_pos(self, behaviorData, linearization_function, onTheFlyCorrection=False): # bandwidth=0.05
+        # Gather all spikes in large array and sort it in time
+        nbSpikes = [a.shape[0] for a in self.clusterData["Spike_labels"]]
+        nbNeurons = [a.shape[1] for a in self.clusterData["Spike_labels"]]
+        spikeMatLabels = np.zeros([np.sum(nbSpikes), np.sum(nbNeurons)])
+        spikeMatTimes = np.zeros([np.sum(nbSpikes), 1])
+        cnbSpikes = np.cumsum(nbSpikes)
+        cnbNeurons = np.cumsum(nbNeurons)
+        for id in range(len(nbSpikes)):
+            if id > 0:
+                spikeMatLabels[cnbSpikes[id - 1]:cnbSpikes[id], cnbNeurons[id - 1]:cnbNeurons[id]] = \
+                    self.clusterData["Spike_labels"][id]
+                spikeMatTimes[cnbSpikes[id - 1]:cnbSpikes[id], :] = self.clusterData["Spike_times"][id]
+            else:
+                spikeMatLabels[0:cnbSpikes[id], 0:cnbNeurons[id]] = self.clusterData["Spike_labels"][id]
+                spikeMatTimes[0:cnbSpikes[id], :] = self.clusterData["Spike_times"][id]
+
+        spikeorder = np.argsort(spikeMatTimes[:, 0])
+        self.spikeMatLabels = spikeMatLabels[spikeorder, :]
+        self.spikeMatTimes = spikeMatTimes[spikeorder, :]
+        ### Perform training (build marginal and local rate functions)
+        if onTheFlyCorrection:
+            bayesMatrices = self.train(behaviorData, onTheFlyCorrection=True)
+        else:
+            bayesMatrices = self.train(behaviorData, onTheFlyCorrection=False)
+        ### Get preferred position for each cluster
+        preferredPos = []
+        # TODO: simplify this loop
+        for _, rateGroup in enumerate(bayesMatrices["rateFunctions"]):
+            for id in range(len(rateGroup) // 2 + 1):
+                for idy in range(4):
+                    if 4 * id + idy < len(rateGroup):
+                        trRateGroup = np.transpose(rateGroup[4 * id + idy][:, :])
+                        posX = np.unravel_index(np.argmax(trRateGroup), shape=trRateGroup.shape)
+                        preferredPos = preferredPos + [
+                            [bayesMatrices["bins"][0][posX[1]], bayesMatrices["bins"][1][posX[0]]]]
+        preferredPos = np.array(preferredPos)
+        _, linearPreferredPos = linearization_function(preferredPos)
+        self.linearPosArgSort = np.argsort(linearPreferredPos)
+        self.linearPreferredPos =linearPreferredPos[self.linearPosArgSort]
+        self.spikeMatLabels = self.spikeMatLabels[:, self.linearPosArgSort]
+        bs = [np.stack(b) for b in bayesMatrices["rateFunctions"]]
+        placefields = np.concatenate(bs)
+        self.orderdePlaceFields = placefields[self.linearPosArgSort,:]
+
+        return bayesMatrices
+
     def train(self, behaviorData, onTheFlyCorrection=False):    
         marginalRateFunctions = []
         rateFunctions = []
@@ -115,220 +162,6 @@ class Trainer():
                 'bins':[np.unique(gridFeature[i]) for i in range(len(gridFeature))],'spikePositions': spikePositions,
                           'mutualInfo': mutualInfo}
         return bayesMatrices
-
-    def train_order_by_pos(self, behaviorData, linearization_function, onTheFlyCorrection=False): # bandwidth=0.05
-        # Gather all spikes in large array and sort it in time
-        nbSpikes = [a.shape[0] for a in self.clusterData["Spike_labels"]]
-        nbNeurons = [a.shape[1] for a in self.clusterData["Spike_labels"]]
-        spikeMatLabels = np.zeros([np.sum(nbSpikes), np.sum(nbNeurons)])
-        spikeMatTimes = np.zeros([np.sum(nbSpikes), 1])
-        cnbSpikes = np.cumsum(nbSpikes)
-        cnbNeurons = np.cumsum(nbNeurons)
-        for id in range(len(nbSpikes)):
-            if id > 0:
-                spikeMatLabels[cnbSpikes[id - 1]:cnbSpikes[id], cnbNeurons[id - 1]:cnbNeurons[id]] = \
-                self.clusterData["Spike_labels"][id]
-                spikeMatTimes[cnbSpikes[id - 1]:cnbSpikes[id], :] = self.clusterData["Spike_times"][id]
-            else:
-                spikeMatLabels[0:cnbSpikes[id], 0:cnbNeurons[id]] = self.clusterData["Spike_labels"][id]
-                spikeMatTimes[0:cnbSpikes[id], :] = self.clusterData["Spike_times"][id]
-
-        spikeorder = np.argsort(spikeMatTimes[:, 0])
-        self.spikeMatLabels = spikeMatLabels[spikeorder, :]
-        self.spikeMatTimes = spikeMatTimes[spikeorder, :]
-        ### Perform training (build marginal and local rate functions)
-        if onTheFlyCorrection:
-            bayesMatrices = self.train(behaviorData, onTheFlyCorrection=True)
-        else:
-            bayesMatrices = self.train(behaviorData, onTheFlyCorrection=False)
-        ### Get preferred position for each cluster
-        preferredPos = []
-        # TODO: simplify this loop
-        for _, rateGroup in enumerate(bayesMatrices["rateFunctions"]):
-            for id in range(len(rateGroup) // 2 + 1):
-                for idy in range(4):
-                    if 4 * id + idy < len(rateGroup):
-                        trRateGroup = np.transpose(rateGroup[4 * id + idy][:, :])
-                        posX = np.unravel_index(np.argmax(trRateGroup), shape=trRateGroup.shape)
-                        preferredPos = preferredPos + [
-                            [bayesMatrices["bins"][0][posX[1]], bayesMatrices["bins"][1][posX[0]]]]
-        preferredPos = np.array(preferredPos)
-        _, linearPreferredPos = linearization_function(preferredPos)
-        self.linearPosArgSort = np.argsort(linearPreferredPos)
-        self.linearPreferredPos =linearPreferredPos[self.linearPosArgSort]
-        self.spikeMatLabels = self.spikeMatLabels[:, self.linearPosArgSort]
-        bs = [np.stack(b) for b in bayesMatrices["rateFunctions"]]
-        placefields = np.concatenate(bs)
-        self.orderdePlaceFields = placefields[self.linearPosArgSort,:]
-
-        return bayesMatrices
-
-    def test_parallel(self, behaviorData, bayesMatrices, windowSizeMS=36):
-        windowSize = windowSizeMS/1000
-
-        print('\nBUILDING POSITION PROBAS')
-        clustersTime = [self.clusterData['Spike_times'][tetrode][
-                                    inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
-                                    behaviorData['Times']['testEpochs'])]
-                                 for tetrode in range(len(self.clusterData['Spike_times']))]
-        clusters = [self.clusterData['Spike_labels'][tetrode][
-                                    inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
-                                    behaviorData['Times']['testEpochs'])]
-                                 for tetrode in range(len(self.clusterData['Spike_times']))]
-        occupation, marginalRateFunctions, rateFunctions = [bayesMatrices[key] for key in
-                                                        ['occupation', 'marginalRateFunctions',
-                                                                'rateFunctions']]
-        mask = occupation > (np.max(occupation) / self.maskingFactor)
-
-        ### Build Poisson term
-        allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
-                            range(len(clusters))]
-        allPoisson = reduce(np.multiply, allPoisson)
-        ### Log of rate functions
-        logRF = []
-        for tetrode in range(np.shape(rateFunctions)[0]):
-            temp = []
-            for cluster in range(np.shape(rateFunctions[tetrode])[0]):
-                temp.append(np.log(rateFunctions[tetrode][cluster] + np.min(
-                    rateFunctions[tetrode][cluster][rateFunctions[tetrode][cluster] != 0])))
-            logRF.append(temp)
-        timeStepPred = behaviorData["positionTime"][inEpochs(behaviorData["positionTime"][:,0], 
-                                                              behaviorData['Times']['testEpochs'])]
-        featTrue = behaviorData["Positions"][inEpochs(behaviorData["positionTime"][:,0], 
-                                                      behaviorData['Times']['testEpochs'])]
-        # For prediction time step we use the time step of measured speed and feature of the animal.
-        # A prediction is made over all time steps in the test set
-        # and the prediction results can be latter on filter out.
-
-        ### Decoding loop
-        print("Parallel pykeops bayesian test")
-        outputPOps = parallelize_prediction(timeStepPred, windowSize, allPoisson, clusters,
-                               clustersTime, logRF, occupation)
-        print("finished bayesian guess")
-        idPos = np.unravel_index(outputPOps[1],shape=allPoisson.shape)
-        inferredPos = np.array([bayesMatrices['bins'][i][idPos[i][:,0]] for i in range(len(bayesMatrices['bins']))])
-        inferredProba = outputPOps[0]
-        inferResults  = np.concatenate([np.transpose(inferredPos),inferredProba], axis=-1)
-        #NOTE: A few values of probability predictions present NaN in pykeops....
-        print("Resolving nan issue from pykeops over a few bins")
-        badBins = np.where(np.isnan(inferResults[:,2]))[0]
-        for bin in badBins:
-            binStartTime = timeStepPred[bin] - windowSize / 2
-            binStopTime = binStartTime + windowSize / 2
-            tetrodesContributions = []
-            tetrodesContributions.append(allPoisson)
-            for tetrode in range(len(clusters)):
-                binProbas = clusters[tetrode][np.intersect1d(
-                    np.where(clustersTime[tetrode][:, 0] > binStartTime),
-                    np.where(clustersTime[tetrode][:, 0] < binStopTime))]
-                # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
-                # because some spike might be closest to one position further away than windowSize,
-                # yet themselves be close to the spike time
-                binClusters = np.sum(binProbas, 0)
-                # Terms that come from spike information
-                if np.sum(binClusters) > 0.5:
-                    spikePattern = reduce(np.multiply,
-                                           [np.exp(logRF[tetrode][cluster] * binClusters[cluster])
-                                            for cluster in range(np.shape(binClusters)[0])])
-                else:
-                    spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
-                tetrodesContributions.append(spikePattern)
-            # Guessed probability map
-            positionPoba = reduce(np.multiply, tetrodesContributions)
-            positionPoba = positionPoba / np.sum(positionPoba)
-            inferResults[bin,2] = np.max(positionPoba)
-
-        outputResults = {"featurePred": inferResults[:, :2], 'featureTrue': featTrue, 'proba': inferResults[:, 2], 
-                         'times': timeStepPred, 'speed_mask': behaviorData["Times"]["speedFilter"]}
-        return outputResults
-
-    def sleep_decoding(self, behaviorData, bayesMatrices, windowSizeMS=36):
-        windowSize = windowSizeMS/1000
-
-        clustersTime = {}
-        clusters = {}
-        inferResultsDic = {}
-        for id,sleepName in enumerate(behaviorData["Times"]["sleepNames"]):
-            clustersTime[sleepName] = [self.clusterData['Spike_times'][tetrode][
-                                         inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
-                                                  behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
-                                     for tetrode in range(len(self.clusterData['Spike_times']))]
-            clusters[sleepName] = [self.clusterData['Spike_labels'][tetrode][
-                                    inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
-                                             behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
-                                for tetrode in range(len(self.clusterData['Spike_times']))]
-
-            print('\nBUILDING POSITION PROBAS')
-            occupation, marginalRateFunctions, rateFunctions = [bayesMatrices[key] for key in
-                                                        ['occupation', 'marginalRateFunctions',
-                                                                'rateFunctions']]
-            mask = occupation > (np.max(occupation) / self.maskingFactor)
-
-            ### Build Poisson term
-            allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
-                                range(len(clusters[sleepName]))]
-            allPoisson = reduce(np.multiply, allPoisson)
-
-            ### Log of rate functions
-            logRF = []
-            for tetrode in range(np.shape(rateFunctions)[0]):
-                temp = []
-                for cluster in range(np.shape(rateFunctions[tetrode])[0]):
-                    temp.append(np.log(rateFunctions[tetrode][cluster] + np.min(
-                        rateFunctions[tetrode][cluster][rateFunctions[tetrode][cluster] != 0])))
-                logRF.append(temp)
-
-            timeStepPred = behaviorData["positionTime"][
-                inEpochs(behaviorData["positionTime"][:, 0], behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
-            # For prediction time step we use the time step of measured speed and feature of the animal.
-            # A prediction is made over all time steps in the test set
-            # and the prediction results can be latter on filter out.
-
-            print("Parallel pykeops bayesian test")
-            outputPOps = parallelize_prediction(timeStepPred, windowSize, allPoisson, clusters[sleepName],
-                                                       clustersTime[sleepName], logRF, occupation)
-            print("finished bayesian guess")
-
-            idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
-            inferredPos = np.array([bayesMatrices['bins'][i][idPos[i][:, 0]] for i in
-                                          range(len(bayesMatrices['bins']))])
-            inferredProba = outputPOps[0]
-            inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
-
-            # NOTE: A few values of probability predictions present NaN in pykeops....
-            print("Resolving nan issue from pykeops over a few bins")
-            badBins = np.where(np.isnan(inferResults[:, 2]))[0]
-            for bin in badBins:
-                binStartTime = timeStepPred[bin] - windowSize / 2
-                binStopTime = binStartTime + windowSize / 2
-                tetrodesContributions = []
-                tetrodesContributions.append(allPoisson)
-                for tetrode in range(len(clusters[sleepName])):
-                    binProbas = clusters[sleepName][tetrode][np.intersect1d(
-                        np.where(clustersTime[sleepName][tetrode][:, 0] > binStartTime),
-                        np.where(clustersTime[sleepName][tetrode][:, 0] < binStopTime))]
-                    # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
-                    # because some spike might be closest to one position further away than windowSize, 
-                    # yet themselves be close to the spike time
-                    binClusters = np.sum(binProbas, 0)
-                    # Terms that come from spike information
-                    if np.sum(binClusters) > 0.5:
-                        spikePattern = reduce(np.multiply,
-                                               [np.exp(logRF[tetrode][cluster] * binClusters[cluster])
-                                                for cluster in range(np.shape(binClusters)[0])])
-                    else:
-                        spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
-                    tetrodesContributions.append(spikePattern)
-                # Guessed probability map
-                positionProba = reduce(np.multiply, tetrodesContributions)
-                positionProba = np.multiply(positionProba, occupation)  # prior: Occupation deduced from training!!
-                positionProba = positionProba / np.sum(positionProba)
-                inferResults[bin, 2] = np.max(positionProba)
-                
-            inferResultsDic[sleepName] = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2], 
-                                          'times': timeStepPred, 'speed_mask': behaviorData["Times"]["speedFilter"]}
-
-        return inferResultsDic
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000
@@ -422,10 +255,109 @@ class Trainer():
             positionProba = positionProba / np.sum(positionProba)
             inferResults[bin, 2] = np.max(positionProba)
 
-        outputResults = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2], 'times': timeStepPred,
+        # Get the true position
+        idTestEpoch = inEpochs(behaviorData["positionTime"][:,0],
+                               behaviorData['Times']['testEpochs'])
+        realPos = behaviorData["Positions"][idTestEpoch]
+        realTimes = behaviorData["positionTime"][idTestEpoch]
+        idsNN = []
+        for timeStamp in timeStepPred:
+            idsNN.append(np.abs(realTimes - timeStamp).argmin())
+        idsNN = np.array(idsNN)
+        featTrue = realPos[idsNN]
+
+        outputResults = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2], 'times': timeStepPred, 'featureTrue': featTrue,
                                            'speed_mask': behaviorData["Times"]["speedFilter"]}  # , "probaMaps": position_proba
         
         return outputResults
+
+    def sleep_decoding(self, behaviorData, bayesMatrices, windowSizeMS=36):
+        windowSize = windowSizeMS/1000
+
+        clustersTime = {}
+        clusters = {}
+        inferResultsDic = {}
+        for id,sleepName in enumerate(behaviorData["Times"]["sleepNames"]):
+            clustersTime[sleepName] = [self.clusterData['Spike_times'][tetrode][
+                                           inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
+                                                    behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
+                                       for tetrode in range(len(self.clusterData['Spike_times']))]
+            clusters[sleepName] = [self.clusterData['Spike_labels'][tetrode][
+                                       inEpochs(self.clusterData['Spike_times'][tetrode][:, 0],
+                                                behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
+                                   for tetrode in range(len(self.clusterData['Spike_times']))]
+
+            print('\nBUILDING POSITION PROBAS')
+            occupation, marginalRateFunctions, rateFunctions = [bayesMatrices[key] for key in
+                                                                ['occupation', 'marginalRateFunctions',
+                                                                 'rateFunctions']]
+            mask = occupation > (np.max(occupation) / self.maskingFactor)
+
+            ### Build Poisson term
+            allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
+                          range(len(clusters[sleepName]))]
+            allPoisson = reduce(np.multiply, allPoisson)
+
+            ### Log of rate functions
+            logRF = []
+            for tetrode in range(np.shape(rateFunctions)[0]):
+                temp = []
+                for cluster in range(np.shape(rateFunctions[tetrode])[0]):
+                    temp.append(np.log(rateFunctions[tetrode][cluster] + np.min(
+                        rateFunctions[tetrode][cluster][rateFunctions[tetrode][cluster] != 0])))
+                logRF.append(temp)
+
+            timeStepPred = behaviorData["positionTime"][
+                inEpochs(behaviorData["positionTime"][:, 0], behaviorData['Times']['sleepEpochs'][2*id:2*id+2])]
+            # For prediction time step we use the time step of measured speed and feature of the animal.
+            # A prediction is made over all time steps in the test set
+            # and the prediction results can be latter on filter out.
+
+            print("Parallel pykeops bayesian test")
+            outputPOps = parallel_pred_as_NN(timeStepPred, windowSize, allPoisson, clusters[sleepName],
+                                             clustersTime[sleepName], logRF, occupation)
+            print("finished bayesian guess")
+
+            idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
+            inferredPos = np.array([bayesMatrices['bins'][i][idPos[i][:, 0]] for i in
+                                    range(len(bayesMatrices['bins']))])
+            inferredProba = outputPOps[0]
+            inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
+
+            # NOTE: A few values of probability predictions present NaN in pykeops....
+            print("Resolving nan issue from pykeops over a few bins")
+            badBins = np.where(np.isnan(inferResults[:, 2]))[0]
+            for bin in badBins:
+                binStartTime = timeStepPred[bin] - windowSize / 2
+                binStopTime = binStartTime + windowSize / 2
+                tetrodesContributions = []
+                tetrodesContributions.append(allPoisson)
+                for tetrode in range(len(clusters[sleepName])):
+                    binProbas = clusters[sleepName][tetrode][np.intersect1d(
+                        np.where(clustersTime[sleepName][tetrode][:, 0] > binStartTime),
+                        np.where(clustersTime[sleepName][tetrode][:, 0] < binStopTime))]
+                    # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+                    # because some spike might be closest to one position further away than windowSize,
+                    # yet themselves be close to the spike time
+                    binClusters = np.sum(binProbas, 0)
+                    # Terms that come from spike information
+                    if np.sum(binClusters) > 0.5:
+                        spikePattern = reduce(np.multiply,
+                                              [np.exp(logRF[tetrode][cluster] * binClusters[cluster])
+                                               for cluster in range(np.shape(binClusters)[0])])
+                    else:
+                        spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
+                    tetrodesContributions.append(spikePattern)
+                # Guessed probability map
+                positionProba = reduce(np.multiply, tetrodesContributions)
+                positionProba = np.multiply(positionProba, occupation)  # prior: Occupation deduced from training!!
+                positionProba = positionProba / np.sum(positionProba)
+                inferResults[bin, 2] = np.max(positionProba)
+
+            inferResultsDic[sleepName] = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2],
+                                          'times': timeStepPred, 'speed_mask': behaviorData["Times"]["speedFilter"]}
+
+        return inferResultsDic
 
 
 ############## Utils ##############
@@ -443,59 +375,6 @@ def find_next_bin(times,clusters,start,stop,start_time,stop_time):
         newStopId +=1
     newStopId = newStopId-1
     return newStartID,newStopId,clusters[newStartID:newStopId+1]
-
-def parallelize_prediction(timeStepPred, windowSize, allPoisson, clusters, clustersTime, logRF, occupancy):
-    # Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
-    # Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
-
-    binStartTime = timeStepPred - windowSize/2
-    binStopTime = timeStepPred + windowSize/2
-
-    # we will progressively add each tetrode contribution
-    tetrodeContributions = 1
-    for tetrode in range(len(clusters)):
-
-        gctLazy = LazyTensor_np(clustersTime[tetrode][:,None])
-        binStartTimeLazy = LazyTensor_np(binStartTime[None,:])
-        binStopTimeLazy = LazyTensor_np(binStopTime[None,:])
-        goodStart = (gctLazy - binStartTimeLazy).relu().sign() # similar to gct_lazy > bin_start_times.lazy
-        goodStop = (binStopTimeLazy - gctLazy).relu().sign()
-        # size: (Number of signal time step,Number of prediction bin,1), indicate for each bin the time step in the bin.
-        goodBins = goodStart*goodStop
-        gcLazy = LazyTensor_np(clusters[tetrode][:,None,:])
-        # For each bin, we gather for each cluster in the tetrode the number of spike detected in signal measurements inside this bin.
-        # gathering can be effectively implemented by a element wise matrix multiplication with the mask good_bins
-        binClusters = (gcLazy*goodBins).sum(axis=0)
-
-        # Prepare for pykeops operations:
-        logRF_r = np.transpose(np.array(logRF[tetrode]), axes=[1, 2, 0])
-        logRF_r = np.reshape(logRF_r,newshape=[np.prod(logRF_r.shape[0:-1]),logRF_r.shape[-1]])
-        log_RFLazy = LazyTensor_np(logRF_r[None,:,:])
-        binClustersLazy = LazyTensor_np(binClusters[:,None,:])
-
-        # the Log firing rate of each cluster is multiplied by the number of bin cluster, and the sum is performed over the
-        # number of cluster in the tetrode
-        res = (log_RFLazy * binClustersLazy).sum(dim=-1).exp()
-        tetrodeContributions = tetrodeContributions * res
-
-    #Finally we need to add the Poisson terms common to all tetrode finalS
-    # position posterior estimation:
-    poisson_r = np.reshape(allPoisson,newshape=[np.prod(allPoisson.shape)])[:,None]
-    allPoisson_Vj = pykeops.numpy.Vj(poisson_r)
-    tetrodeContributions = tetrodeContributions * allPoisson_Vj
-
-    occupancy_r = np.reshape(occupancy, newshape=[np.prod(occupancy.shape)])[:,None]
-    occupancyContrib = pykeops.numpy.Vj(occupancy_r)
-    tetrodeContributions = tetrodeContributions * occupancyContrib
-
-    # If we had only one electrode:
-    # ... but we need to sum over the different electrodes.
-    outputPos = tetrodeContributions.max_argmax_reduction(axis=1)
-    # We also need to normalize the probability:
-    sumProba = tetrodeContributions.sum_reduction(axis=1)
-    outputPos = (outputPos[0]/sumProba,outputPos[1], )
-
-    return outputPos
 
 def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clustersTime, logRF, occupancy):
     # Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
