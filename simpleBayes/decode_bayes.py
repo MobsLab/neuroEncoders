@@ -15,6 +15,7 @@ from importData import import_clusters
 from importData.epochs_management import inEpochs
 
 # !!!! TODO: all train-test in one function, too much repetition
+# TODO: option to remove zero cluster from training and testing
 
 # trainer class
 class Trainer():

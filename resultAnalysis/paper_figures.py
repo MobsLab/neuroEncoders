@@ -38,24 +38,6 @@ class PaperFigures():
         self.folderAligned = os.path.join(self.projectPath.dataPath, 'aligned')
 
     def load_data(self):
-        # CSV files helping to align the pop vector from spike used in spike sorting
-        # with predictions from spike used by the NN are also provided.
-        sspikesTrain = []
-        swspikesTrain = []
-        sspikesTest = []
-        swspikesTest = []
-
-        for ws in self.timeWindows:
-            sspikesTrain.append(np.array(
-                pd.read_csv(os.path.join(self.folderAligned, str(ws), "train", "spikeMat_window_popVector.csv")).values[:,1:],dtype=np.float32))
-            swspikesTrain.append(np.array(
-                pd.read_csv(os.path.join(self.folderAligned, str(ws), "train", "startTimeWindow.csv")).values[:,1:],dtype=np.float32))
-            sspikesTest.append(np.array(
-                pd.read_csv(os.path.join(self.folderAligned ,str(ws), "test", "spikeMat_window_popVector.csv")).values[:,1:],dtype=np.float32))
-            swspikesTest.append(np.array(
-                pd.read_csv(os.path.join(self.folderAligned ,str(ws), "test", "startTimeWindow.csv")).values[:,1:],dtype=np.float32))
-
-
         ### Load the NN prediction without using noise:
         lPredPos = []
         fPredPos = []
@@ -81,14 +63,11 @@ class PaperFigures():
         lTruePos = [self.l_function(f)[1] for f in truePos]
         
         # Output
-        self.spikesAligned = {
-            'spikesTrain': sspikesTrain, 'windowsTrain': swspikesTrain, 'spikesTest': sspikesTest, 'windowsTest': swspikesTest
-        }
         self.resultsNN = {
             'time': time, 'speedMask': speedMask, 'linPred': lPredPos, 'fullPred': fPredPos, 'truePos': truePos, 'linTruePos': lTruePos, 'predLoss': lossPred
         }
         
-        return self.spikesAligned, self.resultsNN
+        return self.resultsNN
 
     def test_bayes(self):
 
@@ -100,8 +79,9 @@ class PaperFigures():
         probaBayes = []
         fPredBayes = []
         for i,ws in enumerate(self.timeWindows):
-            outputsBayes = self.trainerBayes.test_as_NN(self.behaviorData, self.bayesMatrices, # weird time - check
-                self.spikesAligned['windowsTest'][i][:self.resultsNN['time'][i].shape[0]].astype(dtype=np.float64), windowSizeMS=ws) # remove division by sampling rate - it is corrected in the comparator
+            timesToPredict = self.resultsNN['time'][i][:, np.newaxis].astype(np.float64)
+            outputsBayes = self.trainerBayes.test_as_NN(self.behaviorData, self.bayesMatrices,
+                                                        timesToPredict, windowSizeMS=ws)
             infPos = outputsBayes["featurePred"][:, 0:2]
             _, linearBayesPos = self.l_function(infPos)
             
@@ -257,6 +237,8 @@ class PaperFigures():
         fig.show()
         fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.png')))
         fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.svg')))
+
+        return lErrorNN_mean, lErrorNN_std, lErrorBayes_mean, lErrorBayes_std
         
     def nnVSbayes(self, speed='all'):
         # Masks

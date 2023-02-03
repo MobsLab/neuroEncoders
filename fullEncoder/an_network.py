@@ -139,7 +139,7 @@ class LSTMandSpikeNetwork():
                 # where we have filled lines corresponding to spike time of the group
                 # with the feature computed by the spike net; and let other time with a value of 0:
                 # The index of spike detected then become similar to a time value...
-                filledFeatureTrain = tf.reshape(filledFeatureTrain, [self.params.batchSize, -1,self.params.nFeatures])
+                filledFeatureTrain = tf.reshape(filledFeatureTrain, [self.params.batchSize, -1, self.params.nFeatures])
                 # Reshaping the result of the spike net as batchSize:NbTotSpikeDetected:nFeatures
                 # this allow to separate spikes from the same window or from the same batch.
                 allFeatures.append(filledFeatureTrain)
