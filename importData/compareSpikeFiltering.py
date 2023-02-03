@@ -10,14 +10,20 @@ from fullEncoder import nnUtils
 from importData.rawdata_parser import get_params
 from importData.epochs_management import inEpochsMask
 
-## Different strategies are used for spike filtering
-# in the case of the NN and of spike sorting.
+## Different strategies are used for spike filtering in the case of the NN and of spike sorting.
 # To make sure we end up with a fair comparison between the bayesian algorithm
-# and the NN, here we look at the waveforms found (including the noise cluster)
-# by the algorithm for spike sorting and use them to generate a dataset for the NN
-# goal: prove that by using more information (no human biased intervention), the NN
-# can extract more information
-# We also compare the shape of waveforms extracted by the different filtering strategies.
+# and the NN, one needs to give the same spike input to either decoding algorithm,
+#
+# This is done to have clear population-spike trains for the NN as a file:
+# we translate the times of spikes found by the manual spike sorting algo
+# (including the noise cluster) to a dataset for the NN
+
+# Clarification from Dima: what is not done really is a bayesian decoder without noise
+
+# TODO: another important idea: get detected spikes from the NN and use them to
+#  do bayesian decoding. This would be a fair comparison of the two methods.
+#  And, inversly, to input spike sorting results to the NN decoder.
+#  However, none of this is done here.
 
 class WaveFormComparator(): 
     def __init__(self, projectPath, params, behavior_data, windowsizeMS=36, useTrain=True, sleepName=[]): #todo allow for speed filtering
@@ -105,9 +111,11 @@ class WaveFormComparator():
         lenInputNN = [] # Number of spikes per window
         meanTimeWindow = [] # Mean time of spikes in the window
         startTimeWindow = [] # Start of windows
+        startTimeWindowInSamples = [] # Start of windows in samples
         for _, startTime in tqdm(enumerate(inputNN)):
             if len(startTime) > 0:
                 startTimeWindow += [startTime[0] / self.samplingRate]
+                startTimeWindowInSamples += [startTime[0]]
             else:
                 startTimeWindow += [np.nan] # we make sure these windows are never selected
             lenInputNN += [len(startTime)]
@@ -116,17 +124,18 @@ class WaveFormComparator():
         lenInputNN = np.array(lenInputNN)
         meanTimeWindow = np.array(meanTimeWindow)
         startTimeWindow = np.array(startTimeWindow)
+        startTimeWindowInSamples = np.array(startTimeWindowInSamples)
         # Get rid of empty windows
-        goodStartTimeWindow = startTimeWindow[np.logical_not(np.isnan(startTimeWindow))]
-        stopTimeWindow = goodStartTimeWindow+int(windowsizeMS/1000*self.samplingRate)
+        goodStartTimeWindowInSamples = startTimeWindowInSamples[np.logical_not(np.isnan(startTimeWindowInSamples))]
+        stopTimeWindowInSamples = goodStartTimeWindowInSamples+int(windowsizeMS/1000*self.samplingRate)
         
         
         ### Mapping spike sorted spike times to windows
         spikeMat_times_window = np.zeros([trainerBayes.spikeMatTimes.shape[0], 2])
         spikeMat_times_window[:, 0] = trainerBayes.spikeMatTimes[:, 0]
         spikeTime_lazy = pykeops.numpy.LazyTensor(trainerBayes.spikeMatTimes[:,0][:,None]*self.samplingRate,axis=0)
-        startTimeWindow_lazy = pykeops.numpy.Vj(goodStartTimeWindow[:,None].astype(dtype=np.float64))
-        stopTimeWindow_lazy = pykeops.numpy.Vj(stopTimeWindow[:,None].astype(dtype=np.float64))
+        startTimeWindow_lazy = pykeops.numpy.Vj(goodStartTimeWindowInSamples[:,None].astype(dtype=np.float64))
+        stopTimeWindow_lazy = pykeops.numpy.Vj(stopTimeWindowInSamples[:,None].astype(dtype=np.float64))
         ans = (spikeTime_lazy-startTimeWindow_lazy).relu().sign() * ((stopTimeWindow_lazy-spikeTime_lazy).relu().sign())
         ans2 = ans.max_argmax_reduction(dim=1)
         ans2[1][np.equal(ans2[0],0)] = -1

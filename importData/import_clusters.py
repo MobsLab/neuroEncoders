@@ -40,7 +40,7 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
 				st = (np.array([[float(resStr[n])/samplingRate] 
                     for n in tqdm.tqdm(range(len(cluStr)-1))]))
 
-				# Efficient wqy to get the closest position_time to each spike time:
+				# Efficient way to get the closest position_time to each spike time:
 				lastBestId = 0
 				posID = []
 				for n in tqdm.tqdm(range(len(st))):
