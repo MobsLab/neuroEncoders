@@ -3,6 +3,7 @@
 
 # Python-related folders and files
 __pycache__/
+.pytest_cache/
 *.pyc
 *.ipynb
 

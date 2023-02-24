@@ -8,7 +8,6 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 import matplotlib as mplt
-from brokenaxes import brokenaxes
 
 from interval import interval
 
