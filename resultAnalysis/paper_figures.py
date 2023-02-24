@@ -193,31 +193,44 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, ('cumulativeHist_' + str(speed) + '.png')))
         fig.savefig(os.path.join(self.folderFigures, ('cumulativeHist_' + str(speed) + '.svg')))
 
-    def mean_linerrors(self, speed='all'):
+    def mean_linerrors(self, speed='all', filtProp=None):
         ### Prepare the data
         # Masks
         habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
                          for i in range(len(self.timeWindows))]
         habMaskFast = [(habMask[i]) * (self.resultsNN['speedMask'][i]) for i in range(len(self.timeWindows))]
         habMaskSlow = [(habMask[i]) * np.logical_not(self.resultsNN['speedMask'][i][i]) for i in range(len(self.timeWindows))]
+        if filtProp is not None:
+            # Calculate filtering values
+            sortedLPred = [np.argsort(self.resultsNN['predLoss'][iw]) for iw in range(len(self.timeWindows))]
+            thresh = [np.squeeze(self.resultsNN['predLoss'][iw][sortedLPred[iw][int(len(sortedLPred[iw])*filtProp)]])
+                      for iw in range(len(self.timeWindows))]
+            filters_lpred = [np.ones(self.resultsNN['time'][iw].shape).astype(np.bool)*
+                             np.less_equal(self.resultsNN['predLoss'][iw],thresh[iw]) for iw in range(len(self.timeWindows))]
+        else:
+            filters_lpred = [np.ones(habMask[i].shape).astype(np.bool) for i in range(len(self.timeWindows))]
+        finalMasks = [habMask[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+        finalMasksFast = [habMaskFast[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+        finalMasksSlow = [habMaskSlow[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+
         # Data
         lErrorNN = [np.abs(self.resultsNN['linTruePos'][i]-self.resultsNN['linPred'][i]) for i in range(len(self.timeWindows))]
         lErrorBayes = [np.abs(self.resultsNN['linTruePos'][i]-self.resultsBayes['linPred'][i]) for i in range(len(self.timeWindows))]
         if speed == 'all':
-            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))])
-            lErrorNN_std = np.array([np.std(lErrorNN[i][habMask[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMask[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'fast':
-            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
-            lErrorNN_std = np.array([np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'slow':
-            lErrorNN_mean = np.array([np.mean(lErrorNN[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))])
-            lErrorNN_std = np.array([np.std(lErrorNN[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][habMaskSlow[i]]) for i in range(len(self.timeWindows))])
-            lErrorBayes_std = np.array([np.std(lErrorBayes[i][habMaskFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
         else:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')        
         
@@ -235,8 +248,12 @@ class PaperFigures():
         ax.set_ylabel("mean linear error",fontsize="xx-large")
         fig.legend(loc=(0.6,0.7),fontsize="xx-large")
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.png')))
-        fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.svg')))
+        if filtProp is None:
+            fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.png')))
+            fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '.svg')))
+        else:
+            fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '_filt.png')))
+            fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '_filt.svg')))
 
         return lErrorNN_mean, lErrorNN_std, lErrorBayes_mean, lErrorBayes_std
         
@@ -434,8 +451,6 @@ class PaperFigures():
         fig.show()
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.png')))
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.svg')))
-
-
 
 # ------------------------------------------------------------------------------------------------------------------------------
 

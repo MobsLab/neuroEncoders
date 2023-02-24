@@ -452,7 +452,7 @@ class LSTMandSpikeNetwork():
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
         featureTrue = np.reshape(fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]])
-        print("gathering times of the centre in the tiw window")
+        print("gathering times of the centre in the time window")
         datasetTimes = dataset.map(lambda x, y: x["time"],num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
         times = np.reshape(times, [outputTest[0].shape[0]])
@@ -481,8 +481,8 @@ class LSTMandSpikeNetwork():
 
         return testOutput
 
-    def testSleep(self, behaviorData, windowsizeMS=36, isPredLoss=True):
-        
+    def testSleep(self, behaviorData, l_function=[],  windowsizeMS=36, isPredLoss=False):
+
         # Create the folder
         if not os.path.isdir(os.path.join(self.folderResultSleep, str(windowsizeMS))):
             os.makedirs(os.path.join(self.folderResultSleep, str(windowsizeMS)))
@@ -511,26 +511,36 @@ class LSTMandSpikeNetwork():
 
             dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_sequence(self.params, *vals, batched=True),
                 num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.map(lambda x:self.create_indices(x,True), num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(self.create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(lambda vals: ( vals, {"tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
+                                                        "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize)}),
+                                  num_parallel_calls=tf.data.AUTOTUNE)
             dataset.cache()
             dataset.prefetch(tf.data.AUTOTUNE)
             # Infer
             print(f'Inferring {sleepName} values')
             output = self.model.predict(dataset,verbose=1)
-            print(f'gathering exact time of spikes for {sleepName}')
-            datasetTimes = dataset.map(lambda x: x["time"],num_parallel_calls=tf.data.AUTOTUNE)
+
+            # Post-infer management
+            print(f'gathering times of the centre in the time window for {sleepName}')
+            datasetTimes = dataset.map(lambda x, y: x["time"], num_parallel_calls=tf.data.AUTOTUNE)
             times = list(datasetTimes.as_numpy_iterator())
             times = np.ravel(times)
             print(f'gathering indices of spikes relative to coordinates for {sleepName}')
-            datasetPosIndex = dataset.map(lambda x: x["pos_index"],num_parallel_calls=tf.data.AUTOTUNE)
+            datasetPosIndex = dataset.map(lambda x, y: x["pos_index"], num_parallel_calls=tf.data.AUTOTUNE)
             posIndex = list(datasetPosIndex.as_numpy_iterator())
             posIndex = np.ravel(np.array(posIndex))
             #  
-            IDdat = dataset.map(lambda vals: vals["indexInDat"], num_parallel_calls=tf.data.AUTOTUNE)
+            IDdat = dataset.map(lambda vals, y: vals["indexInDat"], num_parallel_calls=tf.data.AUTOTUNE)
             IDdat = list(IDdat.as_numpy_iterator())
-            outLoss = np.expand_dims(output[2], axis=1)    
-            predictions[sleepName] = {"featurePred": output[0][:,:2], "predLoss" : output[1], "times": times,
-                                      "posIndex":posIndex, "lossFromOutputLoss" : outLoss, "indexInDat": IDdat}
+            outLoss = np.expand_dims(output[2], axis=1)
+
+            predictions[sleepName] = {"featurePred": output[0], "predLoss": output[1], "times": times,
+                                      "posIndex": posIndex, "lossFromOutputLoss": outLoss, "indexInDat": IDdat}
+            if l_function:
+                projPredPos,linearPred = l_function(output[0][:,:2])
+                predictions[sleepName]["projPred"] = projPredPos
+                predictions[sleepName]["linearPred"] = linearPred
             
         # Save the results
         for key in predictions.keys():
