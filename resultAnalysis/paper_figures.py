@@ -20,7 +20,8 @@ white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
 ], N=256)
 
 class PaperFigures():
-    def __init__(self, projectPath, behaviorData, trainerBayes, l_function, bayesMatrices={}, timeWindows=[36]): # I am here
+    def __init__(self, projectPath, behaviorData, trainerBayes, l_function,
+                 bayesMatrices={}, timeWindows=[36]):
         self.projectPath = projectPath
         self.trainerBayes = trainerBayes
         self.behaviorData = behaviorData
@@ -66,8 +67,6 @@ class PaperFigures():
         self.resultsNN = {
             'time': time, 'speedMask': speedMask, 'linPred': lPredPos, 'fullPred': fPredPos, 'truePos': truePos, 'linTruePos': lTruePos, 'predLoss': lossPred
         }
-        
-        return self.resultsNN
 
     def test_bayes(self):
 
@@ -452,70 +451,55 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.png')))
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.svg')))
 
-# ------------------------------------------------------------------------------------------------------------------------------
-
-    ### Figure 4: we take an example place cell,
+    # ------------------------------------------------------------------------------------------------------------------------------
+    ## Figure 4: we take an example place cell,
     # and we scatter plot a link between its firing rate and the decoding.
 
-   # def calc_tuning_curve(self, spikes_aligned, resultsNN):
+    def plot_pc_tuning_curve_and_predictions(self, ws=36):
+        dirSave = os.path.join(self.folderFigures, 'tuningCurves')
+        if not os.path.isdir(dirSave):
+            os.mkdir(dirSave)
 
-    #     # Prepare arrays for tuning curve calculation
-    #     spikes_train = spikes_aligned['spikes_train'][0]
-    #     spikes_test = spikes_aligned['spikes_test'][0]
-        
-    #     spikeMat_popVector_hab = np.zeros([timePreds_train.shape[0]+timePreds.shape[0],
-    #                                     spikeMat_window_popVector.shape[1]])
-    #     spikeMat_popVector_hab[:timePreds_train.shape[0],:] = spikeMat_window_popVector_train[:timePreds_train.shape[0]]
-    #     spikeMat_popVector_hab[timePreds_train.shape[0]:, :] = spikeMat_window_popVector[:timePreds.shape[0]]
-    #     timePreds_hab = np.concatenate([timePreds_train,timePreds])
-    #     trueLinearPos_hab = np.concatenate([trueLinearPos_train,trueLinearPos])
-    #     #
-    #     #
-    # #
-    #     placeFieldSort = trainerBayes.linearPosArgSort
-    #     prefPos = trainerBayes.linearPreferredPos
-        
-    #     for target in [5,16,49,46,68,71]:
-    #         pcId = np.where(np.equal(placeFieldSort,target))[0][0] # newID_PlaceToStudy[0]
-    #         prefPosPC = prefPos[pcId]
-    #         #let us compute the tuning curve of the neuron for the linear variable:
-    #         binsLinearPos = np.arange(0,1,step=0.01)
-    #         pcFiring = spikeMat_popVector_hab[:, pcId+1]
-    #         # firing = np.array([np.sum(pcFiring[np.greater_equal(trueLinearPos_hab,binsLinearPos[id])*
-    #         #                                    np.less(trueLinearPos_hab,binsLinearPos[id+1])])/np.sum(np.greater_equal(trueLinearPos_hab,binsLinearPos[id])*
-    #         #                                    np.less(trueLinearPos_hab,binsLinearPos[id+1]))
-    #         #     for id in range(len(binsLinearPos)-1)])
-    #         firing = np.array([np.sum(pcFiring[np.greater_equal(trueLinearPos_hab,binsLinearPos[id])*
-    #                                         np.less(trueLinearPos_hab,binsLinearPos[id+1])])
-    #             for id in range(len(binsLinearPos)-1)])
-    #         tc_pc = firing/(0.032)
+        iwindow = self.timeWindows.index(ws)
+        # Calculate the tuning curve of all place cells
+        linearTuningCurves, binEdges = self.trainerBayes.calculate_linear_tuning_curve(self.l_function,
+                                                                                       self.behaviorData)
+        placeFieldSort = self.trainerBayes.linearPosArgSort
+        loadName = os.path.join(self.projectPath.dataPath, 'aligned', str(ws),
+                                'test', 'spikeMat_window_popVector.csv')
+        spikePopAligned = np.array(pd.read_csv(loadName).values[:,1:], dtype=np.float32)
+        spikePopAligned = spikePopAligned[:len(self.resultsNN['linTruePos'][iwindow]), :]
+        predLoss = self.resultsNN['predLoss'][iwindow]
+        normalize = lambda x: (x-np.min(x))/(np.max(x)-np.min(x))
 
-    #         pcFiring_test = spikeMat_window_popVector[:timePreds.shape[0], pcId + 1]
-    #         #When making a prediction around the pcFiring, the proba should be reflecting the firing rate of the cell...
-    #         predAroundPrefPos =np.greater(pcFiring_test,0)
+        for icell, tuningCurve in enumerate(linearTuningCurves):
+            pcId = np.where(np.equal(placeFieldSort, icell))[0][0]
+            spikeHist = spikePopAligned[:, pcId + 1][:len(self.resultsNN['linTruePos'][iwindow])]
+            spikeMask =np.greater(spikeHist, 0)
 
-    #         error = np.abs(linearNoNoisePos_varyingWind[0]-trueLinearPos)
-    #         #using predicted Error:
-    #         normalize01 = lambda x: (x-np.min(x))/(np.max(x)-np.min(x))
-    #         cm = plt.get_cmap("gray")
-    #         fig,ax = plt.subplots()
-    #         ax.scatter(linearNoNoisePos_varyingWind[0][predAroundPrefPos],
-    #                 (pcFiring_test/np.sum(spikeMat_window_popVector[:timePreds.shape[0],:],axis=1))[predAroundPrefPos],s=12,
-    #                 c=cm(normalize01(lossPredNoNoise_varyingWind[0][predAroundPrefPos])),edgecolors="black",linewidths=0.2)
-    #         ax.scatter(linearNoNoisePos_varyingWind[0][predAroundPrefPos*np.greater(error,0.5)],
-    #                 (pcFiring_test/np.sum(spikeMat_window_popVector[:timePreds.shape[0],:],axis=1))[predAroundPrefPos*np.greater(error,0.5)],s=24,
-    #                 c="white",alpha=0.1,edgecolors="red",linewidths=0.4)
+            if spikeMask.any(): # some neurons do not spike here
+                cm = plt.get_cmap("gray")
+                fig,ax = plt.subplots(figsize=(14,9))
+                ax.scatter(self.resultsNN['linTruePos'][iwindow][spikeMask],
+                          (spikeHist/np.sum(spikePopAligned,axis=1))[spikeMask], s=12,
+                          c=cm(normalize(predLoss[spikeMask])), edgecolors="black", linewidths=0.2)
+                plt.colorbar(plt.cm.ScalarMappable(plt.Normalize(np.min(predLoss[spikeMask]),
+                                                                 np.max(predLoss[spikeMask])),
+                                                   cmap=cm),
+                             label="Predicted loss")
+                ax.set_xlabel("predicted linear position")
+                ax.set_ylabel(f"Number of spike \n relative to total number of spike \n in {ws}ms window")
+                at = ax.twinx()
+                at.plot(binEdges[1:], tuningCurve, c="navy",alpha=0.5)
+                at.set_ylabel("firing rate",color="navy")
+                fig.tight_layout()
+                fig.show()
 
-    #         plt.colorbar(plt.cm.ScalarMappable(plt.Normalize(np.min(lossPredNoNoise_varyingWind[0][predAroundPrefPos]),np.max(lossPredNoNoise_varyingWind[0][predAroundPrefPos])),cmap=cm)
-    #                     ,label="NN log error \n estimate")
-    #         ax.set_xlabel("predicted position")
-    #         ax.set_ylabel("Number of spike \n relative to total number of spike \n in 36ms window")
-    #         at = ax.twinx()
-    #         at.plot(binsLinearPos[:-1],tc_pc,c="navy",alpha=0.5)
-    #         # ax[0].set_xlabel("linear position")
-    #         at.set_ylabel("firing rate",color="navy")
-    #         fig.tight_layout()
-    #         fig.show()
+                fig.savefig(os.path.join(dirSave, (f'{ws}_tc_pred_cluster{pcId}.png')))
+                # fig.savefig(os.path.join(dirSave, (f'{ws}_tc_pred_cluster{pcId}.svg')))
+                plt.close()
+
+
     
     # def fft_pc():
     #     #Compute Fourier transform of predicted positions:
@@ -538,87 +522,3 @@ class PaperFigures():
     #     ax.set_xlabel("frequency, Hz")
     #     ax.set_ylabel("Fourrier Power")
     #     fig.show()
-
-    # ### Let us pursue on comparing NN and Bayesian:
-
-    # import tqdm
-    # ## We will compare the NN with bayesian, random and shuffled bayesian
-    # errors = []
-    # errorsRandomMean = []
-    # errorsRandomStd = []
-    # errorsShuffleMean = []
-    # errorsShuffleStd = []
-    # for lossVal in tqdm.tqdm(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1)):
-    #     bayesPred = linearpos_bayes_varying_window[0][
-    #         np.less_equal(lossPredNoNoise_varyingWind[0][:,0], lossVal)]
-    #     NNpred = linearNoNoisePos_varyingWind[0][:,0][np.less_equal(lossPredNoNoise_varyingWind[0][:,0], lossVal)]
-    #     if (NNpred.shape[0] > 0):
-    #         randomPred = np.random.uniform(0, 1, [NNpred.shape[0], 100])
-    #         errors += [np.mean(np.abs(bayesPred - NNpred))]
-    #         errRand = np.mean(np.abs(NNpred[:, None] - randomPred), axis=0)
-    #         errorsRandomMean += [np.mean(errRand)]
-    #         errorsRandomStd += [np.std(errRand)]
-    #     shuffles = []
-    #     for id in range(100):
-    #         b = np.copy(bayesPred)
-    #         np.random.shuffle(b)
-    #         shuffles += [np.mean(np.abs(NNpred - b))]
-    #     errorsShuffleMean += [np.mean(shuffles)]
-    #     errorsShuffleStd += [np.std(shuffles)]
-    # errorsRandomMean = np.array(errorsRandomMean)
-    # errorsRandomStd = np.array(errorsRandomStd)
-    # errorsShuffleMean = np.array(errorsShuffleMean)
-    # errorsShuffleStd = np.array(errorsShuffleStd)
-    # fig, ax = plt.subplots()
-    # ax.plot(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1), errors, label="bayesian")
-    # ax.plot(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1), errorsRandomMean, color="red",
-    #         label="random Prediction")
-    # ax.fill_between(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1),
-    #                 errorsRandomMean + errorsRandomStd, errorsRandomMean - errorsRandomStd, color="orange")
-    # ax.plot(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1), errorsShuffleMean, color="purple",
-    #         label="shuffle bayesian")
-    # ax.fill_between(np.arange(np.min(lossPredNoNoise_varyingWind[0][:,0]), np.max(lossPredNoNoise_varyingWind[0][:,0]), step=0.1),
-    #                 errorsShuffleMean + errorsShuffleStd, errorsShuffleMean - errorsShuffleStd, color="violet")
-    # ax.set_ylabel("linear distance from NN predictions to Bayesian \n or random predictions")
-    # ax.set_xlabel("probability filtering value")
-    # ax.set_title("Wake")
-    # fig.legend(loc=[0.2, 0.2])
-    # fig.show()
-    # plt.savefig(os.path.join(projectPath.resultsPath, "paperFigure_lossPred", "fig_lineardiffBayesNN_wake.png"))
-    # plt.savefig(os.path.join(projectPath.resultsPath, "paperFigure_lossPred", "fig_lineardiffBayesNN_wake.svg"))
-
-    # fig,ax = plt.subplots()
-    # ax.scatter(linearNoNoisePos_varyingWind[0][habEpochMaskandSpeeds[0]],lossPredNoNoise_varyingWind[0][habEpochMaskandSpeeds[0]],s=1,c="grey")
-    # ax.hist2d(linearNoNoisePos_varyingWind[0][habEpochMaskandSpeeds[0],0],lossPredNoNoise_varyingWind[0][habEpochMaskandSpeeds[0],0],(30,30),cmap=white_viridis,alpha=0.4)
-    # ax.set_xlabel("predicted linear position")
-    # ax.set_ylabel("NN predicted loss")
-    # fig.show()
-    # # fig,ax = plt.subplots()
-    # # ax.scatter(linearNoNoisePos_varyingWind[0][habEpochMask*np.logical_not(windowmask_speed)],lossPredNoNoise_varyingWind[0][habEpochMask*np.logical_not(windowmask_speed)],s=1,c="grey")
-    # # ax.hist2d(linearNoNoisePos_varyingWind[0][habEpochMask*np.logical_not(windowmask_speed),0],lossPredNoNoise_varyingWind[0][habEpochMask*np.logical_not(windowmask_speed),0],(30,30),cmap=white_viridis,alpha=0.4)
-    # # ax.set_xlabel("predicted linear position")
-    # # ax.set_ylabel("NN predicted loss")
-    # # fig.show()
-
-    # #
-    # # mask_right_arm_pred_argmax = np.greater(linearNoNoisePos_varyingWind[0],0.7)
-    # #
-    # # error_rightarm = np.abs(linearNoNoisePos_varyingWind[0]-trueLinearPos)[mask_right_arm_pred_argmax*habEpochMaskandSpeed]
-    # # error_OtherArm = np.abs(linearNoNoisePos_varyingWind[0] - trueLinearPos)[
-    # #     np.logical_not(mask_right_arm_pred_argmax) * habEpochMaskandSpeed]
-    # #
-    # # fig,ax = plt.subplots()
-    # # ax.scatter(linearNoNoisePos_varyingWind[0][mask_right_arm_pred_argmax*habEpochMaskandSpeed],error_rightarm,s=1)
-    # # fig.show()
-    # #
-    # # mask_middle_arm_pred_argmax = np.greater(linearNoNoisePos_varyingWind[0], 0.3)*np.less(linearNoNoisePos_varyingWind[0], 0.7)
-    # # error_MiddleArm = np.abs(linearNoNoisePos_varyingWind[0] - trueLinearPos)[
-    # #     mask_middle_arm_pred_argmax * habEpochMaskandSpeed]
-    # # fig,ax = plt.subplots()
-    # # ax.hist(error_rightarm,color="blue",histtype="step",density=True,bins=50)
-    # # # ax.vlines(np.mean(error_rightarm),ymin=0,ymax=16,color="blue")
-    # # ax.vlines(np.median(error_rightarm), ymin=0, ymax=16, color="blue")
-    # # ax.hist(error_MiddleArm,color="red",histtype="step",density=True,bins=50)
-    # # # ax.vlines(np.mean(error_MiddleArm),ymin=0,ymax=16,color="red")
-    # # ax.vlines(np.median(error_MiddleArm), ymin=0, ymax=16, color="red")
-    # # fig.show()

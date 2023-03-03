@@ -26,5 +26,5 @@ if [ ! -f "$path""SWR.mat" ] || [ ! -f "$path""$log" ]; then
         echo A problem happened while extracting matlab tsd.
         exit 1
 else
-        echo Behavior data exported.
+        echo Ripples data exported.
 fi
