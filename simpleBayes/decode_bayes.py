@@ -13,6 +13,7 @@ import pykeops as pykeops
 from simpleBayes import butils
 from importData import import_clusters
 from importData.epochs_management import inEpochs
+from transformData.linearizer import UMazeLinearizer
 
 # !!!! TODO: all train-test in one function, too much repetition
 # TODO: option to remove zero cluster from training and testing
@@ -359,6 +360,44 @@ class Trainer():
                                           'times': timeStepPred, 'speed_mask': behaviorData["Times"]["speedFilter"]}
 
         return inferResultsDic
+
+    def calculate_linear_tuning_curve(self, linearization_function, behaviorData):
+        linearPlaceFields = []
+        # Create one large epoch that comprises both train and test dataset
+        minTime = np.min(np.concatenate((behaviorData['Times']['trainEpochs'],
+                                         behaviorData['Times']['testEpochs'])))
+        maxTime = np.max(np.concatenate((behaviorData['Times']['trainEpochs'],
+                                         behaviorData['Times']['testEpochs'])))
+        epochForField = np.array([minTime, maxTime])
+        linearTraj = linearization_function(behaviorData['Positions'])[1]
+        timesMask = inEpochs(np.squeeze(behaviorData['positionTime']), epochForField)[0]
+        timeLinear = np.squeeze(behaviorData['positionTime'][timesMask, :])
+        linearTraj = linearTraj[timesMask]
+        linSpace = np.arange(min(linearTraj), max(linearTraj), step=0.01)
+        histPos, binEdges = np.histogram(linearTraj, bins=linSpace)
+
+        for tetrode in range(len(self.clusterData['Spike_times'])):
+            spikeTimesTetrode = np.squeeze(self.clusterData['Spike_times'][tetrode])
+            for icell in range(self.clusterData['Spike_labels'][tetrode].shape[1]):
+                cellMask = self.clusterData['Spike_labels'][tetrode][:, icell] == 1
+                spikeTimes = spikeTimesTetrode[cellMask]
+                spikeTimes = spikeTimes[inEpochs(spikeTimes, epochForField)]
+
+                # Find position of the animal at the time of each spike
+                if spikeTimes.any():
+                    spikeTimesLazy = pykeops.numpy.Vj(spikeTimes[:,None].astype(dtype=np.float64))
+                    timeLinearLazy = pykeops.numpy.Vi(timeLinear[:,None].astype(dtype=np.float64))
+                    idPosInSpikes = ((spikeTimesLazy - timeLinearLazy).abs().argmin(axis=0))[:, 0]
+                    spikePos = linearTraj[idPosInSpikes]
+                    # Create histogram of spike position (find P(spikes|position))
+                    histSpikes, binEdges = np.histogram(spikePos, bins=linSpace)
+                    # Find tuning curve
+                    histTuning = histSpikes / histPos
+                    linearPlaceFields.append(histTuning) # save
+                else:
+                    linearPlaceFields.append(np.zeros(len(linSpace) - 1))
+
+        return linearPlaceFields, binEdges
 
 
 ############## Utils ##############
