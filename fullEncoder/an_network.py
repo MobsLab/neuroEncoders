@@ -12,6 +12,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import os
 import pandas as pd
+from tqdm import tqdm
 # Get utility functions
 from fullEncoder import nnUtils
 from importData.epochs_management import inEpochsMask
@@ -83,8 +84,9 @@ class LSTMandSpikeNetwork():
             
             # Declare spike nets for the different groups:
             self.spikeNets = [nnUtils.spikeNet(nChannels=self.params.nChannelsPerGroup[group], 
-                                               device=self.deviceName, nFeatures=self.params.nFeatures) 
-                                                for group in range(self.params.nGroups)]
+                                               device=self.deviceName, nFeatures=self.params.nFeatures,
+                                               number=str(group))
+                                               for group in range(self.params.nGroups)]
             self.dropoutLayer = tf.keras.layers.Dropout(params.dropoutCNN)
             
             # LSTMs
@@ -134,7 +136,7 @@ class LSTMandSpikeNetwork():
                 # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
                 # We therefore need to    indices[spikePosition[i]] to i  so that it is effectively gather
                 # We then gather either a value of
-                filledFeatureTrain = tf.gather(tf.concat([self.zeroForGather ,x],axis=0),self.indices[group],axis=0)
+                filledFeatureTrain = tf.gather(tf.concat([self.zeroForGather, x],axis=0), self.indices[group],axis=0)
                 # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
                 # where we have filled lines corresponding to spike time of the group
                 # with the feature computed by the spike net; and let other time with a value of 0:
@@ -396,7 +398,7 @@ class LSTMandSpikeNetwork():
                 # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
 
     def test(self, behaviorData, l_function=[], windowsizeMS=36, useSpeedFilter=False,
-             useTrain=False, onTheFlyCorrection=False, isPredLoss=True):
+             useTrain=False, onTheFlyCorrection=False, isPredLoss=False):
         
         # Create the folder
         if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
@@ -444,7 +446,7 @@ class LSTMandSpikeNetwork():
                                                     "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize)}),
                                 num_parallel_calls=tf.data.AUTOTUNE)
         print("INFERRING")
-        outputTest = self.model.predict(dataset,verbose=1) 
+        outputTest = self.model.predict(dataset, verbose=1)
         
         ### Post-inferring management
         print("gathering true feature")
@@ -481,18 +483,28 @@ class LSTMandSpikeNetwork():
 
         return testOutput
 
-    def testSleep(self, behaviorData, l_function=[],  windowsizeMS=36, isPredLoss=False):
+    def testSleep(self, behaviorData, l_function=[], windowSizeDecoder=None,
+                  windowsizeMS=36, isPredLoss=False):
 
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResultSleep, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResultSleep, str(windowsizeMS)))
+        if windowSizeDecoder is None:
+            folderName = str(windowsizeMS)
+            if not os.path.isdir(os.path.join(self.folderResultSleep, folderName)):
+                os.makedirs(os.path.join(self.folderResultSleep, folderName))
+        else:
+            folderName = f'{str(windowsizeMS)}_by_{str(windowSizeDecoder)}'
+            if not os.path.isdir(os.path.join(self.folderResultSleep, folderName)):
+                os.makedirs(os.path.join(self.folderResultSleep, folderName))
+
+        if windowSizeDecoder is None:
+            windowSizeDecoder = windowsizeMS
             
         # Loading the weights
         print('Loading the weights of the trained network')    
         if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
-            self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"))
+            self.model.load_weights(os.path.join(self.folderModels, str(windowSizeDecoder), "predLoss" + "/cp.ckpt"))
         else:
-            self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt"))
+            self.model.load_weights(os.path.join(self.folderModels, str(windowSizeDecoder), "full" + "/cp.ckpt"))
 
         print("decoding sleep epochs")
         predictions = {}
@@ -544,9 +556,82 @@ class LSTMandSpikeNetwork():
             
         # Save the results
         for key in predictions.keys():
-            self.saveResults(predictions[key], windowsizeMS=windowsizeMS, sleep=True, sleepName=key)
+            self.saveResults(predictions[key], folderName=folderName, sleep=True, sleepName=key)
 
-        return predictions
+    def get_artificial_spikes(self, behaviorData, windowsizeMS=36, useSpeedFilter=False,
+                              useTrain=False, isPredLoss=False):
+        # Create the folder
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        # Loading the weights
+        print('Loading the weights of the trained network')
+        if len(behaviorData["Times"]["lossPredSetEpochs"])>0 and isPredLoss:
+            self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"))
+        else:
+            self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt"))
+
+        # Manage the behavior
+        if useSpeedFilter:
+            speedMask = behaviorData["Times"]["speedFilter"]
+        else:
+            speedMask = np.ones_like(behaviorData["Times"]["speedFilter"], dtype=bool)
+        if useTrain:
+            epochMask = inEpochsMask(behaviorData['positionTime'][:, 0], behaviorData['Times']['trainEpochs'])
+        else:
+            epochMask = inEpochsMask(behaviorData['positionTime'][:, 0], behaviorData['Times']['testEpochs'])
+        totMask = speedMask * epochMask
+
+        # Load the and imfer dataset
+        dataset = tf.data.TFRecordDataset(os.path.join(self.projectPath.dataPath,
+                                                       ('dataset'+"_stride"+str(windowsizeMS)+".tfrec")))
+        dataset = dataset.map(lambda *vals: nnUtils.parse_serialized_spike(self.featDesc, *vals),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+        table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(tf.constant(np.arange(len(totMask)), dtype=tf.int64),
+                                                tf.constant(totMask, dtype=tf.float64)), default_value=0)
+        dataset = dataset.filter(lambda x: tf.math.greater(table.lookup(x["pos_index"]), 0)) # Check previous commits for this line
+        posFeature = behaviorData["Positions"]
+        dataset = dataset.map(nnUtils.import_true_pos(posFeature))
+        dataset = dataset.filter(lambda x: tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(x["pos"]))))
+        dataset = dataset.batch(self.params.batchSize, drop_remainder=True) #remove the last batch if it does not contain enough elements to form a batch.
+        dataset = dataset.map(
+            lambda *vals: nnUtils.parse_serialized_sequence(self.params, *vals,batched=True),
+            num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(self.create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(lambda vals: ( vals, {"tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
+                                                    "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize)}),
+                              num_parallel_calls=tf.data.AUTOTUNE)
+
+
+        def spike_detaching_factory(groupId):
+            detach_function = tf.keras.backend.function([self.model.input],
+                                                        [self.model.get_layer(f'outputCNN{groupId}').output])
+            return detach_function
+
+        # TODO: finish this function. You'll get a matrix of artificial spikes
+        #  then, you'll need to slice it by windows to get pop spikes and convert
+        #  it to bayesian spike trains
+        # TODO: to decode sorted spikes with LSTM, you'll need to create a new model
+        #  without CNN. Convert spikes to sparse tensor like popSpikes (nbSpikes*nbClusters)
+        #  here, reshape it to (128*nbSpikes*nbClusters) this would be the input of the LSTM.
+        print("Getting artificial spikes")
+        aSpikes = []
+        detachingFunctions = []
+        zeroForGather = np.zeros((1, 64))
+        for i, batch in enumerate(tqdm(dataset)):
+            for igroup in range(self.params.nGroups):
+                detachingFunctions.append(spike_detaching_factory(igroup))
+                spikes = detachingFunctions[igroup](batch)[0]
+                spikesWithZero = np.concatenate([zeroForGather, spikes], axis=0)
+                popSpikes = np.take(spikesWithZero, batch[0][f'indices{igroup}'], axis=0)
+                aSpikes.append(popSpikes)
+        aSpikes = np.concatenate(aSpikes, axis=0)
+
+        df = pd.DataFrame(aSpikes)
+        df.to_csv(os.path.join(self.folderResult, str(windowsizeMS), "aspikes.csv"))
+
+        return aSpikes
+
 ########### FULL NETWORK CLASS #####################
 
 
@@ -653,14 +738,14 @@ class LSTMandSpikeNetwork():
                 ax.plot(valLosses)
             fig.savefig(os.path.join(folderModels, 'predLoss', "predLossModelLosses.png"))
             
-    def saveResults(self, test_output, windowsizeMS=36, sleep=False, sleepName='Sleep'):
+    def saveResults(self, test_output, folderName=36, sleep=False, sleepName='Sleep'):
         # Manage folders to save
         if sleep:
-            folderToSave = os.path.join(self.folderResultSleep, str(windowsizeMS), sleepName)
+            folderToSave = os.path.join(self.folderResultSleep, str(folderName), sleepName)
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
         else:
-            folderToSave = os.path.join(self.folderResult, str(windowsizeMS))
+            folderToSave = os.path.join(self.folderResult, str(folderName))
         
         # predicted coordinates
         df = pd.DataFrame(test_output['featurePred'])
