@@ -26,7 +26,7 @@ white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
 class PaperFiguresSleep():
     def __init__(self, projectPath, behavior_data, trainerBayes, linearizationFunction,
                  bayesMatrices={}, timeWindows=[36], sleepNames=['PreSleep', 'PostSleep'],
-                 rippleChoice='start'):
+                 rippleChoice='start', folderFigures=None):
         self.projectPath = projectPath
         self.trainerBayes = trainerBayes
         self.behavior_data = behavior_data
@@ -46,7 +46,10 @@ class PaperFiguresSleep():
         self.binsLinearPosHist = np.arange(0, stop=1, step=0.01) # discretisation of the linear variable to help in some plots
         self.cm = plt.get_cmap("tab20b")
         # Manage folders
-        self.folderFigures = os.path.join(self.projectPath.resultsPath, 'figures')
+        if folderFigures is None:
+            self.folderFigures = os.path.join(self.projectPath.resultsPath, 'figures')
+        else:
+            self.folderFigures = os.path.join(self.projectPath.resultsPath, folderFigures)
         if not os.path.exists(self.folderFigures):
             os.mkdir(self.folderFigures)
         self.folderAligned = os.path.join(self.projectPath.dataPath, 'aligned')
@@ -189,10 +192,10 @@ class PaperFiguresSleep():
                                   'timeWindow': timeWindowsForDF,
                                   'sleep type': sleepTypeForPD})
         pairsStats = [
-            [(36, 'PreSleep'), (36, 'PostSleep')],
-            [(108, 'PreSleep'), (108, 'PostSleep')],
-            [(252, 'PreSleep'), (252, 'PostSleep')],
-            [(504, 'PreSleep'), (504, 'PostSleep')]
+            [(str(self.timeWindows[0]), 'PreSleep'), (str(self.timeWindows[0]), 'PostSleep')],
+            [(str(self.timeWindows[1]), 'PreSleep'), (str(self.timeWindows[1]), 'PostSleep')],
+            [(str(self.timeWindows[2]), 'PreSleep'), (str(self.timeWindows[2]), 'PostSleep')],
+            [(str(self.timeWindows[3]), 'PreSleep'), (str(self.timeWindows[3]), 'PostSleep')]
         ]
 
         fig, ax = plt.subplots(figsize=(9, 9))
@@ -733,4 +736,4 @@ class PaperFiguresSleep():
 #     # fig.show()
 
 #     print("Ended sleep analysis")
-#%%
+
