@@ -9,7 +9,7 @@ import pykeops
 from importData.rawdata_parser import get_params
 from importData.epochs_management import inEpochsMask
 import seaborn as sns
-
+from statannotations.Annotator import Annotator
 
 # TODO: this code does not work - REDO!
 
@@ -188,10 +188,21 @@ class PaperFiguresSleep():
         datToPlot = pd.DataFrame({'predLoss': predLoss,
                                   'timeWindow': timeWindowsForDF,
                                   'sleep type': sleepTypeForPD})
+        pairsStats = [
+            [(36, 'PreSleep'), (36, 'PostSleep')],
+            [(108, 'PreSleep'), (108, 'PostSleep')],
+            [(252, 'PreSleep'), (252, 'PostSleep')],
+            [(504, 'PreSleep'), (504, 'PostSleep')]
+        ]
 
         fig, ax = plt.subplots(figsize=(9, 9))
-        sns.barplot(data=datToPlot, x="timeWindow", y="predLoss", hue="sleep type",
-                    errorbar='sd', orient='v', ax=ax)
+        d = sns.barplot(data=datToPlot, x="timeWindow", y="predLoss", hue="sleep type",
+                    ci='sd', orient='v', ax=ax)
+        # TODO: samples must be the same length - change the test
+        annotator = Annotator(d, pairsStats, data=datToPlot, x="timeWindow",
+                              y="predLoss", hue="sleep type")
+        annotator.configure(test='t-test_welch', text_format='star', loc='outside')
+        annotator.apply_and_annotate()
         fig.savefig(os.path.join(self.folderFigures, 'meanPredLossBoxes.png'))
         fig.savefig(os.path.join(self.folderFigures, 'meanPredLossBoxes.svg'))
 
