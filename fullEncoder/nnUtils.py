@@ -4,7 +4,7 @@ import tensorflow as tf
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 class spikeNet:
-	def __init__(self, nChannels=4, device="/cpu:0", nFeatures=128):
+	def __init__(self, nChannels=4, device="/cpu:0", nFeatures=128, number=''):
 		self.nFeatures = nFeatures
 		self.nChannels = nChannels
 		self.device = device
@@ -21,7 +21,8 @@ class spikeNet:
 			self.dropoutLayer = tf.keras.layers.Dropout(0.5)
 			self.denseLayer1 = tf.keras.layers.Dense(self.nFeatures, activation='relu')
 			self.denseLayer2 = tf.keras.layers.Dense(self.nFeatures, activation='relu')
-			self.denseLayer3 = tf.keras.layers.Dense(self.nFeatures, activation='relu')
+			self.denseLayer3 = tf.keras.layers.Dense(self.nFeatures, activation='relu',
+													 name=f'outputCNN{number}')
 
 	def __call__(self, input):
 		return self.apply(input)
