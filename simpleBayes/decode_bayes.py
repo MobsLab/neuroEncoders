@@ -116,8 +116,6 @@ class Trainer():
         occupationInverse[occupationInverse==np.inf] = 0
         occupationInverse = np.multiply(occupationInverse, mask)
         finalOccupation = occupationInverse
-        # occupationInverse[occupationInverse==0] = 10/np.min(occupation)
-        # finalOccupation = 1/occupationInverse
         ### Build marginal rate functions
         print('Building marginal rate and local rate functions')
         for tetrode in tqdm(range(nTetrodes)):
@@ -205,10 +203,11 @@ class Trainer():
                                                         ['occupation', 'marginalRateFunctions',
                                                                 'rateFunctions']]
         mask = occupation > (np.max(occupation) / self.maskingFactor)
+        logOccupation = np.log(occupation + np.min(occupation[mask]))
         ### Build Poisson term
         allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
                             range(len(clusters))]
-        allPoisson = reduce(np.multiply, allPoisson)
+        allPoisson = np.log(reduce(np.multiply, allPoisson))
         ### Log of rate functions
         logRF = []
         for tetrode in range(np.shape(rateFunctions)[0]):
@@ -230,7 +229,7 @@ class Trainer():
         inferredProba = outputPOps[0]
         inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
 
-        # NOTE: A few values of probability predictions present NaN in pykeops....
+        # NOTE: A few values of probability predictions present NaN in pykeops
         print("Resolving nan issue from pykeops over a few bins")
         badBins = np.where(np.isnan(inferResults[:, 2]))[0]
         for bin in badBins:
@@ -248,15 +247,15 @@ class Trainer():
                 binClusters = np.sum(binProbas, 0)
                 # Terms that come from spike information
                 if np.sum(binClusters) > 0.5:
-                    spikePattern = reduce(np.multiply,
-                                           [np.exp(logRF[tetrode][cluster] * binClusters[cluster])
+                    spikePattern = reduce(lambda a, b: a+b,
+                                           [(logRF[tetrode][cluster] + binClusters[cluster])
                                             for cluster in range(np.shape(binClusters)[0])])
                 else:
-                    spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
+                    spikePattern = np.multiply(np.zeros(np.shape(logOccupation)), mask)
                 tetrodesContributions.append(spikePattern)
             # Guessed probability map
-            positionProba = reduce(np.multiply, tetrodesContributions)
-            positionProba = np.multiply(positionProba, occupation) #prior: Occupation deduced from training!!
+            positionProba = reduce(lambda a, b: a+b, tetrodesContributions)
+            positionProba = positionProba + logOccupation #prior: Occupation deduced from training!!
             positionProba = positionProba / np.sum(positionProba)
             inferResults[bin, 2] = np.max(positionProba)
             inferResults[np.isnan(inferResults[:, 2]), 2] = 0 # to correct for overflow
@@ -438,7 +437,7 @@ def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clus
         goodStop = (binStopTimeLazy - gctLazy).relu().sign()
         # size: (Number of signal time step,Number of prediction bin,1), indicate for each bin the time step in the bin.
         goodBins = goodStart * goodStop
-        gcLazy = LazyTensor_np(clusters[tetrode][:,None,:])
+        gcLazy = LazyTensor_np(clusters[tetrode][:, None, :])
         # For each bin, we gather for each cluster in the tetrode the number of spike detected in signal measurements inside this bin.
         # gathering can be effectively implemented by a element wise matrix multiplication with the mask good_bins
         binClusters = (gcLazy * goodBins).sum(axis=0)
@@ -446,25 +445,25 @@ def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clus
 
         # Prepare for pykeops operations:
         logRF_r = np.transpose(np.array(logRF[tetrode]), axes=[1, 2, 0])
-        logRF_r = np.reshape(logRF_r,newshape=[np.prod(logRF_r.shape[0:-1]),logRF_r.shape[-1]])
+        logRF_r = np.reshape(logRF_r,newshape=[np.prod(logRF_r.shape[0:-1]), logRF_r.shape[-1]])
         logRFLazy = LazyTensor_np(logRF_r[None,:,:])
         binClustersLazy = LazyTensor_np(binClusters[:,None,:])
 
         # the Log firing rate of each cluster is multiplied by the number of bin cluster, and the sum is performed over the
         # number of cluster in the tetrode
-        res = (logRFLazy * binClustersLazy).sum(dim=-1).exp()
-        tetrodeContribs = tetrodeContribs*res
+        res = (logRFLazy * binClustersLazy).sum(dim=-1)
+        tetrodeContribs = tetrodeContribs+res
 
     #Finally we need to add the Poisson terms common to all tetrode finalS
     # position posterior estimation:
-    poisson_r = np.reshape(allPoisson,newshape=[np.prod(allPoisson.shape)])[:,None]
+    poisson_r = np.reshape(allPoisson, newshape=[np.prod(allPoisson.shape)])[:,None]
     poissonContribVj = pykeops.numpy.Vj(poisson_r)
-    tetrodeContribs = tetrodeContribs*poissonContribVj
+    tetrodeContribs = tetrodeContribs+poissonContribVj
 
     # The probability need to be weighted by the position probabilities:
     occupancy_r = np.reshape(occupancy,newshape=[np.prod(occupancy.shape)])[:,None]
     occupancyContrib = pykeops.numpy.Vj(occupancy_r)
-    tetrodeContribs = tetrodeContribs * occupancyContrib
+    tetrodeContribs = tetrodeContribs + occupancyContrib
 
     # If we had only one electrode:
     # ... but we need to sum over the different electrodes.
