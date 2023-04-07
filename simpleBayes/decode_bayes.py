@@ -299,11 +299,11 @@ class Trainer():
                                                                 ['occupation', 'marginalRateFunctions',
                                                                  'rateFunctions']]
             mask = occupation > (np.max(occupation) / self.maskingFactor)
-
+            logOccupation = np.log(occupation + np.min(occupation[mask]))
             ### Build Poisson term
             allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
                           range(len(clusters[sleepName]))]
-            allPoisson = reduce(np.multiply, allPoisson)
+            allPoisson = np.log(reduce(np.multiply, allPoisson))
 
             ### Log of rate functions
             logRF = []
@@ -328,7 +328,8 @@ class Trainer():
             idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
             inferredPos = np.array([bayesMatrices['bins'][i][idPos[i][:, 0]] for i in
                                     range(len(bayesMatrices['bins']))])
-            inferredProba = outputPOps[0]
+            # probability moved back to linear scale
+            inferredProba = np.exp(outputPOps[0]) / np.sum(np.exp(outputPOps[0]), axis=0)
             inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
 
             # NOTE: A few values of probability predictions present NaN in pykeops....
@@ -349,17 +350,19 @@ class Trainer():
                     binClusters = np.sum(binProbas, 0)
                     # Terms that come from spike information
                     if np.sum(binClusters) > 0.5:
-                        spikePattern = reduce(np.multiply,
-                                              [np.exp(logRF[tetrode][cluster] * binClusters[cluster])
+                        spikePattern = reduce(lambda a, b: a+b,
+                                              [(logRF[tetrode][cluster] + binClusters[cluster])
                                                for cluster in range(np.shape(binClusters)[0])])
                     else:
-                        spikePattern = np.multiply(np.ones(np.shape(occupation)), mask)
+                        spikePattern = np.multiply(np.zeros(np.shape(logOccupation)), mask)
                     tetrodesContributions.append(spikePattern)
                 # Guessed probability map
-                positionProba = reduce(np.multiply, tetrodesContributions)
-                positionProba = np.multiply(positionProba, occupation)  # prior: Occupation deduced from training!!
-                positionProba = positionProba / np.sum(positionProba)
+                positionProba = reduce(lambda a, b: a+b, tetrodesContributions)
+                positionProba = positionProba + logOccupation #prior: Occupation deduced from training!!
+                # probability moved back to linear scale
+                positionProba = np.exp(positionProba) / np.sum(np.exp(positionProba))
                 inferResults[bin, 2] = np.max(positionProba)
+                inferResults[np.isnan(inferResults[:, 2]), 2] = 0 # to correct for overflow
 
             inferResultsDic[sleepName] = {"featurePred": inferResults[:, :2], 'proba': inferResults[:, 2],
                                           'times': timeStepPred, 'speed_mask': behaviorData["Times"]["speedFilter"]}
