@@ -15,3 +15,6 @@ def manage_devices(usedDevice):
         devicename = device = tf.config.list_logical_devices()[0].name
         
     return devicename
+
+def convert_normalized_to_euclidian(x, maxPos):
+    return normalized*maxPos

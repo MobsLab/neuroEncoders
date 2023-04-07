@@ -21,6 +21,22 @@ def boxplot_linError(lErrorNN_mean, lErrorBayes_mean, timeWindows=[36, 108, 252,
         fig.savefig(os.path.join(dirSave, f'linearErrorBoxPlot{suffix}.png'))
         fig.savefig(os.path.join(dirSave, f'linearErrorBoxPlot{suffix}.svg'))
 
+def boxplot_euclError(errorNN_mean, errorBayes_mean, timeWindows=[36, 108, 252, 504],
+                     dirSave=None, suffix=''):
+    #TODO: add significance test?
+    data = np.round(np.vstack((errorNN_mean, errorBayes_mean)).flatten(), 2)
+    timeWindowsForDF = timeWindows * errorNN_mean.shape[0] * 2
+    decoderForPD = ['ANN'] * errorNN_mean.shape[0] * len(timeWindows) + ['Bayes'] * errorNN_mean.shape[0] * len(timeWindows)
+    datToPlot = pd.DataFrame({'error (cm)': data,
+                              'timeWindow (ms)': timeWindowsForDF,
+                              'decoder': decoderForPD})
+    fig, ax = plt.subplots(figsize=(9, 9))
+    sns.boxplot(data=datToPlot, x="timeWindow (ms)", y="error (cm)", hue="decoder", orient='v', ax=ax)
+
+    if dirSave is not None:
+        fig.savefig(os.path.join(dirSave, f'errorBoxPlot{suffix}.png'))
+        fig.savefig(os.path.join(dirSave, f'errorBoxPlot{suffix}.svg'))
+
 def barplot_linError_mouse_by_mouse(lErrorNN_mean, lErrorBayes_mean,
                                     timeWindows=[36, 108, 252, 504],
                                     mouseNames=['994', '1199_1', '1199_2', '1223'],

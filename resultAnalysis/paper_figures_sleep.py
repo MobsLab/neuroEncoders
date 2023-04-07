@@ -11,7 +11,6 @@ from importData.epochs_management import inEpochsMask
 import seaborn as sns
 from statannotations.Annotator import Annotator
 
-# TODO: this code does not work - REDO!
 
 white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
     (0, '#ffffff'),
@@ -22,6 +21,7 @@ white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
     (0.8, '#78d151'),
     (1, '#fde624'),
 ], N=256)
+EC = np.array([45, 39]) # range of x and y in cm
 
 class PaperFiguresSleep():
     def __init__(self, projectPath, behavior_data, trainerBayes, linearizationFunction,

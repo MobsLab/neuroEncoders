@@ -18,6 +18,8 @@ white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
     (0.8, '#78d151'),
     (1, '#fde624'),
 ], N=256)
+EC = np.array([45, 39]) # range of x and y in cm
+
 
 class PaperFigures():
     def __init__(self, projectPath, behaviorData, trainerBayes, l_function,
@@ -255,6 +257,80 @@ class PaperFigures():
             fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '_filt.svg')))
 
         return lErrorNN_mean, lErrorNN_std, lErrorBayes_mean, lErrorBayes_std
+
+    def mean_euclerrors(self, speed='all', filtProp=None, isCM=False):
+        ### Prepare the data
+        # Masks
+        habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
+                   for i in range(len(self.timeWindows))]
+        habMaskFast = [(habMask[i]) * (self.resultsNN['speedMask'][i]) for i in range(len(self.timeWindows))]
+        habMaskSlow = [(habMask[i]) * np.logical_not(self.resultsNN['speedMask'][i][i]) for i in range(len(self.timeWindows))]
+        if filtProp is not None:
+            # Calculate filtering values
+            sortedLPred = [np.argsort(self.resultsNN['predLoss'][iw]) for iw in range(len(self.timeWindows))]
+            thresh = [np.squeeze(self.resultsNN['predLoss'][iw][sortedLPred[iw][int(len(sortedLPred[iw])*filtProp)]])
+                      for iw in range(len(self.timeWindows))]
+            filters_lpred = [np.ones(self.resultsNN['time'][iw].shape).astype(np.bool)*
+                             np.less_equal(self.resultsNN['predLoss'][iw],thresh[iw]) for iw in range(len(self.timeWindows))]
+        else:
+            filters_lpred = [np.ones(habMask[i].shape).astype(np.bool) for i in range(len(self.timeWindows))]
+        finalMasks = [habMask[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+        finalMasksFast = [habMaskFast[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+        finalMasksSlow = [habMaskSlow[i] * filters_lpred[i] for i in range(len(self.timeWindows))]
+
+        # Data
+        nnD = {}
+        bayesD = {}
+        if isCM:
+            nnD['pred'] = [self.resultsNN['fullPred'][i] * EC for i in range(len(self.timeWindows))]
+            nnD['true'] = [self.resultsNN['truePos'][i] * EC for i in range(len(self.timeWindows))]
+            bayesD['pred'] = [self.resultsBayes['fullPred'][i] * EC for i in range(len(self.timeWindows))]
+        else:
+            nnD['pred'] = [self.resultsNN['fullPred'][i] for i in range(len(self.timeWindows))]
+            nnD['true'] = [self.resultsNN['truePos'][i] for i in range(len(self.timeWindows))]
+            bayesD['pred'] = [self.resultsBayes['fullPred'][i] for i in range(len(self.timeWindows))]
+        errorNN = [np.abs(nnD['true'][i]-nnD['pred'][i]) for i in range(len(self.timeWindows))]
+        errorBayes = [np.abs(nnD['true'][i]-bayesD['pred'][i]) for i in range(len(self.timeWindows))]
+        if speed == 'all':
+            errorNN_mean = np.array([np.mean(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            errorNN_std = np.array([np.std(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_std = np.array([np.std(errorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+        elif speed == 'fast':
+            errorNN_mean = np.array([np.mean(errorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            errorNN_std = np.array([np.std(errorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_std = np.array([np.std(errorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+        elif speed == 'slow':
+            errorNN_mean = np.array([np.mean(errorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            errorNN_std = np.array([np.std(errorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_std = np.array([np.std(errorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+        else:
+            raise ValueError('speed argument could be only "full", "fast" or "slow"')
+
+            # Fig mean error from window size - total
+        fig,ax = plt.subplots(figsize=(10,10))
+        ax.plot(self.timeWindows, errorNN_mean, c="red", label="neural network")
+        ax.fill_between(self.timeWindows, errorNN_mean-errorNN_std, errorNN_mean+errorNN_std,color="red", alpha=0.5)
+        ax.plot(self.timeWindows, errorBayes_mean, c="blue", label="bayesian")
+        ax.fill_between(self.timeWindows, errorBayes_mean-errorBayes_std, errorBayes_mean+errorBayes_std,color="blue", alpha=0.5)
+        ax.set_xlabel("window size (ms)",fontsize="xx-large")
+        ax.set_xticks(self.timeWindows)
+        ax.set_xticklabels(self.timeWindows,fontsize="xx-large")
+        ax.set_yticks(np.unique(np.concatenate([np.round(errorNN_mean,2),np.round(errorBayes_mean,2)])))
+        ax.set_yticklabels(np.unique(np.concatenate([np.round(errorNN_mean,2),np.round(errorBayes_mean,2)])),fontsize="xx-large")
+        ax.set_ylabel("mean linear error",fontsize="xx-large")
+        fig.legend(loc=(0.6,0.7),fontsize="xx-large")
+        fig.show()
+        if filtProp is None:
+            fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '.png')))
+            fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '.svg')))
+        else:
+            fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '_filt.png')))
+            fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '_filt.svg')))
+
+        return errorNN_mean, errorNN_std, errorBayes_mean, errorBayes_std
         
     def nnVSbayes(self, speed='all'):
         # Masks
