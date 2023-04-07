@@ -220,7 +220,7 @@ class Trainer():
         ### Decoding loop
         print("Parallel pykeops bayesian test")
         outputPOps = parallel_pred_as_NN(timeStepPred, windowSize, allPoisson, clusters,
-                                                clustersTime, logRF, occupation)
+                                                clustersTime, logRF, logOccupation)
         print("finished bayesian guess")
 
         idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
@@ -322,7 +322,7 @@ class Trainer():
 
             print("Parallel pykeops bayesian test")
             outputPOps = parallel_pred_as_NN(timeStepPred, windowSize, allPoisson, clusters[sleepName],
-                                             clustersTime[sleepName], logRF, occupation)
+                                             clustersTime[sleepName], logRF, logOccupation)
             print("finished bayesian guess")
 
             idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
@@ -427,6 +427,7 @@ def find_next_bin(times,clusters,start,stop,start_time,stop_time):
 def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clustersTime, logRF, occupancy):
     # Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
     # Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
+    # Here everything in log scale to avoid numerical overflow
 
     binStartTime = firstSpikeNNtime
     binStopTime = binStartTime + windowSize
