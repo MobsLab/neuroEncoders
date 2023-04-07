@@ -226,7 +226,8 @@ class Trainer():
         idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
         inferredPos = np.array(
             [bayesMatrices['bins'][i][idPos[i][:, 0]] for i in range(len(bayesMatrices['bins']))])
-        inferredProba = outputPOps[0]
+        # probability moved back to linear scale
+        inferredProba = np.exp(outputPOps[0]) / np.sum(np.exp(outputPOps[0]), axis=0)
         inferResults = np.concatenate([np.transpose(inferredPos), inferredProba], axis=-1)
 
         # NOTE: A few values of probability predictions present NaN in pykeops
@@ -256,7 +257,8 @@ class Trainer():
             # Guessed probability map
             positionProba = reduce(lambda a, b: a+b, tetrodesContributions)
             positionProba = positionProba + logOccupation #prior: Occupation deduced from training!!
-            positionProba = positionProba / np.sum(positionProba)
+            # probability moved back to linear scale
+            positionProba = np.exp(positionProba) / np.sum(np.exp(positionProba))
             inferResults[bin, 2] = np.max(positionProba)
             inferResults[np.isnan(inferResults[:, 2]), 2] = 0 # to correct for overflow
 
@@ -452,13 +454,13 @@ def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clus
         # the Log firing rate of each cluster is multiplied by the number of bin cluster, and the sum is performed over the
         # number of cluster in the tetrode
         res = (logRFLazy * binClustersLazy).sum(dim=-1)
-        tetrodeContribs = tetrodeContribs+res
+        tetrodeContribs = tetrodeContribs + res
 
     #Finally we need to add the Poisson terms common to all tetrode finalS
     # position posterior estimation:
     poisson_r = np.reshape(allPoisson, newshape=[np.prod(allPoisson.shape)])[:,None]
     poissonContribVj = pykeops.numpy.Vj(poisson_r)
-    tetrodeContribs = tetrodeContribs+poissonContribVj
+    tetrodeContribs = tetrodeContribs + poissonContribVj
 
     # The probability need to be weighted by the position probabilities:
     occupancy_r = np.reshape(occupancy,newshape=[np.prod(occupancy.shape)])[:,None]
@@ -468,9 +470,7 @@ def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clus
     # If we had only one electrode:
     # ... but we need to sum over the different electrodes.
     outputPos = tetrodeContribs.max_argmax_reduction(axis=1)
-    # We also need to normalize the probability:
-    sumProba = tetrodeContribs.sum_reduction(axis=1)
-    outputPos = (outputPos[0]/sumProba,outputPos[1])
+    outputPos = (outputPos[0], outputPos[1])
 
     return outputPos
 ############## Utils ##############
