@@ -115,6 +115,9 @@ class Trainer():
         occupationInverse = 1/occupation
         occupationInverse[occupationInverse==np.inf] = 0
         occupationInverse = np.multiply(occupationInverse, mask)
+        finalOccupation = occupationInverse
+        # occupationInverse[occupationInverse==0] = 10/np.min(occupation)
+        # finalOccupation = 1/occupationInverse
         ### Build marginal rate functions
         print('Building marginal rate and local rate functions')
         for tetrode in tqdm(range(nTetrodes)):
@@ -127,7 +130,7 @@ class Trainer():
             gridFeature, MRF = butils.kdenD(tetrodewisePos, self.bandwidth, edges=gridFeature, kernel=self.kernel)
             MRF[MRF==0] = np.min(MRF[MRF!=0])
             MRF         = MRF/np.sum(MRF)
-            MRF         = np.shape(tetrodewisePos)[0]*np.multiply(MRF, occupationInverse)/behaviorData['Times']['learning']
+            MRF         = np.shape(tetrodewisePos)[0]*np.multiply(MRF, finalOccupation)/behaviorData['Times']['learning']
             marginalRateFunctions.append(MRF)
             # Allocate for local rate functions
             localRateFunctions = []
@@ -147,7 +150,7 @@ class Trainer():
                                                     edges=gridFeature, kernel=self.kernel)
                     LRF[LRF==0] = np.min(LRF[LRF!=0])
                     LRF         = LRF/np.sum(LRF)
-                    LRF         = np.shape(clusterwisePos)[0]*np.multiply(LRF, occupationInverse)/behaviorData['Times']['learning']
+                    LRF         = np.shape(clusterwisePos)[0]*np.multiply(LRF, finalOccupation)/behaviorData['Times']['learning']
                     localRateFunctions.append(LRF)
                 else:
                     localRateFunctions.append(np.ones(np.shape(occupation)))
@@ -231,8 +234,8 @@ class Trainer():
         print("Resolving nan issue from pykeops over a few bins")
         badBins = np.where(np.isnan(inferResults[:, 2]))[0]
         for bin in badBins:
-            binStartTime = timeStepPred[bin] - windowSize / 2
-            binStopTime = binStartTime + windowSize / 2
+            binStartTime = timeStepPred[bin]
+            binStopTime = binStartTime + windowSize
             tetrodesContributions = []
             tetrodesContributions.append(allPoisson)
             for tetrode in range(len(clusters)):
@@ -256,6 +259,7 @@ class Trainer():
             positionProba = np.multiply(positionProba, occupation) #prior: Occupation deduced from training!!
             positionProba = positionProba / np.sum(positionProba)
             inferResults[bin, 2] = np.max(positionProba)
+            inferResults[np.isnan(inferResults[:, 2]), 2] = 0 # to correct for overflow
 
         # Get the true position
         idTestEpoch = inEpochs(behaviorData["positionTime"][:,0],
