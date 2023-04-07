@@ -70,7 +70,7 @@ class Trainer():
         preferredPos = np.array(preferredPos)
         _, linearPreferredPos = linearization_function(preferredPos)
         self.linearPosArgSort = np.argsort(linearPreferredPos)
-        self.linearPreferredPos =linearPreferredPos[self.linearPosArgSort]
+        self.linearPreferredPos = linearPreferredPos[self.linearPosArgSort]
         self.spikeMatLabels = self.spikeMatLabels[:, self.linearPosArgSort]
         bs = [np.stack(b) for b in bayesMatrices["rateFunctions"]]
         placefields = np.concatenate(bs)
@@ -107,7 +107,7 @@ class Trainer():
             ))] # Get speed-filtered coordinates from train epoch
         if onTheFlyCorrection: # setting the position to be between 0 and 1 if necessary
             selPositions = selPositions/maxPos
-        selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions,axis=1))),:] # Remove NaN positions
+        selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions, axis=1))),:] # Remove NaN positions
         ### Build global occupation map
         gridFeature, occupation = butils.kdenD(selPositions, self.bandwidth, kernel=self.kernel) #0.07s
         occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros

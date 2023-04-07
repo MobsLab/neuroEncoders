@@ -52,7 +52,7 @@ class UMazeLinearizer:
         projectedPos = self.mazePoints[bestPoints[:,0],:]
         linearPos = self.tsProj[bestPoints[:,0]]
 
-        return projectedPos,linearPos
+        return projectedPos, linearPos
 
     def verify_linearization(self, ExampleEuclideanData, folder, overwrite=False):
         ## A function to verify and possibly change the linearization.

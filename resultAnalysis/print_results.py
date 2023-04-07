@@ -7,13 +7,16 @@ import pandas as pd
 import numpy.polynomial.polynomial as poly
 import matplotlib.pyplot as plt
 
-def print_results(dir, show=False, typeDec='NN', results=[], lossSelection=0.3, windowSizeMS=36):
+EC = np.array([45, 39]) # range of x and y in cm
+
+def print_results(dir, show=False, typeDec='NN', euclidean=False, results=[],
+				  lossSelection=0.3, windowSizeMS=36):
 	outdir = os.path.join(dir, str(windowSizeMS))
 	# Manage arguments
 	if typeDec == 'bayes' and not results:
 		raise ValueError('You should provide results from BayesTrainer.test() function')
 
-	block=show
+	block = show
 	maxPos = 1
 	# Get data
 	if typeDec == 'NN':
@@ -42,6 +45,9 @@ def print_results(dir, show=False, typeDec='NN', results=[], lossSelection=0.3, 
 		raise ValueError('typeDec should be either "NN" or bayes"')
 	dimOutput = pos.shape[1]
 	assert(pos.shape[1] == inferring.shape[1])
+	if euclidean:
+		pos = pos * EC
+		inferring = inferring * EC
  
 	# Save the executable
 	if typeDec == 'NN':
