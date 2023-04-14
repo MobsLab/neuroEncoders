@@ -95,7 +95,6 @@ def plot_euclError_mouse_by_mouse(errorNN_mean, errorBayes_mean,
                                   dirSave=None, suffix=''):
     for iWindow in range(len(timeWindows)):
 
-        error = errorNN_std[:, iWindow]/errorNN_mean[:, iWindow]
         fig, ax = plt.subplots(figsize=(9, 9))
         ax.errorbar(mouseNames, errorNN_mean[:, iWindow], yerr=errorNN_std, fmt='-o',
                     color=colorsForSNS[0], label='ANN')
