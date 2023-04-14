@@ -4,6 +4,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy.stats import sem
 from matplotlib.colors import  LinearSegmentedColormap
 import matplotlib.gridspec as gridspec
 from importData.rawdata_parser import get_params
@@ -289,8 +290,8 @@ class PaperFigures():
             nnD['pred'] = [self.resultsNN['fullPred'][i] for i in range(len(self.timeWindows))]
             nnD['true'] = [self.resultsNN['truePos'][i] for i in range(len(self.timeWindows))]
             bayesD['pred'] = [self.resultsBayes['fullPred'][i] for i in range(len(self.timeWindows))]
-        errorNN = [np.abs(nnD['true'][i]-nnD['pred'][i]) for i in range(len(self.timeWindows))]
-        errorBayes = [np.abs(nnD['true'][i]-bayesD['pred'][i]) for i in range(len(self.timeWindows))]
+        errorNN = [np.linalg.norm(nnD['true'][i] - nnD['pred'][i], axis=1) for i in range(len(self.timeWindows))]
+        errorBayes = [np.linalg.norm(nnD['true'][i] - bayesD['pred'][i], axis=1) for i in range(len(self.timeWindows))]
         if speed == 'all':
             errorNN_mean = np.array([np.mean(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             errorNN_std = np.array([np.std(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
