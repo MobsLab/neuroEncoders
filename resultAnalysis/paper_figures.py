@@ -195,7 +195,7 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, ('cumulativeHist_' + str(speed) + '.png')))
         fig.savefig(os.path.join(self.folderFigures, ('cumulativeHist_' + str(speed) + '.svg')))
 
-    def mean_linerrors(self, speed='all', filtProp=None):
+    def mean_linerrors(self, speed='all', filtProp=None, errorType='sem'):
         ### Prepare the data
         # Masks
         habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
@@ -221,27 +221,42 @@ class PaperFigures():
         if speed == 'all':
             lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_se = np.array([sem(lErrorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_se = np.array([sem(lErrorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'fast':
             lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_se = np.array([sem(lErrorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_se = np.array([sem(lErrorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'slow':
             lErrorNN_mean = np.array([np.mean(lErrorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             lErrorNN_std = np.array([np.std(lErrorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorNN_se = np.array([sem(lErrorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_mean = np.array([np.mean(lErrorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             lErrorBayes_std = np.array([np.std(lErrorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            lErrorBayes_se = np.array([sem(lErrorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
         else:
-            raise ValueError('speed argument could be only "full", "fast" or "slow"')        
+            raise ValueError('speed argument could be only "full", "fast" or "slow"')
+
+        if errorType == 'std':
+            lerrorNN_err = lErrorNN_std
+            lerrorBayes_err = lErrorBayes_std
+        elif errorType == 'sem':
+            lerrorNN_err = lErrorNN_se
+            lerrorBayes_err = lErrorBayes_se
+        else:
+            raise ValueError('errorType argument could be only "std" or "sem"')
         
         # Fig mean error from window size - total
         fig,ax = plt.subplots(figsize=(10,10))
         ax.plot(self.timeWindows, lErrorNN_mean, c="red", label="neural network")
-        ax.fill_between(self.timeWindows, lErrorNN_mean-lErrorNN_std, lErrorNN_mean+lErrorNN_std,color="red", alpha=0.5)
+        ax.fill_between(self.timeWindows, lErrorNN_mean-lerrorNN_err, lErrorNN_mean+lerrorNN_err,color="red", alpha=0.5)
         ax.plot(self.timeWindows, lErrorBayes_mean, c="blue", label="bayesian")
-        ax.fill_between(self.timeWindows, lErrorBayes_mean-lErrorBayes_std, lErrorBayes_mean+lErrorBayes_std,color="blue", alpha=0.5)
+        ax.fill_between(self.timeWindows, lErrorBayes_mean-lerrorBayes_err, lErrorBayes_mean+lerrorBayes_err,color="blue", alpha=0.5)
         ax.set_xlabel("window size (ms)",fontsize="xx-large")
         ax.set_xticks(self.timeWindows)
         ax.set_xticklabels(self.timeWindows,fontsize="xx-large")
@@ -257,9 +272,9 @@ class PaperFigures():
             fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '_filt.png')))
             fig.savefig(os.path.join(self.folderFigures, ('meanError_' + str(speed) + '_filt.svg')))
 
-        return lErrorNN_mean, lErrorNN_std, lErrorBayes_mean, lErrorBayes_std
+        return lErrorNN_mean, lerrorBayes_err, lErrorBayes_mean, lerrorBayes_err
 
-    def mean_euclerrors(self, speed='all', filtProp=None, isCM=False):
+    def mean_euclerrors(self, speed='all', filtProp=None, errorType='sem', isCM=False):
         ### Prepare the data
         # Masks
         habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
@@ -295,27 +310,42 @@ class PaperFigures():
         if speed == 'all':
             errorNN_mean = np.array([np.mean(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             errorNN_std = np.array([np.std(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            errorNN_se = np.array([sem(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             errorBayes_std = np.array([np.std(errorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_se = np.array([sem(errorBayes[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'fast':
             errorNN_mean = np.array([np.mean(errorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             errorNN_std = np.array([np.std(errorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            errorNN_se = np.array([sem(errorNN[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
             errorBayes_std = np.array([np.std(errorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_se = np.array([sem(errorBayes[i][finalMasksFast[i]]) for i in range(len(self.timeWindows))])
         elif speed == 'slow':
             errorNN_mean = np.array([np.mean(errorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             errorNN_std = np.array([np.std(errorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            errorNN_se = np.array([sem(errorNN[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             errorBayes_mean = np.array([np.mean(errorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
             errorBayes_std = np.array([np.std(errorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
+            errorBayes_se = np.array([sem(errorBayes[i][finalMasksSlow[i]]) for i in range(len(self.timeWindows))])
         else:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')
 
-            # Fig mean error from window size - total
+        if errorType == 'std':
+            errorNN_err = errorNN_std
+            errorBayes_err = errorBayes_std
+        elif errorType == 'sem':
+            errorNN_err = errorNN_se
+            errorBayes_err = errorBayes_se
+        else:
+            raise ValueError('errorType argument could be only "std" or "sem"')
+
+        # Fig mean error from window size - total
         fig,ax = plt.subplots(figsize=(10,10))
         ax.plot(self.timeWindows, errorNN_mean, c="red", label="neural network")
-        ax.fill_between(self.timeWindows, errorNN_mean-errorNN_std, errorNN_mean+errorNN_std,color="red", alpha=0.5)
+        ax.fill_between(self.timeWindows, errorNN_mean-errorNN_err, errorNN_mean+errorNN_err,color="red", alpha=0.5)
         ax.plot(self.timeWindows, errorBayes_mean, c="blue", label="bayesian")
-        ax.fill_between(self.timeWindows, errorBayes_mean-errorBayes_std, errorBayes_mean+errorBayes_std,color="blue", alpha=0.5)
+        ax.fill_between(self.timeWindows, errorBayes_mean-errorBayes_err, errorBayes_mean+errorBayes_err,color="blue", alpha=0.5)
         ax.set_xlabel("window size (ms)",fontsize="xx-large")
         ax.set_xticks(self.timeWindows)
         ax.set_xticklabels(self.timeWindows,fontsize="xx-large")
@@ -331,7 +361,7 @@ class PaperFigures():
             fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '_filt.png')))
             fig.savefig(os.path.join(self.folderFigures, ('meanEuclError_' + str(speed) + '_filt.svg')))
 
-        return errorNN_mean, errorNN_std, errorBayes_mean, errorBayes_std
+        return errorNN_mean, errorNN_err, errorBayes_mean, errorBayes_err
         
     def nnVSbayes(self, speed='all'):
         # Masks
