@@ -87,3 +87,25 @@ def barplot_euclError_mouse_by_mouse(errorNN_mean, errorBayes_mean,
         if dirSave is not None:
             fig.savefig(os.path.join(dirSave, f'errorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.png'))
             fig.savefig(os.path.join(dirSave, f'errorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.svg'))
+
+def plot_euclError_mouse_by_mouse(errorNN_mean, errorBayes_mean,
+                                  errorNN_std, errorBayes_std,
+                                  timeWindows=[36, 108, 252, 504],
+                                  mouseNames=['994', '1199_1', '1199_2', '1223'],
+                                  dirSave=None, suffix=''):
+    for iWindow in range(len(timeWindows)):
+
+        error = errorNN_std[:, iWindow]/errorNN_mean[:, iWindow]
+        fig, ax = plt.subplots(figsize=(9, 9))
+        ax.errorbar(mouseNames, errorNN_mean[:, iWindow], yerr=errorNN_std, fmt='-o',
+                    color=colorsForSNS[0], label='ANN')
+        ax.errorbar(mouseNames, errorBayes_mean[:, iWindow], yerr=errorBayes_std, fmt='-o',
+                    color=colorsForSNS[1], label='Bayes')
+        ax.set_xlabel('Mouse ID')
+        ax.set_ylabel('Euclidean error (cm)')
+        ax.set_title(f'Euclidean error for {timeWindows[iWindow]} ms time window')
+        ax.legend()
+
+        if dirSave is not None:
+            fig.savefig(os.path.join(dirSave, f'errorPlotMBM{suffix}_{timeWindows[iWindow]}.png'))
+            fig.savefig(os.path.join(dirSave, f'errorPlotMBM{suffix}_{timeWindows[iWindow]}.svg'))
