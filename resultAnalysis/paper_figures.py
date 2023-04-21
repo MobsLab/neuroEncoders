@@ -95,7 +95,38 @@ class PaperFigures():
         }
             
         return self.resultsBayes
-           
+
+    def fig_example_XY(self, timeWindow):
+        idWindow = self.timeWindows.index(timeWindow)
+        fig,ax = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(19,8))
+        for idim in range(2):
+            ax[idim, 0].plot(self.resultsNN['time'][idWindow],
+                             self.resultsNN['truePos'][idWindow][:, idim],
+                             c="black",alpha=0.3)
+            ax[idim, 0].scatter(self.resultsNN['time'][idWindow],
+                                self.resultsNN['fullPred'][idWindow][:, idim],
+                                c=self.cm(12+idWindow), alpha=0.9,
+                                label=(str(self.timeWindows[idWindow])+ ' ms'), s=1)
+            ax[idim, 1].plot(self.resultsNN['time'][idWindow],
+                             self.resultsNN['truePos'][idWindow][:, idim],
+                             c="black",alpha=0.3)
+            ax[idim, 1].scatter(self.resultsNN['time'][idWindow],
+                                self.resultsBayes['fullPred'][idWindow][:, idim],
+                                c=self.cm(idWindow), alpha=0.9,
+                                label=(str(self.timeWindows[idWindow]) + ' ms'), s=1)
+        ax[0, 0].set_title('Neural network decoder \n ' + str(self.timeWindows[idWindow]) + ' window',fontsize="xx-large")
+        ax[0, 1].set_title('Bayesian decoder \n ' + str(self.timeWindows[idWindow]) + ' window',fontsize="xx-large")
+        ax[0, 0].set_ylabel('X', fontsize="xx-large")
+        ax[1, 0].set_ylabel('Y', fontsize="xx-large")
+        ax[1, 0].set_xlabel('Time (s)', fontsize="xx-large")
+        ax[1, 1].set_xlabel('Time (s)', fontsize="xx-large")
+        # Save figure
+        fig.tight_layout()
+        fig.show()
+        fig.savefig(os.path.join(self.folderFigures, f'example2D_nn_bayes_{timeWindow}ms.png'))
+        fig.savefig(os.path.join(self.folderFigures, f'example2D_nn_bayes_{timeWindow}ms.svg'))
+
+
     def fig_example_linear(self):
         ## Figure 1: on habituation set, speed filtered, we plot an example of bayesian and neural network decoding
         # ANN results
