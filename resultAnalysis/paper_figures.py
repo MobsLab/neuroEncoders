@@ -617,9 +617,6 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.png')))
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.svg')))
 
-    def fig_eucl_error_filtered(self, fprop=0.3):
-        
-
     # ------------------------------------------------------------------------------------------------------------------------------
     ## Figure 4: we take an example place cell,
     # and we scatter plot a link between its firing rate and the decoding.
@@ -644,7 +641,7 @@ class PaperFigures():
         for icell, tuningCurve in enumerate(linearTuningCurves):
             pcId = np.where(np.equal(placeFieldSort, icell))[0][0]
             spikeHist = spikePopAligned[:, pcId + 1][:len(self.resultsNN['linTruePos'][iwindow])]
-            spikeMask =np.greater(spikeHist, 0)
+            spikeMask = np.greater(spikeHist, 0)
 
             if spikeMask.any(): # some neurons do not spike here
                 cm = plt.get_cmap("gray")
