@@ -7,6 +7,7 @@ import seaborn as sns
 
 cm = plt.get_cmap("tab20b")
 colorsForSNS = [cm(14), cm(2)]
+colorsForSNSF = [cm(12), cm(16)]
 
 def boxplot_linError(lErrorNN_mean, lErrorBayes_mean, timeWindows=[36, 108, 252, 504],
                      dirSave=None, suffix=''):
@@ -124,3 +125,22 @@ def boxplot_euclDist_decoders(distMean, timeWindows=[36, 108, 252, 504],
     if dirSave is not None:
         fig.savefig(os.path.join(dirSave, f'euclDistDecPlot{suffix}.png'))
         fig.savefig(os.path.join(dirSave, f'euclDistDecPlot{suffix}.svg'))
+
+
+def fig_eucl_error_filtered(errorNN_mean, FerrorNN_mean, timeWindows=[36, 108, 252, 504],
+                            dirSave=None, suffix=''):
+    #TODO: add significance test?
+    data = np.round(np.vstack((errorNN_mean, FerrorNN_mean)).flatten(), 2)
+    timeWindowsForDF = timeWindows * errorNN_mean.shape[0] * 2
+    decoderForPD = ['Full'] * errorNN_mean.shape[0] * len(timeWindows) + ['30% best'] * errorNN_mean.shape[0] * len(timeWindows)
+    datToPlot = pd.DataFrame({'eucl. error (cm)': data,
+                              'timeWindow (ms)': timeWindowsForDF,
+                              'filtered': decoderForPD})
+    fig, ax = plt.subplots(figsize=(9, 9))
+    myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
+    sns.boxplot(data=datToPlot, x="timeWindow (ms)", y="eucl. error (cm)", hue="filtered",
+                orient='v', ax=ax, palette=colorsForSNSF)
+
+    if dirSave is not None:
+        fig.savefig(os.path.join(dirSave, f'errorBoxPlot_filtered{suffix}.png'))
+        fig.savefig(os.path.join(dirSave, f'errorBoxPlot_filtered{suffix}.svg'))
