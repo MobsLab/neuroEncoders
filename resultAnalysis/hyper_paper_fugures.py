@@ -108,3 +108,19 @@ def plot_euclError_mouse_by_mouse(errorNN_mean, errorBayes_mean,
         if dirSave is not None:
             fig.savefig(os.path.join(dirSave, f'errorPlotMBM{suffix}_{timeWindows[iWindow]}.png'))
             fig.savefig(os.path.join(dirSave, f'errorPlotMBM{suffix}_{timeWindows[iWindow]}.svg'))
+
+
+def boxplot_euclDist_decoders(distMean, timeWindows=[36, 108, 252, 504],
+                              dirSave=None, suffix=''):
+    #TODO: add significance test?
+    data = distMean.flatten()
+    timeWindowsForDF = timeWindows * distMean.shape[0]
+    datToPlot = pd.DataFrame({'eucl. distance (cm)': data,
+                              'time window (ms)': timeWindowsForDF})
+    fig, ax = plt.subplots(figsize=(9, 9))
+    sns.boxplot(data=datToPlot, x="time window (ms)", y="eucl. distance (cm)",
+                orient='v', ax=ax, palette='flare')
+
+    if dirSave is not None:
+        fig.savefig(os.path.join(dirSave, f'euclDistDecPlot{suffix}.png'))
+        fig.savefig(os.path.join(dirSave, f'euclDistDecPlot{suffix}.svg'))

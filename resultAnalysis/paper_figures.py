@@ -171,6 +171,34 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, 'example_nn_bayes.png'))
         fig.savefig(os.path.join(self.folderFigures, 'example_nn_bayes.svg'))
 
+    def compare_nn_bayes(self, timeWindow, isCM=False, isShow=False):
+        idWindow = self.timeWindows.index(timeWindow)
+        # Data
+        if isCM:
+            nnD = self.resultsNN['fullPred'][idWindow] * EC
+            bayesD = self.resultsBayes['fullPred'][idWindow] * EC
+            title = 'Eucleadian distance (cm)'
+        else:
+            nnD = self.resultsNN['fullPred'][idWindow]
+            bayesD = self.resultsBayes['fullPred'][idWindow]
+            title = 'Eucleadian distance'
+        distMean = np.linalg.norm(nnD - bayesD, axis=1)
+        # Plot eucledian distance between fullPred of resultsNN and resultsBayes
+        if isShow:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 10))
+            ax.scatter(self.resultsNN['time'][idWindow], distMean, c='black',
+                    alpha=0.9, label=(str(self.timeWindows[idWindow]) + ' ms'), s=1)
+            ax.set_title('Eucledian distance between neural network and bayesian decoder \n'
+                         + str(self.timeWindows[idWindow]) + ' window', fontsize="xx-large")
+            ax.set_xlabel("time (s)", fontsize="xx-large")
+            ax.set_ylabel(title, fontsize="xx-large")
+            fig.show()
+            fig.savefig(os.path.join(self.folderFigures, f'nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms.png'))
+            fig.savefig(os.path.join(self.folderFigures, f'nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms.svg'))
+
+        return np.mean(distMean)
+
+
     def hist_linerrors(self, speed='all'):
         ### Prepare the data
         # Masks
@@ -588,6 +616,9 @@ class PaperFigures():
         fig.show()
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.png')))
         fig.savefig(os.path.join(self.folderFigures, ('example_nn_bayes_filtered_' + str(fprop*100) + '%.svg')))
+
+    def fig_eucl_error_filtered(self, fprop=0.3):
+        
 
     # ------------------------------------------------------------------------------------------------------------------------------
     ## Figure 4: we take an example place cell,
