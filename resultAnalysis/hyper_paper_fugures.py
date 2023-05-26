@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 plt.style.use(os.path.join(os.getcwd(), 'resultAnalysis', 'ne.mplstyle'))
 import seaborn as sns
+from scipy.stats import sem
 
 cm = plt.get_cmap("tab20b")
 colorsForSNS = [cm(14), cm(2)]
@@ -144,3 +145,27 @@ def fig_eucl_error_filtered(errorNN_mean, FerrorNN_mean, timeWindows=[36, 108, 2
     if dirSave is not None:
         fig.savefig(os.path.join(dirSave, f'errorBoxPlot_filtered{suffix}.png'))
         fig.savefig(os.path.join(dirSave, f'errorBoxPlot_filtered{suffix}.svg'))
+
+def fig_average_predLoss_vs_euclError(predLossTicks, euclError, timeWindows=[36, 108, 252, 504],
+                                      dirSave=None, suffix=''):
+
+    # Stack euclError into a single array for each time window
+    euclErrorAv = []
+    euclErrorSEM = []
+    for iw in range(len(timeWindows)):
+        euclErrorAv.append(np.nanmean(euclError[:, iw, :], axis=0))
+        euclErrorSEM.append(sem(euclError[:, iw, :], axis=0, nan_policy='omit'))
+
+    fig, ax = plt.subplots(figsize=(15, 9))
+    for iw in range(len(timeWindows)):
+        ax.plot(predLossTicks, euclErrorAv[iw], c=cm(12+iw), label=f'{timeWindows[iw]} ms')
+        ax.fill_between(predLossTicks, euclErrorAv[iw]-euclErrorSEM[iw],
+                         euclErrorAv[iw]+euclErrorSEM[iw], color=cm(12+iw), alpha=0.2)
+    ax.set_xlabel('Normalized predicted loss')
+    ax.set_ylabel('eucl. error (cm)')
+    ax.set_title('Average euclidean error vs. predicted loss')
+    ax.legend()
+
+    if dirSave is not None:
+        fig.savefig(os.path.join(dirSave, f'euclError_vs_predLoss{suffix}.png'))
+        fig.savefig(os.path.join(dirSave, f'euclError_vs_predLoss{suffix}.svg'))

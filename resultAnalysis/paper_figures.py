@@ -141,7 +141,7 @@ class PaperFigures():
         else:
             [a.plot(self.resultsNN['time'][i],self.resultsNN['linTruePos'][i],c="black",alpha=0.3) for i,a in enumerate(ax[:,0])]
             for i in range(len(self.timeWindows)):
-                ax[i,0].scatter(self.resultsNN['time'][i],self.resultsNN['linPred'][i],c=self.cm(12+i),alpha=0.9,label=(str(self.timeWindows[i])+ ' ms'),s=1)
+                ax[i,0].scatter(self.resultsNN['time'][i],self.resultsNN['linPred'][i], c=self.cm(12+i),alpha=0.9,label=(str(self.timeWindows[i])+ ' ms'),s=1)
                 if i == 0:
                     ax[i,0].set_title('Neural network decoder \n ' + str(self.timeWindows[i]) + ' window',fontsize="xx-large")
                 else:
@@ -364,8 +364,8 @@ class PaperFigures():
             nnD['pred'] = [self.resultsNN['fullPred'][i] for i in range(len(self.timeWindows))]
             nnD['true'] = [self.resultsNN['truePos'][i] for i in range(len(self.timeWindows))]
             bayesD['pred'] = [self.resultsBayes['fullPred'][i] for i in range(len(self.timeWindows))]
-        errorNN = [np.linalg.norm(nnD['true'][i] - nnD['pred'][i], axis=1) for i in range(len(self.timeWindows))]
-        errorBayes = [np.linalg.norm(nnD['true'][i] - bayesD['pred'][i], axis=1) for i in range(len(self.timeWindows))]
+        errorNN = [np.linalg.norm(nnD['true'][i] - nnD['pred'][i], axis=1, ord=2) for i in range(len(self.timeWindows))]
+        errorBayes = [np.linalg.norm(nnD['true'][i] - bayesD['pred'][i], axis=1, ord=2) for i in range(len(self.timeWindows))]
         if speed == 'all':
             errorNN_mean = np.array([np.mean(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
             errorNN_std = np.array([np.std(errorNN[i][finalMasks[i]]) for i in range(len(self.timeWindows))])
@@ -543,6 +543,7 @@ class PaperFigures():
             masks = habMaskSlow
         else:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')
+        print('masks are not implemented yet')
         
         ## Calculate errors at each level of predLoss
         errors = [np.abs(self.resultsNN['linTruePos'][iw]-self.resultsNN['linPred'][iw]) for iw in range(len(self.timeWindows))]
@@ -565,6 +566,66 @@ class PaperFigures():
         fig.savefig(os.path.join(self.folderFigures, 'predLoss_vs_error.png'))
         fig.savefig(os.path.join(self.folderFigures, 'predLoss_vs_error.svg'))
 
+    def predLoss_euclError(self, speed='all', step=0.01, isCM=False):
+        REMOVED_PERCENTAGE = 1
+        # Data
+        nnD = {}
+        if isCM:
+            nnD['pred'] = [self.resultsNN['fullPred'][i] * EC for i in range(len(self.timeWindows))]
+            nnD['true'] = [self.resultsNN['truePos'][i] * EC for i in range(len(self.timeWindows))]
+        else:
+            nnD['pred'] = [self.resultsNN['fullPred'][i] for i in range(len(self.timeWindows))]
+            nnD['true'] = [self.resultsNN['truePos'][i] for i in range(len(self.timeWindows))]
+
+        # Scale predicted loss between 0 and 1
+        predLoss = [self.resultsNN['predLoss'][iw] for iw in range(len(self.timeWindows))]
+        predLoss_scaled = [np.divide(np.subtract(predLoss[iw], np.min(predLoss[iw])),
+                                     np.subtract(np.max(predLoss[iw]), np.min(predLoss[iw])))
+                           for iw in range(len(self.timeWindows))]
+        # Masks
+        habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
+                   for i in range(len(self.timeWindows))]
+        habMaskFast = [(habMask[i]) * (self.resultsNN['speedMask'][i]) for i in range(len(self.timeWindows))]
+        habMaskSlow = [(habMask[i]) * np.logical_not(self.resultsNN['speedMask'][i][i]) for i in range(len(self.timeWindows))]
+        if speed == 'all':
+            masks = habMask
+        elif speed == 'fast':
+            masks = habMaskFast
+        elif speed == 'slow':
+            masks = habMaskSlow
+        else:
+            raise ValueError('speed argument could be only "full", "fast" or "slow"')
+
+        ## Calculate errors at each level of predLoss
+        euclErrors = [np.linalg.norm(nnD['true'][iw] - nnD['pred'][iw], axis=1)
+                      for iw in range(len(self.timeWindows))]
+        predLoss_ticks = [np.arange(np.min(predLoss_scaled[iw]),
+                                    np.max(predLoss_scaled[iw]), step)
+                          for iw in range(len(self.timeWindows))]
+        errors_filtered = np.zeros((len(self.timeWindows), len(predLoss_ticks[0])))
+        for iw in range(len(self.timeWindows)):
+            percFiltered = np.array([np.sum([np.less_equal(predLoss_scaled[iw], pfilt)])/predLoss_scaled[iw].shape[0]*100
+                            for pfilt in predLoss_ticks[iw]])
+            # I've arbitrarly decided that 1% of the cut off data are not represetative
+            maskFilterout = percFiltered < REMOVED_PERCENTAGE
+            errors_filtered[iw, :] = np.array([np.mean(euclErrors[iw][masks[iw]][np.less_equal(predLoss_scaled[iw][masks[iw]], pfilt)])
+                                    for pfilt in predLoss_ticks[iw]])
+            errors_filtered[iw][maskFilterout] = np.nan
+
+        labelNames = [(str(self.timeWindows[iw]) + ' ms') for iw in range(len(self.timeWindows))]
+        fig,ax = plt.subplots(figsize=(10, 5.3), constrained_layout=True)
+        [ax.plot(predLoss_ticks[iw],errors_filtered[iw, :],c=self.cm(12+iw),label=labelNames[iw]) for iw in range(len(self.timeWindows))]
+        ax.set_xlabel("Neural network \n prediction filtering value", fontsize="x-large")
+        ax.set_ylabel("Euclidean error (cm)", fontsize="x-large")
+        ax.set_title((speed + ' speed'), fontsize="x-large")
+        fig.legend(loc=(0.87, 0.17), fontsize=12)
+        fig.show()
+
+        fig.savefig(os.path.join(self.folderFigures, f'predLossScaled_vs_euclError_{speed}.png'))
+        fig.savefig(os.path.join(self.folderFigures, f'predLossScaled_vs_euclError_{speed}.svg'))
+
+        return predLoss_ticks[0], errors_filtered
+
     def fig_example_linear_filtered(self, fprop=0.3):
         # Calculate filtering values
         sortedLPred = [np.argsort(self.resultsNN['predLoss'][iw]) for iw in range(len(self.timeWindows))]
@@ -574,7 +635,7 @@ class PaperFigures():
                                     np.less_equal(self.resultsNN['predLoss'][iw],thresh[iw]) for iw in range(len(self.timeWindows))]
         
         
-        fig,ax = plt.subplots(len(self.timeWindows), 2 ,sharex=True,figsize=(15,10),sharey=True)
+        fig,ax = plt.subplots(len(self.timeWindows), 2 ,sharex=True, figsize=(15,10),sharey=True)
         # All points
         if len(self.timeWindows) == 1:
             ax[0].plot(self.resultsNN['time'][0],self.resultsNN['linTruePos'][0],c="black",alpha=0.3)

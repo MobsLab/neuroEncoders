@@ -323,7 +323,7 @@ class LSTMandSpikeNetwork():
                 posFeature = behaviorData["Positions"]
             datasets[key] = datasets[key].map(nnUtils.import_true_pos(posFeature))
             datasets[key] = datasets[key].filter(lambda x: tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(x["pos"]))))
-            datasets[key] = datasets[key].batch(self.params.batchSize,drop_remainder=True)
+            datasets[key] = datasets[key].batch(self.params.batchSize, drop_remainder=True)
             datasets[key] = datasets[key].map(
                 lambda *vals: nnUtils.parse_serialized_sequence(self.params, *vals, batched=True),
                 num_parallel_calls=tf.data.AUTOTUNE) #self.featDesc, *
@@ -479,7 +479,7 @@ class LSTMandSpikeNetwork():
             testOutput["linearTrue"] = linearTrue
             
         # Save the results
-        self.saveResults(testOutput, windowsizeMS=windowsizeMS)
+        self.saveResults(testOutput, folderName=windowsizeMS)
 
         return testOutput
 
