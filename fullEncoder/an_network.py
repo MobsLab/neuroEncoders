@@ -411,15 +411,15 @@ class LSTMandSpikeNetwork():
             self.model.load_weights(os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt"))
         
         # Manage the behavior
-        if useSpeedFilter:            
-            speedMask = behaviorData["Times"]["speedFilter"]
-        else:
-            speedMask = np.ones_like(behaviorData["Times"]["speedFilter"], dtype=bool)
+        speedMask = behaviorData["Times"]["speedFilter"]
         if useTrain:
             epochMask = inEpochsMask(behaviorData['positionTime'][:, 0], behaviorData['Times']['trainEpochs'])
         else:
             epochMask = inEpochsMask(behaviorData['positionTime'][:, 0], behaviorData['Times']['testEpochs'])
-        totMask = speedMask * epochMask
+        if useSpeedFilter:
+            totMask = speedMask * epochMask
+        else:
+            totMask = epochMask
 
         # Load the and imfer dataset
         dataset = tf.data.TFRecordDataset(os.path.join(self.projectPath.dataPath,
