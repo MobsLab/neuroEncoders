@@ -585,8 +585,8 @@ class PaperFigures():
         # Masks
         habMask = [inEpochsMask(self.resultsNN['time'][i], self.behaviorData["Times"]["testEpochs"])
                    for i in range(len(self.timeWindows))]
-        habMaskFast = [(habMask[i]) * (self.resultsNN['speedMask'][i]) for i in range(len(self.timeWindows))]
-        habMaskSlow = [(habMask[i]) * np.logical_not(self.resultsNN['speedMask'][i][i]) for i in range(len(self.timeWindows))]
+        habMaskFast = [self.resultsNN['speedMask'][i] for i in range(len(self.timeWindows))]
+        habMaskSlow = [np.logical_not(self.resultsNN['speedMask'][i]) for i in range(len(self.timeWindows))]
         if speed == 'all':
             masks = habMask
         elif speed == 'fast':
