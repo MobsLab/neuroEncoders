@@ -78,7 +78,12 @@ class Trainer():
 
         return bayesMatrices
 
-    def train(self, behaviorData, onTheFlyCorrection=False):    
+    def train(self, behaviorData, onTheFlyCorrection=False):
+        # Check for bandwidth
+        if self.bandwidth == None:
+            self.bandwidth = behaviorData['Bandwidth']
+
+        # Initialize variables
         marginalRateFunctions = []
         rateFunctions = []
         spikePositions = []
@@ -87,19 +92,15 @@ class Trainer():
         maxPos = np.max(
                 behaviorData["Positions"][np.logical_not(np.isnan(np.sum(behaviorData["Positions"], axis=1)))])
         
-        ### Align the positions time with the spike_times so we can speed filter each spike time (long step)
-        posTimes = pykeops.numpy.Vj(behaviorData['positionTime'][:,0][:,None])
-        tSpeedFilt = []
-        print('Aligning speed-filter with spike times')
-        for tetrode in tqdm(range(nTetrodes)):
-            spike_times = pykeops.numpy.LazyTensor(self.clusterData['Spike_times'][tetrode][:,0][:,None],axis=0)
-            matching_pos_time = (posTimes - spike_times).abs().argmin_reduction(axis=1)
-            # matching_pos_time = np.asarray(matching_pos_time)
-            speed_mask = behaviorData['Times']['speedFilter'][matching_pos_time]
-            tSpeedFilt += [speed_mask]
-        # Check for bandwidth
-        if self.bandwidth == None:
-            self.bandwidth = behaviorData['Bandwidth']
+        ### Align the positions time with the spike_times so we can speed filter each spike time
+        spikeSpeedFilter = []
+        print('Aligning speed-filter with spike times') 
+        for tetrode in tqdm(range(nTetrodes)): # Could be long
+            idSpiketoPos = self.align_denser_with_sparser(self.clusterData['Spike_times'][tetrode][:,0],
+                                                                  behaviorData['positionTime'][:,0])
+            speed_mask = behaviorData['Times']['speedFilter'][idSpiketoPos]
+            spikeSpeedFilter.append(speed_mask)
+            
         # Work with position coordinates		
         selPositions = behaviorData['Positions'][reduce(np.intersect1d,
             (np.where(behaviorData['Times']['speedFilter']),
@@ -115,12 +116,13 @@ class Trainer():
         occupationInverse = 1/occupation
         occupationInverse[occupationInverse==np.inf] = 0
         occupationInverse = np.multiply(occupationInverse, mask)
-        finalOccupation = occupationInverse
+        # TODO: Normalize that? Because it's not a probability distribution anymore, and it's huge
+        finalOccupation = occupationInverse/occupationInverse.sum()
         ### Build marginal rate functions
         print('Building marginal rate and local rate functions')
         for tetrode in tqdm(range(nTetrodes)):
             tetrodewisePos = self.clusterData['Spike_positions'][tetrode][reduce(np.intersect1d,
-                (np.where(tSpeedFilt[tetrode]),
+                (np.where(spikeSpeedFilter[tetrode]),
                 inEpochs(self.clusterData['Spike_times'][tetrode][:,0], behaviorData['Times']['trainEpochs'])))]
             if onTheFlyCorrection: # setting the position to be between 0 and 1 if necessary
                 tetrodewisePos = tetrodewisePos/maxPos
@@ -128,7 +130,9 @@ class Trainer():
             gridFeature, MRF = butils.kdenD(tetrodewisePos, self.bandwidth, edges=gridFeature, kernel=self.kernel)
             MRF[MRF==0] = np.min(MRF[MRF!=0])
             MRF         = MRF/np.sum(MRF)
-            MRF         = np.shape(tetrodewisePos)[0]*np.multiply(MRF, finalOccupation)/behaviorData['Times']['learning']
+            MRF         = np.shape(tetrodewisePos)[0]*np.multiply(MRF, occupationInverse)/behaviorData['Times']['learning']
+            MRF = MRF/MRF.sum()
+            # TODO: Normalize that? Because it's not a probability distribution anymore, and it's huge
             marginalRateFunctions.append(MRF)
             # Allocate for local rate functions
             localRateFunctions = []
@@ -137,7 +141,7 @@ class Trainer():
         ### Build local rate functions (one per cluster)
             for label in range(np.shape(self.clusterData['Spike_labels'][tetrode])[1]):
                 clusterwisePos = self.clusterData['Spike_positions'][tetrode][reduce(np.intersect1d,
-                    (np.where(tSpeedFilt[tetrode]),
+                    (np.where(spikeSpeedFilter[tetrode]),
                     np.where(self.clusterData['Spike_labels'][tetrode][:,label] == 1),
                     inEpochs(self.clusterData['Spike_times'][tetrode][:,0], behaviorData['Times']['trainEpochs'])))]
                 if onTheFlyCorrection:
@@ -148,7 +152,9 @@ class Trainer():
                                                     edges=gridFeature, kernel=self.kernel)
                     LRF[LRF==0] = np.min(LRF[LRF!=0])
                     LRF         = LRF/np.sum(LRF)
-                    LRF         = np.shape(clusterwisePos)[0]*np.multiply(LRF, finalOccupation)/behaviorData['Times']['learning']
+                    LRF         = np.shape(clusterwisePos)[0]*np.multiply(LRF, occupationInverse)/behaviorData['Times']['learning']
+                    LRF = LRF/LRF.sum()
+                    # TODO: Normalize that? Because it's not a probability distribution anymore, and it's huge
                     localRateFunctions.append(LRF)
                 else:
                     localRateFunctions.append(np.ones(np.shape(occupation)))
@@ -165,6 +171,33 @@ class Trainer():
                 'bins':[np.unique(gridFeature[i]) for i in range(len(gridFeature))],'spikePositions': spikePositions,
                           'mutualInfo': mutualInfo}
         return bayesMatrices
+    
+    @staticmethod
+    def align_denser_with_sparser(denser, sparser):
+        """
+        Use pykeops to align the values of sparsely sampled array with
+        the values of densely sampled. The result of the alighnement
+        is the indices of the position times that are closest to the spike times.
+        Indices repeat because there are more spike times than position times.
+
+        Input:
+
+            denser: nparray of shape (nSpikeTimes), times of spike samples
+            sparser: nparray of shape (nPosTimes), times of position samples
+
+        Output:
+
+            idsSparseAlignedToDense: nparray of denser.shape, indices of sparser
+                array that are closest to every value in denser array (values
+                repeat because there are more values in denser array than in
+                sparser array)
+        """
+
+        denserLazy = pykeops.numpy.LazyTensor(denser[:,None], axis=0)
+        sparserLazy = pykeops.numpy.LazyTensor(sparser[:,None], axis=1)
+        idDense = (sparserLazy - denserLazy).abs().argmin_reduction(axis=1)
+
+        return np.squeeze(idDense)
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000
@@ -207,7 +240,7 @@ class Trainer():
         ### Build Poisson term
         allPoisson = [np.exp((-windowSize) * marginalRateFunctions[tetrode]) for tetrode in
                             range(len(clusters))]
-        allPoisson = np.log(reduce(np.multiply, allPoisson))
+        logAllPoisson = np.log(reduce(np.multiply, allPoisson))
         ### Log of rate functions
         logRF = []
         for tetrode in range(np.shape(rateFunctions)[0]):
@@ -219,11 +252,11 @@ class Trainer():
 
         ### Decoding loop
         print("Parallel pykeops bayesian test")
-        outputPOps = parallel_pred_as_NN(timeStepPred, windowSize, allPoisson, clusters,
+        outputPOps = parallel_pred_as_NN(timeStepPred, windowSize, logAllPoisson, clusters,
                                                 clustersTime, logRF, logOccupation)
         print("finished bayesian guess")
 
-        idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
+        idPos = np.unravel_index(outputPOps[1], shape=logAllPoisson.shape)
         inferredPos = np.array(
             [bayesMatrices['bins'][i][idPos[i][:, 0]] for i in range(len(bayesMatrices['bins']))])
         # probability moved back to linear scale
@@ -467,7 +500,7 @@ def parallel_pred_as_NN(firstSpikeNNtime, windowSize, allPoisson, clusters, clus
     tetrodeContribs = tetrodeContribs + poissonContribVj
 
     # The probability need to be weighted by the position probabilities:
-    occupancy_r = np.reshape(occupancy,newshape=[np.prod(occupancy.shape)])[:,None]
+    occupancy_r = np.reshape(occupancy, newshape=[np.prod(occupancy.shape)])[:,None]
     occupancyContrib = pykeops.numpy.Vj(occupancy_r)
     tetrodeContribs = tetrodeContribs + occupancyContrib
 

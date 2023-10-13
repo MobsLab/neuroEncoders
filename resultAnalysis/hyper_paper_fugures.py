@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-plt.style.use(os.path.join(os.getcwd(), 'resultAnalysis', 'ne.mplstyle'))
+# plt.style.use(os.path.join(os.getcwd(), 'resultAnalysis', 'ne.mplstyle'))
 import seaborn as sns
 from scipy.stats import sem
 
