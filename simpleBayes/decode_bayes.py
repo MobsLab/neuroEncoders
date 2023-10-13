@@ -102,39 +102,34 @@ class Trainer():
             spikeSpeedFilter.append(speed_mask)
             
         # Get speed-filtered coordinates from train epoch
-        trainSpeedMask = get_speed_filtered_mask_in_epoch(behaviorData, 'trainEpochs')	
+        behSpeedMask = behaviorData['Times']['speedFilter']
+        posTimes = behaviorData['positionTime'][:,0]
+        trainEpoch = behaviorData['Times']['trainEpochs']
+        trainSpeedMask = self.get_speed_filtered_mask_in_epoch(posTimes, trainEpoch, behSpeedMask)	
         selPositions = behaviorData['Positions'][trainSpeedMask] 
-         # setting the position to be between 0 and 1 if necessary
-        if onTheFlyCorrection:
+        # setting the position to be between 0 and 1 if necessary
+        if onTheFlyCorrection: # TODO: make it a decorator?
             selPositions = selPositions/maxPos
          # Remove NaN positions
         selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions, axis=1))),:]
-        
-        ### Build global occupation map
-        gridFeature, occupation = butils.kdenD(selPositions, self.bandwidth, kernel=self.kernel) #0.07s
-        occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
-        mask = occupation > (np.max(occupation)/self.maskingFactor) # Trick to highlight the differences in occupation map
-        occupationInverse = 1/occupation
-        occupationInverse[occupationInverse==np.inf] = 0
-        occupationInverse = np.multiply(occupationInverse, mask)
-        # TODO: Normalize that? Because it's not a probability distribution anymore, and it's huge
-        finalOccupation = occupationInverse/occupationInverse.sum()
+
+        # Build occupation map
+        finalOccupation = self.build_occupation_map(selPositions, isnormalize=False)
         ### Build marginal rate functions
         print('Building marginal rate and local rate functions')
         for tetrode in tqdm(range(nTetrodes)):
-            tetrodewisePos = self.clusterData['Spike_positions'][tetrode][reduce(np.intersect1d,
-                (np.where(spikeSpeedFilter[tetrode]),
-                inEpochs(self.clusterData['Spike_times'][tetrode][:,0], behaviorData['Times']['trainEpochs'])))]
+            tetrodewisePos = self.get_spikes_with_positions(behaviorData, tetrode,
+                                                            spikeSpeedFilter[tetrode],
+                                                            onTheFlyCorrection)
             if onTheFlyCorrection: # setting the position to be between 0 and 1 if necessary
                 tetrodewisePos = tetrodewisePos/maxPos
-            tetrodewisePos = tetrodewisePos[np.logical_not(np.isnan(np.sum(tetrodewisePos, axis=1))), :] 
-            gridFeature, MRF = butils.kdenD(tetrodewisePos, self.bandwidth, edges=gridFeature, kernel=self.kernel)
-            MRF[MRF==0] = np.min(MRF[MRF!=0])
-            MRF         = MRF/np.sum(MRF)
-            MRF         = np.shape(tetrodewisePos)[0]*np.multiply(MRF, occupationInverse)/behaviorData['Times']['learning']
-            MRF = MRF/MRF.sum()
+            tetrodewisePos = tetrodewisePos[np.logical_not(np.isnan(np.sum(tetrodewisePos, axis=1))), :]
+
+            MRF = self.build_marginal_rate_functions(tetrodewisePos)
             # TODO: Normalize that? Because it's not a probability distribution anymore, and it's huge
             marginalRateFunctions.append(MRF)
+
+
             # Allocate for local rate functions
             localRateFunctions = []
             localSpikePositions = []
@@ -201,7 +196,7 @@ class Trainer():
         return np.squeeze(idDense)
     
     @staticmethod
-    def get_speed_filtered_mask_in_epoch(behaviorData, epochName):
+    def get_speed_filtered_mask_in_epoch(times, epoch, speedMask):
         """
         Get the mask of speed-filtered positions in a given epoch
 
@@ -215,12 +210,71 @@ class Trainer():
             speedMask: nparray of shape (nPosTimes), mask of speed-filtered positions
             in a given epoch
         """
-        speedMask = np.where(behaviorData['Times']['speedFilter'])
-        posTimes = behaviorData['positionTime'][:,0]
-        epochMask = inEpochs(posTimes, behaviorData['Times'][epochName])
+        speedIds = np.where(speedMask)
+        epochMask = inEpochs(times, epoch)
+        idsSpeedInEpoch = reduce(np.intersect1d, (speedIds,epochMask))
 
-        idsSpeedInEpoch = reduce(np.intersect1d, (speedMask,epochMask))
         return idsSpeedInEpoch
+
+    def build_occupation_map(self, positions, isNormalize=False):
+        """
+        Build the occupation map from the coordinates matrix using kernel
+        density estimation
+
+        Input:
+
+            positions: nparray of shape (nSamples, nDimensions), coordinates
+            isnormalize: bool, normalize the occupation map or not
+
+        Output:
+
+            finalOccupation: nparray of shape (nBins, nBins), occupation map
+        """
+
+        _, occupation = butils.kdenD(positions, self.bandwidth,
+                                               kernel=self.kernel)
+        # Avoid having zeros
+        occupation[occupation==0] = np.min(occupation[occupation!=0])
+         # Trick to highlight the differences in occupation map
+        mask = occupation > (np.max(occupation)/self.maskingFactor)
+        # Inverse occupation - for me, meaning is unclear
+        occupationInverse = 1/occupation
+        occupationInverse[occupationInverse==np.inf] = 0
+        occupationInverse = np.multiply(occupationInverse, mask)
+
+        if isNormalize:
+            finalOccupation = occupationInverse/occupationInverse.sum()
+        else:
+            finalOccupation = occupationInverse
+
+        return finalOccupation
+    
+    def get_spikes_with_positions(self, epoch, numSpikeGroup,
+                                      spikeSpeedFilter, isNormalize=False):
+        """
+        Build the marginal rate functions from the spike positions matrix
+        """
+        spikePositions = self.clusterData['Spike_positions'][numSpikeGroup]
+
+        spikeTimes = self.clusterData['Spike_times'][numSpikeGroup][:,0]
+        idsSpeedTrain = self.get_speed_filtered_mask_in_epoch(spikeTimes, epoch,
+                                                            spikeSpeedFilter)
+        tetrodewisePos = spikePositions[idsSpeedTrain]
+
+        return tetrodewisePos
+
+    def build_marginal_rate_functions(self, tetrodewisePos):
+        """
+        Build the marginal rate functions from the spike positions matrix
+        """
+        gridFeature, MRF = butils.kdenD(tetrodewisePos, self.bandwidth,
+                                        edges=gridFeature, kernel=self.kernel)
+        MRF[MRF==0] = np.min(MRF[MRF!=0])
+        MRF = MRF/np.sum(MRF)
+        # This is obscure to me >>
+        # MRF = np.shape(tetrodewisePos)[0]*np.multiply(MRF, occupationInverse)/ \
+        #         behaviorData['Times']['learning']
+        # MRF = MRF/MRF.sum()
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000

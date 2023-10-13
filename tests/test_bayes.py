@@ -25,15 +25,23 @@ class TestPyKeops:
 class TestEpochManipulations:
 
     def test_get_speed_filtered_mask_in_epoch(self):
-        behaviorData = dict()
-        behaviorData['Times'] = dict()
         # Create a speed vector
-        behaviorData['Times']['speedFilter'] = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                                         1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
-        behaviorData['positionTime'] = np.arange(1, 21)[:, np.newaxis]
+        speedMask = np.array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                              1, 1, 1, 1, 1, 1, 1, 1, 1, 1])
+        times = np.arange(1, 21)
         # Create an epoch
-        behaviorData['Times']['trainEpochs'] = np.array([15, 20])
+        epoch = np.array([15, 20])
         # Get the mask
-        ids = plg.Trainer.get_speed_filtered_mask_in_epoch(behaviorData, 'trainEpochs')
+        ids = plg.Trainer.get_speed_filtered_mask_in_epoch(times, epoch, speedMask)
         # Check that the mask is correct
         assert np.all(ids == np.array([14, 15, 16, 17, 18, 19]))
+
+
+class TestKernelMaps:
+    # TODO: Implement tests for kernel maps
+    pass
+
+
+class TestEpochs:
+    # TODO: Implement tests for epochs
+    pass
