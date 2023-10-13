@@ -101,14 +101,15 @@ class Trainer():
             speed_mask = behaviorData['Times']['speedFilter'][idSpiketoPos]
             spikeSpeedFilter.append(speed_mask)
             
-        # Work with position coordinates		
-        selPositions = behaviorData['Positions'][reduce(np.intersect1d,
-            (np.where(behaviorData['Times']['speedFilter']),
-            inEpochs(behaviorData['positionTime'][:,0], behaviorData['Times']['trainEpochs']),
-            ))] # Get speed-filtered coordinates from train epoch
-        if onTheFlyCorrection: # setting the position to be between 0 and 1 if necessary
+        # Get speed-filtered coordinates from train epoch
+        trainSpeedMask = get_speed_filtered_mask_in_epoch(behaviorData, 'trainEpochs')	
+        selPositions = behaviorData['Positions'][trainSpeedMask] 
+         # setting the position to be between 0 and 1 if necessary
+        if onTheFlyCorrection:
             selPositions = selPositions/maxPos
-        selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions, axis=1))),:] # Remove NaN positions
+         # Remove NaN positions
+        selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions, axis=1))),:]
+        
         ### Build global occupation map
         gridFeature, occupation = butils.kdenD(selPositions, self.bandwidth, kernel=self.kernel) #0.07s
         occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
@@ -198,6 +199,28 @@ class Trainer():
         idDense = (sparserLazy - denserLazy).abs().argmin_reduction(axis=1)
 
         return np.squeeze(idDense)
+    
+    @staticmethod
+    def get_speed_filtered_mask_in_epoch(behaviorData, epochName):
+        """
+        Get the mask of speed-filtered positions in a given epoch
+
+        Input:
+
+            behaviorData: dict, contains the position times key and epoch limits
+            epochName: str, name of the epoch to use ('trainEpochs' or 'testEpochs')
+
+        Output:
+
+            speedMask: nparray of shape (nPosTimes), mask of speed-filtered positions
+            in a given epoch
+        """
+        speedMask = np.where(behaviorData['Times']['speedFilter'])
+        posTimes = behaviorData['positionTime'][:,0]
+        epochMask = inEpochs(posTimes, behaviorData['Times'][epochName])
+
+        idsSpeedInEpoch = reduce(np.intersect1d, (speedMask,epochMask))
+        return idsSpeedInEpoch
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000

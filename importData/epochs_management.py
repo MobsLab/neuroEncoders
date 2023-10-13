@@ -18,7 +18,7 @@ import csv
 
 # a few tool to help do difference of intervals as sets:
 def obtainCloseComplementary(epochs,boundInterval):
-	# we obtain the close complementary ( intervals share their bounds )
+	# we obtain the close complementary (intervals share their bounds )
 	# Note: to obtain the open complementary, one would need to add some dt to end and start of intervals....
 	p1 = interval()
 	for i in range(len(epochs)//2):
