@@ -25,7 +25,10 @@ class Trainer():
         self.bandwidth = bandwidth
         self.kernel = kernel
         self.maskingFactor = maskingFactor
-        self.clusterData  = import_clusters.load_spike_sorting(self.projectPath)
+        try:
+            self.clusterData  = import_clusters.load_spike_sorting(self.projectPath)
+        except:
+            print('WARNING: No cluster data were loaded')
         # Folders
         self.folderResult = os.path.join(self.projectPath.resultsPath, "results")
         if not os.path.isdir(self.folderResult):
@@ -114,7 +117,7 @@ class Trainer():
         selPositions = selPositions[np.logical_not(np.isnan(np.sum(selPositions, axis=1))),:]
 
         # Build occupation map
-        finalOccupation = self.build_occupation_map(selPositions, isnormalize=False)
+        occupationMap = self.build_occupation_map(selPositions, isnormalize=False)
         ### Build marginal rate functions
         print('Building marginal rate and local rate functions')
         for tetrode in tqdm(range(nTetrodes)):
@@ -196,23 +199,37 @@ class Trainer():
         return np.squeeze(idDense)
     
     @staticmethod
-    def get_speed_filtered_mask_in_epoch(times, epoch, speedMask):
+    def find_speed_filtered_spikes_in_epoch(times, epoch, speedMask,
+                                            spikeLabels=None, numCluster=None):
         """
-        Get the mask of speed-filtered positions in a given epoch
+        Get the mask of speed-filtered positions of spikes in a given epoch
 
         Input:
 
-            behaviorData: dict, contains the position times key and epoch limits
-            epochName: str, name of the epoch to use ('trainEpochs' or 'testEpochs')
-
+            times: ndarray, contains the spike times of every sorted spike
+            epoch: str, name of the epoch to use ('trainEpochs' or 'testEpochs')
+            speedMask: nparray of shape (nPosTimes), mask of speed-filtered positions
+            spikeLabels: (optional) nparray of shape (nSpikes, nClusters),
+                         labels of spikes, OneHotEncoded
+            numCluster: (optional) int, number of the cluster to use. If both
+                        spikeLabels and numCluster are None, all spikes are used,
+                        regardless of their cluster. If spikeLabels is not None and
+                        numCluster is not None, spikes of certain cluster are used.
+                         
         Output:
 
-            speedMask: nparray of shape (nPosTimes), mask of speed-filtered positions
+            idsSpeedInEpoch: nparray of shape (nPosTimes), mask of speed-filtered positions
             in a given epoch
         """
-        speedIds = np.where(speedMask)
+        speedIds = np.where(speedMask)[0]
         epochMask = inEpochs(times, epoch)
-        idsSpeedInEpoch = reduce(np.intersect1d, (speedIds,epochMask))
+        if spikeLabels is not None and numCluster is not None:
+            clusterMask = np.where(spikeLabels[:,numCluster] == 1)[0]
+            idsSpeedInEpoch = reduce(np.intersect1d, (speedIds,epochMask,clusterMask))
+        elif spikeLabels is None and numCluster is None:
+            idsSpeedInEpoch = reduce(np.intersect1d, (speedIds,epochMask))
+        else:
+            raise ValueError("Both spikeLabels and numCluster must be None or not None")
 
         return idsSpeedInEpoch
 
@@ -237,31 +254,34 @@ class Trainer():
         occupation[occupation==0] = np.min(occupation[occupation!=0])
          # Trick to highlight the differences in occupation map
         mask = occupation > (np.max(occupation)/self.maskingFactor)
-        # Inverse occupation - for me, meaning is unclear
-        occupationInverse = 1/occupation
-        occupationInverse[occupationInverse==np.inf] = 0
-        occupationInverse = np.multiply(occupationInverse, mask)
+        occupation = np.multiply(occupation, mask)
 
         if isNormalize:
-            finalOccupation = occupationInverse/occupationInverse.sum()
+            finalOccupation = occupation/occupation.sum()
         else:
-            finalOccupation = occupationInverse
+            finalOccupation = occupation
 
         return finalOccupation
     
-    def get_spikes_with_positions(self, epoch, numSpikeGroup,
-                                      spikeSpeedFilter, isNormalize=False):
+    def get_spike_pos_for_use(self, epoch, numSpikeGroup, spikeSpeedFilter,
+                               numCluster=None):
         """
-        Build the marginal rate functions from the spike positions matrix
+        TODO: docstring
         """
         spikePositions = self.clusterData['Spike_positions'][numSpikeGroup]
-
         spikeTimes = self.clusterData['Spike_times'][numSpikeGroup][:,0]
-        idsSpeedTrain = self.get_speed_filtered_mask_in_epoch(spikeTimes, epoch,
-                                                            spikeSpeedFilter)
-        tetrodewisePos = spikePositions[idsSpeedTrain]
+        if numCluster is not None:
+            spikeLabels = self.clusterData['Spike_labels'][numSpikeGroup]
+        else:
+            spikeLabels = None
 
-        return tetrodewisePos
+        idsSpeedTrain = self.find_speed_filtered_spikes_in_epoch(spikeTimes, epoch,
+                                                            spikeSpeedFilter,
+                                                            spikeLabels=spikeLabels,
+                                                            numCluster=numCluster)
+        spikesinEpoch = spikePositions[idsSpeedTrain]
+
+        return spikesinEpoch
 
     def build_marginal_rate_functions(self, tetrodewisePos):
         """
@@ -275,6 +295,9 @@ class Trainer():
         # MRF = np.shape(tetrodewisePos)[0]*np.multiply(MRF, occupationInverse)/ \
         #         behaviorData['Times']['learning']
         # MRF = MRF/MRF.sum()
+
+    def build_local_rate_functions(self, clusterData):
+        pass
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000
