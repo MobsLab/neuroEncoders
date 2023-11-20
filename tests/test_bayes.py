@@ -1,3 +1,5 @@
+### Fixtures pytest https://docs.pytest.org/en/6.2.x/fixture.html
+
 import pytest
 import pathlib, sys, shutil
 import numpy as np
@@ -78,20 +80,27 @@ class TestKernelMaps:
     pass
 
 
-class TestFullBayes:  
-    # TODO: Implement tests for epochs
-
+# This does not work. I should learn how to do teardown in pytest
+@pytest.fixture(scope='class')
+def setup_trainer(request):
     path = Project(str(pathlib.Path(__file__).parent.absolute().joinpath('filesForTest', 'test.xml')))
-    trainer = plg.Trainer(path) # TODO: Do not forget to remove path
-    trainer.clusterData = dict()
-    trainer.clusterData['trainEpochs'] = np.array([[20, 30, 40, 75]]).T
-    trainer.clusterData['Spike_positions'] = []
-    trainer.clusterData['Spike_times'] = []
+    request.cls.trainer = plg.Trainer(path) # TODO: Do not forget to remove path
+    request.cls.trainer.clusterData = dict()
+    request.cls.trainer.clusterData['trainEpochs'] = np.array([[20, 30, 40, 75]]).T
+    request.cls.trainer.clusterData['Spike_positions'] = []
+    request.cls.trainer.clusterData['Spike_times'] = []
     for i in range(3):
-        trainer.clusterData['Spike_positions'].append(np.random.random((100, 2)))
+        request.cls.trainer.clusterData['Spike_positions'].append(np.random.random((100, 2)))
         spikeTimes = np.arange(100) + np.random.random(1)
         spikeTimes = spikeTimes[:, np.newaxis]
-        trainer.clusterData['Spike_times'].append(spikeTimes)
+        request.cls.trainer.clusterData['Spike_times'].append(spikeTimes)
+    yield path
+    shutil.rmtree(path.dataPath)
+    shutil.rmtree(path.resultsPath)
+
+@pytest.mark.usefixtures('setup_trainer')
+class TestFullBayes:  
+    # TODO: Implement tests for epochs
 
     def test_get_spike_pos_for_use_tetrodewise(self):
         ### Parameters
@@ -99,21 +108,17 @@ class TestFullBayes:
         speedMask = np.zeros(100)
         speedMask[50:] += 1
         # Epoch
-        epoch = TestFullBayes.trainer.clusterData['trainEpochs']
+        epoch = self.trainer.clusterData['trainEpochs']
         #numSpikeGroup
         numSpikeGroup = 1
 
-        spikesInEpoch = TestFullBayes.trainer.get_spike_pos_for_use(epoch, numSpikeGroup,
+        spikesInEpoch = self.trainer.get_spike_pos_for_use(epoch, numSpikeGroup,
                                                                     speedMask)
 
         assert len(spikesInEpoch) == 25 # From 50 to 75
-        assert (TestFullBayes.trainer.clusterData['Spike_positions'][numSpikeGroup][50:75] == \
+        assert (self.trainer.clusterData['Spike_positions'][numSpikeGroup][50:75] == \
                 spikesInEpoch).all()
 
     #TODO:test_get_spike_pos_for_use_clusterwise
 
-    # This does not work. I should learn how to do teardown in pytest
-    @pytest.fixture(scope='class')
-    def teardown(self):
-        shutil.rmtree(TestFullBayes.path.dataPath)
-        shutil.rmtree(TestFullBayes.path.resultsPath)
+    
