@@ -89,11 +89,23 @@ def setup_trainer(request):
     request.cls.trainer.clusterData['trainEpochs'] = np.array([[20, 30, 40, 75]]).T
     request.cls.trainer.clusterData['Spike_positions'] = []
     request.cls.trainer.clusterData['Spike_times'] = []
+    request.cls.trainer.clusterData['Spike_labels'] = []
+    num_cells_in_tetrode = 2
+    request.cls.samples = [100, 80, 120] # number of samples per tetrode
+    samples = request.cls.samples
     for i in range(3):
-        request.cls.trainer.clusterData['Spike_positions'].append(np.random.random((100, 2)))
-        spikeTimes = np.arange(100) + np.random.random(1)
+        # Mock spike positions
+        request.cls.trainer.clusterData['Spike_positions'].append(np.random.random((samples[i], 2)))
+        # Mock spike times
+        spikeTimes = np.arange(samples[i]) + np.random.random(1)
         spikeTimes = spikeTimes[:, np.newaxis]
         request.cls.trainer.clusterData['Spike_times'].append(spikeTimes)
+        # Mock spike labels
+        spikeLabels = np.zeros((samples[i], num_cells_in_tetrode))
+        spikeLabels[:samples[i]//2, 0] += 1
+        spikeLabels[samples[i]//2:, 1] += 1
+        request.cls.trainer.clusterData['Spike_labels'].append(spikeLabels)
+    # Remove created folder
     yield path
     shutil.rmtree(path.dataPath)
     shutil.rmtree(path.resultsPath)
@@ -103,14 +115,25 @@ class TestFullBayes:
     # TODO: Implement tests for epochs
 
     def test_get_spike_pos_for_use_tetrodewise(self):
-        ### Parameters
-        # Speed mask
-        speedMask = np.zeros(100)
-        speedMask[50:] += 1
+        """
+        This test assumes that in the first tetrode there are two cells that
+        form a 100 samples long spike train. There is also a train epoch that
+        lasts from 20 to 30 and from 40 to 75 samples. And speed mask that take
+        all samples from 50 to the end is given.
+
+        One needs to find the spike positions from the first tetrode group that
+        belong to the train epoch and satisfy the speed mask. The result should
+        be the 25 samples from the start of the speed mask (20 to 30 samples are
+        out because they are not in the speed mask) to 75th samples because that
+        is where train epoch ends.
+        """
         # Epoch
         epoch = self.trainer.clusterData['trainEpochs']
         #numSpikeGroup
-        numSpikeGroup = 1
+        numSpikeGroup = 0
+        # Speed mask
+        speedMask = np.zeros(self.samples[numSpikeGroup])
+        speedMask[50:] += 1
 
         spikesInEpoch = self.trainer.get_spike_pos_for_use(epoch, numSpikeGroup,
                                                                     speedMask)
@@ -118,7 +141,38 @@ class TestFullBayes:
         assert len(spikesInEpoch) == 25 # From 50 to 75
         assert (self.trainer.clusterData['Spike_positions'][numSpikeGroup][50:75] == \
                 spikesInEpoch).all()
+        
+    def test_get_spike_pos_for_use_clusterwise(self):
+        """
+        This test assumes that in the third tetrode there are two cells that
+        form a 120 samples long spike train. The first 60 samples belong to
+        the first cell and the last 60 samples belong to the second cell.
+        There is also a train epoch that lasts from 20 to 30 and from 40 to 75
+        samples. And speed mask that take all samples from 50 to the end is given.
 
-    #TODO:test_get_spike_pos_for_use_clusterwise
+        One needs to find the spike positions from the second cluster of the third
+        tetrode group that belong to the train epoch and satisfy the speed mask.
+        The result should be the 15 samples from the start of the spike label
+        mask (20 to 30 samples are out because they are not in the speed mask,
+        and 50 to 60 is out because they don't belong to the second cluster) to
+        75th samples because that is where train epoch ends.
+        """
+        # Epoch
+        epoch = self.trainer.clusterData['trainEpochs']
+        #numSpikeGroup
+        numSpikeGroup = 2
+        numCluster = 1
+
+        # Speed mask
+        speedMask = np.zeros(self.samples[numSpikeGroup])
+        speedMask[50:] += 1
+
+        spikesInEpoch = self.trainer.get_spike_pos_for_use(epoch, numSpikeGroup,
+                                                           speedMask,
+                                                           numCluster=numCluster)
+
+        assert len(spikesInEpoch) == 15 # From 60 to 75
+        assert (self.trainer.clusterData['Spike_positions'][numSpikeGroup][60:75] == \
+                spikesInEpoch).all()
 
     
