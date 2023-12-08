@@ -4,6 +4,41 @@ import random
 from functools import reduce
 from sklearn.neighbors import KernelDensity
 
+NBINS = 45 # default number of bins for the histogram
+KERNEL = 'gaussian' # default kernel for the KDE
+
+def kdenD(feature, bandwidth, nbins=NBINS, kernel=KERNEL, **kwargs):
+	"""Build nD kernel density estimate (KDE).
+		feature should be an array of shape (N,n) where n is the dimension of 
+		the env variable N number of elements.
+	"""
+	ndims = feature.shape[1]
+	nbins = [nbins]* ndims
+	# Edges management
+	if ('edges' in kwargs):
+		gridFeature = kwargs['edges']
+	else:
+		# create grid of sample locations (default: 150x150x...x150)
+		lspace = [
+			np.linspace(np.min(feature[:,idim]),
+			   			np.max(feature[:,idim]), nbins[idim]) 
+            for idim in range(ndims)
+			]
+		gridFeature = np.meshgrid(*lspace,indexing="ij")
+	
+	# Make sure feature is of the shape [N,n]
+	feature = feature.reshape([feature.shape[0], -1])
+	xySample = np.vstack([gridFeature[i].ravel() for i in range(len(gridFeature))]).T
+	kdeSKL = KernelDensity(kernel=kernel, bandwidth=bandwidth)
+	kdeSKL.fit(feature)
+
+	# score_samples() returns the log-likelihood of the samples
+	z = np.exp(kdeSKL.score_samples(xySample))
+	zz = np.reshape(z, gridFeature[0].shape)
+	final_est = zz/np.sum(zz)
+	
+	return final_est, gridFeature
+
 ############ Kernels ############
 def epanech_kernel_1d(sizeKernel):
 	values = np.ones(2*sizeKernel)
@@ -32,30 +67,6 @@ def kde2D(x, y, bandwidth, xbins=45j, ybins=45j, **kwargs):
 	z = np.exp(kdeSKL.score_samples(xySample))
 	zz = np.reshape(z, xx.shape)
 	return xx, yy, zz/np.sum(zz)
-
-def kdenD(feature, bandwidth, nbins=None, **kwargs):
-	"""Build nD kernel density estimate (KDE).
-		feature should be an array of shape (N,n) where n is the dimension of 
-		the env variable N number of elements.
-	"""
-	if nbins ==None:
-		nbins = [45 for j in range(feature.shape[1])]
-	feature = feature.reshape([feature.shape[0],-1]) # make sure feature is of the shape [N,n]
-	kernel       = kwargs.get('kernel', 'gaussian'      ) #'epanechnikov'
-	if ('edges' in kwargs):
-		gridFeature = kwargs['edges']
-	else:
-		# create grid of sample locations (default: 150x150x...x150)
-		lspace = [np.linspace(np.min(feature[:,i]),np.max(feature[:,i]),nbins[i]) 
-            for i in range(feature.shape[1])]
-		gridFeature = np.meshgrid(*lspace,indexing="ij")
-	xySample = np.vstack([gridFeature[i].ravel() for i in range(len(gridFeature))]).T
-	kdeSKL = KernelDensity(kernel=kernel, bandwidth=bandwidth)
-	kdeSKL.fit(feature)
-	# score_samples() returns the log-likelihood of the samples
-	z = np.exp(kdeSKL.score_samples(xySample))
-	zz = np.reshape(z, gridFeature[0].shape)
-	return gridFeature, zz/np.sum(zz)
 ############ Kernels ############
 
 ############ Utils ############

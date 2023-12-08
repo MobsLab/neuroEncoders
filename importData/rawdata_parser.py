@@ -72,6 +72,7 @@ def get_behavior(folder, bandwidth=None, getfilterSpeed = True, decode=False):
 	speed = np.swapaxes(speed[:,:],1,0)
 	if bandwidth == None:
 		goodRecordingTimeStep = np.logical_not(np.isnan(np.sum(positions,axis=1)))
+		# TODO: remove it from here and check whether it is used anywhere except in Bayes
 		bandwidth = (np.max(positions[goodRecordingTimeStep,:]) - np.min(positions[goodRecordingTimeStep,:]))/15
 	# Check for sleep sessions
 	sleepPeriods = f.root.behavior.sleepPeriods[:]

@@ -84,6 +84,8 @@ class Trainer():
     def train(self, behaviorData, onTheFlyCorrection=False):
         # Check for bandwidth
         if self.bandwidth == None:
+            # Load bandwidth from behaviorData (it is calculated as the range of 
+            # the position divided by 15)
             self.bandwidth = behaviorData['Bandwidth']
 
         # Initialize variables
@@ -232,7 +234,28 @@ class Trainer():
             raise ValueError("Both spikeLabels and numCluster must be None or not None")
 
         return idsSpeedInEpoch
+    
+    def get_spike_pos_for_use(self, epoch, numSpikeGroup, spikeSpeedFilter,
+                            numCluster=None):
+        """
+        TODO: docstring
+        """
+        spikePositions = self.clusterData['Spike_positions'][numSpikeGroup]
+        spikeTimes = self.clusterData['Spike_times'][numSpikeGroup][:,0]
+        if numCluster is not None:
+            spikeLabels = self.clusterData['Spike_labels'][numSpikeGroup]
+        else:
+            spikeLabels = None
 
+        idsSpeedTrain = self.find_speed_filtered_spikes_in_epoch(spikeTimes, epoch,
+                                                            spikeSpeedFilter,
+                                                            spikeLabels=spikeLabels,
+                                                            numCluster=numCluster)
+        spikesinEpoch = spikePositions[idsSpeedTrain]
+
+        return spikesinEpoch
+
+    # TODO: abstract all kernel maps in one function
     def build_occupation_map(self, positions, isNormalize=False):
         """
         Build the occupation map from the coordinates matrix using kernel
@@ -262,26 +285,6 @@ class Trainer():
             finalOccupation = occupation
 
         return finalOccupation
-    
-    def get_spike_pos_for_use(self, epoch, numSpikeGroup, spikeSpeedFilter,
-                               numCluster=None):
-        """
-        TODO: docstring
-        """
-        spikePositions = self.clusterData['Spike_positions'][numSpikeGroup]
-        spikeTimes = self.clusterData['Spike_times'][numSpikeGroup][:,0]
-        if numCluster is not None:
-            spikeLabels = self.clusterData['Spike_labels'][numSpikeGroup]
-        else:
-            spikeLabels = None
-
-        idsSpeedTrain = self.find_speed_filtered_spikes_in_epoch(spikeTimes, epoch,
-                                                            spikeSpeedFilter,
-                                                            spikeLabels=spikeLabels,
-                                                            numCluster=numCluster)
-        spikesinEpoch = spikePositions[idsSpeedTrain]
-
-        return spikesinEpoch
 
     def build_marginal_rate_functions(self, tetrodewisePos):
         """
@@ -296,8 +299,37 @@ class Trainer():
         #         behaviorData['Times']['learning']
         # MRF = MRF/MRF.sum()
 
-    def build_local_rate_functions(self, clusterData):
-        pass
+        return MRF
+
+    def build_local_rate_functions(self, clusterwisePos):
+        """
+        Build the local rate functions from the spike positions matrix
+        """
+        gridFeature, LRF = butils.kdenD(clusterwisePos, self.bandwidth,
+                                                    edges=gridFeature, kernel=self.kernel)
+        LRF[LRF==0] = np.min(LRF[LRF!=0])
+        LRF         = LRF/np.sum(LRF)
+        # This is obscure to me >>
+        # LRF         = np.shape(clusterwisePos)[0]*np.multiply(LRF, occupationInverse)/ \
+        #     behaviorData['Times']['learning']
+        # LRF = LRF/LRF.sum()
+
+        return LRF
+
+    def build_map(self, time_series, is_normalize=True, type_map='occupation'):
+        _, mapped= butils.kdenD(time_series, self.bandwidth, kernel=self.kernel)
+        mapped[mapped==0] = np.min(mapped[mapped!=0])
+        
+        if type_map == 'occupation':
+             # Trick to highlight the differences in occupation map
+            mask = mapped > (np.max(mapped)/self.maskingFactor)
+            mapped = np.multiply(mapped, mask)
+        if is_normalize:
+            mapped = mapped/mapped.sum()
+
+        return mapped
+
+
 
     def test_as_NN(self, behaviorData, bayesMatrices, timeStepPred, windowSizeMS=36, useTrain=False, sleepEpochs=[]):
         windowSize = windowSizeMS/1000
