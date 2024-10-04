@@ -31,7 +31,7 @@ class Project():
 		# Json
 		if jsonPath == None:
 			self.json = self.baseName + '.json'
-			self.graph = self.folder + 'models/'
+			self.graph = os.path.join(self.folder, nameExp, "models")
 		else:
 			print('using file:',jsonPath)
 			self.json = jsonPath
@@ -66,7 +66,7 @@ class Params:
 		self.nChannelsPerGroup = helper.numChannelsPerGroup()
 		self.length = 0
 
-		self.nSteps = int(10000 * 0.036 / windowSize) # ?
+		self.nSteps = int(10000 * 0.036 / windowSize) # useless
 		self.nEpochs = nEpochs
 		self.windowLength = windowSize # in seconds
 

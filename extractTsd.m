@@ -1,12 +1,12 @@
 function extractTsd(folderData, target)
 % the function should receive the folder ending by a /
     %%%%%%%%%%%--- load the tsd file to read tsds array ---%%%%%%%%%%%
-    addpath('./tsdPackage/')
+    addpath(genpath('/home/mobs/Dropbox/Mobs_member/BasileToulemonde/Code/full_neuroEncoder/neuroEncoders-master/tsdPackage'))
     
     folderData = [folderData filesep];
 	%%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%
-	Behavior=importdata(strcat(folderData,'behavResources.mat'));
-	disp('Data Loaded.')
+	    Behavior=importdata(strcat(folderData,'behavResources.mat'));
+	    disp('Data Loaded.')
     
     disp(['target: ', target]);
 	if strcmp(target, 'pos')
@@ -24,8 +24,8 @@ function extractTsd(folderData, target)
 		behavior.position_time = T;
         behavior.speed = V;
 	else
-		behavior.positions     = Data(Behavior.(target));
-		behavior.position_time = Range(Behavior.(target), 's');
+		behavior.positions       = Data(Behavior.(target));
+		behavior.position_time   = Range(Behavior.(target), 's');
     end
     
     if isfield(Behavior,'SessionEpoch')
@@ -73,3 +73,4 @@ function extractTsd(folderData, target)
     save(strcat(folderData,'nnBehavior.mat'),'behavior','-v7.3');
     disp('Behavior is successfully extracted')
 end
+

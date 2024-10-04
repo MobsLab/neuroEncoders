@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="16"
+   name=""
+   committed-date="2006-06-30T09:02:16.554641Z"
+   url="file:///home/battagli/svn/matlab/trunk/UtilsStats"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   prop-time="2006-06-06T06:42:15.000000Z"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="sem.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9b4cf8822cae6f5b0d6725b62ae38efa"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="combinations.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4f3b66a5810d1f1f4f8346157c5cb6a1"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ChernoffGaussian.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="77af69ab93d17700ca193e5786f66756"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="infors.c"
+   text-time="2006-06-09T13:24:38.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="57b27a591c40dbf20b1053472a2272da"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="rank_order.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a3170f0a0cd2976bf0a0f0f85205673a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="13"
+   name="regression_line.m"
+   text-time="2006-06-06T17:37:10.000000Z"
+   committed-date="2006-06-06T20:29:23.516627Z"
+   checksum="b690cb17959b9bed23e8fd0f37915a83"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binomial_test.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="1e59b63e659460e02029547792885b5b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CircularANOVA.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="54fa77f231524844849f9e5724f142ca"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="AnovaWithinSubjects.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ec7e0af13d6c6b6844995d879684760e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans_md.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9609bbd24e4dc9a5e88cd5bbe3312660"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="infors.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a0d5c21dc43dbbd177e399ad7107470c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="regression2_test.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="dd4102559c87810a3bb6985facc5e6a6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="contingency_chisq.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="1e5d0ed61c449b7ba3a5f13bfca0f757"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans_refine_impl.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9f07f982a943f4a76541b6419fb7c7fb"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="dc6d814adafa7c4658f72d21ab3fabfe"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans2_patt.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7e7d9ad1ef269a7687b053d0aeb2b9ef"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="TwoWayAnova.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="b9f5514486ff4dd179a54d3d55de7a5b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SplitQuantiles.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="569fdcc201825f1d36dc9520037c0bcd"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="gsl_permutations.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4396b018a65e8e042ef0bf8d75d11906"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans2.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="8189c8756d905f54f606827990930026"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Dispositions.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="215c0e30e7b93c7937726cfe532e102c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="OneWayAnova.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f4835b1b586779b6c35647b6f4b91a22"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="exp_fit_gsl.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a26486036357e621ec06540f785de6a9"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="percentile.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="3f41d125a12484d9282df5e167d19ac8"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CrossCorrSD.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6393b69c9a665e188740fdd4f2392807"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans_spherical.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7e7d9ad1ef269a7687b053d0aeb2b9ef"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="exp_dual_fit_gsl.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7bd14d253af935bb894341c83555a8f7"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="infors_mex.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ff4e4d4f3abd65cda38e03298af5a36a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CylindricalEM.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="fb3eb70134827b4af3477b76a9c47308"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CircularMean.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="dc2030adc03a976f37d16fc5b449c213"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MixedTwoWayAnova.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="04ee088dd0a7464e00674816d5acf191"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans_spherical.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6b5b86e1c9ffa3c291b4d07d57daf320"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binomial_sign_test.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="8fc2a747e85be8ca66c9ca2e38ef7acc"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="FriedmanAnova.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="bbd909a65e634ee9a62ccd6268743c7a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ChernoffGaussian2Cyl.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f0167dcdb72e0fe8d9eb13cf6026043e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="kmeans_spherical_impl.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="63ec3eb388022e5236e794d9fbe9178c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="gsl_combinations.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="38599869ce9cdfe68fccc0007a40468b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="RepMeasAnova.m"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7ed6ae12caf039a4f8609874d3cf20a5"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CylEMGetPjx.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6371dc6bbc075154f4acfbeb9dfcb4e2"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="gsl_dual_fit.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a390d3d525976fe19749284181cd6284"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="._.DS_Store"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="96c68b79bc82b883258762468d5a38a3"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ndAverage.c"
+   text-time="2006-06-01T11:58:58.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="66a36ca011a22e72a424b4d13d5cff6d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:58:58.000000Z"/>
+</wc-entries>

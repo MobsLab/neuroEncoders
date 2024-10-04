@@ -1,0 +1,635 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="11"
+   name=""
+   committed-date="2006-06-05T15:43:32.457573Z"
+   url="file:///home/battagli/svn/matlab/trunk/UtilsCompute"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   prop-time="2006-06-06T06:42:18.000000Z"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="WaveFormStats2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5d4ed49ec397a5af89cdbcda085499bd"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="WaveFormsStats.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="164db288d6baed9c5e3dbd0d8e0fc85a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="hist2d.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="50ae963951706e19fc47e46d29f2ae57"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SmoothMatrix.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="42ac7583dd24a117f1f1a4db179fb4a4"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="idx_intervals.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="fd650d7a19e2688ec721792ea5e4d082"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="AngularAcceleration.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9791131e9ecdf05f5db85c60dc257c75"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="RemoveBadPosPoints2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f58a79202538bf9de4924cc739106283"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="spike_triplets_ts.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0a2c23d3ae40860be64ff10545bf000c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SplitPF.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a2ef6dfa972870fce1f50af69ee290c6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="vectorSparseness.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="71506287d2fac8cd652c73ccbb440271"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="S2M2.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ff30172620e489e0ba36726706b77d15"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Histogram_intervals.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7ed507d3b3ee12e58780c5cf9684c704"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MakeReactOverlap.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ca5d9113caa06e0c850a599094d2d79e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CtsdPETH.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a08948ce06f277667d6342357e542720"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SelectAlongFirstDimension.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="613f29c38d182992928d192eee8ec066"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="RemovePosSkips.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="3613c5cc369c2ed4e053f4bd4319215e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="spike_pairs_ts.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="c34346c54b19ab0b454160ada5a9d190"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ThreshVector.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7fa991911126e130290cf968f672ea4f"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Create_Q_times.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="5ab719fb4cbdee988294ec3724b88c48"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="FindAlignNext.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7b5d10acce88bd8f361f9e8923d2463b"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Cell2List.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6323186084e7efe76249714da0fa25e6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CrossCorrBootstrap2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="acb76362cae03e5c50421402b8e02cd6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:02.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CircularMazeAngularCoordinate.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7eae2ad68731cef653476569dbb03b85"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SmAngularAcceleration.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a66021783e3e8d9d96cb6488eefb175e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="count_triplets.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="ff4ac337504e103ca3ad266f52c0b0b0"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="AggClusterMin.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a8346d03834ee40ae41369c66ad8408e"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ReactCC.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="00ee13cb7d06a89bb66f557a1386e130"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="findComplexSpikes2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0b15606d76ded0969c0fa5ed9563f8f6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SMatrixTrigger.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0eb40975bea906d0b148d55907610189"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SlidingNorm.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="8f4991cc4db31228406527ce10bffb3f"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="LagStateCorr.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="de7b3c48f1929d6e541c523aa09871f5"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="._.DS_Store"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="96c68b79bc82b883258762468d5a38a3"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="cross_decode.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="73c8d477839eb60cf92f8701c2379c60"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binsearch.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="bc0524bf02d97711acd33cd91881cc4a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binsearch_floor.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="c1c20bc3f0428d2732a8fe15897cbca8"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MatrixCorrCoef.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7d69f0cda8ba935b6521dea374ae34a9"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ReactEV.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9818c88be6b748fc5a6527d830bef747"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="SMatrixDecay.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="18386186088cd6f501a7e4341838ea33"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binsearch.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="9aadfaac7fe1720f80ab640245e650c4"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ClusterLink.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="96e3c6947acbbe097211eec80958bb62"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="spike_triplets.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="06d1141f8486badaad641460ae186966"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="binsearch2.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="bc0524bf02d97711acd33cd91881cc4a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="JoinTTfile.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="1083e9cebbb1ef7db8cb8872977dd969"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MakeCCPairs.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="aed6bc3d4fde5c9025340759dae20d29"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="spike_pairs.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0bc5272ae934912381aac5a0e6c01016"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="count_triplets_ts.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a4b533e5a9293f3293ae7bc2dabe9b81"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="count_pairs.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6338d35cad14d0028fce9635f6150a96"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="PECorr.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a83c42afec3c4cbe732dbdcc1a855310"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="coarse_grain.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="87f58550e27ed66d5f84e6b7bad85b65"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="LagStateOverlap.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="61a27dfe69b9a9f26545b1ba8e5be7f8"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="RemoveBadPosPoints.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="cd968f18248ad9a9a62611bfdf33766a"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MeanStdWaveforms.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="add1dc9eba8c7130ecdbfff0e80eb38d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Vel.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4ed9c1771a2876abc5dc44ac98d65025"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="hist2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="1ae2de7c8d343e2d788eb30dc8cee726"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="coarse_grain.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="0e22546601ae09369f152db2f237bbd2"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="VelFilter.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="e8ca83e9deb9b1bed2a90f459dd53e42"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CrossCorrBias2.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="61f44baef6481d9188a87bab76859f76"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="continuousAngle.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="22ed01781d5bfa433ee4d9742b0e9861"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="RandomScattergram.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="cefd6f8949453bc2488faa4ed8d9f79c"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CrossCorr.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="bc8796ab9fa90559057e53143300a361"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="DiagMean.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="6a6be325ce8c9e1578a03d609cbbb257"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ReactRmatrices.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="b3ad565269b003c012c3304ff8f413f7"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="FilterFFT.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="75a6b71a6d5ebe412132946494963cd0"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="Vel2d.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="909c1be38685ea0e0bc5b00fac83a15d"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="ReactRmatrices_idx.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="4bb4d0dae856cd3858828b479bd1d0d3"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="CrossCorr.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="880aa7128e2987f9f6a1431f17fb1204"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="AlignNext.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="f1935e2822c65c02d0890b696f54df05"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="MakeReactPairs.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="e4d20ab4394b99e9ba5a3f41c3473577"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="count_pairs_ts.c"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a66610b5d7be65e6d66bdf4814585376"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+</wc-entries>
