@@ -3,6 +3,7 @@ import os
 from time import sleep
 import numpy as np
 import sys
+sys.path.append('/home/mobs/Dropbox/Mobs_member/Basile/Code/full_neuroEncoder/neuroEncoders-master')
 import math
 from functools import reduce
 from tqdm import tqdm
@@ -49,7 +50,7 @@ class Trainer():
                 spikeMatTimes[0:cnbSpikes[id], :] = self.clusterData["Spike_times"][id]
 
         spikeorder = np.argsort(spikeMatTimes[:, 0])
-        self.spikeMatLabels = spikeMatLabels[spikeorder, :]
+        self.spikeMatLabels = spikeMatLabels[spikeorder, :] ######################################################### CRASH !!!!!!!!!!!
         self.spikeMatTimes = spikeMatTimes[spikeorder, :]
         ### Perform training (build marginal and local rate functions)
         if onTheFlyCorrection:

@@ -12,6 +12,7 @@ import subprocess
 from utils.global_classes import Project, Params
 
 
+
 def main(args):
 	# Manage inputs
 	if not args.mode == 'bayes':
@@ -227,7 +228,7 @@ if __name__=="__main__":
 
 	if not(os.path.isfile(os.path.expanduser(os.path.split(args.path)[0] + 
                                           os.path.sep + 'nnBehavior.mat'))):
-		subprocess.run(["./getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')),
+		subprocess.run(["/home/mobsrick/Dropbox/Mobs_member/Basile/Code/full_neuroEncoder/neuroEncoders-master/getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')),
                   						'\''+args.target+'\''])
 	print()
 

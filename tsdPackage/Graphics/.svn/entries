@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<wc-entries
+   xmlns="svn:">
+<entry
+   committed-rev="3"
+   name=""
+   committed-date="2006-05-27T13:21:27.549959Z"
+   url="file:///home/battagli/svn/matlab/trunk/Graphics"
+   last-author="battagli"
+   kind="dir"
+   uuid="1dbe6431-9a14-0410-b9e7-efee63371b5f"
+   revision="17"/>
+<entry
+   committed-rev="1"
+   name="plotTS.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="a80e674bf9c6ab16425863e9d6266081"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="gplot3.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="e165be0560bbeb6a5d64db02f06c16d6"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="2"
+   name="setSameAxisLim.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T18:33:54.065989Z"
+   checksum="8b581152a7f89e46ce41af712e37a8e4"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="2"
+   name="integerTicks.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T18:33:54.065989Z"
+   checksum="c5d20f1843362c24a26294f5bd512758"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="3"
+   name="RasterPlot.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-27T13:21:27.549959Z"
+   checksum="c20ce9f9b8474ae3310150fbdec1df01"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="circleColorCube.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="7c31cf9f49de316b72b1b6fcfa1889c4"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="makeFigure.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="49a425b4c0c1589599bbfbf361c99903"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="circlePlot.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="653e9782b673bde4bf57398f9cffc8ef"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="3"
+   name="RasterPETH.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-27T13:21:27.549959Z"
+   checksum="e6ef3e15f7ad9ff4fe6402ee024595bc"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="._.DS_Store"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="96c68b79bc82b883258762468d5a38a3"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+<entry
+   committed-rev="1"
+   name="PlotISet.m"
+   text-time="2006-06-01T11:59:03.000000Z"
+   committed-date="2006-05-25T10:43:10.993826Z"
+   checksum="acb0f9d65c9a4cc3441e8ec8d6d63800"
+   last-author="battagli"
+   kind="file"
+   prop-time="2006-06-01T11:59:03.000000Z"/>
+</wc-entries>

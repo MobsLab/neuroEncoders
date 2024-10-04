@@ -1,0 +1,31 @@
+K 10
+svn:ignore
+V 523
+RandomScattergram.mexglx
+continuousAngle.mexglx
+MakeCCPairs.mexglx
+Histogram_intervals.mexglx
+FilterFFT.mexglx
+count_pairs.mexglx
+AlignNext.mexglx
+PECorr.mexglx
+binsearch_floor.mexglx
+SplitPF.mexglx
+MakeReactOverlap.mexglx
+RemovePosSkips.mexglx
+cross_decode.mexglx
+CrossCorr.mexglx
+binsearch2.mexglx
+count_triplets_ts.mexglx
+SlidingNorm.mexglx
+MakeReactPairs.mexglx
+coarse_grain.mexglx
+idx_intervals.mexglx
+count_triplets.mexglx
+S2M2.mexglx
+LagStateCorr.mexglx
+count_pairs_ts.mexglx
+LagStateOverlap.mexglx
+binsearch.mexglx
+
+END

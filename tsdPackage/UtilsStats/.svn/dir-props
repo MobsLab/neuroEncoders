@@ -1,0 +1,21 @@
+K 10
+svn:ignore
+V 333
+CylindricalEM.mexglx
+kmeans2_patt.mexglx
+kmeans_spherical_impl.mexglx
+CylEMGetPjx.mexglx
+kmeans2.mexglx
+CrossCorrSD.mexglx
+exp_dual_fit_gsl.mexglx
+kmeans_spherical.mexglx
+kmeans_refine_impl.mexglx
+gsl_combinations.mexglx
+ndAverage.mexglx
+gsl_dual_fit.mexglx
+gsl_permutations.mexglx
+infors.mexglx
+exp_fit_gsl.mexglx
+infors_mex.mexglx
+
+END
