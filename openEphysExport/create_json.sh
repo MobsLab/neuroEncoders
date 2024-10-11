@@ -34,9 +34,9 @@ pathToXml=$destPath/openEphysLoadFile.xml
 
 defaultFilter=`jq ".defaultFilter" $pathToJson`
 if [[ $defaultFilter == "true" ]];then
-	cp $SCRIPTPATH/openEphysLoadExample_df.xml $pathToXml
+	cp $SCRIPTPATH/xmls/openEphysLoadExample_df.xml $pathToXml
 else
-	cp $SCRIPTPATH/openEphysLoadExample.xml $pathToXml
+	cp $SCRIPTPATH/xmls/openEphysLoadExample.xml $pathToXml
 fi
 
 
