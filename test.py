@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # neuroEncoder by the Memory, Oscillations and Brain States (MOBS) team
-# 2017-2022
-# by Thibault Balenbois, Pierre Orhan and Dmitri Bryzgalov
-# t.balenbois@gmail.com; brygalovdm@gmail.com
+# 2017-2024
+# by Théotime de Charrin, Thibault Balenbois, Pierre Orhan and Dmitri Bryzgalov
+# theotime.decharrin@gmail.com; t.balenbois@gmail.com; brygalovdm@gmail.com
 
 import os
 import subprocess
@@ -15,8 +15,8 @@ from importData import rawdata_parser
 # Load custum code
 from utils.global_classes import Params, Project
 
-# FILENAME = "/media/mobs/DimaERC2/TEST2_Basile/M1182_20210301_UMaze.xml"
-FILENAME = "/media/mickey/DimaERC2/TEST1_Basile/M1199_20210408_UMaze.xml"
+# FILENAME = "/media/mickey/DimaERC2/TEST1_Basile/M1199_20210408_UMaze.xml"
+FILENAME = "/media/mickey/DimaERC2/TEST3_Basile_M1239/M1239_20211105_StimMFBWake.xml"
 nameExp = "TESTTHEOTIME"
 ProjectPath = Project(os.path.expanduser(FILENAME), nameExp=nameExp)
 folderCode = "/home/mickey/Documents/Theotime/neuroEncoders-master"
