@@ -1,7 +1,7 @@
 function extractTsd(folderData, target)
 % the function should receive the folder ending by a /
     %%%%%%%%%%%--- load the tsd file to read tsds array ---%%%%%%%%%%%
-    addpath(genpath('/home/mobs/Dropbox/Mobs_member/Basile/Code/full_neuroEncoder/neuroEncoders-master/tsdPackage'))
+    addpath('./tsdPackage/'))
     
     %folderData = [folderData filesep];
 	%%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%

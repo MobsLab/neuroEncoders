@@ -4,236 +4,321 @@
 # by Thibault Balenbois, Pierre Orhan and Dmitri Bryzgalov
 # t.balenbois@gmail.com; brygalovdm@gmail.com
 
-# Load standard libs
-import sys
 import os
 import subprocess
-# Load custum code
-from utils.global_classes import Project, Params
 
+# Load standard libs
+import sys
+
+# Load custum code
+from utils.global_classes import Params, Project
 
 
 def main(args):
-	# Manage inputs
-	if not args.mode == 'bayes':
-		if args.gpu:
-			from utils import management
-			deviceName = management.manage_devices('GPU')
-		else:
-			os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-			os.environ["CUDA_VISIBLE_DEVICES"] = ""
-			from utils import management
-			deviceName = management.manage_devices('CPU')			
-	if args.mode=="decode":
-		jsonPath = os.path.expanduser(args.jsonPath)
-	else:
-		jsonPath = None
-  
-	from importData import rawdata_parser
-	from transformData.linearizer import UMazeLinearizer
-	from resultAnalysis import print_results
+    # Manage inputs
+    if not args.mode == "bayes":
+        if args.gpu:
+            from utils import management
 
-	# Output to shell
-	print()
-	if not args.mode == 'bayes':
-		print('NEUROENCODER: DEVICE', deviceName)
-	xmlPath = args.path.strip('\'')
-	print('NEUROENCODER: PATH', xmlPath)
-	windowSize = int(args.window*1000)
-	print(f'NEUROENCODER: WINDOW {windowSize} ms')
-	mode = args.mode
-	print('NEUROENCODER: MODE', mode)
-	if mode != 'bayes':
-		isPL = args.predicted_loss
-		if isPL:
-			print('Two networks will be tested: one full on training set and '
-         				'one with predLoss only on a separate part of data')
-	print()
-	
-	# Get behavior and tune parameters
-	ProjectPath = Project(os.path.expanduser(xmlPath), jsonPath=jsonPath, nameExp=args.name)
-	# Select the data for testing
-	if mode != 'decode':
-		rawdata_parser.speed_filter(ProjectPath.folder)
-		rawdata_parser.select_epochs(ProjectPath.folder)
-	# Create parameters
-	DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
-	Parameters = Params(DataHelper, args.window)
-	# Create linearization function
-	Linearizer = UMazeLinearizer(ProjectPath.folder)
-	Linearizer.verify_linearization(DataHelper.position/DataHelper.maxPos(),
-                                		ProjectPath.folder, overwrite=False)
-	l_function = Linearizer.pykeops_linearization
+            deviceName = management.manage_devices("GPU")
+        else:
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            from utils import management
 
-	# Training, testing, and preparing network for online setup
-	if mode == 'bayes':        
-		from simpleBayes import decode_bayes as Training
-		
-		TrainerBayes = Training.Trainer(ProjectPath)
-		bayesMatrices = TrainerBayes.train_order_by_pos(DataHelper.fullBehavior,
-                                                  				l_function)
-		outputs = TrainerBayes.test_parallel(DataHelper.fullBehavior, bayesMatrices,
-                                       			windowSizeMS=windowSize)
-		print_results.print_results(TrainerBayes.folderResult, typeDec='bayes',
-                            			results = outputs, windowSizeMS=windowSize)
+            deviceName = management.manage_devices("CPU")
+    if args.mode == "decode":
+        jsonPath = os.path.expanduser(args.jsonPath)
+    else:
+        jsonPath = None
 
-	elif mode == 'ann':
-		from importData.juliaData.julia_data_parser import julia_spike_filter
-		from fullEncoder import an_network as Training
-		from openEphysExport.generate_json import generate_json
-		
-		# Create data
-		folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
-		julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
-		# Network
-		NNTrainer = Training.LSTMandSpikeNetwork(ProjectPath, Parameters,
-                                           		deviceName=deviceName)
-		NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize,
-                  			isPredLoss=isPL)
-		NNTrainer.test(DataHelper.fullBehavior, l_function=l_function,
-                 							windowsizeMS=windowSize, isPredLoss=isPL)
-		print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSize)
-		# Create json
-		if isPL:
-			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
-                            				'savedModels', 'predLossModel')
-		else:
-			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
-                            				'savedModels', 'fullModel')
-		generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+    from importData import rawdata_parser
+    from resultAnalysis import print_results
+    from transformData.linearizer import UMazeLinearizer
 
-	elif mode == 'decode':
-			from importData.juliaData.julia_data_parser import julia_spike_filter
-			from decoder import decode
+    # Output to shell
+    print()
+    if not args.mode == "bayes":
+        print("NEUROENCODER: DEVICE", deviceName)
+    xmlPath = args.path.strip("'")
+    print("NEUROENCODER: PATH", xmlPath)
+    windowSize = int(args.window * 1000)
+    print(f"NEUROENCODER: WINDOW {windowSize} ms")
+    mode = args.mode
+    print("NEUROENCODER: MODE", mode)
+    if mode != "bayes":
+        isPL = args.predicted_loss
+        if isPL:
+            print(
+                "Two networks will be tested: one full on training set and "
+                "one with predLoss only on a separate part of data"
+            )
+    print()
 
-			if not os.path.isfile(ProjectPath.json):
-				sys.exit("No .json file was found to pick up the network to decode." + 
-						 " Please verify that you encoded the weights, and that " +
-       					 "you json file has the same name as basefile.dat")
-			else:
-				# Create data
-				folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
-				 # Right now, the thresholds are not the same
-				julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
-				# Decode
-				Decoder = decode.Decoder(ProjectPath, Parameters)
-				outputs = Decoder.test(DataHelper.fullBehavior,l_function=l_function,
-                           					windowsizeMS=windowSize)
-				print_results.print_results(Decoder.folderResult, windowSizeMS=windowSize)
-	
-	elif mode == 'compare':
-		from simpleBayes import decode_bayes as BayesTrainer
-		from importData.juliaData.julia_data_parser import julia_spike_filter
-		from fullEncoder import an_network as Training
-		from openEphysExport.generate_json import generate_json
-		from importData.compareSpikeFiltering import WaveFormComparator
-		from resultAnalysis import paper_figures
-  
-		### Bayes
-		TrainerBayes = BayesTrainer.Trainer(ProjectPath)
-		bayesMatrices = TrainerBayes.train_order_by_pos(DataHelper.fullBehavior,
-                                                			l_function)
+    # Get behavior and tune parameters
+    ProjectPath = Project(
+        os.path.expanduser(xmlPath), jsonPath=jsonPath, nameExp=args.name
+    )
+    # Select the data for testing
+    if mode != "decode":
+        rawdata_parser.speed_filter(ProjectPath.folder)
+        rawdata_parser.select_epochs(ProjectPath.folder)
+    # Create parameters
+    DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
+    Parameters = Params(DataHelper, args.window)
+    # Create linearization function
+    Linearizer = UMazeLinearizer(ProjectPath.folder)
+    Linearizer.verify_linearization(
+        DataHelper.position / DataHelper.maxPos(), ProjectPath.folder, overwrite=False
+    )
+    l_function = Linearizer.pykeops_linearization
 
-		### ANN TODO: if exists
-		folder_code = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
-		julia_spike_filter(ProjectPath, folder_code, windowSize=args.window)
-		# Network
-		NNTrainer = Training.LSTMandSpikeNetwork(ProjectPath, Parameters,
-                                           			deviceName=deviceName)
-		NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-		NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
-		NNTrainer.test(DataHelper.fullBehavior, l_function=l_function,
-                 			windowsizeMS=windowSize)
-		if isPL:
-			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
-                            		'savedModels', 'predLossModel')
-		else:
-			modelPath = os.path.join(NNTrainer.folderModels, str(windowSize),
-                            		'savedModels', 'fullModel')
-		generate_json(ProjectPath, modelPath, DataHelper.list_channels)
-  
-		### Compare and align waveforms
-		WFCTrain = WaveFormComparator(ProjectPath, Parameters, DataHelper.fullBehavior,
-                                		useTrain=True, windowsizeMS=windowSize)
-		WFCTrain.save_alignment_tools(TrainerBayes,l_function,windowsizeMS=windowSize)
-		WFCTest = WaveFormComparator(ProjectPath, Parameters, DataHelper.fullBehavior,
-                               			useTrain=False, windowsizeMS=windowSize)
-		WFCTest.save_alignment_tools(TrainerBayes,l_function,windowsizeMS=windowSize)
-		
-		### Figures
-		figures = paper_figures.PaperFigures(ProjectPath, DataHelper.fullBehavior,
-                                       	TrainerBayes, l_function, bayesMatrices=bayesMatrices)
-		figures.load_data()
-		figures.test_bayes()
-		figures.fig_example_linear()
-		figures.hist_linerrors()
-		figures.nnVSbayes()
-		figures.predLoss_vs_trueLoss()
-		figures.fig_example_2d()
-		figures.predLoss_linError()
-		figures.predLoss_linError()
-		figures.fig_example_linear_filtered()
+    # Training, testing, and preparing network for online setup
+    if mode == "bayes":
+        from simpleBayes import decode_bayes as Training
+
+        TrainerBayes = Training.Trainer(ProjectPath)
+        bayesMatrices = TrainerBayes.train_order_by_pos(
+            DataHelper.fullBehavior, l_function
+        )
+        outputs = TrainerBayes.test_parallel(
+            DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
+        )
+        print_results.print_results(
+            TrainerBayes.folderResult,
+            typeDec="bayes",
+            results=outputs,
+            windowSizeMS=windowSize,
+        )
+
+    elif mode == "ann":
+        from fullEncoder import an_network as Training
+        from importData.juliaData.julia_data_parser import julia_spike_filter
+        from openEphysExport.generate_json import generate_json
+
+        # Create data
+        folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+        julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+        # Network
+        NNTrainer = Training.LSTMandSpikeNetwork(
+            ProjectPath, Parameters, deviceName=deviceName
+        )
+        NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+        NNTrainer.train(
+            DataHelper.fullBehavior, windowsizeMS=windowSize, isPredLoss=isPL
+        )
+        NNTrainer.test(
+            DataHelper.fullBehavior,
+            l_function=l_function,
+            windowsizeMS=windowSize,
+            isPredLoss=isPL,
+        )
+        print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSize)
+        # Create json
+        if isPL:
+            modelPath = os.path.join(
+                NNTrainer.folderModels, str(windowSize), "savedModels", "predLossModel"
+            )
+        else:
+            modelPath = os.path.join(
+                NNTrainer.folderModels, str(windowSize), "savedModels", "fullModel"
+            )
+        generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+
+    elif mode == "decode":
+        from decoder import decode
+        from importData.juliaData.julia_data_parser import julia_spike_filter
+
+        if not os.path.isfile(ProjectPath.json):
+            sys.exit(
+                "No .json file was found to pick up the network to decode."
+                + " Please verify that you encoded the weights, and that "
+                + "you json file has the same name as basefile.dat"
+            )
+        else:
+            # Create data
+            folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+            # Right now, the thresholds are not the same
+            julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+            # Decode
+            Decoder = decode.Decoder(ProjectPath, Parameters)
+            outputs = Decoder.test(
+                DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSize
+            )
+            print_results.print_results(Decoder.folderResult, windowSizeMS=windowSize)
+
+    elif mode == "compare":
+        from fullEncoder import an_network as Training
+        from importData.compareSpikeFiltering import WaveFormComparator
+        from importData.juliaData.julia_data_parser import julia_spike_filter
+        from openEphysExport.generate_json import generate_json
+        from resultAnalysis import paper_figures
+        from simpleBayes import decode_bayes as BayesTrainer
+
+        ### Bayes
+        TrainerBayes = BayesTrainer.Trainer(ProjectPath)
+        bayesMatrices = TrainerBayes.train_order_by_pos(
+            DataHelper.fullBehavior, l_function
+        )
+
+        ### ANN TODO: if exists
+        folder_code = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+        julia_spike_filter(ProjectPath, folder_code, windowSize=args.window)
+        # Network
+        NNTrainer = Training.LSTMandSpikeNetwork(
+            ProjectPath, Parameters, deviceName=deviceName
+        )
+        NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+        NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
+        NNTrainer.test(
+            DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSize
+        )
+        if isPL:
+            modelPath = os.path.join(
+                NNTrainer.folderModels, str(windowSize), "savedModels", "predLossModel"
+            )
+        else:
+            modelPath = os.path.join(
+                NNTrainer.folderModels, str(windowSize), "savedModels", "fullModel"
+            )
+        generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+
+        ### Compare and align waveforms
+        WFCTrain = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper.fullBehavior,
+            useTrain=True,
+            windowsizeMS=windowSize,
+        )
+        WFCTrain.save_alignment_tools(TrainerBayes, l_function, windowsizeMS=windowSize)
+        WFCTest = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper.fullBehavior,
+            useTrain=False,
+            windowsizeMS=windowSize,
+        )
+        WFCTest.save_alignment_tools(TrainerBayes, l_function, windowsizeMS=windowSize)
+
+        ### Figures
+        figures = paper_figures.PaperFigures(
+            ProjectPath,
+            DataHelper.fullBehavior,
+            TrainerBayes,
+            l_function,
+            bayesMatrices=bayesMatrices,
+        )
+        figures.load_data()
+        figures.test_bayes()
+        figures.fig_example_linear()
+        figures.hist_linerrors()
+        figures.nnVSbayes()
+        figures.predLoss_vs_trueLoss()
+        figures.fig_example_2d()
+        figures.predLoss_linError()
+        figures.predLoss_linError()
+        figures.fig_example_linear_filtered()
 
 
+if __name__ == "__main__":
+    print()
+    import argparse
 
+    Parser = argparse.ArgumentParser(
+        description="Creating and training an agent "
+        + "to decode high level features from electrophysiology data"
+    )
+    subparsers = Parser.add_subparsers(
+        dest="mode",
+        title="modes",
+        description="all existing modes of encoding",
+        help="selects an encoding mode"
+        + ". For more information type the mode name between neuroencoder and -h",
+    )
 
-if __name__=="__main__":
-	print()
-	import argparse
-	Parser = argparse.ArgumentParser(description="Creating and training an agent "
-                + "to decode high level features from electrophysiology data")
-	subparsers = Parser.add_subparsers(dest='mode', title='modes',
-        description='all existing modes of encoding',
-        help='selects an encoding mode' + 
-		'. For more information type the mode name between neuroencoder and -h')
+    for cmd in ["ann", "bayes", "compare", "decode"]:
+        p = subparsers.add_parser(cmd)
+        p.add_argument("path", type=str, help="path to xml file")
+        if cmd == "decode":
+            p.add_argument("jsonPath", type=str, help="path to json file")
+        if cmd != "bayes":
+            p.add_argument(
+                "-g",
+                "--gpu",
+                action="store_true",
+                help="run computations on gpu. Requires specific installation.",
+            )
+            p.add_argument(
+                "-w",
+                "--window",
+                type=float,
+                help="defines window size, in seconds. Defaults to 0.036",
+                default=0.036,
+            )
+            p.add_argument(
+                "-pl",
+                "--predicted_loss",
+                action="store_false",
+                help="defines whether another, predLoss only, "
+                + "network will be train on the piece of data",
+            )
+            p.add_argument(
+                "-t",
+                "--target",
+                type=str,
+                help="name of feature to be decoded. Defaults are Xtsd and Ytsd. "
+                + "Must be a tsd variable from behavResources.mat",
+                default="pos",
+            )
+            p.add_argument(
+                "-n",
+                "--name",
+                type=str,
+                help="name of the folder where all models and results will be stored",
+                default="Network",
+            )
+        else:
+            p.add_argument(
+                "-w",
+                "--window",
+                type=float,
+                help="defines window size, in seconds. Defaults to 0.036",
+                default=0.036,
+            )
+    args = Parser.parse_args()
 
-	for cmd in ['ann', 'bayes', 'compare', 'decode']:
-		p = subparsers.add_parser(cmd)
-		p.add_argument('path', type=str, help="path to xml file")
-		if cmd == 'decode':
-			p.add_argument('jsonPath', type=str, help="path to json file")
-		if cmd != 'bayes':
-			p.add_argument('-g', '--gpu', action='store_true',
-                help="run computations on gpu. Requires specific installation.")
-			p.add_argument('-w', '--window', type=float,
-                help='defines window size, in seconds. Defaults to 0.036',
-                default=0.036)
-			p.add_argument('-pl', '--predicted_loss', action='store_false',
-                help='defines whether another, predLoss only, '
-                + 'network will be train on the piece of data')
-			p.add_argument('-t', '--target', type=str,
-                help='name of feature to be decoded. Defaults are Xtsd and Ytsd. '
-                + 'Must be a tsd variable from behavResources.mat', default="pos")
-			p.add_argument('-n', '--name', type=str,
-                help='name of the folder where all models and results will be stored', 
-                default="Network")
-		else:
-			p.add_argument('-w', '--window', type=float,
-                help='defines window size, in seconds. Defaults to 0.036',
-                default=0.036)
-	args = Parser.parse_args()
+    print()
+    import shutil
 
-	print()
-	import shutil
-	rows, columns = shutil.get_terminal_size()
-	print("|| neuroEncoder by MOBS ||".center(rows))
-	print("may 2020 - march 2022".center(rows))
-	print("email: t.balenbois@gmail.com && bryzgalovdm@gmail.com".center(rows))
-	print()
+    rows, columns = shutil.get_terminal_size()
+    print("|| neuroEncoder by MOBS ||".center(rows))
+    print("may 2020 - march 2022".center(rows))
+    print("email: t.balenbois@gmail.com && bryzgalovdm@gmail.com".center(rows))
+    print()
 
-	# Check if split is not too optimistic
-	if args.mode=="decode":
-		print('Decoding of full dataset \n')
+    # Check if split is not too optimistic
+    if args.mode == "decode":
+        print("Decoding of full dataset \n")
 
-	if not(os.path.isfile(os.path.expanduser(os.path.split(args.path)[0] + 
-                                          os.path.sep + 'nnBehavior.mat'))):
-		subprocess.run(["/home/mobsrick/Dropbox/Mobs_member/Basile/Code/full_neuroEncoder/neuroEncoders-master/getTsdFeature.sh", os.path.expanduser(args.path.strip('\'')),
-                  						'\''+args.target+'\''])
-	print()
+    if not (
+        os.path.isfile(
+            os.path.expanduser(
+                os.path.split(args.path)[0] + os.path.sep + "nnBehavior.mat"
+            )
+        )
+    ):
+        subprocess.run(
+            [
+                "./getTsdFeature.sh",
+                os.path.expanduser(args.path.strip("'")),
+                "'" + args.target + "'",
+            ]
+        )
+    print()
 
-	main(args)
+    main(args)
 
-	print()
-	print()
-	print('Algo has done what it wanted to do.')
+    print()
+    print()
+    print("Algo has done what it wanted to do.")
