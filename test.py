@@ -20,7 +20,7 @@ from utils.global_classes import Params, Project
 FILENAME = os.path.expanduser("~/Documents/Theotime/M1199/M1199_20210408_UMaze.xml")
 nameExp = "TESTTHEOTIME"
 ProjectPath = Project(os.path.expanduser(FILENAME), nameExp=nameExp)
-folderCode = "/home/mickey/Documents/Theotime/neuroEncoders-master"
+folderCode = str(os.getcwd())
 
 # Creating the file nnBehavior.mat
 #####################################################################################################################
