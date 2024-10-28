@@ -1,32 +1,47 @@
+import os
 
-import os, tables
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from matplotlib.colors import  LinearSegmentedColormap
 import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import pykeops
-from importData.rawdata_parser import get_params
-from importData.epochs_management import inEpochsMask
 import seaborn as sns
+import tables
+from matplotlib.colors import LinearSegmentedColormap
 from statannotations.Annotator import Annotator
 
+from importData.epochs_management import inEpochsMask
+from importData.rawdata_parser import get_params
 
-white_viridis = LinearSegmentedColormap.from_list('white_viridis', [
-    (0, '#ffffff'),
-    (1e-20, '#ffffff'),
-    (0.2, '#404388'),
-    (0.4, '#2a788e'),
-    (0.6, '#21a784'),
-    (0.8, '#78d151'),
-    (1, '#fde624'),
-], N=256)
-EC = np.array([45, 39]) # range of x and y in cm
+white_viridis = LinearSegmentedColormap.from_list(
+    "white_viridis",
+    [
+        (0, "#ffffff"),
+        (1e-20, "#ffffff"),
+        (0.2, "#404388"),
+        (0.4, "#2a788e"),
+        (0.6, "#21a784"),
+        (0.8, "#78d151"),
+        (1, "#fde624"),
+    ],
+    N=256,
+)
+EC = np.array([45, 39])  # range of x and y in cm
 
-class PaperFiguresSleep():
-    def __init__(self, projectPath, behavior_data, trainerBayes, linearizationFunction,
-                 bayesMatrices={}, timeWindows=[36], sleepNames=['PreSleep', 'PostSleep'],
-                 rippleChoice='start', folderFigures=None):
+
+class PaperFiguresSleep:
+    def __init__(
+        self,
+        projectPath,
+        behavior_data,
+        trainerBayes,
+        linearizationFunction,
+        bayesMatrices={},
+        timeWindows=[36],
+        sleepNames=["PreSleep", "PostSleep"],
+        rippleChoice="start",
+        folderFigures=None,
+    ):
         self.projectPath = projectPath
         self.trainerBayes = trainerBayes
         self.behavior_data = behavior_data
@@ -36,24 +51,28 @@ class PaperFiguresSleep():
         self.sleepNames = sleepNames
         _, self.samplingRate, _ = get_params(self.projectPath.xml)
         match rippleChoice:
-            case 'start':
+            case "start":
                 self.ripCol = 1
-            case 'center':
+            case "center":
                 self.ripCol = 2
-            case 'end':
+            case "end":
                 self.ripCol = 2
-        
-        self.binsLinearPosHist = np.arange(0, stop=1, step=0.01) # discretisation of the linear variable to help in some plots
+
+        self.binsLinearPosHist = np.arange(
+            0, stop=1, step=0.01
+        )  # discretisation of the linear variable to help in some plots
         self.cm = plt.get_cmap("tab20b")
         # Manage folders
         if folderFigures is None:
-            self.folderFigures = os.path.join(self.projectPath.resultsPath, 'figures')
+            self.folderFigures = os.path.join(self.projectPath.resultsPath, "figures")
         else:
-            self.folderFigures = os.path.join(self.projectPath.resultsPath, folderFigures)
+            self.folderFigures = os.path.join(
+                self.projectPath.resultsPath, folderFigures
+            )
         if not os.path.exists(self.folderFigures):
             os.mkdir(self.folderFigures)
-        self.folderAligned = os.path.join(self.projectPath.dataPath, 'aligned')
-        
+        self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
+
     def load_data(self):
         ### Load the NN prediction without using noise:
         lpredpos = {}
@@ -66,29 +85,64 @@ class PaperFiguresSleep():
             time[sleepName] = []
             losspred[sleepName] = []
             for ws in self.timeWindows:
-                pathToSleep = os.path.join(self.projectPath.resultsPath, "results_Sleep",
-                                           str(ws), sleepName)
-                lpredpos[sleepName].append(np.squeeze(np.array(pd.read_csv(
-                    os.path.join(pathToSleep, "linearPred.csv")).values[:,1:],dtype=np.float32)))
-                fpredpos[sleepName].append(np.array(pd.read_csv(
-                    os.path.join(pathToSleep, "featurePred.csv")).values[:, 1:],dtype=np.float32))
-                time[sleepName].append(np.squeeze(np.array(pd.read_csv(
-                    os.path.join(pathToSleep, "timeStepsPred.csv")).values[:, 1:],dtype=np.float32)))
-                losspred[sleepName].append(np.squeeze(np.array(pd.read_csv(
-                    os.path.join(pathToSleep, "lossPred.csv")).values[:, 1:],dtype=np.float32)))
+                pathToSleep = os.path.join(
+                    self.projectPath.resultsPath, "results_Sleep", str(ws), sleepName
+                )
+                lpredpos[sleepName].append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(pathToSleep, "linearPred.csv")
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+                )
+                fpredpos[sleepName].append(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(pathToSleep, "featurePred.csv")
+                        ).values[:, 1:],
+                        dtype=np.float32,
+                    )
+                )
+                time[sleepName].append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(pathToSleep, "timeStepsPred.csv")
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+                )
+                losspred[sleepName].append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(pathToSleep, "lossPred.csv")
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+                )
 
         # Load ripples
         # TODO: add maskSleep maskSleep = inEpochsMask(ripples[:, rippleChoice], behavior_data["Times"]["sleepEpochs"][:2])
         # TODO: should I normalize lossPred?
-        with tables.open_file(self.projectPath.folder + 'nnSWR.mat', "a") as f:
+        with tables.open_file(self.projectPath.folder + "nnSWR.mat", "a") as f:
             ripples = f.root.ripple[:, :].transpose()
 
         timesRipples = {}
         idCloseRipples = {}
         idCloseRipplesInSleep = {}
         timeDistToRipples = {}
-        rippleTimeJ = pykeops.numpy.Vj(ripples[:, self.ripCol].astype(dtype=np.float64)[:, None])
-        rippleTimeI = pykeops.numpy.Vi(ripples[:, self.ripCol].astype(dtype=np.float64)[:, None])
+        rippleTimeJ = pykeops.numpy.Vj(
+            ripples[:, self.ripCol].astype(dtype=np.float64)[:, None]
+        )
+        rippleTimeI = pykeops.numpy.Vi(
+            ripples[:, self.ripCol].astype(dtype=np.float64)[:, None]
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             timesRipples[sleepName] = []
             idCloseRipples[sleepName] = []
@@ -97,232 +151,425 @@ class PaperFiguresSleep():
             for i in range(len(self.timeWindows)):
                 # Calculating ids of timesteps that are closest to ripple times
                 timesRipples[sleepName].append(ripples[:, self.ripCol])
-                predTime = pykeops.numpy.Vi(time[sleepName][i].astype(dtype=np.float64)[:, None])
-                idCloseRipples[sleepName].append(((predTime - rippleTimeJ).abs().argmin(axis=0))[:, 0])
+                predTime = pykeops.numpy.Vi(
+                    time[sleepName][i].astype(dtype=np.float64)[:, None]
+                )
+                idCloseRipples[sleepName].append(
+                    ((predTime - rippleTimeJ).abs().argmin(axis=0))[:, 0]
+                )
                 # We remove ripple time tat are not inside tjhe predictio time (for exmaple in sleep)
-                idCloseRipplesInSleep[sleepName].append(idCloseRipples[sleepName][i][inEpochsMask(ripples[:, self.ripCol],
-                                                        [np.min(time[sleepName][i]), np.max(time[sleepName][i])])]) # aka ripple time
+                idCloseRipplesInSleep[sleepName].append(
+                    idCloseRipples[sleepName][i][
+                        inEpochsMask(
+                            ripples[:, self.ripCol],
+                            [np.min(time[sleepName][i]), np.max(time[sleepName][i])],
+                        )
+                    ]
+                )  # aka ripple time
                 # Calculating the distance between the closest ripple time and everytimesteps
-                predTime = pykeops.numpy.Vj(time[sleepName][i].astype(dtype=np.float64)[:, None])
-                timeDistToRipples[sleepName].append(((predTime - rippleTimeI).abs().min(axis=0))[:, 0])
-        
+                predTime = pykeops.numpy.Vj(
+                    time[sleepName][i].astype(dtype=np.float64)[:, None]
+                )
+                timeDistToRipples[sleepName].append(
+                    ((predTime - rippleTimeI).abs().min(axis=0))[:, 0]
+                )
+
         # Output
         self.resultsNN = {
-            'time': time, 'linPred': lpredpos, 'fullPred': fpredpos, 'predLoss': losspred
+            "time": time,
+            "linPred": lpredpos,
+            "fullPred": fpredpos,
+            "predLoss": losspred,
         }
         self.ripples = {
-            'time': ripples[:, self.ripCol], 'idCloseRipples': idCloseRipples, 'idCloseRipplesInSleep': idCloseRipplesInSleep,
-            'timeDistToRipples': timeDistToRipples
+            "time": ripples[:, self.ripCol],
+            "idCloseRipples": idCloseRipples,
+            "idCloseRipplesInSleep": idCloseRipplesInSleep,
+            "timeDistToRipples": timeDistToRipples,
         }
 
-
     def fig_example_sleep_linear(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(18,10), sharex='col', sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(18, 10),
+            sharex="col",
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                ax[i, isleep].scatter(self.resultsNN['time'][sleepName][i],
-                                    self.resultsNN['linPred'][sleepName][i],
-                              c=self.cm(12+0), alpha=0.9,
-                              label=(str(self.timeWindows[i])+ ' ms'), s=1)
+                ax[i, isleep].scatter(
+                    self.resultsNN["time"][sleepName][i],
+                    self.resultsNN["linPred"][sleepName][i],
+                    c=self.cm(12 + 0),
+                    alpha=0.9,
+                    label=(str(self.timeWindows[i]) + " ms"),
+                    s=1,
+                )
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} linear decoded position for {self.timeWindows[i]} ms window',
-                                    fontsize="xx-large")
+                    ax[i, isleep].set_title(
+                        f"{sleepName} linear decoded position for {self.timeWindows[i]} ms window",
+                        fontsize="xx-large",
+                    )
                 if i == len(self.timeWindows):
-                    ax[i, isleep].set_xlabel('samples', fontsize="xx-large")
-                ax[i, isleep].set_ylabel('linear position', fontsize="xx-large")
+                    ax[i, isleep].set_xlabel("samples", fontsize="xx-large")
+                ax[i, isleep].set_ylabel("linear position", fontsize="xx-large")
                 ax[i, isleep].set_yticks([0, 0.4, 0.8])
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f'example_sleep_nn.png'))
-        fig.savefig(os.path.join(self.folderFigures, f'example_sleep_nn.svg'))
+        fig.savefig(os.path.join(self.folderFigures, f"example_sleep_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"example_sleep_nn.svg"))
 
     def fig_sleep_distributution_linear(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex='col', sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex="col",
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                ax[i, isleep].hist(self.resultsNN['linPred'][sleepName][i], bins=50, color="black")
-                ax[i, isleep].set_title(f'{sleepName} linear decoded distribution for {self.timeWindows[i]} ms window',
-                                fontsize="xx-large")
-                ax[i, isleep].set_xlabel('linear position', fontsize="xx-large")
-                ax[i, isleep].set_ylabel('count', fontsize="xx-large")
+                ax[i, isleep].hist(
+                    self.resultsNN["linPred"][sleepName][i], bins=50, color="black"
+                )
+                ax[i, isleep].set_title(
+                    f"{sleepName} linear decoded distribution for {self.timeWindows[i]} ms window",
+                    fontsize="xx-large",
+                )
+                ax[i, isleep].set_xlabel("linear position", fontsize="xx-large")
+                ax[i, isleep].set_ylabel("count", fontsize="xx-large")
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f'distr_sleep_nn.png'))
-        fig.savefig(os.path.join(self.folderFigures, f'distr_sleep_nn.svg'))
+        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_nn.svg"))
 
     def fig_sleep_distributution_lossPred(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex=True, sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex=True,
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                ax[i, isleep].hist(self.resultsNN['predLoss'][sleepName][i], bins=50, color="black")
-                ax[i, isleep].set_title(f'{sleepName} predicted loss distribution for {self.timeWindows[i]} ms window',
-                                        fontsize="xx-large")
-                ax[i, isleep].set_xlabel('linear position', fontsize="xx-large")
-                ax[i, isleep].set_ylabel('count', fontsize="xx-large")
+                ax[i, isleep].hist(
+                    self.resultsNN["predLoss"][sleepName][i], bins=50, color="black"
+                )
+                ax[i, isleep].set_title(
+                    f"{sleepName} predicted loss distribution for {self.timeWindows[i]} ms window",
+                    fontsize="xx-large",
+                )
+                ax[i, isleep].set_xlabel("linear position", fontsize="xx-large")
+                ax[i, isleep].set_ylabel("count", fontsize="xx-large")
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f'distr_sleep_pred_loss_nn.png'))
-        fig.savefig(os.path.join(self.folderFigures, f'distr_sleep_pred_loss_nn.svg'))
+        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_pred_loss_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_pred_loss_nn.svg"))
 
     def fig_sleep_barplot_lossPred(self):
-        predLoss = np.concatenate([self.resultsNN['predLoss'][sleepName][i]
-                                     for i in range(len(self.timeWindows))
-                                     for sleepName in self.sleepNames])
-        timeWindowsPre = np.concatenate([[timeWindow] * len(self.resultsNN['predLoss']['PreSleep'][i])
-                                         for i, timeWindow in enumerate(self.timeWindows)])
-        timeWindowsPost = np.concatenate([[timeWindow] * len(self.resultsNN['predLoss']['PostSleep'][i])
-                                         for i, timeWindow in enumerate(self.timeWindows)])
+        predLoss = np.concatenate(
+            [
+                self.resultsNN["predLoss"][sleepName][i]
+                for i in range(len(self.timeWindows))
+                for sleepName in self.sleepNames
+            ]
+        )
+        timeWindowsPre = np.concatenate(
+            [
+                [timeWindow] * len(self.resultsNN["predLoss"]["PreSleep"][i])
+                for i, timeWindow in enumerate(self.timeWindows)
+            ]
+        )
+        timeWindowsPost = np.concatenate(
+            [
+                [timeWindow] * len(self.resultsNN["predLoss"]["PostSleep"][i])
+                for i, timeWindow in enumerate(self.timeWindows)
+            ]
+        )
         timeWindowsForDF = np.hstack((timeWindowsPre, timeWindowsPost))
-        sleepTypeForPD = [self.sleepNames[0]] * len(self.resultsNN['predLoss'][self.sleepNames[0]][0])
+        sleepTypeForPD = [self.sleepNames[0]] * len(
+            self.resultsNN["predLoss"][self.sleepNames[0]][0]
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             if isleep == 0:
                 start = 1
             else:
                 start = 0
             for i in range(start, len(self.timeWindows)):
-                more = [self.sleepNames[isleep]] * len(self.resultsNN['predLoss'][self.sleepNames[isleep]][i])
+                more = [self.sleepNames[isleep]] * len(
+                    self.resultsNN["predLoss"][self.sleepNames[isleep]][i]
+                )
                 sleepTypeForPD.extend(more)
-        datToPlot = pd.DataFrame({'predLoss': predLoss,
-                                  'timeWindow': timeWindowsForDF,
-                                  'sleep type': sleepTypeForPD})
+        datToPlot = pd.DataFrame(
+            {
+                "predLoss": predLoss,
+                "timeWindow": timeWindowsForDF,
+                "sleep type": sleepTypeForPD,
+            }
+        )
         pairsStats = [
-            [(str(self.timeWindows[0]), 'PreSleep'), (str(self.timeWindows[0]), 'PostSleep')],
-            [(str(self.timeWindows[1]), 'PreSleep'), (str(self.timeWindows[1]), 'PostSleep')],
-            [(str(self.timeWindows[2]), 'PreSleep'), (str(self.timeWindows[2]), 'PostSleep')],
-            [(str(self.timeWindows[3]), 'PreSleep'), (str(self.timeWindows[3]), 'PostSleep')]
+            [
+                (str(self.timeWindows[0]), "PreSleep"),
+                (str(self.timeWindows[0]), "PostSleep"),
+            ],
+            [
+                (str(self.timeWindows[1]), "PreSleep"),
+                (str(self.timeWindows[1]), "PostSleep"),
+            ],
+            [
+                (str(self.timeWindows[2]), "PreSleep"),
+                (str(self.timeWindows[2]), "PostSleep"),
+            ],
+            [
+                (str(self.timeWindows[3]), "PreSleep"),
+                (str(self.timeWindows[3]), "PostSleep"),
+            ],
         ]
 
         fig, ax = plt.subplots(figsize=(9, 9))
-        d = sns.barplot(data=datToPlot, x="timeWindow", y="predLoss", hue="sleep type",
-                    ci='sd', orient='v', ax=ax)
+        d = sns.barplot(
+            data=datToPlot,
+            x="timeWindow",
+            y="predLoss",
+            hue="sleep type",
+            ci="sd",
+            orient="v",
+            ax=ax,
+        )
         # TODO: samples must be the same length - change the test
-        annotator = Annotator(d, pairsStats, data=datToPlot, x="timeWindow",
-                              y="predLoss", hue="sleep type")
-        annotator.configure(test='t-test_welch', text_format='star', loc='outside')
+        annotator = Annotator(
+            d,
+            pairsStats,
+            data=datToPlot,
+            x="timeWindow",
+            y="predLoss",
+            hue="sleep type",
+        )
+        annotator.configure(test="t-test_welch", text_format="star", loc="outside")
         annotator.apply_and_annotate()
-        fig.savefig(os.path.join(self.folderFigures, 'meanPredLossBoxes.png'))
-        fig.savefig(os.path.join(self.folderFigures, 'meanPredLossBoxes.svg'))
+        fig.savefig(os.path.join(self.folderFigures, "meanPredLossBoxes.png"))
+        fig.savefig(os.path.join(self.folderFigures, "meanPredLossBoxes.svg"))
 
     def fig_ripples_hist_sleep_and_out(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex='row', sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex="row",
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
                 # TODO: one figure
                 # # We plot an histogram of probability in sleep and out of sleep
-                lossPredInQ = self.resultsNN['predLoss'][sleepName][i]
-                ax[i, isleep].hist(lossPredInQ[self.ripples['idCloseRipplesInSleep'][sleepName][i]], bins=50, color="green", alpha=0.2, density=True)
-                ax[i, isleep].vlines(np.mean(lossPredInQ[self.ripples['idCloseRipplesInSleep'][sleepName][i]]), 0, 0.25, color="green")
-                ax[i, isleep].hist(lossPredInQ, bins=50, color="red", alpha=0.2, density=True)
+                lossPredInQ = self.resultsNN["predLoss"][sleepName][i]
+                ax[i, isleep].hist(
+                    lossPredInQ[self.ripples["idCloseRipplesInSleep"][sleepName][i]],
+                    bins=50,
+                    color="green",
+                    alpha=0.2,
+                    density=True,
+                )
+                ax[i, isleep].vlines(
+                    np.mean(
+                        lossPredInQ[self.ripples["idCloseRipplesInSleep"][sleepName][i]]
+                    ),
+                    0,
+                    0.25,
+                    color="green",
+                )
+                ax[i, isleep].hist(
+                    lossPredInQ, bins=50, color="red", alpha=0.2, density=True
+                )
                 ax[i, isleep].vlines(np.mean(lossPredInQ), 0, 0.25, color="red")
-                if i == len(self.timeWindows)-1:
-                    ax[i, isleep].set_xlabel('predicted loss', fontsize="xx-large")
+                if i == len(self.timeWindows) - 1:
+                    ax[i, isleep].set_xlabel("predicted loss", fontsize="xx-large")
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} {self.timeWindows[i]} ms', fontsize="xx-large")
+                    ax[i, isleep].set_title(
+                        f"{sleepName} {self.timeWindows[i]} ms", fontsize="xx-large"
+                    )
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, 'distr_lossPred_sleep_during_ripples.png'))
-        fig.savefig(os.path.join(self.folderFigures, 'distr_lossPred_sleep_during_ripples.svg'))
+        fig.savefig(
+            os.path.join(self.folderFigures, "distr_lossPred_sleep_during_ripples.png")
+        )
+        fig.savefig(
+            os.path.join(self.folderFigures, "distr_lossPred_sleep_during_ripples.svg")
+        )
 
     def fig_ripples_hist_pred_during_ripples(self, duringRipples=True):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex=True, sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex=True,
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
                 if duringRipples:
-                    mask = self.ripples['idCloseRipplesInSleep'][sleepName][i]
-                    nameFile = 'distr_linearPred_sleep_during_ripples'
+                    mask = self.ripples["idCloseRipplesInSleep"][sleepName][i]
+                    nameFile = "distr_linearPred_sleep_during_ripples"
                 else:
-                    mask = np.arange(0, len(self.resultsNN['linPred'][sleepName][i]))
-                    nameFile = 'distr_linearPred_sleep'
-                ax[i, isleep].hist(self.resultsNN['linPred'][sleepName][i][mask], bins=100)
+                    mask = np.arange(0, len(self.resultsNN["linPred"][sleepName][i]))
+                    nameFile = "distr_linearPred_sleep"
+                ax[i, isleep].hist(
+                    self.resultsNN["linPred"][sleepName][i][mask], bins=100
+                )
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} {self.timeWindows[i]} ms', fontsize="xx-large")
-                ax[i, isleep].set_title(f'{self.timeWindows[i]} ms', fontsize="xx-large")
-                if i == len(self.timeWindows)-1:
-                    ax[i, isleep].set_xlabel('predicted linear position', fontsize="xx-large")
-                ax[i, isleep].set_ylabel('count', fontsize="xx-large")
+                    ax[i, isleep].set_title(
+                        f"{sleepName} {self.timeWindows[i]} ms", fontsize="xx-large"
+                    )
+                ax[i, isleep].set_title(
+                    f"{self.timeWindows[i]} ms", fontsize="xx-large"
+                )
+                if i == len(self.timeWindows) - 1:
+                    ax[i, isleep].set_xlabel(
+                        "predicted linear position", fontsize="xx-large"
+                    )
+                ax[i, isleep].set_ylabel("count", fontsize="xx-large")
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f'{nameFile}.png'))
-        fig.savefig(os.path.join(self.folderFigures, f'{nameFile}.svg'))
+        fig.savefig(os.path.join(self.folderFigures, f"{nameFile}.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"{nameFile}.svg"))
 
     def fig_ripples_scatter_position_lossPred_during_ripples(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex=True, sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex=True,
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                mask = self.ripples['idCloseRipplesInSleep'][sleepName][i]
-                ax[i, isleep].scatter(self.resultsNN['linPred'][sleepName][i][mask],
-                                      self.resultsNN['predLoss'][sleepName][i][mask], s=1)
+                mask = self.ripples["idCloseRipplesInSleep"][sleepName][i]
+                ax[i, isleep].scatter(
+                    self.resultsNN["linPred"][sleepName][i][mask],
+                    self.resultsNN["predLoss"][sleepName][i][mask],
+                    s=1,
+                )
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} {self.timeWindows[i]} ms', fontsize="xx-large")
-                ax[i, isleep].set_title(f'{self.timeWindows[i]} ms', fontsize="xx-large")
-                if i == len(self.timeWindows)-1:
-                    ax[i, isleep].set_xlabel('predicted linear position', fontsize="xx-large")
+                    ax[i, isleep].set_title(
+                        f"{sleepName} {self.timeWindows[i]} ms", fontsize="xx-large"
+                    )
+                ax[i, isleep].set_title(
+                    f"{self.timeWindows[i]} ms", fontsize="xx-large"
+                )
+                if i == len(self.timeWindows) - 1:
+                    ax[i, isleep].set_xlabel(
+                        "predicted linear position", fontsize="xx-large"
+                    )
                 if isleep == 0:
-                    ax[i, isleep].set_ylabel('predicted loss', fontsize="xx-large")
+                    ax[i, isleep].set_ylabel("predicted loss", fontsize="xx-large")
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, 'predLoss_position_during_ripples.png'))
-        fig.savefig(os.path.join(self.folderFigures, 'predLoss_position_during_ripples.svg'))
+        fig.savefig(
+            os.path.join(self.folderFigures, "predLoss_position_during_ripples.png")
+        )
+        fig.savefig(
+            os.path.join(self.folderFigures, "predLoss_position_during_ripples.svg")
+        )
 
     def fig_ripples_scatter_time_lossPred_during_ripples(self):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(10,10), sharex=True, sharey=True)
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(10, 10),
+            sharex=True,
+            sharey=True,
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                mask = self.ripples['idCloseRipplesInSleep'][sleepName][i]
-                ax[i, isleep].scatter(self.resultsNN['time'][sleepName][i][mask],
-                                      self.resultsNN['predLoss'][sleepName][i][mask], s=1)
+                mask = self.ripples["idCloseRipplesInSleep"][sleepName][i]
+                ax[i, isleep].scatter(
+                    self.resultsNN["time"][sleepName][i][mask],
+                    self.resultsNN["predLoss"][sleepName][i][mask],
+                    s=1,
+                )
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} {self.timeWindows[i]} ms', fontsize="xx-large")
-                ax[i, isleep].set_title(f'{self.timeWindows[i]} ms', fontsize="xx-large")
-                if i == len(self.timeWindows)-1:
-                    ax[i, isleep].set_xlabel('predicted linear position', fontsize="xx-large")
+                    ax[i, isleep].set_title(
+                        f"{sleepName} {self.timeWindows[i]} ms", fontsize="xx-large"
+                    )
+                ax[i, isleep].set_title(
+                    f"{self.timeWindows[i]} ms", fontsize="xx-large"
+                )
+                if i == len(self.timeWindows) - 1:
+                    ax[i, isleep].set_xlabel(
+                        "predicted linear position", fontsize="xx-large"
+                    )
                 if isleep == 0:
-                    ax[i, isleep].set_ylabel('predicted loss', fontsize="xx-large")
+                    ax[i, isleep].set_ylabel("predicted loss", fontsize="xx-large")
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, 'predLoss_position_during_ripples.png'))
-        fig.savefig(os.path.join(self.folderFigures, 'predLoss_position_during_ripples.svg'))
+        fig.savefig(
+            os.path.join(self.folderFigures, "predLoss_position_during_ripples.png")
+        )
+        fig.savefig(
+            os.path.join(self.folderFigures, "predLoss_position_during_ripples.svg")
+        )
 
     def fig_ripples_final_figure(self, window=0.4):
-        fig,ax = plt.subplots(len(self.timeWindows), len(self.sleepNames),
-                              figsize=(14,10), sharex=True, sharey='col')
+        fig, ax = plt.subplots(
+            len(self.timeWindows),
+            len(self.sleepNames),
+            figsize=(14, 10),
+            sharex=True,
+            sharey="col",
+        )
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
-                timeDist = self.ripples['timeDistToRipples'][sleepName][i]
-                predLoss = self.resultsNN['predLoss'][sleepName][i]
-                r = ax[i, isleep].hist2d(timeDist[np.less(timeDist, window)],
-                              predLoss[np.less(timeDist, window)], (1000, 100),
-                              cmap=white_viridis)
-                means = np.sum(r[0] * r[2][:-1][None, :], axis=1)/np.sum(r[0],axis=1)
-                stds = np.sqrt(np.sum(r[0] * np.power(r[2][:-1][None, :] - means[:, None], 2),axis=1)/np.sum(r[0],axis=1))
-                ax[i, isleep].plot(r[1][:-1], means, c="red", label="mean predicted loss \n given time to ripple", alpha=0.3)
-                ax[i, isleep].fill_between(r[1][:-1], means - stds, means + stds, color="orange", alpha=0.3)
+                timeDist = self.ripples["timeDistToRipples"][sleepName][i]
+                predLoss = self.resultsNN["predLoss"][sleepName][i]
+                r = ax[i, isleep].hist2d(
+                    timeDist[np.less(timeDist, window)],
+                    predLoss[np.less(timeDist, window)],
+                    (1000, 100),
+                    cmap=white_viridis,
+                )
+                means = np.sum(r[0] * r[2][:-1][None, :], axis=1) / np.sum(r[0], axis=1)
+                stds = np.sqrt(
+                    np.sum(
+                        r[0] * np.power(r[2][:-1][None, :] - means[:, None], 2), axis=1
+                    )
+                    / np.sum(r[0], axis=1)
+                )
+                ax[i, isleep].plot(
+                    r[1][:-1],
+                    means,
+                    c="red",
+                    label="mean predicted loss \n given time to ripple",
+                    alpha=0.3,
+                )
+                ax[i, isleep].fill_between(
+                    r[1][:-1], means - stds, means + stds, color="orange", alpha=0.3
+                )
                 if i == 0:
-                    ax[i, isleep].set_title(f'{sleepName} {self.timeWindows[i]} ms', fontsize="xx-large")
-                ax[i, isleep].set_title(f'{self.timeWindows[i]} ms', fontsize="xx-large")
-                if i == len(self.timeWindows)-1:
-                    ax[i, isleep].set_xlabel("Time to ripple (s)", fontsize='xx-large')
-                    ax[i, isleep].tick_params(axis='x', labelsize='x-large')
+                    ax[i, isleep].set_title(
+                        f"{sleepName} {self.timeWindows[i]} ms", fontsize="xx-large"
+                    )
+                ax[i, isleep].set_title(
+                    f"{self.timeWindows[i]} ms", fontsize="xx-large"
+                )
+                if i == len(self.timeWindows) - 1:
+                    ax[i, isleep].set_xlabel("Time to ripple (s)", fontsize="xx-large")
+                    ax[i, isleep].tick_params(axis="x", labelsize="x-large")
                     ax[i, isleep].legend(loc=(0.65, 0.13), fontsize="large")
                 if isleep == 0:
-                    ax[i, isleep].set_ylabel("predicted loss", fontsize='xx-large')
-                    ax[i, isleep].tick_params(axis='y', labelsize='x-large')
+                    ax[i, isleep].set_ylabel("predicted loss", fontsize="xx-large")
+                    ax[i, isleep].tick_params(axis="y", labelsize="x-large")
                 # ax[i, isleep].set_ylim(-8,1)
         fig.tight_layout()
         fig.show()
         plt.savefig(os.path.join(self.folderFigures, "lossSleepRipples.png"))
         plt.savefig(os.path.join(self.folderFigures, "lossSleepRipples.svg"))
-        
+
+
 # def paperFigure_sleep(projectPath, params, linearizationFunction,behavior_data,sleepName,windowsizeMS=36,saveFolder="resultSleep"):
 #     predsNN_varying_wind = []
 #     timePreds_varying_wind = []
@@ -736,4 +983,3 @@ class PaperFiguresSleep():
 #     # fig.show()
 
 #     print("Ended sleep analysis")
-

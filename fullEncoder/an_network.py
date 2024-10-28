@@ -211,9 +211,7 @@ class LSTMandSpikeNetwork:
                 x = self.inputsToSpikeNets[
                     group
                 ]  # --> [NbKeptSpike,nbChannels,32] tensors
-                x = self.spikeNets[
-                    group
-                ].apply(
+                x = self.spikeNets[group].apply(
                     x
                 )  # outputs a [NbSpikeOfTheGroup,nFeatures=self.params.nFeatures(default 128)] tensor.
                 # The gather strategy:
@@ -348,8 +346,9 @@ class LSTMandSpikeNetwork:
                     learning_rate=self.params.learningRates[0]
                 ),
                 loss={
-                    outputs[3].name.split("/Identity")[0]: lambda x,
-                    y: y,  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    outputs[3].name.split("/Identity")[
+                        0
+                    ]: lambda x, y: y,  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
                 },
             )
             self.outlossPredNames = [outputs[3].name.split("/Identity")[0]]
@@ -1682,7 +1681,8 @@ class LSTMandSpikeNetwork:
             if self.params.usingMixedPrecision:
                 vals.update(
                     {
-                        "group" + str(group): tf.cast(
+                        "group"
+                        + str(group): tf.cast(
                             vals["group" + str(group)], dtype=tf.float16
                         )
                     }
@@ -1941,9 +1941,7 @@ class LSTMandSpikeNetwork_control:
                 x = self.inputsToSpikeNets[
                     group
                 ]  # --> [NbKeptSpike,nbChannels,32] tensors
-                x = self.spikeNets[
-                    group
-                ].apply(
+                x = self.spikeNets[group].apply(
                     x
                 )  # outputs a [NbSpikeOfTheGroup,nFeatures=self.params.nFeatures(default 128)] tensor.
                 # The gather strategy:
@@ -2078,8 +2076,9 @@ class LSTMandSpikeNetwork_control:
                     learning_rate=self.params.learningRates[0]
                 ),
                 loss={
-                    outputs[3].name.split("/Identity")[0]: lambda x,
-                    y: y,  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    outputs[3].name.split("/Identity")[
+                        0
+                    ]: lambda x, y: y,  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
                 },
             )
             self.outlossPredNames = [outputs[3].name.split("/Identity")[0]]
@@ -2864,7 +2863,8 @@ class LSTMandSpikeNetwork_control:
             if self.params.usingMixedPrecision:
                 vals.update(
                     {
-                        "group" + str(group): tf.cast(
+                        "group"
+                        + str(group): tf.cast(
                             vals["group" + str(group)], dtype=tf.float16
                         )
                     }
