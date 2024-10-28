@@ -1,8 +1,19 @@
 # Load libs
 import os.path
 
+# Load custom code
+from ..importData.rawdata_parser import DataHelper
+
 
 class Project:
+    """
+    Class to store the paths of the project.
+    xmlPath: path to the xml find
+    datPath: path to the dat file
+    jsonPath: path to the json file
+    nameExp: name of the experiment, defaults to "Network"
+    """
+
     def __init__(self, xmlPath, datPath="", jsonPath=None, nameExp="Network"):
         # Basic names
         if xmlPath[-3:] != "xml":
@@ -72,7 +83,15 @@ class Project:
 
 
 class Params:
-    def __init__(self, helper, windowSize, nEpochs=100):
+    """
+    Class to store the parameters of the project.
+
+        helper: instance of the DataHelper class
+        windowSize: size of the window in seconds (see neuroencoder for arg default)
+        nEpochs: number of epochs to train the network
+    """
+
+    def __init__(self, helper: DataHelper, windowSize: float, nEpochs=100):
         self.nGroups = helper.nGroups()
         self.dimOutput = helper.dim_output()
         self.nChannelsPerGroup = helper.numChannelsPerGroup()
@@ -96,6 +115,8 @@ class Params:
         self.lstmDropout = 0.3  # is not implemented(code uses self.dropout_CNN)
         self.batchSize = 128  # Change that if your GPU (or CPU) is not powerful enough
 
+        # TODO: check if this is still relevant
+        # we might want to introduce some Adam or stuff like that
         self.learningRates = [0.0003]  #  [0.00003, 0.00003, 0.00001]
         self.lossActivation = None  # tf.nn.relu
 

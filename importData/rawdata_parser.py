@@ -14,20 +14,16 @@ mplt.use("TkAgg")
 from tkinter import Button, Entry, Label, Tk, Toplevel
 
 sys.path.append("./importData")
-import os
-import re
 
 # from importData import epochs_management as ep
 import sys
 
 import matplotlib as mplt
-import matplotlib.pyplot as plt
-import numpy as np
-import tables
 from interval import interval
 
 # Custom codes
 from importData import epochs_management as ep
+from utils.global_classes import Params, Project
 
 ########### Management of epochs ############
 
@@ -301,12 +297,14 @@ def get_behavior(folder, bandwidth=None, getfilterSpeed=True, decode=False):
     return behavior_data
 
 
-def speed_filter(folder, overWrite=True):
-    ## A simple tool to set up a threshold on the speed value
-    # The speed threshold is then implemented through a speed_mask:
-    # a boolean array indicating for each index (i.e measured feature time step)
-    # if it is above threshold or not.
+def speed_filter(folder: str, overWrite: bool = True) -> None:
+    """
+    A simple tool to set up a threshold on the speed value
+    The speed threshold is then implemented through a speed_mask:
+    a boolean array indicating for each index (i.e measured feature time step)
+    if it is above threshold or not.
 
+    """
     # Parameters
     window_len = 14  # changed following Dima's advice
 
@@ -480,20 +478,19 @@ def speed_filter(folder, overWrite=True):
         df.to_csv(folder + "speedFilterValue.csv")  # save the speed filter value
 
 
-def select_epochs(folder, overWrite=True):
-    # Find test set with most uniform covering of speed and environment variable.
-    # provides then a little manual tool to change the size of the window
-    # and its position.
+def select_epochs(folder: str, overWrite=True):
+    """
+    Find test set with most uniform covering of speed and environment variable.
+    provides then a little manual tool to change the size of the window
+    and its position.
+    """
 
+    # TODO: add a way to select training set in the middle of the dataset
     if not os.path.exists(folder + "nnBehavior.mat"):
         raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
     with tables.open_file(folder + "nnBehavior.mat", "a") as f:
         children = [c.name for c in f.list_nodes("/behavior")]
-        if (
-            overWrite == False
-            and "trainEpochs" in children
-            and "testEpochs" in children
-        ):
+        if not overWrite and "trainEpochs" in children and "testEpochs" in children:
             return
 
         # Get info from the file
@@ -705,7 +702,7 @@ def select_epochs(folder, overWrite=True):
                             linewidth=3.0,
                         )
 
-        # TODO add histograms here...
+        # TODO: add histograms here...
         sliderTest = plt.Slider(
             ax[-4],
             "test starting index",
@@ -1084,7 +1081,7 @@ def select_epochs(folder, overWrite=True):
 class DataHelper:
     """A class to detect and describe the main properties on the signal and behavior"""
 
-    def __init__(self, path, mode, jsonPath=None):
+    def __init__(self, path: Project, mode, jsonPath=None):
         self.path = path
         self.mode = mode
 
