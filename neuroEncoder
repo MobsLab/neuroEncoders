@@ -10,7 +10,7 @@ import subprocess
 # Load standard libs
 import sys
 
-# Load custum code
+# Load custom code
 from utils.global_classes import Params, Project
 
 

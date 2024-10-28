@@ -9,10 +9,13 @@ from pykeops.numpy import LazyTensor as LazyTensor_np
 
 
 class UMazeLinearizer:
-    # A class to define a linearization function of the data.
-    # Depending on the maze shape, user might want to change this class
-    # to fit to their maze shape.
-    def __init__(self, folder):
+    """
+    A class to define a linearization function of the data.
+    Depending on the maze shape, user might want to change this class
+    to fit to their maze shape.
+    """
+
+    def __init__(self, folder: str):
         with tables.open_file(folder + "nnBehavior.mat", "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
             if "linearizationPoints" in children:
