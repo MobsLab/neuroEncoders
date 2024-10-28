@@ -25,7 +25,7 @@ The application is written in four languages: the main one is Python, the three 
 
 - Matlab was tested on versions from 2016 to 2019
 - Shell part was only tested on Ubuntu computers <= 18.04 LTS, and Ubuntu 24.04 LTS
-- Julia requires separate installation (make sure Julia interpreter is contained in the PATH)
+- Julia requires separate installation. It was _only_ tested on versin `1.5.3` (make sure Julia interpreter is contained in the PATH).
 - neuroEncoders was tested on 3.6 <= Python <= 3.10.15
 
 Running the following command will install the CPU version of tensorflow (tested on Python >= 3.8). Please make sure conda is installed on your computer.

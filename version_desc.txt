@@ -21,3 +21,7 @@
 15 june 2022
 * Changed several hyperparameters after hypertuning
 * Minor bug fixes in an_network module
+
+### Version 2.0.4 modifications
+* Updated code
+* TODO
