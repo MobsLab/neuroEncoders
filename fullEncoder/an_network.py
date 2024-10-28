@@ -270,7 +270,7 @@ class LSTMandSpikeNetwork:
                     outputSeq = self.dropoutLayer(outputSeq)
             ### Outputs
             myoutputPos = self.denseFeatureOutput(output)  # positions
-            print("myuotputPos =", myoutputPos)
+            print("myoutputPos =", myoutputPos)
             outputPredLoss = self.denseLoss2(
                 self.denseLoss3(
                     self.denseLoss4(
@@ -492,10 +492,11 @@ class LSTMandSpikeNetwork:
                 ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
             )
         )
-        ndataset = ndataset.map(
-            lambda *vals: nnUtils.parse_serialized_spike(self.featDesc, *vals),
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
+
+        def _parse_function(*vals):
+            return nnUtils.parse_serialized_spike(self.featDesc, *vals)
+
+        ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
         # Manage masks
         epochMask["train"] = inEpochsMask(
             behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
@@ -1999,7 +2000,7 @@ class LSTMandSpikeNetwork_control:
                     outputSeq = self.dropoutLayer(outputSeq)
             ### Outputs
             myoutputPos = self.denseFeatureOutput(output)  # positions
-            print("myuotputPos =", myoutputPos)
+            print("myoutputPos =", myoutputPos)
             outputPredLoss = self.denseLoss2(
                 self.denseLoss3(
                     self.denseLoss4(
