@@ -24,6 +24,8 @@ If tensorflow is installed with gpu version, you can use the option `--gpu` so t
 
 # Installation - Updated 2024-10-15 (theotime branch)
 
+## Requirements
+
 The application is written in four languages: the main one is Python, the three auxiliary ones are Matlab, Julia and shell.
 
 - Matlab was tested on versions from 2016 to 2019
@@ -52,4 +54,19 @@ To install FreeImage which might be needed to setup CuDNN, run :
 
 ```
 sudo apt-get install libfreeimage3 libfreeimage-dev
+```
+
+## Pre-commit hooks
+
+For better code quality, we use pre-commit hooks. To install them, please run :
+
+```
+pre-commit autoupdate --repo https://github.com/pre-commit/pre-commit-hooks
+pre-commit install
+```
+
+To check your configuration and verify that the pre-commit hooks were already set up, run:
+
+```
+pre-commit run --all-files
 ```
