@@ -119,6 +119,7 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
 
 	nodes = (position_time[:,1],)
 	nodes_index = float.(1:1:size(position_time,1))
+    println("Interpolating the position_time to get the position index of each spike")
 	itp = interpolate(nodes, nodes_index, (Gridded(Constant())))
 
 	nGroups = size(list_channels,1)
