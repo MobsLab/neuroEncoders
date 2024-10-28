@@ -17,7 +17,10 @@ from utils.global_classes import Params, Project
 
 # FILENAME = "/media/mickey/DimaERC2/TEST1_Basile/M1199_20210408_UMaze.xml"
 # FILENAME = "/media/mickey/DimaERC2/TEST3_Basile_M1239/M1239_20211105_StimMFBWake.xml"
-FILENAME = os.path.expanduser("~/Documents/Theotime/M1199/M1199_20210408_UMaze.xml")
+# FILENAME = os.path.expanduser("~/Documents/Theotime/M1199/M1199_20210408_UMaze.xml")
+FILENAME = os.path.expanduser(
+    "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+)
 nameExp = "TESTTHEOTIME"
 ProjectPath = Project(os.path.expanduser(FILENAME), nameExp=nameExp)
 folderCode = str(os.getcwd())
