@@ -1,13 +1,11 @@
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v5.0.0
     hooks:
     -   id: trailing-whitespace
         files: .*.py$           
     -   id: end-of-file-fixer
         files: .*.py$          
-    -   id: requirements-txt-fixer
-        files: requirements.txt$  
 -   repo: https://github.com/psf/black-pre-commit-mirror
     rev: 23.11.0
     hooks:
