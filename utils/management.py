@@ -4,7 +4,7 @@ import tensorflow as tf
 
 def manage_devices(usedDevice):
     # if gpu set memory growth
-    if usedDevice == 'GPU':
+    if usedDevice == "GPU":
         device_phys = tf.config.list_physical_devices(usedDevice)
         tf.config.experimental.set_memory_growth(device_phys[0], True)
     # get the name of the device
@@ -13,8 +13,10 @@ def manage_devices(usedDevice):
         devicename = device[0].name
     else:
         devicename = device = tf.config.list_logical_devices()[0].name
-        
+
     return devicename
 
-def convert_normalized_to_euclidian(x, maxPos):
-    return normalized*maxPos
+
+def convert_normalized_to_euclidian(normalized, maxPos):
+    return normalized * maxPos
+
