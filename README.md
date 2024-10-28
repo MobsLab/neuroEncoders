@@ -7,7 +7,7 @@ Usage :
 ./neuroEncoder <ann | bayes> <path> ...
 ```
 
-"ann" mode extracts spikes from a .dat file, and creates a neural network graph from the spikes to the position. "bayes" mode loads units from .clu and .res files and use a bayesian decoder to get to the position. "decode" mode takes already existing graph from .json file to decode position of the animal from the new file. "compare" mode will plot the figures comparing results of bayesian decoder and neuroEncoders on the same file
+"ann" mode extracts spikes from a .dat file, and creates a neural network graph from the spikes to the position. "bayes" mode loads units from .clu and .res files and use a bayesian decoder to get to the position. "decode" mode takes already existing graph from `.json` file to decode position of the animal from the new file. "compare" mode will plot the figures comparing results of bayesian decoder and neuroEncoders on the same file
 
 The argument `<path>` specifies the path to the .xml of your dataset. The script assumes that the .dat is in the same folder as this .xml (and with the same name !). The position is taken from the variables AlignedXtsd and AlignedYtsd (in their absence - Xtsd and Ytsd) of the behavResources.mat file (in the same folder as the other files), unless the option -t or --target is used.
 

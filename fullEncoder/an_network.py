@@ -67,7 +67,18 @@ class LSTMandSpikeNetwork:
         self.trainLosses = {}
 
         ### Description of layers here
-        with tf.device(self.deviceName):
+
+        # Handle multiple GPUs - single host setup
+        self.strategy = tf.distribute.MirroredStrategy(
+            devices=(
+                [dev.replace("/device:", "") for dev in self.deviceName]
+                if isinstance(self.deviceName, list)
+                else [self.deviceName.replace("/device:", "")]
+            )
+        )
+        with self.strategy.scope():
+            # Everything that creates variables should be under the strategy scope.
+            # In general this is only model construction & `compile()`.
             if self.params.usingMixedPrecision:
                 self.inputsToSpikeNets = [
                     tf.keras.layers.Input(
@@ -164,19 +175,13 @@ class LSTMandSpikeNetwork:
 
             # Gather the full model
             outputs = self.generate_model()
-            # Handle multiple GPUs - single host setup
-            strategy = tf.distribute.MirroredStrategy()
-            print("Number of devices: {}".format(strategy.num_replicas_in_sync))
             # Build two models
             # One just desctibed, with two oibjective funcitons corresponding
             # to both position and predicted losses
-            with strategy.scope():
-                # Everything that creates variables should be under the strategy scope.
-                # In general this is only model construction & `compile()`.
-                self.model = self.compile_model(outputs)
-                # In theory, the predicted loss could be not learning enough in the first network (optional)
-                # Second only with loss corresponding to predicted loss
-                self.predLossModel = self.compile_model(outputs, predLossOnly=True)
+            self.model = self.compile_model(outputs)
+            # In theory, the predicted loss could be not learning enough in the first network (optional)
+            # Second only with loss corresponding to predicted loss
+            self.predLossModel = self.compile_model(outputs, predLossOnly=True)
 
     def get_theweights(self, behaviorData, windowsizeMS, isPredLoss=0):
         print("Loading the weights of the trained network")
@@ -200,7 +205,7 @@ class LSTMandSpikeNetwork:
 
     def generate_model(self):
         # CNN plus dense on every group independently
-        with tf.device(self.deviceName):
+        with self.strategy.scope():
             allFeatures = []  # store the result of the CNN computation for each group
             for group in range(self.params.nGroups):
                 x = self.inputsToSpikeNets[
@@ -352,7 +357,7 @@ class LSTMandSpikeNetwork:
 
     def generate_model_Cplusplus(self):
         ### Describe
-        with tf.device(self.deviceName):
+        with self.strategy.scope():
             allFeatures = []
             for group in range(self.params.nGroups):
                 x = self.inputsToSpikeNets[group]
@@ -1814,7 +1819,15 @@ class LSTMandSpikeNetwork_control:
         self.trainLosses = {}
 
         ### Description of layers here
-        with tf.device(self.deviceName):
+        # Handle multiple GPUs - single host setup
+        self.strategy = tf.distribute.MirroredStrategy(
+            devices=(
+                [dev.replace("/device:", "") for dev in self.deviceName]
+                if isinstance(self.deviceName, list)
+                else [self.deviceName.replace("/device:", "")]
+            )
+        )
+        with self.strategy.scope():
             if self.params.usingMixedPrecision:
                 self.inputsToSpikeNets = [
                     tf.keras.layers.Input(
@@ -1921,7 +1934,7 @@ class LSTMandSpikeNetwork_control:
 
     def generate_model(self):
         # CNN plus dense on every group independently
-        with tf.device(self.deviceName):
+        with self.strategy.scope():
             allFeatures = []  # store the result of the CNN computation for each group
             for group in range(self.params.nGroups):
                 x = self.inputsToSpikeNets[
@@ -2073,7 +2086,7 @@ class LSTMandSpikeNetwork_control:
 
     def generate_model_Cplusplus(self):
         ### Describe
-        with tf.device(self.deviceName):
+        with self.strategy.scope():
             allFeatures = []
             for group in range(self.params.nGroups):
                 x = self.inputsToSpikeNets[group]
@@ -2942,4 +2955,3 @@ class LSTMandSpikeNetwork_control:
 
 
 ########### HELPING LSTMandSpikeNetwork FUNCTIONS#####################
-
