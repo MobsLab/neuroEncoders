@@ -60,9 +60,9 @@ class Trainer:
                     "Spike_times"
                 ][id]
             else:
-                spikeMatLabels[0 : cnbSpikes[id], 0 : cnbNeurons[id]] = (
-                    self.clusterData["Spike_labels"][id]
-                )
+                spikeMatLabels[
+                    0 : cnbSpikes[id], 0 : cnbNeurons[id]
+                ] = self.clusterData["Spike_labels"][id]
                 spikeMatTimes[0 : cnbSpikes[id], :] = self.clusterData["Spike_times"][
                     id
                 ]
@@ -593,9 +593,9 @@ class Trainer:
                 # probability moved back to linear scale
                 positionProba = np.exp(positionProba) / np.sum(np.exp(positionProba))
                 inferResults[bin, 2] = np.max(positionProba)
-                inferResults[np.isnan(inferResults[:, 2]), 2] = (
-                    0  # to correct for overflow
-                )
+                inferResults[
+                    np.isnan(inferResults[:, 2]), 2
+                ] = 0  # to correct for overflow
 
             inferResultsDic[sleepName] = {
                 "featurePred": inferResults[:, :2],
