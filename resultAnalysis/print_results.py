@@ -12,14 +12,25 @@ EC = np.array([45, 39])  # range of x and y in cm
 
 
 def print_results(
-    dir,
+    dir: str,
     show=False,
-    typeDec="NN",
-    euclidean=False,
+    typeDec: str = "NN",
+    euclidean: bool = False,
     results=[],
-    lossSelection=0.3,
-    windowSizeMS=36,
+    lossSelection: float = 0.3,
+    windowSizeMS: int = 36,
 ):
+    """
+    This function is used to print the results of the decoding.
+    args:
+    - dir: the directory where the results are stored
+    - show: if True, the figures will be shown
+    - typeDec: the type of decoder used (NN or bayes)
+    - euclidean: if True, the euclidean distance will be used
+    - results: the results of the Decoding (mantadory to provide if typeDec is bayes)
+    - lossSelection: the percentage of the best windows to selected
+    - windowSizeMS: the size of the window in ms
+    """
     outdir = os.path.join(dir, str(windowSizeMS))
     # Manage arguments
     if typeDec == "bayes" and not results:

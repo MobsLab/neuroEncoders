@@ -5,7 +5,27 @@ import tensorflow as tf
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 class spikeNet:
-    def __init__(self, nChannels=4, device="/cpu:0", nFeatures=128, number=""):
+    """
+    This class is a convolutional network that takes as input a spike sequence and returns a feature vector of size nFeatures.
+
+    args:
+    nChannels: number of channels in the input
+    device: the device on which the network is run
+    nFeatures: the size of the output feature vector
+    number: a number to identify the network
+
+    Details of the default network:
+    The network is composed of 3 convolutional layers followed by 3 max pooling layers. The convolutional layers have 8, 16 and 32 filters of size 2x3. The max pooling layers have a pool size of 1x2.
+    The convolutional layers are followed by 3 dense layers with a ReLU activation function. The dense layers have a size of nFeatures and the last dense layer has a size of nFeatures and is named "outputCNN{number}".
+    """
+
+    def __init__(
+        self,
+        nChannels=4,
+        device: str = "/cpu:0",
+        nFeatures=128,
+        number="",
+    ):
         self.nFeatures = nFeatures
         self.nChannels = nChannels
         self.device = device
@@ -73,12 +93,17 @@ class spikeNet:
 
 ########### SPIKE STORAGE AND PARCING FUNCTIONS #####################
 def get_spike_sequences(params, generator):
-    # Used in the main function to get the Spike sequence from the spike generator
-    # and cast it into an "example" format that will then be decoded by tensorflow inputs system tf.io
-    # as the key word yield is used, this function effectively returns a generator
+    # WARNING: This function is actually not used in the code, it might be a helper function to understand the pipeline of the spike sequence??
+    """
+    Used in the main neuroEncoder function to get the Spike sequence from the spike generator
+    and cast it into an "example" format that will then be decoded by tensorflow inputs system tf.io as the key word yield is used, this function effectively returns a generator.
 
-    # The goal of the function is to bin the set of spikes with respect to times, gather spikes in time windows
-    # of fix length
+    The goal of the function is to bin the set of spikes with respect to times, gather spikes in time windows of fix length.
+
+    args:
+    params: the parameters of the network
+    generator: the generator that yields the spikes
+    """
 
     windowStart = None
 
@@ -89,7 +114,7 @@ def get_spike_sequences(params, generator):
         [] for _ in range(params.nGroups)
     ]  # nGroups of array each containing the spike of a group
     for pos_index, grp, time, spike, pos in generator:
-        if windowStart == None:
+        if windowStart is None:
             windowStart = (
                 time  # at the first pass: initialize the windowStart on "time"
             )
@@ -139,9 +164,10 @@ def get_spike_sequences(params, generator):
 
 
 def serialize_spike_sequence(params, pos_index, pos, groups, length, times, *spikes):
-    # Moves from the info obtained via the SpikeDetector -> spikeGenerator -> getSpikeSequences pipeline toward the
-    # tensorflow storing file. This take a specific format, which is here declared through the dic+tf.train.Feature
-    # organisation. We see that groups now correspond to the "spikes" we had before....
+    """
+    Moves from the info obtained via the SpikeDetector -> spikeGenerator -> getSpikeSequences pipeline toward the tensorflow storing file.
+    This take a specific format, which is here declared through the dict+tf.train.Feature organisation. We see that groups now correspond to the "spikes" we had before....
+    """
 
     feat = {
         "pos_index": tf.train.Feature(int64_list=tf.train.Int64List(value=[pos_index])),
@@ -150,7 +176,7 @@ def serialize_spike_sequence(params, pos_index, pos, groups, length, times, *spi
         "groups": tf.train.Feature(int64_list=tf.train.Int64List(value=groups)),
         "time": tf.train.Feature(float_list=tf.train.FloatList(value=[np.mean(times)])),
     }
-    # Pierre: convert the spikes dic into a tf.train.Feature, used for the tensorflow protocol.
+    # Pierre: convert the spikes dict into a tf.train.Feature, used for the tensorflow protocol.
     # their is no reason to change the key name but still done here.
     for g in range(params.nGroups):
         feat.update(

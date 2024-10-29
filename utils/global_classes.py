@@ -1,8 +1,10 @@
 # Load libs
 import os.path
+import sys
 
 # Load custom code
-from ..importData.rawdata_parser import DataHelper
+sys.path.append("../importData")
+from importData.rawdata_parser import DataHelper
 
 
 class Project:
