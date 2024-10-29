@@ -1,11 +1,25 @@
 import os
 import subprocess
 
+# Load custom code
+from utils.global_classes import Project
+
 BUFFERSIZE = 72000
 
 
-def julia_spike_filter(projectPath, folderCode, windowSize=0.200, singleSpike=False):
-    # Launch an extraction of the spikes in Julia:
+def julia_spike_filter(
+    projectPath: Project, folderCode, windowSize=0.200, singleSpike=False
+):
+    """
+    Launch an extraction of the spikes in Julia:
+    This function is used to extract the spikes from the nnBehavior.mat file using Julia.
+    The spikes are then saved in a csv file and then converted to a tfrec file with the correspondig striding.
+
+    args:
+    projectPath: Project object, containing the paths to the xml and dat files
+    folderCode: str, path to the folder containing the neuroEncoder code
+
+    """
     if singleSpike:
         test1 = os.path.isfile(
             (os.path.join(projectPath.folder, "dataset", "dataset_singleSpike.tfrec"))

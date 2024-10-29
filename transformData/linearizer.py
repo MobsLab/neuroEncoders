@@ -13,9 +13,13 @@ class UMazeLinearizer:
     A class to define a linearization function of the data.
     Depending on the maze shape, user might want to change this class
     to fit to their maze shape.
+
+    args:
+    folder: str, the folder where the linearization points are saved
+    nb_bins: int, the number of bins to use for the linearization, defaults to 100
     """
 
-    def __init__(self, folder: str):
+    def __init__(self, folder: str, nb_bins: int = 100):
         with tables.open_file(folder + "nnBehavior.mat", "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
             if "linearizationPoints" in children:
@@ -33,7 +37,8 @@ class UMazeLinearizer:
 
             ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
             itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
-            self.tsProj = np.arange(0, stop=1, step=1 / 100)
+            self.nb_bins = nb_bins
+            self.tsProj = np.arange(0, stop=1, step=1 / self.nb_bins)
             self.mazePoints = itpObject(self.tsProj)
 
     def apply_linearization(self, euclideanData, keops=True):

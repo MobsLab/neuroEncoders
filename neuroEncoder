@@ -42,6 +42,7 @@ def main(args):
         print("NEUROENCODER: DEVICE", deviceName)
     xmlPath = args.path.strip("'")
     print("NEUROENCODER: PATH", xmlPath)
+    # WARNING: windowSize is in ms and gets converted to s
     windowSize = int(args.window * 1000)
     print(f"NEUROENCODER: WINDOW {windowSize} ms")
     mode = args.mode
@@ -81,6 +82,8 @@ def main(args):
         bayesMatrices = TrainerBayes.train_order_by_pos(
             DataHelper.fullBehavior, l_function
         )
+        # WARNING: Why does this function not exist in the class?
+        # TODO: Fix this if Bayes is still of actuality
         outputs = TrainerBayes.test_parallel(
             DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
         )
@@ -88,7 +91,7 @@ def main(args):
             TrainerBayes.folderResult,
             typeDec="bayes",
             results=outputs,
-            windowSizeMS=windowSize,
+            windowSizeMS=int(windowSize / 1000),
         )
 
     elif mode == "ann":
@@ -227,7 +230,7 @@ if __name__ == "__main__":
 
     Parser = argparse.ArgumentParser(
         description="Creating and training an agent "
-        + "to decode high level features from electrophysiology data"
+        + "to decode high level features from electrophysiology data."
     )
     subparsers = Parser.add_subparsers(
         dest="mode",
@@ -276,15 +279,15 @@ if __name__ == "__main__":
                 "--name",
                 type=str,
                 help="name of the folder where all models and results will be stored",
-                default="Network",
+                default=str(cmd) + "_results",
             )
         else:
             p.add_argument(
                 "-w",
                 "--window",
                 type=float,
-                help="defines window size, in seconds. Defaults to 0.036",
-                default=0.036,
+                help="defines window size, in seconds. Defaults to 0.100",
+                default=0.100,
             )
     args = Parser.parse_args()
 
@@ -308,6 +311,8 @@ if __name__ == "__main__":
             )
         )
     ):
+        # Get the tsd feature, i.e. a nnBehavior.mat file from the tsd feature.
+        # The target is the name of the feature to be decoded, will default to the position.
         subprocess.run(
             [
                 "./getTsdFeature.sh",

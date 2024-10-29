@@ -3,6 +3,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+from typing import Literal
 
 import matplotlib as mplt
 import matplotlib.pyplot as plt
@@ -23,7 +24,6 @@ from interval import interval
 
 # Custom codes
 from importData import epochs_management as ep
-from utils.global_classes import Params, Project
 
 ########### Management of epochs ############
 
@@ -1079,9 +1079,21 @@ def select_epochs(folder: str, overWrite=True):
 
 
 class DataHelper:
-    """A class to detect and describe the main properties on the signal and behavior"""
+    """
+    A class to detect and describe the main properties on the signal and behavior
+    args:
+    - path: the path to the folder containing the xml and dat files
+    - mode: the argument of the neuroEncoder command
+    - jsonPath: the path to the json file containing the thresholds
 
-    def __init__(self, path: Project, mode, jsonPath=None):
+    """
+
+    def __init__(
+        self,
+        path,
+        mode: Literal["ann", "bayes", "compare", "decode"],
+        jsonPath=None,
+    ):
         self.path = path
         self.mode = mode
 
