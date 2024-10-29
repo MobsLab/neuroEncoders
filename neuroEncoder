@@ -66,7 +66,7 @@ def main(args):
         rawdata_parser.select_epochs(ProjectPath.folder)
     # Create parameters
     DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
-    Parameters = Params(DataHelper, args.window)
+    Parameters = Params(helper=DataHelper, windowSize=args.window, nEpochs=args.epochs)
     # Create linearization function
     Linearizer = UMazeLinearizer(ProjectPath.folder)
     Linearizer.verify_linearization(
@@ -245,19 +245,19 @@ if __name__ == "__main__":
         p.add_argument("path", type=str, help="path to xml file")
         if cmd == "decode":
             p.add_argument("jsonPath", type=str, help="path to json file")
+        p.add_argument(
+            "-w",
+            "--window",
+            type=float,
+            help="defines window size, in seconds. Defaults to 0.100",
+            default=0.100,
+        )
         if cmd != "bayes":
             p.add_argument(
                 "-g",
                 "--gpu",
                 action="store_true",
                 help="run computations on gpu. Requires specific installation.",
-            )
-            p.add_argument(
-                "-w",
-                "--window",
-                type=float,
-                help="defines window size, in seconds. Defaults to 0.036",
-                default=0.036,
             )
             p.add_argument(
                 "-pl",
@@ -281,13 +281,12 @@ if __name__ == "__main__":
                 help="name of the folder where all models and results will be stored",
                 default=str(cmd) + "_results",
             )
-        else:
             p.add_argument(
-                "-w",
-                "--window",
-                type=float,
-                help="defines window size, in seconds. Defaults to 0.100",
-                default=0.100,
+                "-e",
+                "--epochs",
+                type=int,
+                help="number of epochs for training. Defaults to 100",
+                default=100,
             )
     args = Parser.parse_args()
 
