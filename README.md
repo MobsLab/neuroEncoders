@@ -16,7 +16,7 @@ The argument `<path>` specifies the path to the `.xml` of your dataset. The scri
 
 If you wish to decode something else than position, you can use the option `--target <nameOfTsd>` to specify the name of tsd object inside the behavResources.mat file. If specified, the data from this object will be used as target for the decoding. We get decoded features from Matlab files, which requires both Matlab installation and presense of Tsd package. Tsd package (originally written by [Francesco Battaglia](https://www.ru.nl/english/people/battaglia-f/)) will be distributed along with the main code because it is hard to find. One place to find it is [here](https://github.com/PeyracheLab/TStoolbox)
 
-The option `--window <windowLength>` allows you to specify the window size (in seconds). Default is 0.036 (s).
+The option `--window <windowLength>` allows you to specify the window size (in seconds). Default is 0.100 (s).
 
 In "compare" mode, the script also uses data from a .fil file to get the spikes. If you don't have one of those, please create it by applying hipass filter on you .dat file (`ndm_hipass` command in Neuroscope suite)
 

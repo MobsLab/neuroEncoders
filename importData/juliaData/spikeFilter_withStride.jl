@@ -88,7 +88,8 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
     println("Number of channel: ",Nchannel)
     println("Sampling rate: ",samplingRate)
     println("List of channels for each group: " ,list_channels)
-	println("Window size: " ,string(WINDOWSIZE*1000))
+    println("Window size: " ,string(WINDOWSIZE*1000), " ms")
+    println("Window stride: " ,string(WINDOWSTRIDE*1000), " ms")
 
 	file = open(datPath)
 	isreadable(file)
@@ -138,6 +139,8 @@ function extract_spike_with_buffer(xmlPath,datPath,behavePath,fileName,datasetNa
 	feats = [] #list storing all spikes fromatted as Dict for tensorflow
 	lastBuffIndex = (size(mmapFile,1)%BUFFERSIZE==0) ? (size(mmapFile,1)÷BUFFERSIZE) : (size(mmapFile,1)÷BUFFERSIZE)+1
 	for idBuff in ProgressBar(1:1:lastBuffIndex)
+        # Théotime: this loop is where it usually fails.
+        # Error: LoadError: BoundsError: attempt to access 7-element Array{Any,1} at index [8]
 		# we should begin at spikes which timing are above the first position measure:
 		possibleTime_spike  = collect(float.(1+(idBuff-1)*BUFFERSIZE:1:min(size(mmapFile,1),BUFFERSIZE*idBuff))./samplingRate)
 		# we need to be careful with the last buffer, which might contain less elements

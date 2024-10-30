@@ -426,6 +426,25 @@ class LSTMandSpikeNetwork:
         isPredLoss=True,
         earlyStop=False,
     ):
+        """
+        Train the network on the dataset.
+        The training is done in two steps:
+        - First we train the full model on the position loss and the uncertainty loss
+        - Then we train the loss predictor model on the predicted loss
+
+        Parameters
+        ----------
+        behaviorData : dict
+        onTheFlyCorrection : bool
+        windowsizeMS : int
+        scheduler : str
+        isPredLoss : bool
+        earlyStop : bool
+
+        Returns
+        -------
+        None
+        """
         ### Create neccessary arrays
         epochMask = {}
         totMask = {}
