@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
-from typing import Literal
+from typing import Literal, Optional
 
 import matplotlib as mplt
 import matplotlib.pyplot as plt
@@ -206,7 +206,28 @@ def findTime(positionTime, lastBestTime, time):
 
 
 # Load the positions
-def get_behavior(folder, bandwidth=None, getfilterSpeed=True, decode=False):
+def get_behavior(
+    folder: str,
+    bandwidth: Optional[int] = None,
+    getfilterSpeed: bool = True,
+    decode: bool = False,
+) -> dict[str, np.ndarray]:
+    """
+    Load the behavior data from the nnBehavior.mat file
+
+    Parameters
+    ----------
+    folder : str
+    bandwidth : int, optional
+    getfilterSpeed : bool, optional
+    decode : bool, optional
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+    """
+
+    # check if the file exists
     if not os.path.exists(folder + "nnBehavior.mat"):
         raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
     # Extract basic behavior
@@ -217,7 +238,7 @@ def get_behavior(folder, bandwidth=None, getfilterSpeed=True, decode=False):
     positionTime = np.swapaxes(positionTime[:, :], 1, 0)
     speed = f.root.behavior.speed
     speed = np.swapaxes(speed[:, :], 1, 0)
-    if bandwidth == None:
+    if bandwidth is None:
         goodRecordingTimeStep = np.logical_not(np.isnan(np.sum(positions, axis=1)))
         bandwidth = (
             np.max(positions[goodRecordingTimeStep, :])
@@ -1133,9 +1154,15 @@ class DataHelper:
         self.startTime = self.positionTime[0]
 
     def nGroups(self):
+        """
+        Returns the number of groups of channels by looking at the list of channels in the .xml file.
+        """
         return len(self.list_channels)
 
     def numChannelsPerGroup(self):
+        """
+        Returns the number of channels per group by looking at the list of channels in the .xml file.
+        """
         return [len(self.list_channels[n]) for n in range(self.nGroups())]
 
     def maxPos(self):
@@ -1145,6 +1172,9 @@ class DataHelper:
         return maxPos if self.mode != "decode" else 1
 
     def dim_output(self):
+        """
+        Returns the number of output features by looking at the number of columns in the positions array.
+        """
         return self.positions.shape[1]
 
     def getThresholds(self):
