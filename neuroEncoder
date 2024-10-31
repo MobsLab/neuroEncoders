@@ -15,6 +15,8 @@ from utils.global_classes import Params, Project
 
 
 def main(args):
+    # WARNING: This is a very long function, consider splitting it?
+    # NOTE: The "nnBehavior.mat" file is already created when executing main func.
     # Manage inputs
     if not args.mode == "bayes":
         if args.gpu:
@@ -42,7 +44,7 @@ def main(args):
         print("NEUROENCODER: DEVICE", deviceName)
     xmlPath = args.path.strip("'")
     print("NEUROENCODER: PATH", xmlPath)
-    # WARNING: windowSize is in ms and gets converted to s
+    # WARNING: windowSize is in s and gets converted to ms
     windowSize = int(args.window * 1000)
     print(f"NEUROENCODER: WINDOW {windowSize} ms")
     mode = args.mode
@@ -299,7 +301,7 @@ if __name__ == "__main__":
     print("email: t.balenbois@gmail.com && bryzgalovdm@gmail.com".center(rows))
     print()
 
-    # Check if split is not too optimistic
+    # TODO:  Check if split is not too optimistic
     if args.mode == "decode":
         print("Decoding of full dataset \n")
 
