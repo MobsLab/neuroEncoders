@@ -27,7 +27,19 @@ using TFRecord
 # datPath = "~/dataTest/Mouse-M1199-1304/continuous.dat"
 # behavePath = "~/dataTest/Mouse-M1199-1304/nnBehavior.mat"
 # fileName = "~/dataTest/Mouse-M1199-1304/test_spikeJulia.csv"
-#
+
+# #For testing purposes
+# xmlPath = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+# datPath = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.dat"
+# behavePath = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/nnBehavior.mat"
+# fileName = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/tmpspikeData_fromJulia.csv"
+# thresholdsFileName = replace(fileName, "spikeData_fromJulia" => "thresholds_Julia")
+# datasetName = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/dataset/dataset_stride100.tfrec"
+# datasetNameSleep = "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/dataset/datasetSleep_stride100.tfrec"
+
+BUFFERSIZE = parse(Int64,"72000")
+WINDOWSIZE = parse(Float32,"0.200")
+WINDOWSTRIDE = parse(Float32,"0.200")
 xmlPath = ARGS[2]
 datPath = ARGS[3]
 behavePath = ARGS[4]
