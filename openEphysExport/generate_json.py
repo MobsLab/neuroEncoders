@@ -64,7 +64,12 @@ def generate_json(
 
     # Create json
     if not offline:
-        subprocess.run(["./openEphysExport/create_json.sh", projectPath.json])
+        subprocess.run(
+            [
+                os.path.join(os.path.dirname(__file__), "create_json.sh"),
+                projectPath.json,
+            ]
+        )
 
     else:
         # create a structure.oebin file:

@@ -6,8 +6,17 @@ SCRIPTPATH=$(dirname "$SCRIPT")
 cd $SCRIPTPATH
 args=("$@")
 
-# sudo apt-get install jq
-# sudo apt-get install xmlstarlet
+#TODO: check if exists, and if not, install
+if ! command -v jq &> /dev/null
+then
+    echo "jq could not be found, installing..."
+    sudo apt-get install jq
+fi
+if ! command -v xmlstarlet &> /dev/null
+then
+    echo "xmlstarlet could not be found, installing..."
+    sudo apt-get install jq
+fi
 
 if [[ $# < 1 ]]
 then
