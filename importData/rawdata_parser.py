@@ -224,7 +224,10 @@ def get_behavior(
 
     Returns
     -------
-    dict[str, np.ndarray]
+    dict[str, np.ndarray] with the following
+    keys:
+    Positions, positionTime, Speed, Bandwidth, Times
+
     """
 
     # check if the file exists

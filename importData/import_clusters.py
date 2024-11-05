@@ -11,9 +11,28 @@ import tqdm as tqdm
 
 from importData import rawdata_parser
 from simpleBayes import butils
+from utils.global_classes import Project
 
 
-def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=True):
+def getSpikesfromClu(
+    projectPath: Project, behavior_data: dict, cluster_modifier=1, savedata=True
+) -> dict[str, list]:
+    """
+    Get spikes from clu files and save them in a dictionary.
+
+    Parameters
+    ----------
+    projectPath : Project object
+    behavior_data : dictionary w Positions, positionTime, Speed, Bandwidth, Times
+    cluster_modifier : int, optional
+        The default is 1.
+    savedata : bool, optional
+        The default is True.
+
+    Returns
+    -------
+    cluster_data : dictionary with Spike_labels, Spike_times, Spike_positions, Spike_speed
+    """
     # Get parameters
     listChannels, samplingRate, _ = rawdata_parser.get_params(projectPath.xml)
     # Allocate
@@ -126,7 +145,19 @@ def getSpikesfromClu(projectPath, behavior_data, cluster_modifier=1, savedata=Tr
     return cluster_data
 
 
-def load_spike_sorting(projectPath):
+def load_spike_sorting(projectPath: Project) -> dict:
+    """
+    Load spike sorting data from the dataset/clusterData folder if the files are present, otherwise
+    run the spike sorting algorithm and save the data.
+
+    Parameters
+    ----------
+    projectPath : Project object
+
+    Returns
+    -------
+    cluster_data : dict
+    """
     cluster_save_path = os.path.join(projectPath.folder, "dataset", "clusterData")
     if os.path.isfile(os.path.join(cluster_save_path, "Spike_labels0.csv")):
         lfiles = glob.glob(os.path.join(cluster_save_path, "Spike_labels*.csv"))

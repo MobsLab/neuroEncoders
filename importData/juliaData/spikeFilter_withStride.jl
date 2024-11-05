@@ -52,7 +52,7 @@ WINDOWSIZE = parse(Float32,ARGS[9])
 WINDOWSTRIDE = parse(Float32,ARGS[10])
 
 
-print(xmlPath)
+println(xmlPath)
 
 using CodecZlib
 using BufferedStreams

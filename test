@@ -24,6 +24,7 @@ FILENAME = os.path.expanduser(
 nameExp = "TESTTHEOTIME"
 ProjectPath = Project(os.path.expanduser(FILENAME), nameExp=nameExp)
 folderCode = str(os.getcwd())
+windowSize = 0.100
 
 # Creating the file nnBehavior.mat
 #####################################################################################################################
@@ -119,12 +120,12 @@ def julia_spike_filter(projectPath, folderCode, windowSize=0.200, singleSpike=Fa
                     ),
                     str(BUFFERSIZE),
                     str(windowSize),
-                    str(0.200),
+                    str(0.100),
                 ]
             )  # the striding is 36ms based...
 
 
-julia_spike_filter(ProjectPath, folderCode)
+julia_spike_filter(ProjectPath, folderCode, windowSize)
 
 ############################################################################################################################
 
@@ -148,7 +149,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 DataHelper = rawdata_parser.DataHelper(ProjectPath, "ann")
 
-Parameters = Params(DataHelper, 0.200)
+Parameters = Params(DataHelper, windowSize)
 # Create linearization function
 Linearizer = UMazeLinearizer(ProjectPath.folder)
 Linearizer.verify_linearization(
@@ -166,14 +167,21 @@ NNTrainer = Training.LSTMandSpikeNetwork(
     ProjectPath, Parameters, deviceName="/device:GPU:0"
 )
 NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=200, isPredLoss=isPL)
-NNTrainer.test(
-    DataHelper.fullBehavior, l_function=l_function, windowsizeMS=200, isPredLoss=isPL
+NNTrainer.train(
+    DataHelper.fullBehavior, windowsizeMS=int(windowSize * 1000), isPredLoss=isPL
 )
-print_results.print_results(NNTrainer.folderResult, windowSizeMS=200)
+NNTrainer.test(
+    DataHelper.fullBehavior,
+    l_function=l_function,
+    windowsizeMS=int(windowSize * 1000),
+    isPredLoss=isPL,
+)
+print_results.print_results(NNTrainer.folderResult, windowSizeMS=int(windowSize * 1000))
 # Create json
 
-modelPath = os.path.join(NNTrainer.folderModels, str(0.200), "savedModels", "fullModel")
+modelPath = os.path.join(
+    NNTrainer.folderModels, str(windowSize), "savedModels", "fullModel"
+)
 generate_json(ProjectPath, modelPath, DataHelper.list_channels)
 
 # Network : test with an existing model (turn speed filter off before running this section)

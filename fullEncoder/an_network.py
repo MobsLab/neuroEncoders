@@ -533,6 +533,8 @@ class LSTMandSpikeNetwork:
                 lambda x: tf.equal(table.lookup(x["pos_index"]), 1.0)
             )
             # This is just max normalization to use if the behavioral data have not been normalized yet
+            # TODO: make a way to input 1D target, different 2D targets...
+            # coherent with the --target arg from main
             if onTheFlyCorrection:
                 maxPos = np.max(
                     behaviorData["Positions"][
@@ -786,6 +788,9 @@ class LSTMandSpikeNetwork:
                         np.logical_not(np.isnan(np.sum(behaviorData["pos"], axis=1)))
                     ]
                 )
+                # WARNING: where is this "pos" index coming from ?
+                # could be nowhere except for nnBehavior.mat - but never created
+                # TODO: implement if target is binary in main
                 posFeature = behaviorData["pos"] / maxPos
             else:
                 posFeature = behaviorData["pos"]

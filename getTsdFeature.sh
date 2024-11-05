@@ -1,6 +1,10 @@
 #!/bin/bash
 
 # If some files are missing, run some matlab code to generate them
+
+# $0: The path to this code directory
+# $1: The path of the dat file that contains the data
+cd "$(dirname "$0")"
 path=$(dirname "$1")
 path="${path}/"
 log="mlog.out"

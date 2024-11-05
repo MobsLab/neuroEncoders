@@ -109,6 +109,7 @@ def main(args):
             ProjectPath, Parameters, deviceName=deviceName
         )
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+        # TODO: if target is not position, change the target
         NNTrainer.train(
             DataHelper.fullBehavior, windowsizeMS=windowSize, isPredLoss=isPL
         )
@@ -300,6 +301,11 @@ if __name__ == "__main__":
     print("may 2020 - march 2022".center(rows))
     print("email: t.balenbois@gmail.com && bryzgalovdm@gmail.com".center(rows))
     print()
+    print()
+    print("{:=^40}".format("PARAMETERS").center(rows))
+    for k, v in vars(args).items():
+        print(f"{k}: {v}".center(rows))
+    print("{:=^40}".format("END").center(rows))
 
     # TODO:  Check if split is not too optimistic
     if args.mode == "decode":
@@ -316,7 +322,7 @@ if __name__ == "__main__":
         # The target is the name of the feature to be decoded, will default to the position.
         subprocess.run(
             [
-                "./getTsdFeature.sh",
+                os.path.join(os.path.dirname(__file__), "getTsdFeature.sh"),
                 os.path.expanduser(args.path.strip("'")),
                 "'" + args.target + "'",
             ]
