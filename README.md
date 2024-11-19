@@ -36,7 +36,7 @@ The application is written in four languages: the main one is Python, the three 
 Running the following command will install the CPU version of tensorflow (tested on Python >= 3.8). Please make sure conda is installed on your computer.
 
 ```
-sudo ./install.sh
+./install.sh
 ```
 
 To install GPU version, please install NVIDIA drivers, CUDA and CuDNN compatible with your version of operating system, graphics card and tensorflow 2.10.0.
