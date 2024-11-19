@@ -22,7 +22,9 @@ def print_results(
 ):
     """
     This function is used to print the results of the decoding.
+
     args:
+    ----
     - dir: the directory where the results are stored
     - show: if True, the figures will be shown
     - typeDec: the type of decoder used (NN or bayes)
@@ -30,6 +32,12 @@ def print_results(
     - results: the results of the Decoding (mantadory to provide if typeDec is bayes)
     - lossSelection: the percentage of the best windows to selected
     - windowSizeMS: the size of the window in ms
+
+    return:
+    ---
+    - a dictionary containing the mean euclidean error, the mean euclidean error of the selected windows, the mean linear error and the mean linear error of the selected windows if relevant
+
+    It will automatically close the figures at the end.
     """
     outdir = os.path.join(dir, str(windowSizeMS))
     # Manage arguments
@@ -181,6 +189,13 @@ def print_results(
             typeDec=typeDec,
         )
 
+    return (
+        np.nanmean(error) * maxPos,
+        np.nanmean(error[frames]) * maxPos,
+        np.nanmean(lError) if linear else None,
+        np.nanmean(lError[frames]) * maxPos if linear else None,
+    )
+
     ### Figures
     # Overview
 
@@ -220,7 +235,10 @@ def overview_fig(
         bbox_inches="tight",
     )
     if show:
-        plt.show(block=show)
+        while True:
+            plt.show(block=show)
+        plt.close()
+
     print()
 
     # Interactive figure 2D
@@ -402,7 +420,9 @@ def fig_interror(
         bbox_inches="tight",
     )
     if show:
-        plt.show(block=show)
+        while True:
+            plt.show(block=show)
+        plt.close()
     print()
 
 
