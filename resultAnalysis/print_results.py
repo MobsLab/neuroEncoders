@@ -19,6 +19,7 @@ def print_results(
     results=[],
     lossSelection: float = 0.3,
     windowSizeMS: int = 36,
+    force=True,
 ):
     """
     This function is used to print the results of the decoding.
@@ -32,10 +33,11 @@ def print_results(
     - results: the results of the Decoding (mantadory to provide if typeDec is bayes)
     - lossSelection: the percentage of the best windows to selected
     - windowSizeMS: the size of the window in ms
+    - force: if True, the figures will be re-computed even if they already exist
 
     return:
     ---
-    - a dictionary containing the mean euclidean error, the mean euclidean error of the selected windows, the mean linear error and the mean linear error of the selected windows if relevant
+    - a tuple containing the mean euclidean error, the mean euclidean error of the selected windows, the mean linear error and the mean linear error of the selected windows if relevant
 
     It will automatically close the figures at the end.
     """
@@ -155,6 +157,7 @@ def print_results(
         dimOutput=dimOutput,
         show=block,
         typeDec=typeDec,
+        force=force,
     )
     fig_interror(
         pos,
@@ -166,6 +169,7 @@ def print_results(
         dimOutput=dimOutput,
         show=block,
         typeDec=typeDec,
+        force=force,
     )
     if linear:
         overview_fig(
@@ -176,6 +180,7 @@ def print_results(
             dimOutput=1,
             show=block,
             typeDec=typeDec,
+            force=force,
         )
         fig_interror(
             lpos,
@@ -187,6 +192,7 @@ def print_results(
             dimOutput=1,
             show=block,
             typeDec=typeDec,
+            force=force,
         )
 
     return (
@@ -201,8 +207,43 @@ def print_results(
 
 
 def overview_fig(
-    pos, inferring, selection, outfolder, dimOutput=2, show=False, typeDec="NN"
+    pos,
+    inferring,
+    selection,
+    outfolder,
+    dimOutput=2,
+    show=False,
+    typeDec="NN",
+    force=True,
 ):
+    """
+    This function is used to plot the overview figure of the decoding.
+
+    args:
+    ----
+    - pos: the true position of the mouse
+    - inferring: the inferred position of the mouse
+    - selection: the selected windows
+    - outfolder: the folder where to save the figure
+    - dimOutput: the dimension of the output (1 or 2)
+    - show: if True, the figure will be shown
+    - typeDec: the type of decoder used (NN or bayes)
+    - force: if True, the figure will be re-computed even if it already exists
+
+    return:
+    ---
+    - None
+    """
+    if (
+        os.path.isfile(
+            os.path.expanduser(
+                os.path.join(outfolder, f"overviewFig_{dimOutput}d_{typeDec}.png")
+            )
+        )
+        and not force
+    ):
+        return
+
     if dimOutput == 2:
         fig, ax = plt.subplots(figsize=(15, 9))
         for dim in range(dimOutput):
@@ -254,7 +295,37 @@ def fig_interror(
     dimOutput=2,
     show=False,
     typeDec="NN",
+    force=True,
 ):
+    """
+    This function is used to plot the interactive figure of the decoding.
+
+        args:
+        ----
+        - pos: the true position of the mouse
+        - Error: the error of the decoding
+        - q_control: the control of the decoding
+        - selection: the selected windows
+        - thresh: the threshold of the selection
+        - outfolder: the folder where to save the figure
+        - dimOutput: the dimension of the output (1 or 2)
+        - show: if True, the figure will be shown
+        - typeDec: the type of decoder used (NN or bayes)
+        - force: if True, the figure will be re-computed even if it already exists
+
+        return:
+        ---
+        - None
+    """
+    if (
+        os.path.isfile(
+            os.path.expanduser(
+                os.path.join(outfolder, f"errorFig_{dimOutput}d_{typeDec}.png")
+            )
+        )
+        and not force
+    ):
+        return
     fig, ax = plt.subplots(figsize=(15, 9))
     from matplotlib.widgets import Slider
     from mpl_toolkits.axes_grid1 import make_axes_locatable

@@ -95,7 +95,8 @@ class spikeNet:
 def get_spike_sequences(params, generator):
     # WARNING: This function is actually not used in the code, it might be a helper function to understand the pipeline of the spike sequence??
     """
-    Used in the main neuroEncoder function to get the Spike sequence from the spike generator
+    Warning: This function is not used in the code.
+    Could be used in the main neuroEncoder function to get the Spike sequence from the spike generator
     and cast it into an "example" format that will then be decoded by tensorflow inputs system tf.io as the key word yield is used, this function effectively returns a generator.
 
     The goal of the function is to bin the set of spikes with respect to times, gather spikes in time windows of fix length.
