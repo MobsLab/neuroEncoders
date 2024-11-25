@@ -3,16 +3,15 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+from tkinter import Button, Entry, Label, Tk, Toplevel
 from typing import Literal, Optional
 
-import matplotlib as mplt
+# import matplotlib as mplt
+# mplt.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tables
-
-mplt.use("TkAgg")
-from tkinter import Button, Entry, Label, Tk, Toplevel
 
 sys.path.append("./importData")
 
