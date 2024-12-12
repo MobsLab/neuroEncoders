@@ -1382,6 +1382,19 @@ class LSTMandSpikeNetwork:
         windowsizeMS=36,
         isPredLoss=False,
     ):
+        """
+        Test the network on sleep epochs.
+
+        parameters:
+        ______________________________________________________
+        behaviorData : dict
+            dictionary containing the behavioral data. In particular, it needs to contain the following keys:
+            - Times : dict with sleepNames and sleepEpochs keys
+        l_function : list
+        windowSizeDecoder : int
+        windowsizeMS : int
+        isPredLoss : bool
+        """
         # Create the folder
         if windowSizeDecoder is None:
             folderName = str(windowsizeMS)
