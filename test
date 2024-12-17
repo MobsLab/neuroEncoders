@@ -15,16 +15,18 @@ from utils.global_classes import Params, Project
 # Load standard libs
 
 
-FILENAME = "/media/mickey/DimaERC2/TEST1_Basile/M1199_20210408_UMaze.xml"
+FILENAME = os.path.expanduser(
+    "~/Documents/Theotime/DimaERC2/M1199TEST1_Basile/M1199_20210408_UMaze.xml"
+)
 # FILENAME = "/media/mickey/DimaERC2/TEST3_Basile_M1239/M1239_20211105_StimMFBWake.xml"
 # FILENAME = os.path.expanduser("~/Documents/Theotime/M1199/M1199_20210408_UMaze.xml")
-FILENAME = os.path.expanduser(
-    "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
-)
-nameExp = "TESTTHEOTIME"
+# FILENAME = os.path.expanduser(
+#     "/media/DataMOBS209/home/mobs/Documents/PierreCode/dataTest/Mouse-M1199-1304/continuous.xml"
+# )
+nameExp = "maisTESTTHEOTIME_OUIIIIIII"
 ProjectPath = Project(os.path.expanduser(FILENAME), nameExp=nameExp)
 folderCode = str(os.getcwd())
-windowSize = 0.100
+windowSize = 0.036
 
 # Creating the file nnBehavior.mat
 #####################################################################################################################
@@ -78,6 +80,7 @@ def julia_spike_filter(projectPath, folderCode, windowSize=0.200, singleSpike=Fa
         if not os.path.exists(projectPath.dat):
             raise ValueError("the dat file does not exist :" + projectPath.dat)
         codepath = os.path.join(folderCode, "importData/juliaData/")
+        windowStrideinSec = windowSize * 1
         if singleSpike:
             subprocess.run(
                 [
@@ -120,7 +123,7 @@ def julia_spike_filter(projectPath, folderCode, windowSize=0.200, singleSpike=Fa
                     ),
                     str(BUFFERSIZE),
                     str(windowSize),
-                    str(0.100),
+                    str(windowStrideinSec),
                 ]
             )  # the striding is 36ms based...
 
