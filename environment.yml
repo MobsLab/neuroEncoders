@@ -20,7 +20,7 @@ dependencies:
       - pydot==1.4.2
       - pydotplus==2.0.2
       - graphviz==0.20.3
-      - tensorflow==2.10
+      - tensorflow[and-cuda]==2.15
       - tensorrt==8.6.0
       - pykeops==2.1
       - pre-commit==4.0.1
