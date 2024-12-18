@@ -12,7 +12,10 @@ import spikeinterface.preprocessing as spre
 
 ## import glob
 from probeinterface import generate_linear_probe
-from spikeinterface.sorters import run_sorter_jobs
+from spikeinterface.sorters import run_sorter_by_property, run_sorter_jobs
+
+os.environ["OMP_NUM_THREADS"] = "32"
+si.set_global_job_kwargs(n_jobs=-1, progress_bar=True)
 
 file_to_load = Path(sys.argv[1])
 
@@ -27,14 +30,14 @@ required_extensions = [
     "correlograms",
 ]
 
-sorter_names = ["mountainsort5", "kilosort4", "spykingcircus2"]
+sorter_names = ["kilosort4", "spykingcircus2", "mountainsort5"]
 
 dat = Path(sys.argv[1])
 
 try:
     print(dat)
-except:
-    print("No file provided")
+except Exception as e:
+    print(f"No file provided \n{e}")
     if os.path.exists(dat):
         dat = os.path.abspath(dat)
         print(dat)
@@ -53,9 +56,14 @@ probe = generate_linear_probe(
 )
 probe.set_device_channel_indices(np.arange(num_elec))
 recording = recording.set_probe(probe)
+recording.split_recording_by_channel_groups()
+
 recording = spre.depth_order(recording)
 
-print(f"Probe generated: {probe}")
+
+print(
+    f"Probe generated: {probe}\nFound {num_elec} electrodes with the following groups:\n {recording.get_channel_groups()}"
+)
 
 # run sorter (if not already done)
 
@@ -70,11 +78,17 @@ print(f"Probe generated: {probe}")
 job_list = []
 print(f"Checking sorters for {dat}")
 for sorter_name in sorter_names:
-    output_folder = Path(dat.parent) / f"sorters/sorter_output_{sorter_name}"
+    output_folder = Path(dat.parent) / f"sorting/sorter_output_{sorter_name}"
     if output_folder.exists():
         print(f"Sorter {sorter_name} already run")
     else:
         print(f"Sorter {sorter_name} not run, adding to job list.")
+        # run_sorter_by_property(
+        #     sorter_name=sorter_name,
+        #     recording=recording,
+        #     grouping_property="group",
+        #     folder=output_folder,
+        # )
         job_list.append(
             {
                 "sorter_name": sorter_name,
@@ -86,4 +100,4 @@ for sorter_name in sorter_names:
 
 # run all sorters in job_list
 print(f"Running sorters for {dat}")
-sortings = run_sorter_jobs(job_list=job_list, engine="joblib")
+sortings = run_sorter_jobs(job_list=job_list)
