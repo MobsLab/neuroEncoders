@@ -1,11 +1,17 @@
 
                             < M A T L A B (R) >
-                  Copyright 1984-2018 The MathWorks, Inc.
-              R2018b Update 6 (9.5.0.1265761) 64-bit (glnxa64)
-                              December 4, 2019
+                  Copyright 1984-2024 The MathWorks, Inc.
+             R2024b Update 2 (24.2.0.2773142) 64-bit (glnxa64)
+                              October 22, 2024
 
  
 To get started, type doc.
 For product information, visit www.mathworks.com.
  
+[Warning: Function newline has the same name as a MATLAB built-in. We suggest
+you rename the function to avoid a potential name conflict.] 
+[> In path (line 109)
+In addpath>doPathAddition (line 126)
+In addpath (line 90)
+In startup (line 5)] 
 >> >> 

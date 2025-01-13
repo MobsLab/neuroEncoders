@@ -245,7 +245,7 @@ if __name__ == "__main__":
 
     for cmd in ["ann", "bayes", "compare", "decode"]:
         p = subparsers.add_parser(cmd)
-        p.add_argument("path", type=str, help="path to xml file")
+        p.add_argument("path", help="path to xml file", type=os.path.abspath)
         if cmd == "decode":
             p.add_argument("jsonPath", type=str, help="path to json file")
         p.add_argument(
@@ -313,8 +313,10 @@ if __name__ == "__main__":
 
     if not (
         os.path.isfile(
-            os.path.expanduser(
-                os.path.split(args.path)[0] + os.path.sep + "nnBehavior.mat"
+            os.path.abspath(
+                os.path.expanduser(
+                    os.path.split(args.path)[0] + os.path.sep + "nnBehavior.mat"
+                )
             )
         )
     ):
@@ -323,7 +325,7 @@ if __name__ == "__main__":
         subprocess.run(
             [
                 os.path.join(os.path.dirname(__file__), "getTsdFeature.sh"),
-                os.path.expanduser(args.path.strip("'")),
+                os.path.abspath(os.path.expanduser(args.path.strip("'"))),
                 "'" + args.target + "'",
             ]
         )
