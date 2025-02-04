@@ -81,8 +81,16 @@ class UMazeLinearizer:
         return projectedPos, linearPos
 
     def verify_linearization(self, ExampleEuclideanData, folder, overwrite=False):
-        ## A function to verify and possibly change the linearization.
-        # Auxiliary
+        """
+        A function to verify and possibly change the linearization.
+        This function will plot the data and allow the user to change the linearization points. The new linearization points will be saved in the folder.
+
+        args:
+        ExampleEuclideanData: np.array, the data to be linearized
+        folder: str, the folder where the linearization points are saved
+        overwrite: bool, if True, the linearization points will be overwritten, defaults to False
+        """
+
         def try_linearization(ax, l0s):
             _, linearTrue = self.apply_linearization(euclidData)
             binIndex = [
