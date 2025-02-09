@@ -105,6 +105,7 @@ def main(args):
         folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
         julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
         # Network
+        # let's try with a transformer
         NNTrainer = Training.LSTMandSpikeNetwork(
             ProjectPath, Parameters, deviceName=deviceName
         )
