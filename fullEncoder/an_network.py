@@ -20,15 +20,6 @@ from tqdm import tqdm
 from fullEncoder import nnUtils
 from importData.epochs_management import inEpochsMask
 
-# We generate a transformer model with the functional Model interface in tensorflow
-
-
-class TransformerNetwork:
-    # TODO: check if we can use huggingface multimodal transformers like https://huggingface.co/lmms-lab/LLaVA-Video-7B-Qwen2
-    # https://www.nature.com/articles/s41598-024-75616-6#additional-information
-    def __init__(self, projectPath, params, deviceName="/device:CPU:0"):
-        super(LSTMandSpikeNetwork, self).__init__()
-
 
 # We generate a model with the functional Model interface in tensorflow
 ########### FULL NETWORK CLASS #####################
