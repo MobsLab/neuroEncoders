@@ -16,7 +16,7 @@ from utils.global_classes import Params, Project
 
 def main(args):
     # WARNING: This is a very long function, consider splitting it?
-    # NOTE: The "nnBehavior.mat" file is already created when executing main func.
+    # NOTE: The "nnBehavior.mat" file is already created when executing main func see `getTsdFeature.sh`.
     # Manage inputs
     if not args.mode == "bayes":
         if args.gpu:
