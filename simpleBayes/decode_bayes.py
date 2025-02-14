@@ -267,8 +267,8 @@ class Trainer:
         }
         return bayesMatrices
 
-    def test_legacy(self, bayes_matrices, behavior_data, windowSize=36):
-        windowSize = windowSize / 1000
+    def test_legacy(self, bayes_matrices, behavior_data, windowSizeMS=36):
+        windowSizeMS = windowSizeMS / 1000
 
         print("\nBUILDING POSITION PROBAS")
         guessed_clusters_time = [
@@ -305,7 +305,7 @@ class Trainer:
                 for i in range(len(testEpochs) // 2)
             ]
         )
-        n_bins = math.floor(Ttest / windowSize)
+        n_bins = math.floor(Ttest / windowSizeMS)
         # for each bin we will need to now the test epoch it belongs to, so that we can then
         # set the time correctly to select the corresponding spikes
         timeEachTestEpoch = [
@@ -316,8 +316,8 @@ class Trainer:
         cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
         # a function that given the bin indicates the bin index:
         binToEpoch = lambda x: np.where(
-            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
-            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+            ((x * windowSizeMS - cumTimeEachTestEpoch[0:-1]) >= 0)
+            * ((x * windowSizeMS - cumTimeEachTestEpoch[1:]) < 0)
         )[0][0]
         binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
         firstBinEpoch = [
@@ -325,7 +325,7 @@ class Trainer:
             for epochId in range(len(timeEachTestEpoch))
         ]
         All_Poisson_term = [
-            np.exp((-windowSize) * Marginal_rate_functions[tetrode])
+            np.exp((-windowSizeMS) * Marginal_rate_functions[tetrode])
             for tetrode in range(len(guessed_clusters))
         ]
         All_Poisson_term = reduce(np.multiply, All_Poisson_term)
@@ -357,9 +357,9 @@ class Trainer:
             # whereas we forbid the use of some time steps b filtering them according to speed.
             bin_start_time = (
                 testEpochs[2 * binToEpoch(bin)]
-                + (bin - firstBinEpoch[binToEpoch(bin)]) * windowSize
+                + (bin - firstBinEpoch[binToEpoch(bin)]) * windowSizeMS
             )
-            bin_stop_time = bin_start_time + windowSize
+            bin_stop_time = bin_start_time + windowSizeMS
             times.append(bin_start_time)
 
             binSpikes = 0
