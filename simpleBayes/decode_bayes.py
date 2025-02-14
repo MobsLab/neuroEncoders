@@ -267,6 +267,201 @@ class Trainer:
         }
         return bayesMatrices
 
+    def test_legacy(self, bayes_matrices, behavior_data, windowSize=36):
+        windowSize = windowSize / 1000
+
+        print("\nBUILDING POSITION PROBAS")
+        guessed_clusters_time = [
+            self.clusterData["Spike_times"][tetrode][
+                inEpochs(
+                    self.clusterData["Spike_times"][tetrode][:, 0],
+                    behavior_data["Times"]["testEpochs"],
+                )
+            ]
+            for tetrode in range(len(self.clusterData["Spike_times"]))
+        ]
+        guessed_clusters = [
+            self.clusterData["Spike_labels"][tetrode][
+                inEpochs(
+                    self.clusterData["Spike_times"][tetrode][:, 0],
+                    behavior_data["Times"]["testEpochs"],
+                )
+            ]
+            for tetrode in range(len(self.clusterData["Spike_times"]))
+        ]
+
+        Occupation, Marginal_rate_functions, Rate_functions = [
+            bayes_matrices[key]
+            for key in ["Occupation", "Marginal rate functions", "Rate functions"]
+        ]
+        mask = Occupation > (np.max(Occupation) / self.masking_factor)
+
+        ### Build Poisson term
+        # first we bin the time
+        testEpochs = behavior_data["Times"]["testEpochs"]
+        Ttest = np.sum(
+            [
+                testEpochs[2 * i + 1] - testEpochs[2 * i]
+                for i in range(len(testEpochs) // 2)
+            ]
+        )
+        n_bins = math.floor(Ttest / windowSize)
+        # for each bin we will need to now the test epoch it belongs to, so that we can then
+        # set the time correctly to select the corresponding spikes
+        timeEachTestEpoch = [
+            testEpochs[2 * i + 1] - testEpochs[2 * i]
+            for i in range(len(testEpochs) // 2)
+        ]
+        cumTimeEachTestEpoch = np.cumsum(timeEachTestEpoch)
+        cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
+        # a function that given the bin indicates the bin index:
+        binToEpoch = lambda x: np.where(
+            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
+            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+        )[0][0]
+        binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
+        firstBinEpoch = [
+            np.min(np.where(np.equal(binToEpochArray, epochId))[0])
+            for epochId in range(len(timeEachTestEpoch))
+        ]
+        All_Poisson_term = [
+            np.exp((-windowSize) * Marginal_rate_functions[tetrode])
+            for tetrode in range(len(guessed_clusters))
+        ]
+        All_Poisson_term = reduce(np.multiply, All_Poisson_term)
+
+        ### Log of rate functions
+        log_RF = []
+        for tetrode in range(np.shape(Rate_functions)[0]):
+            temp = []
+            for cluster in range(np.shape(Rate_functions[tetrode])[0]):
+                temp.append(
+                    np.log(
+                        Rate_functions[tetrode][cluster]
+                        + np.min(
+                            Rate_functions[tetrode][cluster][
+                                Rate_functions[tetrode][cluster] != 0
+                            ]
+                        )
+                    )
+                )
+            log_RF.append(temp)
+
+        ### Decoding loop
+        position_proba = [np.ones(np.shape(Occupation))] * n_bins
+        position_true = [np.ones(2)] * n_bins
+        nSpikes = []
+        times = []
+        for bin in range(n_bins):
+            # Trouble: the test Epochs is discretized in continuous bin
+            # whereas we forbid the use of some time steps b filtering them according to speed.
+            bin_start_time = (
+                testEpochs[2 * binToEpoch(bin)]
+                + (bin - firstBinEpoch[binToEpoch(bin)]) * windowSize
+            )
+            bin_stop_time = bin_start_time + windowSize
+            times.append(bin_start_time)
+
+            binSpikes = 0
+            tetrodes_contributions = []
+            tetrodes_contributions.append(All_Poisson_term)
+
+            for tetrode in range(len(guessed_clusters)):
+                # Clusters inside our window
+                bin_probas = guessed_clusters[tetrode][
+                    np.intersect1d(
+                        np.where(guessed_clusters_time[tetrode][:, 0] > bin_start_time),
+                        np.where(guessed_clusters_time[tetrode][:, 0] < bin_stop_time),
+                    )
+                ]
+                bin_clusters = np.sum(bin_probas, 0)
+                binSpikes = binSpikes + np.sum(bin_clusters)
+
+                # Terms that come from spike information
+                if np.sum(bin_clusters) > 0.5:
+                    spike_pattern = reduce(
+                        np.multiply,
+                        [
+                            np.exp(log_RF[tetrode][cluster] * bin_clusters[cluster])
+                            for cluster in range(np.shape(bin_clusters)[0])
+                        ],
+                    )
+                else:
+                    spike_pattern = np.multiply(np.ones(np.shape(Occupation)), mask)
+
+                tetrodes_contributions.append(spike_pattern)
+
+            nSpikes.append(binSpikes)
+
+            # Guessed probability map
+            position_proba[bin] = reduce(np.multiply, tetrodes_contributions)
+            position_proba[bin] = position_proba[bin] / np.sum(position_proba[bin])
+            # True position
+            position_true_mean = np.nanmean(
+                behavior_data["Positions"][
+                    reduce(
+                        np.intersect1d,
+                        (
+                            np.where(
+                                behavior_data["positionTime"][:, 0] > bin_start_time
+                            ),
+                            np.where(
+                                behavior_data["positionTime"][:, 0] < bin_stop_time
+                            ),
+                        ),
+                    )
+                ],
+                axis=0,
+            )
+            position_true[bin] = (
+                position_true[bin - 1]
+                if np.isnan(position_true_mean).any()
+                else position_true_mean
+            )
+
+            if bin % 50 == 0:
+                sys.stdout.write(
+                    "[%-30s] : %.3f %%"
+                    % ("=" * (bin * 30 // n_bins), bin * 100 / n_bins)
+                )
+                sys.stdout.write("\r")
+                sys.stdout.flush()
+        sys.stdout.write(
+            "[%-30s] : %.3f %%"
+            % ("=" * ((bin + 1) * 30 // n_bins), (bin + 1) * 100 / n_bins)
+        )
+        sys.stdout.write("\r")
+        sys.stdout.flush()
+
+        position_true[0] = position_true[1]
+        print("\nDecoding finished")
+
+        # Guessed X and Y
+        allProba = [
+            np.unravel_index(np.argmax(position_proba[bin]), position_proba[bin].shape)
+            for bin in range(len(nSpikes))
+        ]
+        bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
+        position_guessed = [
+            [
+                bayes_matrices["Bins"][i][allProba[bin][i]]
+                for i in range(len(bayes_matrices["Bins"]))
+            ]
+            for bin in range(len(nSpikes))
+        ]
+        inferResults = np.concatenate(
+            [np.array(position_guessed), np.array(bestProba).reshape([-1, 1])], axis=-1
+        )
+
+        outputResults = {
+            "inferring": inferResults,
+            "pos": np.array(position_true),
+            "probaMaps": position_proba,
+            "times": np.array(times),
+            "nSpikes": np.array(nSpikes),
+        }
+        return outputResults
+
     def test_as_NN(
         self,
         behaviorData,
@@ -406,7 +601,7 @@ class Trainer:
                         np.where(clustersTime[tetrode][:, 0] < binStopTime),
                     )
                 ]
-                # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+                # Note:  we would lose some spikes if we used the clusterData[Spike_pos_index]
                 # because some spike might be closest to one position further away than windowSize,
                 # yet themselves be close to the spike time
                 binClusters = np.sum(binProbas, 0)
@@ -567,7 +762,7 @@ class Trainer:
                             ),
                         )
                     ]
-                    # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+                    # Note:  we would lose some spikes if we used the clusterData[Spike_pos_index]
                     # because some spike might be closest to one position further away than windowSize,
                     # yet themselves be close to the spike time
                     binClusters = np.sum(binProbas, 0)
@@ -680,6 +875,7 @@ def find_next_bin(times, clusters, start, stop, start_time, stop_time):
     return newStartID, newStopId, clusters[newStartID : newStopId + 1]
 
 
+# TODO: le passer en test_parallel??
 def parallel_pred_as_NN(
     firstSpikeNNtime, windowSize, allPoisson, clusters, clustersTime, logRF, occupancy
 ):
@@ -752,14 +948,14 @@ class LegacyTrainer:
         self.bandwidth = bandwidth
         self.kernel = kernel
         self.masking_factor = masking_factor
-        self.cluster_data = import_clusters.load_spike_sorting(self.projectPath)
+        self.clusterData = import_clusters.load_spike_sorting(self.projectPath)
 
     def train(self, behavior_data, onTheFlyCorrection=False):
         Marginal_rate_functions = []
         Rate_functions = []
         Spike_positions = []
         Mutual_info = []
-        n_tetrodes = len(self.cluster_data["Spike_labels"])
+        n_tetrodes = len(self.clusterData["Spike_labels"])
         maxPos = np.max(
             behavior_data["Positions"][
                 np.logical_not(np.isnan(np.sum(behavior_data["Positions"], axis=1)))
@@ -771,7 +967,7 @@ class LegacyTrainer:
         print("Aligning speed-filter with spike times")
         for tetrode in tqdm(range(n_tetrodes)):
             spike_times = pykeops.numpy.LazyTensor(
-                self.cluster_data["Spike_times"][tetrode][:, 0][:, None], axis=0
+                self.clusterData["Spike_times"][tetrode][:, 0][:, None], axis=0
             )
             matching_pos_time = (pos_times - spike_times).abs().argmin_reduction(axis=1)
             speed_mask = behavior_data["Times"]["speedFilter"][matching_pos_time]
@@ -819,13 +1015,13 @@ class LegacyTrainer:
         ### Build marginal rate functions
         print("Building marginal rate and local rate functions")
         for tetrode in tqdm(range(n_tetrodes)):
-            tetrodewisePos = self.cluster_data["Spike_positions"][tetrode][
+            tetrodewisePos = self.clusterData["Spike_positions"][tetrode][
                 reduce(
                     np.intersect1d,
                     (
                         np.where(tetrode_speed_filter_spiketimes[tetrode]),
                         inEpochs(
-                            self.cluster_data["Spike_times"][tetrode][:, 0],
+                            self.clusterData["Spike_times"][tetrode][:, 0],
                             behavior_data["Times"]["trainEpochs"],
                         ),
                     ),
@@ -855,18 +1051,17 @@ class LegacyTrainer:
             LocalMutualInfo = []
 
             ### Build local rate functions (one per cluster)
-            for label in range(np.shape(self.cluster_data["Spike_labels"][tetrode])[1]):
-                clusterwisePos = self.cluster_data["Spike_positions"][tetrode][
+            for label in range(np.shape(self.clusterData["Spike_labels"][tetrode])[1]):
+                clusterwisePos = self.clusterData["Spike_positions"][tetrode][
                     reduce(
                         np.intersect1d,
                         (
                             np.where(tetrode_speed_filter_spiketimes[tetrode]),
                             np.where(
-                                self.cluster_data["Spike_labels"][tetrode][:, label]
-                                == 1
+                                self.clusterData["Spike_labels"][tetrode][:, label] == 1
                             ),
                             inEpochs(
-                                self.cluster_data["Spike_times"][tetrode][:, 0],
+                                self.clusterData["Spike_times"][tetrode][:, 0],
                                 behavior_data["Times"]["trainEpochs"],
                             ),
                         ),
@@ -925,22 +1120,22 @@ class LegacyTrainer:
 
         print("\nBUILDING POSITION PROBAS")
         guessed_clusters_time = [
-            self.cluster_data["Spike_times"][tetrode][
+            self.clusterData["Spike_times"][tetrode][
                 inEpochs(
-                    self.cluster_data["Spike_times"][tetrode][:, 0],
+                    self.clusterData["Spike_times"][tetrode][:, 0],
                     behavior_data["Times"]["testEpochs"],
                 )
             ]
-            for tetrode in range(len(self.cluster_data["Spike_times"]))
+            for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
         guessed_clusters = [
-            self.cluster_data["Spike_labels"][tetrode][
+            self.clusterData["Spike_labels"][tetrode][
                 inEpochs(
-                    self.cluster_data["Spike_times"][tetrode][:, 0],
+                    self.clusterData["Spike_times"][tetrode][:, 0],
                     behavior_data["Times"]["testEpochs"],
                 )
             ]
-            for tetrode in range(len(self.cluster_data["Spike_times"]))
+            for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
 
         Occupation, Marginal_rate_functions, Rate_functions = [
@@ -1122,41 +1317,41 @@ class LegacyTrainer:
 
         if useTrain:
             guessed_clusters_time = [
-                self.cluster_data["Spike_times"][tetrode][
+                self.clusterData["Spike_times"][tetrode][
                     inEpochs(
-                        self.cluster_data["Spike_times"][tetrode][:, 0],
+                        self.clusterData["Spike_times"][tetrode][:, 0],
                         behavior_data["Times"]["trainEpochs"],
                     )
                 ]
-                for tetrode in range(len(self.cluster_data["Spike_times"]))
+                for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
             guessed_clusters = [
-                self.cluster_data["Spike_labels"][tetrode][
+                self.clusterData["Spike_labels"][tetrode][
                     inEpochs(
-                        self.cluster_data["Spike_times"][tetrode][:, 0],
+                        self.clusterData["Spike_times"][tetrode][:, 0],
                         behavior_data["Times"]["trainEpochs"],
                     )
                 ]
-                for tetrode in range(len(self.cluster_data["Spike_times"]))
+                for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
         else:
             guessed_clusters_time = [
-                self.cluster_data["Spike_times"][tetrode][
+                self.clusterData["Spike_times"][tetrode][
                     inEpochs(
-                        self.cluster_data["Spike_times"][tetrode][:, 0],
+                        self.clusterData["Spike_times"][tetrode][:, 0],
                         behavior_data["Times"]["testEpochs"],
                     )
                 ]
-                for tetrode in range(len(self.cluster_data["Spike_times"]))
+                for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
             guessed_clusters = [
-                self.cluster_data["Spike_labels"][tetrode][
+                self.clusterData["Spike_labels"][tetrode][
                     inEpochs(
-                        self.cluster_data["Spike_times"][tetrode][:, 0],
+                        self.clusterData["Spike_times"][tetrode][:, 0],
                         behavior_data["Times"]["testEpochs"],
                     )
                 ]
-                for tetrode in range(len(self.cluster_data["Spike_times"]))
+                for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
         # print('\nBUILDING POSITION PROBAS')
         Occupation, Marginal_rate_functions, Rate_functions = [
@@ -1206,7 +1401,7 @@ class LegacyTrainer:
                         np.where(guessed_clusters_time[tetrode][:, 0] < bin_stop_time),
                     )
                 ]
-                # Note:  we would lose some spikes if we used the cluster_data[Spike_pos_index]
+                # Note:  we would lose some spikes if we used the clusterData[Spike_pos_index]
                 # because some spike might be closest to one position further away than windowSize, yet themselves be close to the spike time
                 bin_clusters = np.sum(bin_probas, 0)
                 # Terms that come from spike information

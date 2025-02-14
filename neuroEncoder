@@ -90,7 +90,10 @@ def main(args):
         )
         # WARNING: Why does this function not exist in the class?
         # TODO: Fix this if Bayes is still of actuality
-        outputs = TrainerBayes.test_parallel(
+        # outputs = TrainerBayes.test_as_NN(
+        #     DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
+        # )
+        outputs = TrainerBayes.test_legacy(
             DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
         )
         print_results.print_results(
