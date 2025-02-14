@@ -99,6 +99,7 @@ class Params:
         self.nChannelsPerGroup = helper.numChannelsPerGroup()
         self.length = 0
 
+        # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???
         self.nSteps = int(10000 * 0.036 / windowSize)  # useless
         self.nEpochs = nEpochs
