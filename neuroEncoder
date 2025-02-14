@@ -68,7 +68,11 @@ def main(args):
         rawdata_parser.select_epochs(ProjectPath.folder)
     # Create parameters
     DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
-    Parameters = Params(helper=DataHelper, windowSize=args.window, nEpochs=args.epochs)
+    Parameters = Params(
+        helper=DataHelper,
+        windowSize=args.window,
+        nEpochs=args.epochs if args.epochs else 100,
+    )
     # Create linearization function
     Linearizer = UMazeLinearizer(ProjectPath.folder)
     Linearizer.verify_linearization(
@@ -256,6 +260,21 @@ if __name__ == "__main__":
             help="defines window size, in seconds. Defaults to 0.100",
             default=0.100,
         )
+        p.add_argument(
+            "-n",
+            "--name",
+            type=str,
+            help="name of the folder where all models and results will be stored",
+            default=str(cmd) + "_results",
+        )
+
+        p.add_argument(
+            "-e",
+            "--epochs",
+            type=int,
+            help="number of epochs for training. Defaults to 100",
+            default=100,
+        )
         if cmd != "bayes":
             p.add_argument(
                 "-g",
@@ -277,20 +296,6 @@ if __name__ == "__main__":
                 help="name of feature to be decoded. Defaults are Xtsd and Ytsd. "
                 + "Must be a tsd variable from behavResources.mat",
                 default="pos",
-            )
-            p.add_argument(
-                "-n",
-                "--name",
-                type=str,
-                help="name of the folder where all models and results will be stored",
-                default=str(cmd) + "_results",
-            )
-            p.add_argument(
-                "-e",
-                "--epochs",
-                type=int,
-                help="number of epochs for training. Defaults to 100",
-                default=100,
             )
     args = Parser.parse_args()
 
