@@ -69,6 +69,8 @@ class LSTMandSpikeNetwork:
         ### Description of layers here
         with tf.device(self.deviceName):
             if self.params.usingMixedPrecision:
+                # If we use mixed precision, we need to specify the type of the inputs
+                # We use float16 for the inputs to the spike nets
                 self.inputsToSpikeNets = [
                     tf.keras.layers.Input(
                         shape=(self.params.nChannelsPerGroup[group], 32),

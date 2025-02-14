@@ -29,13 +29,20 @@ disp('Data Loaded.')
 disp(['target: ', target]);
 if strcmp(target, 'pos')
     try
-        X = Data(Behavior.("AlignedXtsd"));
-        Y = Data(Behavior.("AlignedYtsd"));
-        T = Range(Behavior.("AlignedXtsd"), 's');
+        X = Data(Behavior.("CleanAlignedXtsd"));
+        Y = Data(Behavior.("CleanAlignedYtsd"));
+        T = Range(Behavior.("CleanAlignedXtsd"), 's');
     catch
-        X = Data(Behavior.("Xtsd"));
-        Y = Data(Behavior.("Ytsd"));
-        T = Range(Behavior.("Xtsd"), 's');
+        try
+            X = Data(Behavior.("AlignedXtsd"));
+            Y = Data(Behavior.("AlignedYtsd"));
+            T = Range(Behavior.("AlignedXtsd"), 's');
+        catch
+            warning('No aligned data found, using raw data.')
+            X = Data(Behavior.("Xtsd"));
+            Y = Data(Behavior.("Ytsd"));
+            T = Range(Behavior.("Xtsd"), 's');
+        end
     end
     V = Data(Behavior.("Vtsd"));
     behavior.positions     = [X Y];
