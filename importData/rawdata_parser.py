@@ -216,10 +216,10 @@ def get_behavior(
 
     Parameters
     ----------
-    folder : str
-    bandwidth : int, optional
-    getfilterSpeed : bool, optional
-    decode : bool, optional
+    folder : str, where the mat `nnBehavior.mat` file is located
+    bandwidth : int, optional (default=None)
+    getfilterSpeed : bool, optional, whether to the speed filter on train/test data. Should be True for training (ann|bayes), false otherwise.
+    decode : bool, optional, wether to train-test split the data or not.
 
     Returns
     -------
@@ -328,6 +328,7 @@ def speed_filter(folder: str, overWrite: bool = True) -> None:
     if it is above threshold or not.
 
     """
+    # TODO: change the order of the epochs AND be able to select the training set in the middle of the dataset
     # Parameters
     window_len = 14  # changed following Dima's advice
 
@@ -1105,7 +1106,7 @@ class DataHelper:
     """
     A class to detect and describe the main properties on the signal and behavior
     args:
-    - path: the path to the folder containing the xml and dat files
+    - projectPath: a Project object containing the path to the data (xml & dat)
     - mode: the argument of the neuroEncoder command
     - jsonPath: the path to the json file containing the thresholds
 
@@ -1113,11 +1114,22 @@ class DataHelper:
 
     def __init__(
         self,
-        path,
+        projectPath,
         mode: Literal["ann", "bayes", "compare", "decode"],
         jsonPath=None,
     ):
-        self.path = path
+        """
+        Initializes the DataHelper object.
+        path should be a Project object.
+        """
+        self.windowSizeMS = projectPath.windowSize * 1000  # gets converted to ms
+        self.path = projectPath  # the path object
+        self.globalResultsPath = projectPath.resultsPath
+        self.resultsPath = os.path.join(
+            projectPath.resultsPath,
+            "results",
+            str(self.windowSizeMS),
+        )
         self.mode = mode
 
         if not os.path.exists(self.path.xml):

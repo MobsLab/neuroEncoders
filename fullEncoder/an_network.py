@@ -1225,7 +1225,7 @@ class LSTMandSpikeNetwork:
             testOutput["linearTrue"] = linearTrue
 
         # Save the results
-        self.saveResults(testOutput, folderName=200)
+        self.saveResults(testOutput, folderName=windowsizeMS)
 
         return testOutput
 

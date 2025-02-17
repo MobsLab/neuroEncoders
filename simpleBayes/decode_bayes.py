@@ -267,38 +267,42 @@ class Trainer:
         }
         return bayesMatrices
 
-    def test_legacy(self, bayes_matrices, behavior_data, windowSizeMS=36):
+    def test_legacy(self, bayesMatrices, behaviorData, windowSizeMS=36):
         windowSizeMS = windowSizeMS / 1000
 
         print("\nBUILDING POSITION PROBAS")
+        # find the spikes times in the test epochs
         guessed_clusters_time = [
             self.clusterData["Spike_times"][tetrode][
                 inEpochs(
                     self.clusterData["Spike_times"][tetrode][:, 0],
-                    behavior_data["Times"]["testEpochs"],
+                    behaviorData["Times"]["testEpochs"],
                 )
             ]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
+        # find the clusters/mua in the test epochs
         guessed_clusters = [
             self.clusterData["Spike_labels"][tetrode][
                 inEpochs(
                     self.clusterData["Spike_times"][tetrode][:, 0],
-                    behavior_data["Times"]["testEpochs"],
+                    behaviorData["Times"]["testEpochs"],
                 )
             ]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
 
+        # load Bayes matrices
         Occupation, Marginal_rate_functions, Rate_functions = [
-            bayes_matrices[key]
-            for key in ["Occupation", "Marginal rate functions", "Rate functions"]
+            bayesMatrices[key]
+            for key in ["occupation", "marginalRateFunctions", "rateFunctions"]
         ]
-        mask = Occupation > (np.max(Occupation) / self.masking_factor)
+        mask = Occupation > (np.max(Occupation) / self.maskingFactor)
 
         ### Build Poisson term
         # first we bin the time
-        testEpochs = behavior_data["Times"]["testEpochs"]
+        testEpochs = behaviorData["Times"]["testEpochs"]
+        # the total time of the test epochs
         Ttest = np.sum(
             [
                 testEpochs[2 * i + 1] - testEpochs[2 * i]
@@ -398,15 +402,15 @@ class Trainer:
             position_proba[bin] = position_proba[bin] / np.sum(position_proba[bin])
             # True position
             position_true_mean = np.nanmean(
-                behavior_data["Positions"][
+                behaviorData["Positions"][
                     reduce(
                         np.intersect1d,
                         (
                             np.where(
-                                behavior_data["positionTime"][:, 0] > bin_start_time
+                                behaviorData["positionTime"][:, 0] > bin_start_time
                             ),
                             np.where(
-                                behavior_data["positionTime"][:, 0] < bin_stop_time
+                                behaviorData["positionTime"][:, 0] < bin_stop_time
                             ),
                         ),
                     )
@@ -444,8 +448,8 @@ class Trainer:
         bestProba = [np.max(position_proba[bin]) for bin in range(len(nSpikes))]
         position_guessed = [
             [
-                bayes_matrices["Bins"][i][allProba[bin][i]]
-                for i in range(len(bayes_matrices["Bins"]))
+                bayesMatrices["bins"][i][allProba[bin][i]]
+                for i in range(len(bayesMatrices["bins"]))
             ]
             for bin in range(len(nSpikes))
         ]
@@ -453,12 +457,17 @@ class Trainer:
             [np.array(position_guessed), np.array(bestProba).reshape([-1, 1])], axis=-1
         )
 
+        # Update the dict to comply to neuroencoders v2, new nomenclature.
         outputResults = {
             "inferring": inferResults,
             "pos": np.array(position_true),
+            "featureTrue": np.array(position_true),
             "probaMaps": position_proba,
             "times": np.array(times),
             "nSpikes": np.array(nSpikes),
+            "featurePred": inferResults[:, :2],
+            "proba": inferResults[:, 2],
+            "speed_mask": behaviorData["Times"]["speedFilter"],
         }
         return outputResults
 
@@ -1358,7 +1367,7 @@ class LegacyTrainer:
             bayes_matrices[key]
             for key in ["Occupation", "Marginal rate functions", "Rate functions"]
         ]
-        mask = Occupation > (np.max(Occupation) / self.masking_factor)
+        mask = Occupation > (np.max(Occupation) / self.maskingFactor)
 
         ### Build Poisson term
         All_Poisson_term = [
