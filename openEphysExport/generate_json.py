@@ -10,6 +10,25 @@ from importData.rawdata_parser import get_params
 def generate_json(
     projectPath, modelPath, listChannels, useOpenEphysFilter=False, offline=False
 ):
+    """
+    Generate the json julia thresholds file for the project and online implementation.
+
+    Parameters
+    ----------
+    projectPath : str
+        Path to the project folder
+    modelPath : str
+        Path to the model folder
+    listChannels : list
+    useOpenEphysFilter : bool, optional
+    offline : bool, optional
+
+    Returns
+    -------
+    None
+
+    """
+
     # Start creating json
     outjsonStr = {}
     outjsonStr["encodingPrefix"] = modelPath

@@ -45,8 +45,8 @@ def main(args):
     xmlPath = args.path.strip("'")
     print("NEUROENCODER: PATH", xmlPath)
     # WARNING: windowSize is in s and gets converted to ms
-    windowSize = int(args.window * 1000)
-    print(f"NEUROENCODER: WINDOW {windowSize} ms")
+    windowSizeMS = int(args.window * 1000)
+    print(f"NEUROENCODER: WINDOW {windowSizeMS} ms")
     mode = args.mode
     print("NEUROENCODER: MODE", mode)
     if mode != "bayes":
@@ -60,12 +60,15 @@ def main(args):
 
     # Get behavior and tune parameters
     ProjectPath = Project(
-        os.path.expanduser(xmlPath), jsonPath=jsonPath, nameExp=args.name
+        os.path.expanduser(xmlPath),
+        jsonPath=jsonPath,
+        nameExp=args.name,
+        windowSize=args.window,
     )
     # Select the data for testing
     if mode != "decode":
-        rawdata_parser.speed_filter(ProjectPath.folder)
-        rawdata_parser.select_epochs(ProjectPath.folder)
+        rawdata_parser.speed_filter(ProjectPath.folder, overWrite=False)
+        rawdata_parser.select_epochs(ProjectPath.folder, overWrite=False)
     # Create parameters
     DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
     Parameters = Params(
@@ -80,9 +83,13 @@ def main(args):
     )
     l_function = Linearizer.pykeops_linearization
 
+    # Save main parameters in json file in the Params.folder
+    Parameters.save_params_to_json()
+
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
         from simpleBayes import decode_bayes as Training
+        from importData.epochs_management import inEpochs
 
         TrainerBayes = Training.Trainer(ProjectPath)
         bayesMatrices = TrainerBayes.train_order_by_pos(
@@ -90,17 +97,25 @@ def main(args):
         )
         # WARNING: Why does this function not exist in the class?
         # TODO: Fix this if Bayes is still of actuality
-        # outputs = TrainerBayes.test_as_NN(
-        #     DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
+        # timeStepPred = DataHelper.fullBehavior["positionTime"][
+        #         inEpochs(
+        #             DataHelper.fullBehavior["positionTime"][:, 0],
+        #             DataHelper.fullBehavior["Times"]["testEpochs"]
+        #         )
+        #     ]
+        #
+        # outputsNN = TrainerBayes.test_as_NN(
+        #     DataHelper.fullBehavior, bayesMatrices, timeStepPred, windowSizeMS=windowSize
         # )
+        #
         outputs = TrainerBayes.test_legacy(
-            DataHelper.fullBehavior, bayesMatrices, windowSizeMS=windowSize
+            bayesMatrices, DataHelper.fullBehavior, windowSizeMS=windowSizeMS
         )
         print_results.print_results(
             TrainerBayes.folderResult,
             typeDec="bayes",
             results=outputs,
-            windowSizeMS=int(windowSize / 1000),
+            windowSizeMS=windowSizeMS,
         )
 
     elif mode == "ann":
@@ -119,25 +134,29 @@ def main(args):
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
         # TODO: if target is not position, change the target
         NNTrainer.train(
-            DataHelper.fullBehavior, windowsizeMS=windowSize, isPredLoss=isPL
+            DataHelper.fullBehavior, windowsizeMS=windowSizeMS, isPredLoss=isPL
         )
         NNTrainer.test(
             DataHelper.fullBehavior,
             l_function=l_function,
-            windowsizeMS=windowSize,
+            windowsizeMS=windowSizeMS,
             isPredLoss=isPL,
         )
-        print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSize)
+        print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSizeMS)
         # Create json
         if isPL:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSize), "savedModels", "predLossModel"
+                NNTrainer.folderModels,
+                str(windowSizeMS),
+                "savedModels",
+                "predLossModel",
             )
         else:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSize), "savedModels", "fullModel"
+                NNTrainer.folderModels, str(windowSizeMS), "savedModels", "fullModel"
             )
         generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+        print("Saved json file for Julia thresholds and checkpoints.")
 
     elif mode == "decode":
         from decoder import decode
@@ -157,9 +176,11 @@ def main(args):
             # Decode
             Decoder = decode.Decoder(ProjectPath, Parameters)
             outputs = Decoder.test(
-                DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSize
+                DataHelper.fullBehavior,
+                l_function=l_function,
+                windowsizeMS=windowSizeMS,
             )
-            print_results.print_results(Decoder.folderResult, windowSizeMS=windowSize)
+            print_results.print_results(Decoder.folderResult, windowSizeMS=windowSizeMS)
 
     elif mode == "compare":
         from fullEncoder import an_network as Training
@@ -183,17 +204,20 @@ def main(args):
             ProjectPath, Parameters, deviceName=deviceName
         )
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-        NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSize)
+        NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSizeMS)
         NNTrainer.test(
-            DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSize
+            DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSizeMS
         )
         if isPL:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSize), "savedModels", "predLossModel"
+                NNTrainer.folderModels,
+                str(windowSizeMS),
+                "savedModels",
+                "predLossModel",
             )
         else:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSize), "savedModels", "fullModel"
+                NNTrainer.folderModels, str(windowSizeMS), "savedModels", "fullModel"
             )
         generate_json(ProjectPath, modelPath, DataHelper.list_channels)
 
@@ -203,17 +227,21 @@ def main(args):
             Parameters,
             DataHelper.fullBehavior,
             useTrain=True,
-            windowsizeMS=windowSize,
+            windowsizeMS=windowSizeMS,
         )
-        WFCTrain.save_alignment_tools(TrainerBayes, l_function, windowsizeMS=windowSize)
+        WFCTrain.save_alignment_tools(
+            TrainerBayes, l_function, windowsizeMS=windowSizeMS
+        )
         WFCTest = WaveFormComparator(
             ProjectPath,
             Parameters,
             DataHelper.fullBehavior,
             useTrain=False,
-            windowsizeMS=windowSize,
+            windowsizeMS=windowSizeMS,
         )
-        WFCTest.save_alignment_tools(TrainerBayes, l_function, windowsizeMS=windowSize)
+        WFCTest.save_alignment_tools(
+            TrainerBayes, l_function, windowsizeMS=windowSizeMS
+        )
 
         ### Figures
         figures = paper_figures.PaperFigures(
@@ -260,8 +288,8 @@ if __name__ == "__main__":
             "-w",
             "--window",
             type=float,
-            help="defines window size, in seconds. Defaults to 0.100",
-            default=0.100,
+            help="defines window size, in seconds. Defaults to 0.108",
+            default=0.108,
         )
         p.add_argument(
             "-n",

@@ -1,6 +1,8 @@
 # Load libs
+import json
 import os.path
 import sys
+from datetime import date
 
 # Load custom code
 sys.path.append("../importData")
@@ -12,11 +14,14 @@ class Project:
     Class to store the paths of the project.
     xmlPath: path to the xml find
     datPath: path to the dat file
-    jsonPath: path to the json file
+    jsonPath: path to the json file with the Julia thresholds and the graph
     nameExp: name of the experiment, defaults to "Network"
+    windowSize: size of the window in seconds, defaults to 0.036
     """
 
-    def __init__(self, xmlPath, datPath="", jsonPath=None, nameExp="Network"):
+    def __init__(
+        self, xmlPath, datPath="", jsonPath=None, nameExp="Network", windowSize=0.036
+    ):
         # Basic names
         if xmlPath[-3:] != "xml":
             if os.path.isfile(xmlPath[:-3] + "xml"):
@@ -41,6 +46,8 @@ class Project:
         self.resultsPath = os.path.join(
             self.folder, nameExp
         )  # Allows change at every experiment
+        self.windowSize = windowSize
+        # Create dirs if don't exist
         if not os.path.isdir(self.dataPath):
             os.makedirs(self.dataPath)
         if not os.path.isdir(self.resultsPath):
@@ -94,6 +101,11 @@ class Params:
     """
 
     def __init__(self, helper: DataHelper, windowSize: float, nEpochs=100):
+        self.date = date.today().strftime("%Y-%m-%d")
+        self.path = helper.path
+        self.resultsPath = helper.resultsPath
+        self.globalResultsPath = helper.globalResultsPath
+        self.mode = helper.mode
         self.nGroups = helper.nGroups()
         self.dimOutput = helper.dim_output()
         self.nChannelsPerGroup = helper.numChannelsPerGroup()
@@ -103,7 +115,7 @@ class Params:
         # WARNING: maybe striding is actually 0.036 ms based ???
         self.nSteps = int(10000 * 0.036 / windowSize)  # useless
         self.nEpochs = nEpochs
-        self.windowLength = windowSize  # in seconds
+        self.windowSize = windowSize  # in seconds
 
         ### from units encoder params
         self.validCluWindow = 0.0005
@@ -117,7 +129,7 @@ class Params:
         self.dropoutCNN = 0.2
         self.lstmSize = 128
         self.lstmDropout = 0.3  # is not implemented(code uses self.dropout_CNN)
-        self.batchSize = 128  # Change that if your GPU (or CPU) is not powerful enough
+        self.batchSize = 256  # Change that if your GPU (or CPU) is not powerful enough
 
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that
@@ -128,3 +140,17 @@ class Params:
         # enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer
         # except the output for unclear reasons linked to gradient computations
+
+    def save_params_to_json(self):
+        """
+        Save the experimentation parameters to a json file in the results folder.
+        Is called in the main func.
+        Should not be mistaken with the generate_json function for the ann, which is
+        called to save the julia thresholds in the datPath.
+        """
+        if not os.path.isdir(self.resultsPath):
+            os.makedirs(self.resultsPath)
+        dict_params = vars(self).copy()
+        dict_params.pop("path")
+        with open(os.path.join(self.resultsPath, "params.json"), "w") as f:
+            json.dump(dict_params, f)
