@@ -33,3 +33,4 @@ script_get_allresults.py
 test_emergency.py
 utils/global_classes_ht.py
 fullEncoder/an_network_ht.py
+notebooks/debug.ipynb
