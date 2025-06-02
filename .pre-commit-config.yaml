@@ -5,19 +5,30 @@ repos:
     -   id: trailing-whitespace
         files: .*.py$           
     -   id: end-of-file-fixer
-        files: .*.py$          
+        files: .*.py$
+
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff version.
+    rev: v0.11.8
+    hooks:
+      # Run the linter.
+      - id: ruff       
+        types_or: [ python, pyi ]
+        args: [ --fix ]
+      # Run the formatter.
+      - id: ruff-format
+        types_or: [ python, pyi ]
+
 -   repo: https://github.com/psf/black-pre-commit-mirror
     rev: 23.11.0
     hooks:
-    -   id: black
-        args: [--line-length=88]
-        files: .*.py$           
     -   id: black-jupyter
         args: [--line-length=88]
         files: .*.ipynb$           
--   repo: https://github.com/timothycrosley/isort
-    rev: 5.12.0
-    hooks:
-    -   id: isort
-        args: ["--profile", "black", "--filter-files"]
-        files: .*.py$           
+# -   repo: https://github.com/pycqa/isort
+#     rev: 5.11.2
+#     hooks:
+#       - id: isort
+#         name: isort (python)
+#         args: [--profile, black, --filter-files]
+#         types_or: [ python, pyi ]

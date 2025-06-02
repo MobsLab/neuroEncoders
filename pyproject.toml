@@ -1,0 +1,111 @@
+[project]
+name = "neuroencoders"
+version = "2.0.1"
+description = "Neuroencoders is a Python package for the analysis of neural data, including encoding models, decoding models, and visualization tools."
+authors = [
+    { name = "Dima Bryzgalov", email = "bryzgalovdm@gmail.com" },
+    { name = "Théotime de Charrin", email = "theotime.decharrin@gmail.com" },
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bokeh>=3.7.3",
+    "cmcrameri>=1.9",
+    "dill>=0.3.9",
+    "graphviz>=0.20.3",
+    "ipykernel>=6.29.5",
+    "ipympl>=0.9.7",
+    "isort>=6.0.1",
+    "jupyter==1.0.0",
+    "lxml>=5.3.2",
+    "matplotlib==3.6.2",
+    "numba>=0.60.0",
+    "numpy==1.23.5",
+    "nvidia-cudnn-cu12~=8.9",
+    "opencv-python>=4.8.1.78",
+    "pandas>=2.1.0",
+    "parameterized>=0.9.0",
+    "polars>=1.30.0",
+    "pre-commit>=4.2.0",
+    "pydot>=3.0.4",
+    "pydotplus>=2.0.2",
+    "pykeops>=2.2.3",
+    "pyqt5>=5.15.11",
+    "scikit-image>=0.24.0",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.15.2",
+    "seaborn>=0.13.2",
+    "setuptools==74.1.2",
+    "shapely>=2.1.0",
+    "statannotations>=0.7.2",
+    "tables==3.7.0",
+    "tensorflow==2.15.0",
+    "tqdm>=4.67.1",
+]
+
+[tool.uv.workspace]
+members = ["neuroencoders"]
+
+[dependency-groups]
+dev = [
+    "imageio[ffmpeg,pyav]>=2.37.0",
+    "ruff>=0.11.8",
+]
+
+[tool.ruff]
+line-length = 88
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+    "*.ipynb",
+]
+indent-width = 4
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint]
+# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.isort]
+case-sensitive = true
