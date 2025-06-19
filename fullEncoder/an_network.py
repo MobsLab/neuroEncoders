@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from tensorflow import keras
 from tqdm import tqdm
 
 # Get utility functions
@@ -442,32 +443,10 @@ class LSTMandSpikeNetwork:
             # if loss function is logcosh
             # tempPosLoss is in cm2
 
-            transform_function = (
-                tf.identity
-                if self.params.transform is None
-                else tf.math.log
-                if self.params.transform == "log"
-                else tf.math.sqrt
-            )
-            # if transform_function is log: posLoss ~ log(cm) * 0.5
-            # if transform_function is sqrt: posLoss ~ cm
-            # if transform_function is None: posLoss ~ cm2
-            cst = (
-                tf.constant(2.0) if self.params.transform == "log" else tf.constant(1.0)
-            )
-
-            posLoss = tf.identity(
-                tf.math.scalar_mul(
-                    cst, tf.math.reduce_mean(tempPosLoss), name="posLoss"
-                )
-            )
+            posLoss = tf.identity(tf.math.reduce_mean(tempPosLoss), name="posLoss")
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
             # the computations for the loss of the loss predictor
-            logposLoss = tf.math.log(
-                tf.add(tempPosLoss, self.epsilon)
-            )  # minimizing difference between logposLoss and outputPredLoss
-
             # still ~ in cm2
             loss_function_PredLoss = tf.keras.losses.mean_squared_error
             # # outputPredLoss is supposed to be in cm2 and predict the MSE loss.
@@ -841,14 +820,7 @@ class LSTMandSpikeNetwork:
                 self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
             )
             datasets[key] = datasets[key].map(
-                lambda vals: (
-                    vals,
-                    {
-                        self.outNames[0]: tf.zeros(self.params.batchSize),
-                        self.outNames[1]: tf.zeros(self.params.batchSize),
-                    },
-                ),
-                num_parallel_calls=tf.data.AUTOTUNE,
+                map_outputs, num_parallel_calls=tf.data.AUTOTUNE
             )
             # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
             # and each mini-batch contains a representative sample of the training set.
@@ -2898,8 +2870,6 @@ class MultiColumnLoss(tf.keras.losses.Loss):
             total_loss += weight * column_loss
 
         return total_loss
-
-
 
     def result(self):
         return self.total / self.count
