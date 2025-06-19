@@ -9,9 +9,16 @@ import subprocess
 
 # Load standard libs
 import sys
+from warnings import warn
+
+from utils.global_classes import DataHelper as DataHelperClass
 
 # Load custom code
-from utils.global_classes import Params, Project
+from utils.global_classes import Params, Project, save_project_to_pickle
+
+# Meta parameters
+show_figures = False
+debug = True
 
 
 def main(args):
@@ -56,6 +63,8 @@ def main(args):
                 "Two networks will be tested: one full on training set and "
                 "one with predLoss only on a separate part of data"
             )
+    else:
+        isPL = False
     print()
 
     # Get behavior and tune parameters
@@ -67,55 +76,123 @@ def main(args):
     )
     # Select the data for testing
     if mode != "decode":
-        rawdata_parser.speed_filter(ProjectPath.folder, overWrite=False)
-        rawdata_parser.select_epochs(ProjectPath.folder, overWrite=False)
+        try:
+            rawdata_parser.speed_filter(
+                ProjectPath.folder,
+                overWrite=(True if args.redo else False),
+                phase=args.phase,
+            )
+        except Exception as e:
+            # If an IndexError occurs, it means that the speed filter failed
+            print(f"Error during speed filter: {e}")
+            args.phase = None
+            rawdata_parser.speed_filter(
+                ProjectPath.folder,
+                overWrite=(True if args.redo else False),
+                phase=args.phase,
+            )
+            warn(
+                f'"IndexError" occurred for {ProjectPath.folder}, setting phase to None.'
+            )
+        rawdata_parser.select_epochs(
+            ProjectPath.folder,
+            overWrite=(True if (args.redo or args.phase is not None) else False),
+            phase=args.phase,
+            force=True if (args.phase is not None and not show_figures) else False,
+            find_best_sets=True,
+            isPredLoss=isPL,
+        )
     # Create parameters
-    DataHelper = rawdata_parser.DataHelper(ProjectPath, mode)
-    Parameters = Params(
-        helper=DataHelper,
+    DataHelper = DataHelperClass(
+        ProjectPath.xml,
+        mode=mode,
+        target=args.target,
+        phase=args.phase,
+        nameExp=args.name,
         windowSize=args.window,
-        nEpochs=args.epochs if args.epochs else 100,
     )
     # Create linearization function
-    Linearizer = UMazeLinearizer(ProjectPath.folder)
+    Linearizer = UMazeLinearizer(ProjectPath.folder, phase=args.phase)
     Linearizer.verify_linearization(
-        DataHelper.positions / DataHelper.maxPos(), ProjectPath.folder, overwrite=False
+        DataHelper.positions / DataHelper.maxPos(),
+        ProjectPath.folder,
+        overwrite=(True if args.redo else False),
     )
     l_function = Linearizer.pykeops_linearization
 
+    # Now that we have the linearization function, we can get the true target
+    DataHelper.get_true_target(l_function, in_place=True, show=show_figures)
+
+    Parameters = Params(
+        helper=DataHelper,
+        windowSize=args.window,
+        nEpochs=args.epochs,
+        phase=args.phase,
+        batchSize=256 if args.window < 1.08 else 128,
+        save_json=True,
+    )
+
+    # Save ProjectPath object
+    save_project_to_pickle(ProjectPath)
     # Save main parameters in json file in the Params.folder
-    Parameters.save_params_to_json()
+    # save_project_to_pickle(
+    #     Parameters, output=os.path.join(Parameters.resultsPath, "Parameters.pkl")
+    # )
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
         from simpleBayes import decode_bayes as Training
-        from importData.epochs_management import inEpochs
 
-        TrainerBayes = Training.Trainer(ProjectPath)
+        TrainerBayes = Training.Trainer(ProjectPath, phase=args.phase)
         bayesMatrices = TrainerBayes.train_order_by_pos(
-            DataHelper.fullBehavior, l_function
+            DataHelper.fullBehavior, l_function=l_function
         )
         # WARNING: Why does this function not exist in the class?
         # TODO: Fix this if Bayes is still of actuality
-        # timeStepPred = DataHelper.fullBehavior["positionTime"][
-        #         inEpochs(
-        #             DataHelper.fullBehavior["positionTime"][:, 0],
-        #             DataHelper.fullBehavior["Times"]["testEpochs"]
-        #         )
-        #     ]
-        #
-        # outputsNN = TrainerBayes.test_as_NN(
-        #     DataHelper.fullBehavior, bayesMatrices, timeStepPred, windowSizeMS=windowSize
-        # )
-        #
-        outputs = TrainerBayes.test_legacy(
-            bayesMatrices, DataHelper.fullBehavior, windowSizeMS=windowSizeMS
+        try:
+            import numpy as np
+            import pandas as pd
+
+            if args.phase is not None:
+                suffix = f"_{args.phase}"
+            else:
+                suffix = ""
+            timeStepPred = np.squeeze(
+                np.array(
+                    pd.read_csv(
+                        os.path.join(
+                            ProjectPath.folderResult,
+                            str(windowSizeMS),
+                            f"timeStepsPred{suffix}.csv",
+                        )
+                    ).values[:, 1:],
+                    dtype=np.float32,
+                )
+            )
+        except FileNotFoundError:
+            raise ValueError(
+                'To run the bayes mode as NN, you need to run the "NN" trainer first.'
+            )
+
+        outputs = TrainerBayes.test_as_NN(
+            DataHelper.fullBehavior,
+            bayesMatrices,
+            timeStepPred,
+            windowSizeMS=windowSizeMS,
+            useTrain=False,
+            l_function=l_function,
         )
         print_results.print_results(
             TrainerBayes.folderResult,
             typeDec="bayes",
             results=outputs,
             windowSizeMS=windowSizeMS,
+            show=show_figures,
+            lossSelection=0.1,
+            euclidean=False,
+            target=args.target,
+            phase=args.phase,
+            force=args.redo,
         )
 
     elif mode == "ann":
@@ -125,24 +202,61 @@ def main(args):
 
         # Create data
         folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
-        julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+        windowStride = args.striding
+        strideFactor = round(args.window / windowStride, 4)
+        # check if windowStride is an integer, if not raise an error
+        if not strideFactor.is_integer():
+            raise ValueError("The window size is not compatible with the 36ms stride.")
+        julia_spike_filter(
+            ProjectPath,
+            folderCode,
+            windowSize=args.window,
+            windowStride=windowStride,  # This way the striding is always 36ms-based
+            redo=False,
+            BUFFERSIZE=144000,
+        )
         # Network
-        # let's try with a transformer
+        # return
         NNTrainer = Training.LSTMandSpikeNetwork(
-            ProjectPath, Parameters, deviceName=deviceName
+            ProjectPath,
+            Parameters,
+            deviceName=deviceName,
+            debug=debug,
+            phase=args.phase,
+            isTransformer=Parameters.isTransformer,
         )
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
         # TODO: if target is not position, change the target
+
         NNTrainer.train(
-            DataHelper.fullBehavior, windowsizeMS=windowSizeMS, isPredLoss=isPL
+            DataHelper.fullBehavior,
+            windowSizeMS=windowSizeMS,
+            isPredLoss=isPL,
+            earlyStop=args.early_stop,
+            # load_model=True,
         )
+
         NNTrainer.test(
             DataHelper.fullBehavior,
             l_function=l_function,
-            windowsizeMS=windowSizeMS,
+            windowSizeMS=windowSizeMS,
             isPredLoss=isPL,
+            useSpeedFilter=False,
+            phase=args.phase,
+            useTrain=False,
+            template=args.phase,
         )
-        print_results.print_results(NNTrainer.folderResult, windowSizeMS=windowSizeMS)
+
+        print_results.print_results(
+            NNTrainer.folderResult,
+            windowSizeMS=windowSizeMS,
+            show=show_figures,
+            lossSelection=0.1,
+            euclidean=False,
+            target=args.target,
+            phase=args.phase,
+        )
+        NNTrainer.clear_session()
         # Create json
         if isPL:
             modelPath = os.path.join(
@@ -153,9 +267,16 @@ def main(args):
             )
         else:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSizeMS), "savedModels", "fullModel"
+                NNTrainer.folderModels,
+                str(windowSizeMS),
+                "savedModels",
+                "fullModel",
             )
-        generate_json(ProjectPath, modelPath, DataHelper.list_channels)
+        # WARNING: for now modelPath is not used due to issues in the generate_json function.
+        # Indeed the generate & load from json (see Decoder class) already look for the str(window), savedModels...
+        # Will use NNTrainer.folderModels instead
+        print(ProjectPath.json)
+        generate_json(ProjectPath, NNTrainer.folderModels, DataHelper.list_channels)
         print("Saved json file for Julia thresholds and checkpoints.")
 
     elif mode == "decode":
@@ -172,9 +293,26 @@ def main(args):
             # Create data
             folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
             # Right now, the thresholds are not the same
-            julia_spike_filter(ProjectPath, folderCode, windowSize=args.window)
+            windowStride = args.striding
+            strideFactor = round(args.window / windowStride, 4)
+            # check if windowStride is an integer, if not raise an error
+            if not strideFactor.is_integer():
+                raise ValueError(
+                    "The window size is not compatible with the 36ms stride."
+                )
+            julia_spike_filter(
+                ProjectPath,
+                folderCode,
+                windowSize=args.window,
+                windowStride=windowStride,  # This way the striding is always 36ms-based
+            )
             # Decode
-            Decoder = decode.Decoder(ProjectPath, Parameters)
+            Decoder = decode.Decoder(
+                ProjectPath,
+                Parameters,
+                windowSizeMS=windowSizeMS,
+                deviceName=deviceName,
+            )
             outputs = Decoder.test(
                 DataHelper.fullBehavior,
                 l_function=l_function,
@@ -193,15 +331,25 @@ def main(args):
         ### Bayes
         TrainerBayes = BayesTrainer.Trainer(ProjectPath)
         bayesMatrices = TrainerBayes.train_order_by_pos(
-            DataHelper.fullBehavior, l_function
+            DataHelper.fullBehavior, l_function=l_function
         )
 
         ### ANN TODO: if exists
-        folder_code = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
-        julia_spike_filter(ProjectPath, folder_code, windowSize=args.window)
+        folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+        julia_spike_filter(
+            ProjectPath,
+            folderCode,
+            windowSize=args.window,
+            windowStride=windowStride,  # This way the striding is always 36ms-based
+            redo=False,
+            BUFFERSIZE=144000,
+        )
         # Network
         NNTrainer = Training.LSTMandSpikeNetwork(
-            ProjectPath, Parameters, deviceName=deviceName
+            ProjectPath,
+            Parameters,
+            deviceName=deviceName,
+            debug=debug,
         )
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
         NNTrainer.train(DataHelper.fullBehavior, windowSizeMS=windowSizeMS)
@@ -299,7 +447,7 @@ if __name__ == "__main__":
             "--name",
             type=str,
             help="name of the folder where all models and results will be stored",
-            default=str(cmd) + "_results",
+            default="Current_results",
         )
 
         p.add_argument(
@@ -309,6 +457,50 @@ if __name__ == "__main__":
             help="number of epochs for training. Defaults to 100",
             default=100,
         )
+
+        p.add_argument(
+            "-p",
+            "--phase",
+            type=str,
+            help="Use only one phase of experiments for training/selectioning the epochs. Will overwrite the epochs",
+            choices=[
+                "all",
+                "pre",
+                "hab",
+                "preNoHab",
+                "cond",
+                "post",
+                "extinction",
+                "postNoExtinction",
+            ],
+            default=None,
+        )
+
+        p.add_argument(
+            "-r",
+            "--redo",
+            action="store_true",
+            help="Force and redo all the parameters settings (speed filter, epochs selection, etc.)",
+        )
+        p.add_argument(
+            "-t",
+            "--target",
+            type=str,
+            help="name of feature to be decoded. Defaults are Xtsd and Ytsd. "
+            + "Must be a tsd variable from behavResources.mat",
+            default="pos",
+            choices=[
+                "pos",
+                "lin",
+                "linear",
+                "LinAndThigmo",
+                "linAndThigmo",
+                "LinAndDirection",
+                "Direction",
+                "direction",
+            ],
+        )
+
         if cmd != "bayes":
             p.add_argument(
                 "-g",
@@ -319,17 +511,22 @@ if __name__ == "__main__":
             p.add_argument(
                 "-pl",
                 "--predicted_loss",
-                action="store_false",
+                action="store_true",
                 help="defines whether another, predLoss only, "
                 + "network will be train on the piece of data",
             )
             p.add_argument(
-                "-t",
-                "--target",
-                type=str,
-                help="name of feature to be decoded. Defaults are Xtsd and Ytsd. "
-                + "Must be a tsd variable from behavResources.mat",
-                default="pos",
+                "-s",
+                "--striding",
+                type=float,
+                help="defines the striding of the window, in seconds. Defaults to 0.036",
+                default=0.036,
+            )
+            p.add_argument(
+                "-es",
+                "--early_stop",
+                action="store_true",
+                help="defines whether to use early stopping during training",
             )
     args = Parser.parse_args()
 
