@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 Here is an example of opening viewers directly from spikeinterface objects : recording and sorting.
 

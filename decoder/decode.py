@@ -73,11 +73,11 @@ class Decoder:
         pass
 
     def test(
-        self, behaviorData, l_function=[], windowsizeMS=36, onTheFlyCorrection=False
+        self, behaviorData, l_function=[], windowSizeMS=36, onTheFlyCorrection=False
     ):
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
 
         # Manage the behavior
         tot_mask = np.isfinite(np.sum(behaviorData["Positions"][0:-1], axis=1))
@@ -86,7 +86,7 @@ class Decoder:
         dataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
         dataset = dataset.map(
@@ -170,7 +170,7 @@ class Decoder:
             testOutput["linearTrue"] = linearTrue
 
         # Save the results
-        self.saveResults(testOutput, windowsizeMS=windowsizeMS)
+        self.saveResults(testOutput, windowSizeMS=windowSizeMS)
 
         return testOutput
 
@@ -216,8 +216,7 @@ class Decoder:
             if self.params.usingMixedPrecision:
                 vals.update(
                     {
-                        "group"
-                        + str(group): tf.cast(
+                        "group" + str(group): tf.cast(
                             vals["group" + str(group)], dtype=tf.float16
                         )
                     }
@@ -231,16 +230,16 @@ class Decoder:
             vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
         return vals
 
-    def saveResults(self, testOutput, windowsizeMS=36, sleep=False, sleepName="Sleep"):
+    def saveResults(self, testOutput, windowSizeMS=36, sleep=False, sleepName="Sleep"):
         # Manage folders to save
         if sleep:
             folderToSave = os.path.join(
-                self.folderResultSleep, str(windowsizeMS), sleepName
+                self.folderResultSleep, str(windowSizeMS), sleepName
             )
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
         else:
-            folderToSave = os.path.join(self.folderResult, str(windowsizeMS))
+            folderToSave = os.path.join(self.folderResult, str(windowSizeMS))
         # predicted coordinates
         df = pd.DataFrame(testOutput["featurePred"])
         df.to_csv(os.path.join(folderToSave, "featurePred.csv"))

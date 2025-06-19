@@ -1,12 +1,16 @@
 # Load libs
 import numpy as np
+import os
+from typing import Dict, Tuple, Optional
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 class spikeNet:
     """
-    This class is a convolutional network that takes as input a spike sequence and returns a feature vector of size nFeatures.
+    This class is a convolutional network that takes as input a spike sequence from nChannels and returns a feature vector of size nFeatures.
 
     args:
     nChannels: number of channels in the input
@@ -15,8 +19,14 @@ class spikeNet:
     number: a number to identify the network
 
     Details of the default network:
-    The network is composed of 3 convolutional layers followed by 3 max pooling layers. The convolutional layers have 8, 16 and 32 filters of size 2x3. The max pooling layers have a pool size of 1x2.
-    The convolutional layers are followed by 3 dense layers with a ReLU activation function. The dense layers have a size of nFeatures and the last dense layer has a size of nFeatures and is named "outputCNN{number}".
+    -----
+    The network is composed of 3 convolutional layers each followed by a max pooling layer.
+    The convolutional layers have 8, 16 and 32 filters of size 2x3. The max pooling layers have a pool size of 1x2.
+    The convolutional layers are followed by 3 dense layers with a ReLU activation function. The dense layers have a size of nFeatures and the
+        last dense layer has a size of nFeatures and is named "outputCNN{number}".
+
+    One filter of size (2,3) would roughly mean that the first filters "see" half of the channels and 3 time bins,
+        i.e. from (3*0.036/32) ~= 3 ms for 36 ms-based windows to ~100 ms for 1.08s-based windows.
     """
 
     def __init__(
@@ -182,8 +192,7 @@ def serialize_spike_sequence(params, pos_index, pos, groups, length, times, *spi
     for g in range(params.nGroups):
         feat.update(
             {
-                "group"
-                + str(g): tf.train.Feature(
+                "group" + str(g): tf.train.Feature(
                     float_list=tf.train.FloatList(value=spikes[g].ravel())
                 )
             }

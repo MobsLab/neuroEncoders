@@ -91,7 +91,7 @@ def generate_json(
         )
 
     else:
-        # create a structure.oebin file:
+        # create a structure.oebin file from previous structure.oebin file:
         file = open(os.path.join(projectPath.folder, "structure.oebin"), mode="r")
         outjson = json.load(file)
         listChannels, _, nChannels = get_params(projectPath.xml)

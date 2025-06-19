@@ -178,7 +178,7 @@ def main(args):
             outputs = Decoder.test(
                 DataHelper.fullBehavior,
                 l_function=l_function,
-                windowsizeMS=windowSizeMS,
+                windowSizeMS=windowSizeMS,
             )
             print_results.print_results(Decoder.folderResult, windowSizeMS=windowSizeMS)
 
@@ -204,9 +204,9 @@ def main(args):
             ProjectPath, Parameters, deviceName=deviceName
         )
         NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-        NNTrainer.train(DataHelper.fullBehavior, windowsizeMS=windowSizeMS)
+        NNTrainer.train(DataHelper.fullBehavior, windowSizeMS=windowSizeMS)
         NNTrainer.test(
-            DataHelper.fullBehavior, l_function=l_function, windowsizeMS=windowSizeMS
+            DataHelper.fullBehavior, l_function=l_function, windowSizeMS=windowSizeMS
         )
         if isPL:
             modelPath = os.path.join(
@@ -217,7 +217,10 @@ def main(args):
             )
         else:
             modelPath = os.path.join(
-                NNTrainer.folderModels, str(windowSizeMS), "savedModels", "fullModel"
+                NNTrainer.folderModels,
+                str(windowSizeMS),
+                "savedModels",
+                "fullModel.keras",
             )
         generate_json(ProjectPath, modelPath, DataHelper.list_channels)
 
@@ -227,20 +230,20 @@ def main(args):
             Parameters,
             DataHelper.fullBehavior,
             useTrain=True,
-            windowsizeMS=windowSizeMS,
+            windowSizeMS=windowSizeMS,
         )
         WFCTrain.save_alignment_tools(
-            TrainerBayes, l_function, windowsizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
         )
         WFCTest = WaveFormComparator(
             ProjectPath,
             Parameters,
             DataHelper.fullBehavior,
             useTrain=False,
-            windowsizeMS=windowSizeMS,
+            windowSizeMS=windowSizeMS,
         )
         WFCTest.save_alignment_tools(
-            TrainerBayes, l_function, windowsizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
         )
 
         ### Figures

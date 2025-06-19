@@ -26,7 +26,7 @@ def print_results(
 
     args:
     ----
-    - dir: the directory where the results are stored
+    - dir: the directory where the results are stored (also known as folderResult)
     - show: if True, the figures will be shown
     - typeDec: the type of decoder used (NN or bayes)
     - euclidean: if True, the euclidean distance will be used
@@ -359,7 +359,7 @@ def fig_interror(
     def update(val):
         sys.stdout.write("threshold value: " + str(val) + "\r")
         sys.stdout.flush()
-        l.set_ydata([val, val])
+        thresh_line.set_ydata([val, val])
         if typeDec == "NN":
             selection = np.squeeze(q_control < val)
         elif typeDec == "bayes":
@@ -395,7 +395,6 @@ def fig_interror(
         / 100,
     )
     slider.on_changed(update)
-    oldAx = ax
 
     # ERROR & STD
     ax = plt.subplot2grid((1, 2), (0, 1))
@@ -480,7 +479,7 @@ def fig_interror(
     # coefs = poly.polyfit(Error[selNoNans], inferring[selNoNans,dim_output], 2)
     ffit = poly.polyval(x_new, coefs)
     plt.plot(x_new, ffit, "k", linewidth=3)
-    l = plt.axhline(thresh, c="k")
+    thresh_line = plt.axhline(thresh, c="k")
     ax.set_ylabel("evaluated loss")
     ax.set_xlabel("decoding error")
     ax.set_title("decoding error vs. evaluated loss")
