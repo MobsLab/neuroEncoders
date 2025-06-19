@@ -172,6 +172,7 @@ class DataHelper(Project):
         self,
         xmlPath=None,
         mode=None,
+        target=None,
         *args,
         **kwargs,
     ):
@@ -182,16 +183,27 @@ class DataHelper(Project):
         --------
 
         - xmlPath: should be a xmlPath to instantiate a Project object.
+        - mode: the mode of the experiment, can be "ann", "bayes", "compare", or "decode".
+        - target: the target of the experiment, can be "pos", "lin", "linear", "LinAndThigmo", "linAndThigmo", "direction", or "Direction".
         - *args: additional positional arguments to pass to the Project constructor.
         - **kwargs: additional keyword arguments to pass to the Project constructor.
+            - phase: the phase of the experiment, can be "pre", "preNoHab", "hab", "cond", "post", "extinction"... or None.
             - force_ref: whether to force the computation of the reference and xy coordinates, even if they are already saved.
         """
         # Handle positional arguments
         if xmlPath is None and len(args) >= 3:
             xmlPath, mode, target = args[0], args[1], args[2]
             args = args[3:]
+        elif xmlPath is not None and mode is None and len(args) >= 2:
+            mode, target = args[0], args[1]
+            args = args[2:]
+        elif (
+            xmlPath is not None
         self.mode = mode
+        self.target = target
+        self.phase = kwargs.get("phase", None)  # remove from the kwargs
         self.force_ref = kwargs.get("force_ref", False)
+
         # LEGACY: old called directly called Project object in the init
         if isinstance(xmlPath, Project):
             xmlPath = xmlPath.xml
@@ -206,6 +218,110 @@ class DataHelper(Project):
             "results",
             str(int(self.windowSizeMS)),
         )
+        self.suffix = f"_{self.phase}" if self.phase is not None else ""
+
+        self.list_channels, self.samplingRate, self.nChannels = get_params(self.xml)
+        if self.mode == "decode":
+            self.fullBehavior = get_behavior(
+                self.folder, getfilterSpeed=False, decode=True, phase=self.phase
+            )
+            -1
+        ]  # max(self.epochs["train"] + self.epochs["test"])
+        self.startTime = self.positionTime[0]
+        self.upper_x = 0.65
+        self.ylim = 0.75
+        self._define_maze_zones()
+        self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
+        Returns the number of **spike** groups (visually, neurons are spiking) of channels by looking
+        at the list of channels in the .xml file.
+        """
+        return len(self.list_channels)
+
+    def numChannelsPerGroup(self):
+        """
+        Returns the number of channels per "spiking" group by looking at the list of channels in the .xml file.
+        return [len(self.list_channels[n]) for n in range(self.nGroups())]
+
+            axis=0,
+        )
+        return maxPos if self.mode != "decode" else 1
+
+    def dim_output(self):
+        """
+        Returns the number of output features by looking at the number of columns in the positions array.
+        """
+        return self.positions.shape[1]
+
+    def getThresholds(self):
+        idx = 0
+        nestedThresholds = []
+        for group in range(len(self.list_channels)):
+            temp = []
+            for channel in range(len(self.list_channels[group])):
+                temp.append(self.thresholds[idx])
+                idx += 1
+            nestedThresholds.append(temp)
+        return nestedThresholds
+
+    def setThresholds(self, thresholds):
+        assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
+        self.thresholds = [i for d in thresholds for i in d]
+
+    def get_true_target(self, l_function=None, in_place=False, show=False):
+        """
+        Returns the true target of interest by looking and modifying the positions array.
+
+        Args:
+        - l_function: a function that takes a position and returns the linearized position
+        - in_place: whether to modify the positions array in place
+        - show: whether to show the distance to the wall
+
+        Returns:
+        - the modified positions array
+        - if in_place is True,the modified positions array will be found in the positions attribute of the object
+        """
+
+        if hasattr(self, "old_positions"):
+            warn(
+                "old_positions already exist,meaning you already ran the true target ! beware."
+            )
+
+        if not hasattr(self, "l_function") and l_function is None:
+            self.l_function = l_function
+        self.get_maze_limits(show=False)
+
+        if self.target == "pos":
+            positions = self.positions
+
+        elif self.target == "lin" or self.target == "linear":
+            _, positions = l_function(self.positions)
+            positions = positions.reshape(-1)
+            self.linearized = positions
+
+            thigmo = self.dist2wall(self.positions, show=show)
+            positions = np.concatenate(
+            )
+        elif self.target.lower() == "linanddirection":
+            _, positions = l_function(self.positions)
+            positions = positions.reshape(-1)
+            self.direction = self._get_traveling_direction(positions)
+            positions = np.concatenate(
+
+
+            anim = plotter.show(interval=10, repeat=True, block=True)
+
+        if in_place:
+            if not hasattr(self, "old_positions"):
+                self.old_positions = self.positions
+            self.positions = positions
+            self.fullBehavior["old_positions"] = self.old_positions
+            self.fullBehavior["Positions"] = positions
+
+        return positions
+
+    def dist2wall(self, positions, show=False):
+        """
+        Calculate the distance to the wall for each position.
 
 class Params:
     """

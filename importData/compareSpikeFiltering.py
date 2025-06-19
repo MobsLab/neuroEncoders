@@ -26,6 +26,8 @@ from importData.rawdata_parser import get_params
 #  And, inversly, to input spike sorting results to the NN decoder.
 #  However, none of this is done here.
 
+pykeops.set_verbose(False)
+
 
 class WaveFormComparator:
     def __init__(
@@ -36,6 +38,7 @@ class WaveFormComparator:
         windowSizeMS=36,
         useTrain=True,
         sleepName=[],
+        **kwargs,
     ):  # todo allow for speed filtering
         self.projectPath = projectPath
         self.params = params
@@ -43,6 +46,12 @@ class WaveFormComparator:
         self.useTrain = useTrain
         self.sleepName = sleepName
         self.windowSizeMS = windowSizeMS
+        phase = kwargs.get("phase", None)
+        assert phase == params.phase, (
+            "The phase of the WaveFormComparator must be the same as the one of the params"
+        )
+        self.phase = phase
+        self.suffix = f"_{phase}" if phase is not None else ""
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
         self.feat_desc = {
@@ -234,13 +243,13 @@ class WaveFormComparator:
             os.path.join(foldertosave, f"spikeMat_window_popVector{self.suffix}.csv")
         )
         df = pd.DataFrame(meanTimeWindow)
-        df.to_csv(os.path.join(foldertosave, "meanTimeWindow.csv"))
+        df.to_csv(os.path.join(foldertosave, f"meanTimeWindow{self.suffix}.csv"))
         df = pd.DataFrame(spikeMat_times_window)
-        df.to_csv(os.path.join(foldertosave, "spikeMat_times_window.csv"))
+        df.to_csv(os.path.join(foldertosave, f"spikeMat_times_window{self.suffix}.csv"))
         df = pd.DataFrame(startTimeWindow)
-        df.to_csv(os.path.join(foldertosave, "startTimeWindow.csv"))
+        df.to_csv(os.path.join(foldertosave, f"startTimeWindow{self.suffix}.csv"))
         df = pd.DataFrame(lenInputNN)
-        df.to_csv(os.path.join(foldertosave, "lenInputNN.csv"))
+        df.to_csv(os.path.join(foldertosave, f"lenInputNN{self.suffix}.csv"))
 
     def get_NNdataset_spikepos(self):
         resData = self.dataset.map(lambda vals: vals["indexInDat"])
