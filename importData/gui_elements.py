@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+
+# mplt.use("TkAgg")
+from tkinter import Button, Entry, Label, Toplevel
 from typing import Optional, Tuple
 
 import matplotlib as matplotlib
@@ -7,28 +10,16 @@ import matplotlib.animation as animation
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import Normalize
-from cmcrameri import cm as cmc
 import seaborn as sns
+from cmcrameri import cm as cmc
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from sklearn.metrics import (
-    confusion_matrix,
-    classification_report,
-    precision_recall_curve,
-    roc_curve,
-    auc,
     accuracy_score,
+    confusion_matrix,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
 )
-from matplotlib.patches import Rectangle
-from matplotlib.colors import LinearSegmentedColormap
-import pandas as pd
-import warnings
-
-
-# mplt.use("TkAgg")
-from tkinter import Button, Entry, Label, Tk, Toplevel
 
 
 class rangeButton:
@@ -1399,7 +1390,7 @@ class ModelPerformanceVisualizer:
         print(f"Precision: {self.precision:.3f}")
         print(f"Recall: {self.recall:.3f}")
         print(f"F1-Score: {self.f1:.3f}")
-        print(f"\nError Breakdown:")
+        print("\nError Breakdown:")
         print(f"True Positives: {np.sum(self.true_positives)}")
         print(f"True Negatives: {np.sum(self.true_negatives)}")
         print(f"False Positives: {np.sum(self.false_positives)}")
@@ -1442,7 +1433,7 @@ if __name__ == "__main__":
     print(f"Current backend: {matplotlib.get_backend()}")
     print("""
 # Plot your MATLAB maze shape:
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0], 
+maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
                [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
 
 plotter = AnimatedPositionPlotter(your_data_helper)
@@ -1466,12 +1457,12 @@ plotter.setup_plot(
 )
 
 # Alternative: Use helper function
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0], 
+maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
                [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
 custom_lines = create_maze_from_matlab(maze_coords)
 
 plotter = create_plotter_for_data(
-    your_data_helper, 
+    your_data_helper,
     custom_lines=custom_lines
 )
 
