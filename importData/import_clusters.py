@@ -48,9 +48,10 @@ def getSpikesfromClu(
             f"Importing sorted spikes from Neuroscope files from electrodes group #{tetrode}"
         )
         if os.path.isfile(projectPath.clu(tetrode)):
-            with open(projectPath.clu(tetrode), "r") as fClu, open(
-                projectPath.res(tetrode), "r"
-            ) as fRes:  # open(projectPath.spk(tetrode), 'rb') as fSpk
+            with (
+                open(projectPath.clu(tetrode), "r") as fClu,
+                open(projectPath.res(tetrode), "r") as fRes,
+            ):  # open(projectPath.spk(tetrode), 'rb') as fSpk
                 cluStr = fClu.readlines()
                 resStr = fRes.readlines()
                 nClu = int(cluStr[0]) - 1
@@ -88,7 +89,7 @@ def getSpikesfromClu(
                 newposId = np.array(posID)
                 newposId[
                     np.where(np.array(posID) > len(behavior_data["Speed"]) - 1)[0]
-                ] = (len(behavior_data["Speed"]) - 1)
+                ] = len(behavior_data["Speed"]) - 1
                 ss = behavior_data["Speed"][newposId, :]
 
                 spikeTime.append(st)
@@ -145,7 +146,7 @@ def getSpikesfromClu(
     return cluster_data
 
 
-def load_spike_sorting(projectPath: Project) -> dict:
+def load_spike_sorting(projectPath: Project, phase=None) -> dict:
     """
     Load spike sorting data from the dataset/clusterData folder if the files are present, otherwise
     run the spike sorting algorithm and save the data.
@@ -195,7 +196,7 @@ def load_spike_sorting(projectPath: Project) -> dict:
         print("finished reading")
     else:
         behavior_data = rawdata_parser.get_behavior(
-            projectPath.folder, getfilterSpeed=False
+            projectPath.folder, getfilterSpeed=False, phase=phase
         )
         cluster_data = getSpikesfromClu(projectPath, behavior_data)
     return cluster_data

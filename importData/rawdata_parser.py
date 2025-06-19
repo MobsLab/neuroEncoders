@@ -78,6 +78,8 @@ def get_params(pathToXml):
     if samplingRate is None or nChannels is None or not listChannels:
         raise ValueError(
             f"""The xml file does not contain the required information
+            samplingRate, nChannels, or listChannels.
+            Did you select the right xml file?
             Please check the xml file: {pathToXml}
             """
         )
@@ -102,8 +104,17 @@ def get_behavior(
     bandwidth: Optional[int] = None,
     getfilterSpeed: bool = True,
     decode: bool = False,
+    phase: Literal[
+        "all",
+        "pre",
+        "preNoHab",
+        "hab",
+        "cond",
+        "post",
+        "postNoExtinction",
         "extinction",
         None,
+    ] = None,
 ) -> dict[str, np.ndarray]:
     """
     Load the behavior data from the nnBehavior.mat file
@@ -129,6 +140,7 @@ def get_behavior(
         raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
     if phase is not None:
         filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+        if not os.path.exists(filename):
             assert tables.is_hdf5_file(folder + "nnBehavior.mat")
             import shutil
 
@@ -143,10 +155,12 @@ def get_behavior(
     with tables.open_file(filename) as f:
         positions = f.root.behavior.positions
         positions = np.swapaxes(positions[:, :], 1, 0)
+        positionTime = f.root.behavior.position_time
         positionTime = np.swapaxes(positionTime[:, :], 1, 0)
         speed = f.root.behavior.speed
         speed = np.swapaxes(speed[:, :], 1, 0)
         if bandwidth is None:
+            goodRecordingTimeStep = np.logical_not(np.isnan(np.sum(positions, axis=1)))
             bandwidth = (
                 np.max(positions[goodRecordingTimeStep, :])
                 - np.min(positions[goodRecordingTimeStep, :])
@@ -186,9 +200,11 @@ def get_behavior(
                     ]
                     id_sessions = [
                         i
+                        for i, session in enumerate(list_sessions)
                         if session is not None
                     ]
                     # create epochs from the session start and stop times
+                    SessionEpochs[phase] = []
                     for id in id_sessions:
                         SessionEpochs[phase].extend([sessionStart[id], sessionStop[id]])
 
@@ -196,11 +212,33 @@ def get_behavior(
         if (
             not decode
         ):  # Not applicable for decode mode where all dataset is to be decoded
+            if len(f.root.behavior.trainEpochs.shape) == 2:
                 trainEpochs = np.concatenate(f.root.behavior.trainEpochs)
                 testEpochs = np.concatenate(f.root.behavior.testEpochs)
+                try:
+                    lossPredSetEpochs = np.concatenate(
+                        f.root.behavior.lossPredSetEpochs
+                    )
+                except ValueError:
+                    # for some reason the old code doesnt load empty arrays anymore
+                    lossPredSetEpochs = f.root.behavior.lossPredSetEpochs[:]
             elif len(f.root.behavior.trainEpochs.shape) == 1:
                 trainEpochs = f.root.behavior.trainEpochs[:]
+                testEpochs = f.root.behavior.testEpochs[:]
+                lossPredSetEpochs = f.root.behavior.lossPredSetEpochs[:]
+            else:
+                raise Exception("bad train and test epochs format")
+        # Get learning time and if needed speedFilter
+        samplingWindowPosition = (positionTime[1:] - positionTime[0:-1])[:, 0]
+        samplingWindowPosition[np.isnan(np.sum(positions[0:-1], axis=1))] = 0
         if not decode:
+            if getfilterSpeed:
+                speedFilter = f.root.behavior.speedMask[:]
+            else:
+                speedFilter = np.ones_like(f.root.behavior.speedMask[:])
+            lEpochIndex = [
+                [
+                    np.argmin(np.abs(positionTime - trainEpochs[2 * i + 1])),
                     np.argmin(np.abs(positionTime - trainEpochs[2 * i])),
                 ]
                 for i in range(len(trainEpochs) // 2)
@@ -209,7 +247,38 @@ def get_behavior(
                 np.sum(
                     np.multiply(
                         speedFilter[lEpochIndex[i][1] : lEpochIndex[i][0]],
+                        samplingWindowPosition[lEpochIndex[i][1] : lEpochIndex[i][0]],
+                    )
                 )
+                for i in range(len(lEpochIndex))
+            ]
+            learningTime = np.sum(learningTime)
+        else:
+            learningTime = np.sum(samplingWindowPosition)
+
+        # Organize output
+        behavior_data = {
+            "Positions": positions,
+            "positionTime": positionTime,
+            "Speed": speed,
+            "Bandwidth": bandwidth,
+            "Times": {"learning": learningTime},
+        }
+        if not decode:
+            behavior_data["Times"]["trainEpochs"] = trainEpochs
+            behavior_data["Times"]["testEpochs"] = testEpochs
+            behavior_data["Times"]["lossPredSetEpochs"] = lossPredSetEpochs
+        if getfilterSpeed:
+            behavior_data["Times"]["speedFilter"] = speedFilter
+        if np.sum(sleepPeriods) > 0:
+            behavior_data["Times"]["sleepEpochs"] = sleepPeriods
+            behavior_data["Times"]["sleepNames"] = sleepNames
+            behavior_data["Times"]["sessionNames"] = sessionNames
+            if sessionNames[0] != "Recording":
+                behavior_data["Times"]["sessionStart"] = sessionStart
+                behavior_data["Times"]["sessionStop"] = sessionStop
+                if "SessionEpochs" in locals():
+                    behavior_data["Times"]["SessionEpochs"] = SessionEpochs
 
         if "ref" in f.root.behavior:  # NEW: try to load the images if they exist.
             behavior_data["ref"] = f.root.behavior.ref[:]
@@ -221,11 +290,10 @@ def get_behavior(
             behavior_data["ratioIMAonREAL"] = float(
                 f.root.behavior.ratioIMAonREAL.read()
             )
-    if getfilterSpeed:
-        behavior_data["Times"]["speedFilter"] = speedFilter
-    if np.sum(sleepPeriods) > 0:
-        behavior_data["Times"]["sleepEpochs"] = sleepPeriods
         if "shock_zone" in f.root.behavior:
+            behavior_data["shock_zone"] = f.root.behavior.shock_zone[:]
+
+        f.close()
 
     return behavior_data
 
@@ -252,6 +320,13 @@ def speed_filter(
             if template is not None:
                 templ_file = f"nnBehavior_{template}.mat"
             else:
+                templ_file = "nnBehavior.mat"
+            assert tables.is_hdf5_file(folder + templ_file)
+            import shutil
+
+            shutil.copyfile(
+                folder + templ_file,
+                folder + "nnBehavior_" + phase + ".mat",
                 follow_symlinks=True,
             )
     # Extract basic behavior
@@ -404,6 +479,8 @@ def speed_filter(
                 speedThreshold = val
                 speedFilter = speedToshowSm > np.exp(speedThreshold)
                 l1.set_ydata(behToShow[speedFilter, 0])
+                l2.set_ydata(behToShow[speedFilter, 1])
+                l1.set_xdata(timeToShow[speedFilter])
                 l2.set_xdata(timeToShow[speedFilter])
                 l3.set_offsets(
                     np.transpose(
@@ -415,12 +492,20 @@ def speed_filter(
                         )
                     )
                 )
+                l4.set_ydata(speedToshowSm[speedFilter])
+                l4.set_xdata(timeToShow[speedFilter])
                 l5.set_xdata(val)
                 l6.set_xdata(np.exp(val))
+                ax3.set_xlabel(f"raw speed ({np.exp(val):.2f} cm/s)")
+                fig.canvas.draw_idle()
+
+            slider.on_changed(update)
+            if not force:
+                plt.show(block=not force)
             speedThreshold = slider.val
         # Final value
         speedFilter = myspeed2 > np.exp(
-            slider.val
+            speedThreshold
         )  # Apply the value to the whole dataset
 
         f.create_array("/behavior", "speedMask", speedFilter)
@@ -431,7 +516,7 @@ def speed_filter(
         df.to_csv(folder + "speedFilterValue.csv")  # save the speed filter value
 
 
-def select_epochs(folder: str, overWrite=True):
+def select_epochs(
     folder: str,
     overWrite: bool = True,
     phase=None,
@@ -444,11 +529,14 @@ def select_epochs(folder: str, overWrite=True):
     provides then a little manual tool to change the size of the window
     and its position.
 
+    args:
+    -------
     folder: str, path to the folder containing the nnBehavior.mat file
     overWrite: bool, whether to overwrite the existing train and test epochs
     phase: str, whether to pre-select only some specific sessions (pre, hab, cond, or post for now)
     force: bool, whether to force the function to run without figure preview
     find_best_sets: bool, whether to find the best test set based on the entropy of the speed and environment variable
+
     returns
     -------
     None, but creates a nnBehavior_{phase}.mat file with the trainEpochs, testEpochs, and lossPredSetEpochs
@@ -467,6 +555,7 @@ def select_epochs(folder: str, overWrite=True):
     # we will need to copy the behavior data to a new file called nnBehavior_{phase}.mat
     if phase is not None:
         filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+        if not os.path.exists(filename):
             print("weird to copy that file now")
             assert tables.is_hdf5_file(folder + "nnBehavior.mat")
             import shutil
@@ -474,8 +563,12 @@ def select_epochs(folder: str, overWrite=True):
             shutil.copyfile(
                 folder + "nnBehavior.mat",
                 folder + "nnBehavior_" + phase + ".mat",
+                follow_symlinks=True,
+            )
+    with tables.open_file(filename, "a") as f:
         children = [c.name for c in f.list_nodes("/behavior")]
-        if not overWrite and "trainEpochs" in children and "testEpochs" in children:
+        if (
+            not overWrite
             and "trainEpochs" in children
             and "testEpochs"
             and "lossPredSetEpochs" in children
@@ -501,8 +594,6 @@ def select_epochs(folder: str, overWrite=True):
         ]
         if sessionNames[0] != "Recording":
             IsMultiSessions = True
-                for l in f.root.behavior.SessionNames[:, 0]
-            ]
             sessionStart = f.root.behavior.SessionStart[:, :][:, 0]
             sessionStop = f.root.behavior.SessionStop[:, :][:, 0]
         else:
@@ -548,14 +639,22 @@ def select_epochs(folder: str, overWrite=True):
                         )
 
                     # create preselection list
+                    pre_list = [
+                        re.search(pattern, sessionNames[x], re.IGNORECASE)
                         for x in range(len(sessionNames))
                     ]
                     id_pre = [
                         x for x in range(len(pre_list)) if pre_list[x] is not None
                     ]
                     id_toselectPRE = list(
+                        set(id_toshow) & set(id_pre)
+                    )  # all preselected conditions (except sleep)
+
                 for id in id_toshow:
                     epochToShow.extend([sessionStart[id], sessionStop[id]])
+                if phase is not None:
+                    epochToSelectPRE = []
+                    for id in id_toselectPRE:
                         epochToSelectPRE.extend(
                             [sessionStart[id], sessionStop[id]]
                         )  # the only epochs we want to select by default
@@ -579,6 +678,13 @@ def select_epochs(folder: str, overWrite=True):
             speedsToShowPRE = speeds[maskToShowPRE, :]
             xmin, xmax = timeToShowPRE[0], timeToShowPRE[-1]
 
+        try:
+            idx_cut = np.where(timeToShow == timeToShowPRE[0])[0][0]
+        except IndexError:
+            session_pretty = "\n".join(f"• {item}" for item in sessionNames)
+            raise IndexError(
+                f"""{phase} is not available for mouse in {folder}.
+                Please check the phase name/session epochs.
                 Available Sessions are:
                 {session_pretty}
                 """
@@ -669,7 +775,15 @@ def select_epochs(folder: str, overWrite=True):
                 bestPLSet = np.argsort(entropiesPositions)[-2]
                 print("Found best loss pred set at index", bestPLSet)
                 lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
+            else:
+                bestPLSet = 0
+                lossPredSetId = (
+                    0 if testSetId != 0 else 3 * bestTestSet * sizeTest + idx_cut
+                )
+        else:
+            bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
             bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
+            lossPredSetId = 0
 
         # TODO: implement this best test set.
         SetData = {
@@ -681,9 +795,6 @@ def select_epochs(folder: str, overWrite=True):
             "sizeLossPredSet": sizelossPredSet,
             "bestPLSet": bestPLSet,
         }
-        # as well as its size:
-
-        cmap = plt.get_cmap("nipy_spectral")
         keptSession = np.ones(len(sessionNames))  # a mask for the session
         if IsMultiSessions:
             keptSession[id_sleep] = 0
@@ -693,6 +804,7 @@ def select_epochs(folder: str, overWrite=True):
 
         if force:
             if IsMultiSessions:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
                     timeToShow,
                     SetData,
                     keptSession,
@@ -704,6 +816,7 @@ def select_epochs(folder: str, overWrite=True):
                     timeToShow, SetData, keptSession
                 )
         else:
+            # Display the figure
             #### Next we provide a tool to manually change the bestTest set position
             # as well as its size:
 
@@ -711,6 +824,8 @@ def select_epochs(folder: str, overWrite=True):
             min_val, max_val = 0.3, 1.0
             n = 20
             cmap = plt.get_cmap("nipy_spectral")
+            colors = cmap(np.linspace(min_val, max_val, n))
+            cmSessValue = mplt.colors.LinearSegmentedColormap.from_list(
                 "mycmap", colors
             )
             colorSess = cmSessValue(np.arange(len(sessionNames)) / (len(sessionNames)))
@@ -719,7 +834,6 @@ def select_epochs(folder: str, overWrite=True):
                 positions.shape[1] + 5, max(len(colorSess), 2), figure=fig
             )
 
-                    timeToShow[ep.inEpochs(timeToShow, lossPredSetEpochs)[0]],
             if IsMultiSessions:
                 ax = [
                     fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
@@ -727,6 +841,7 @@ def select_epochs(folder: str, overWrite=True):
                 ax[0].get_shared_x_axes().join(ax[0], ax[1])
                 # ax = [brokenaxes(xlims=showtimes, subplot_spec=gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
             else:
+                ax = [
                     fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
                 ]  # ax for feature display
                 ax[0].get_shared_x_axes().join(ax[0], ax[1])
@@ -750,6 +865,13 @@ def select_epochs(folder: str, overWrite=True):
             ax += [
                 fig.add_subplot(gs[-2, :]),  # test set starting index
                 fig.add_subplot(gs[-1, : max(len(colorSess) - 4, 1)]),  # test set size
+            ]  # test set.
+            ax += [
+                fig.add_subplot(
+                    gs[-3, max(len(colorSess) - 3, 1) : max(len(colorSess), 2)]
+                )
+            ]  # buttons for manual range selection (LossPred)
+            ax += [
                 fig.add_subplot(
                     gs[-1, max(len(colorSess) - 3, 1) : max(len(colorSess), 2)]
                 )
@@ -1121,8 +1243,17 @@ def select_epochs(folder: str, overWrite=True):
                                     pass
                         if SetData["useLossPredTrainSet"]:
                             ls[dim][2] = ax[dim].scatter(
+                                timeToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0]
+                                ],
+                                behToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim
+                                ],
+                                c="orange",
                                 s=0.5,
                             )
+                    else:
+                        l1.set_offsets(
                             np.transpose(
                                 np.stack(
                                     [
@@ -1136,7 +1267,7 @@ def select_epochs(folder: str, overWrite=True):
                                 )
                             )
                         )
-                        l2[iaxis].set_offsets(
+                        l2.set_offsets(
                             np.transpose(
                                 np.stack(
                                     [
@@ -1155,8 +1286,11 @@ def select_epochs(folder: str, overWrite=True):
                                 ls[dim][2].remove()
                             except:
                                 pass
+                            ls[dim][2] = ax[dim].scatter(
                                 timeToShow[
                                     ep.inEpochs(timeToShow, lossPredSetEpochs)[0]
+                                ],
+                                behToShow[
                                     ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim
                                 ],
                                 c="orange",
@@ -1167,6 +1301,7 @@ def select_epochs(folder: str, overWrite=True):
                                 l3.remove()
                             except:
                                 pass
+
                     # modify the xlim of the axes according to the changed epochs
                     xmin, xmax = (
                         min(
@@ -1181,6 +1316,7 @@ def select_epochs(folder: str, overWrite=True):
                     ax[dim].set_xlim(xmin, xmax)
                 fig.canvas.draw_idle()
 
+            def buttUpdate(id):
                 """
                 Create a function to update the button state when clicked.
                 """
@@ -1210,14 +1346,19 @@ def select_epochs(folder: str, overWrite=True):
 
             sliderTest.on_changed(update_with_buttons)
             sliderTestSize.on_changed(update_with_buttons)
+            sliderLossPredTrain.on_changed(update_with_buttons)
             sliderLossPredTrainSize.on_changed(update_with_buttons)
 
             [b.on_clicked(buttUpdate(id)) for id, b in enumerate(butts)]
 
+            update_button_states()
 
+            def buttUpdateLossPred(val):
                 if SetData["useLossPredTrainSet"]:
                     buttLossPred.color = [0, 0, 0, 0]
+                    SetData["useLossPredTrainSet"] = False
                 else:
+                    SetData["useLossPredTrainSet"] = True
                     buttLossPred.color = "orange"
                 update(0)
                 return SetData["useLossPredTrainSet"]
@@ -1227,15 +1368,16 @@ def select_epochs(folder: str, overWrite=True):
             class rangeButton:
                 nameDict = {"test": "test", "lossPred": "predicted loss"}
 
-                SetData["useLossPredTrainSet"] = True
                 def __init__(self, typeButt="test", relevantSliders=None):
                     if typeButt == "test" or typeButt == "lossPred":
                         self.typeButt = typeButt
                     if relevantSliders is None:
+                        raise ValueError("relevantSliders must be a list of 2 sliders")
                     else:
                         self.relevantSliders = relevantSliders
 
                 def __call__(self, val):
+                    self.win = Toplevel()
                     self.win.title(
                         f"Manual setting of the {self.nameDict[self.typeButt]} set"
                     )
@@ -1245,28 +1387,23 @@ def select_epochs(folder: str, overWrite=True):
                     self.rangeLabel = Label(self.win, text=textLabel)
                     self.rangeLabel.place(relx=0.5, y=30, anchor="center")
 
-            def __init__(self, typeButt="test", relevantSliders=None):
                     self.rangeEntry = Entry(self.win, width=18, bd=5)
                     defaultValues = self.update_def_values(SetData)
                     self.rangeEntry.insert(0, f"{defaultValues[0]}-{defaultValues[1]}")
                     self.rangeEntry.place(relx=0.5, y=90, anchor="center")
 
-            def __call__(self, val):
-                self.win.geometry("400x200")
                     self.okButton = Button(self.win, width=5, height=1, text="Ok")
                     self.okButton.bind(
                         "<Button-1>", lambda event: self.set_sliders_and_close()
                     )
                     self.okButton.place(relx=0.5, y=175, anchor="center")
 
-                self.rangeLabel = Label(self.win, text=textLabel)
                     self.win.mainloop()
 
                 def construct_label(self):
                     text = f"Enter the range of the {self.nameDict[self.typeButt]} set in sec (e.g. 0-1000)"
                     return text
 
-                        raise ValueError(
                 def update_def_values(self, SetData):
                     nameId = f"{self.typeButt}SetId"
                     nameSize = f"size{self.typeButt[0].upper()}{self.typeButt[1:]}Set"
@@ -1284,6 +1421,7 @@ def select_epochs(folder: str, overWrite=True):
                                 float(num) for num in list(strEntry.split("-"))
                             ]
                             convertedRange = [
+                                self.closestId(timeToShow, num) for num in parsedRange
                             ]
                             startId = convertedRange[0]
                             sizeSetinId = convertedRange[1] - convertedRange[0]
@@ -1291,6 +1429,7 @@ def select_epochs(folder: str, overWrite=True):
                             return startId, sizeSetinId
                         except ValueError:
                             self.okButton.configure(bg="red")
+                            raise ValueError(
                                 "Please enter a valid range in the format 'start-end'"
                             )
 
@@ -1300,11 +1439,10 @@ def select_epochs(folder: str, overWrite=True):
                         slider.set_val(valuesForSlider[ivalue])
                     self.win.destroy()
 
-        ButtlPManual.on_clicked(
                 def closestId(self, arr, valToFind):
                     return (np.abs(arr - valToFind)).argmin()
 
-                + "Simply close the window when you are satisfied with your choice."
+            ButtlPManual.on_clicked(
                 rangeButton(
                     typeButt="lossPred",
                     relevantSliders=[sliderLossPredTrain, sliderLossPredTrainSize],
@@ -1316,12 +1454,14 @@ def select_epochs(folder: str, overWrite=True):
                 )
             )
 
+            def buttInstructionsShow(val):
                 intructions_str = (
                     "Black will become train dataset, red will become test dataset, "
                     + "and orange (if lossPred button is pressed) will become a set "
                     + "to fine-tune predicted loss.\n \n By pressing button with session names "
                     + "you can choose which sessions to include in the analysis. "
                     + "Either use sliders to regulate size and position of test and fine-tuning sets.\n \n"
+                    + "Or click on manual setter for test or fine-tuning sets \n \n"
                     + "USE ZOOM TOOL OF THE FIGURE WINDOW TO AVOID GAPS IF YOU HAVE ANY \n \n"
                     + "Simply close the window when you are satisfied with your choice."
                 )
@@ -1332,15 +1472,12 @@ def select_epochs(folder: str, overWrite=True):
                 instLabel.pack()
                 win.mainloop()
 
-            "Please choose train (black) and test (red) sets. You can add a set (orange) to "
-        )
             buttInstructions.on_clicked(buttInstructionsShow)
 
             suptitle_str = (
                 "Please choose train (black) and test (red) sets. You can add a set (orange) to "
                 "fine-tune predicted loss (by pressing lossPred button)"
             )
-        if IsMultiSessions:
             plt.suptitle(suptitle_str, fontsize=22)
             plt.text(
                 x=0.93,
@@ -1350,7 +1487,6 @@ def select_epochs(folder: str, overWrite=True):
                 ha="center",
                 transform=fig.transFigure,
             )
-        else:
             plt.text(
                 x=0.93,
                 y=0.71,
@@ -1371,7 +1507,15 @@ def select_epochs(folder: str, overWrite=True):
 
             if IsMultiSessions:
                 trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow,
+                    SetData,
+                    keptSession,
+                    starts=sessionStart,
+                    stops=sessionStop,
+                )
+            else:
                 trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow, SetData, keptSession
                 )
 
         if "testEpochs" in children:
@@ -1395,7 +1539,6 @@ def select_epochs(folder: str, overWrite=True):
         f.flush()  # effectively write down the modification we just made
         f.close()
 
-                positionTime[lossPredMask], positions[lossPredMask, 0], c="orange"
         if not force:
             fig, ax = plt.subplots()
             trainMask = ep.inEpochsMask(positionTime, trainEpoch)[:, 0]
@@ -1403,6 +1546,7 @@ def select_epochs(folder: str, overWrite=True):
             ax.plot(
                 positionTime[trainMask],
                 positions[trainMask, 0],
+                "--.",
                 c="black",
                 markersize=6,
             )
@@ -1413,3 +1557,14 @@ def select_epochs(folder: str, overWrite=True):
                 c="red",
                 markersize=6,
             )
+            ax.set_title("Linearized coordinate of the animal (1st dimension plotted)")
+            if SetData["useLossPredTrainSet"]:
+                lossPredMask = ep.inEpochsMask(positionTime, lossPredSetEpochs)[:, 0]
+                ax.plot(
+                    positionTime[lossPredMask],
+                    positions[lossPredMask, 0],
+                    "--.",
+                    markersize=6,
+                    c="orange",
+                )
+            plt.show(block=True)
