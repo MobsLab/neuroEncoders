@@ -1118,17 +1118,37 @@ class Params:
         self.masking = 20
 
         ### full encoder params
-        self.nFeatures = 64
-        self.lstmLayers = 2
-        self.dropoutCNN = 0.2
+        self.nFeatures = 128
+        self.isTransformer = True  # use transformer instead of LSTM
+        self.nHeads = 8  # number of attention heads in the transformer if used
+
+        self.lstmLayers = 2 if not self.isTransformer else 8
+        self.dropoutCNN = 0.5
         self.lstmSize = 128
-        self.lstmDropout = 0.3  # is not implemented(code uses self.dropout_CNN)
-        self.batchSize = 256  # Change that if your GPU (or CPU) is not powerful enough
+        self.dropoutLSTM = 0 if not self.isTransformer else 0.5
+        self.ff_dim1 = 256  # first fully connected layer in Transformer arch dimension
+        self.ff_dim2 = (
+            self.nFeatures
+        )  # second fully connected layer in Transformer arch dimension
 
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = [0.0003]  #  [0.00003, 0.00003, 0.00001]
-        self.lossActivation = None  # tf.nn.relu
+        self.learningRates = [0.001]  #  [0.00003, 0.00003, 0.00001]
+        self.lossActivation = "softplus"  # activation function for the loss layer
+        self.loss = "mse"  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
+        if self.target.lower() == "direction":
+            self.loss = "binary_crossentropy"
+
+        self.column_losses = {"0": self.loss, "1": "binary_crossentropy"}
+        self.column_weights = (
+            {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
+        )
+
+        # self.transform = "log"  # "log" or "sqrt" or None
+        self.transform = None  # "log" or "sqrt" or None
+        self.delta = 0.4  # for the huber loss - roughly the random prediction threshold
+        self.alpha = 5
 
         self.usingMixedPrecision = False
         # enforcing float16 computations whenever possible
