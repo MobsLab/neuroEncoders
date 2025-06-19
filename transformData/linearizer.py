@@ -1,10 +1,14 @@
 ## Created by Pierre 01/04/2021
 
+import os
+from warnings import warn
+
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import scipy.interpolate as itp
 import tables
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pykeops import set_verbose as pykeopsset_verbose
 from pykeops.numpy import LazyTensor as LazyTensor_np
 
@@ -20,29 +24,88 @@ class UMazeLinearizer:
     args:
     folder: str, the folder where the linearization points are saved
     nb_bins: int, the number of bins to use for the linearization, defaults to 100
+    phase: str, the phase of the experiment, defaults to None
     """
 
-    def __init__(self, folder: str, nb_bins: int = 100):
-        with tables.open_file(folder + "nnBehavior.mat", "a") as f:
+    def __init__(self, *args, **kwargs):
+        # Extract folder/path parameter (can be called either way)
+        if len(args) >= 1:
+            folder = args[0]
+            args = args[1:]
+        else:
+            folder = kwargs.pop("folder", None)
+            if folder is None:
+                folder = kwargs.pop("path", None)
+
+        if folder is None:
+            raise ValueError("folder (or path) parameter is required")
+
+        # Extract nb_bins parameter
+        if len(args) >= 1:
+            nb_bins = args[0]
+            args = args[1:]
+        else:
+            nb_bins = kwargs.pop("nb_bins", 100)
+
+        # Extract phase parameter
+        if len(args) >= 1:
+            phase = args[0]
+            args = args[1:]
+        else:
+            phase = kwargs.pop("phase", None)
+
+        # Initialize attributes
+        self.folder = folder
+        self.nb_bins = nb_bins
+        self.phase = phase
+
+        # Initialize linearization points
+        filename = os.path.join(folder, "nnBehavior.mat")
+        if not os.path.exists(filename):
+            raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
+        if phase is not None:
+            filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+            if not os.path.exists(filename):
+                assert tables.is_hdf5_file(folder + "nnBehavior.mat")
+                import shutil
+
+                warn("weird to copy that file now")
+
+                shutil.copyfile(
+                    folder + "nnBehavior.mat",
+                    folder + "nnBehavior_" + phase + ".mat",
+                    follow_symlinks=True,
+                )
+        # Extract basic behavior
+        with tables.open_file(filename, "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
             if "linearizationPoints" in children:
                 self.nnPoints = f.root.behavior.linearizationPoints[:]
             else:
                 self.nnPoints = [
-                    [0.45, 0.40],
-                    [0.45, 0.65],
-                    [0.45, 0.9],
-                    [0.7, 0.9],
+                    [0.15, 0.1],
+                    [0.15, 0.5],
+                    [0.15, 0.9],
+                    [0.5, 0.9],
                     [0.9, 0.9],
-                    [0.9, 0.7],
-                    [0.9, 0.4],
+                    [0.85, 0.5],
+                    [0.85, 0.1],
                 ]
 
             ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            # equally spaced linear points. As many as the number of points
+            # pu in the verify_linearization function (by default 7 anchor points)
+            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            # itpObject is the interpolating object that finds a fit between
+            # the anchor points and the equally spaced 2D points
             self.nb_bins = nb_bins
             self.tsProj = np.arange(0, stop=1, step=1 / self.nb_bins)
-            self.mazePoints = itpObject(self.tsProj)
+            self.mazePoints = self.itpObject(self.tsProj)  # from 1D to 2D
+
+            if "aligned_ref" in children:
+                self.aligned_ref = f.root.behavior.aligned_ref[:]
+            else:
+                self.aligned_ref = None
 
     def apply_linearization(self, euclideanData, keops=True):
         if keops:
@@ -116,19 +179,19 @@ class UMazeLinearizer:
 
         def b1update(n):
             self.nnPoints = [
-                [0.45, 0.40],
-                [0.45, 0.65],
-                [0.45, 0.9],
-                [0.7, 0.9],
+                [0.15, 0.1],
+                [0.15, 0.5],
+                [0.15, 0.9],
+                [0.5, 0.9],
                 [0.9, 0.9],
-                [0.9, 0.7],
-                [0.9, 0.4],
+                [0.85, 0.5],
+                [0.85, 0.1],
             ]
             # create the interpolating object
             ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
             self.tsProj = np.arange(0, stop=1, step=1 / 100)
-            self.mazePoints = itpObject(self.tsProj)
+            self.mazePoints = self.itpObject(self.tsProj)
             try:
                 self.lPoints.remove()
                 fig.canvas.draw()
@@ -145,9 +208,11 @@ class UMazeLinearizer:
                 self.nnPoints = self.nnPoints[0 : len(self.nnPoints) - 1]
                 # create the interpolating object
                 ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-                itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+                self.itpObject = itp.make_interp_spline(
+                    ts, np.array(self.nnPoints), k=2
+                )
                 self.tsProj = np.arange(0, stop=1, step=1 / 100)
-                self.mazePoints = itpObject(self.tsProj)
+                self.mazePoints = self.itpObject(self.tsProj)
                 self.lPoints.remove()
                 fig.canvas.draw()
                 if len(self.nnPoints) > 2:
@@ -183,9 +248,11 @@ class UMazeLinearizer:
                 if len(self.nnPoints) > 2:
                     # create the interpolating object
                     ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-                    itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+                    self.itpObject = itp.make_interp_spline(
+                        ts, np.array(self.nnPoints), k=2
+                    )
                     self.tsProj = np.arange(0, stop=1, step=1 / 100)
-                    self.mazePoints = itpObject(self.tsProj)
+                    self.mazePoints = self.itpObject(self.tsProj)
 
                     self.l0s = try_linearization(ax, self.l0s)
                 else:
@@ -200,7 +267,25 @@ class UMazeLinearizer:
                 fig.canvas.draw()
 
         # Check existence of linearized data
-        with tables.open_file(folder + "nnBehavior.mat", "a") as f:
+
+        filename = os.path.join(folder, "nnBehavior.mat")
+        if not os.path.exists(filename):
+            raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
+        if self.phase is not None:
+            filename = os.path.join(folder, "nnBehavior_" + self.phase + ".mat")
+            if not os.path.exists(filename):
+                assert tables.is_hdf5_file(folder + "nnBehavior.mat")
+                import shutil
+
+                print("weird to copy that file now")
+
+                shutil.copyfile(
+                    folder + "nnBehavior.mat",
+                    folder + "nnBehavior_" + phase + ".mat",
+                    follow_symlinks=True,
+                )
+        # Extract basic behavior
+        with tables.open_file(filename, "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
             if "linearizationPoints" in children:
                 print("Linearization points have been created before")
@@ -240,19 +325,44 @@ class UMazeLinearizer:
             # Next we obtain user click to create a new set of linearization points
             [a.set_aspect(1) for a in ax]
             fig.canvas.mpl_connect("button_press_event", onclick)
-            plt.show()
+            plt.show(block=True)
+
             # create the interpolating object
             ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
             self.tsProj = np.arange(0, stop=1, step=1 / 100)
-            self.mazePoints = itpObject(self.tsProj)
+            self.mazePoints = self.itpObject(self.tsProj)
             # plot the exact linearization variable:
             _, linearTrue = self.apply_linearization(euclidData)
             cm = plt.get_cmap("Spectral")
-            fig, ax = plt.subplots()
-            ax.scatter(euclidData[:, 0], euclidData[:, 1], c=cm(linearTrue))
-            ax.set_title("Linearization variable, Spectral colormap")
-            plt.show()
+            norm = mcolors.Normalize(vmin=linearTrue.min(), vmax=linearTrue.max())
+            fig, axScatter = plt.subplots()
+            scatter_plot = axScatter.scatter(
+                euclidData[:, 0], euclidData[:, 1], c=linearTrue, cmap=cm, norm=norm
+            )
+            # Display the color bar for the scatter plot using the Spectral colormap
+            plt.colorbar(scatter_plot, ax=axScatter, norm=norm)
+            fig.suptitle("Linearization variable, Spectral colormap")
+
+            # Create new axes on the right and on the top of the current axes
+            divider = make_axes_locatable(axScatter)
+            axHistX = divider.append_axes("bottom", 1.2, pad=0.1, sharex=axScatter)
+            axHistY = divider.append_axes("right", 1.2, pad=0.1, sharey=axScatter)
+
+            # Make some labels invisible
+            axHistX.xaxis.set_tick_params(labelbottom=False)
+            axHistY.yaxis.set_tick_params(labelleft=False)
+
+            # Plot histograms
+            axHistX.hist(euclidData[:, 0], bins=30, color="gray")
+            axHistY.hist(
+                euclidData[:, 1], bins=30, orientation="horizontal", color="gray"
+            )
+
+            # Set labels
+            axHistX.set_ylabel("Frequency")
+            axHistY.set_xlabel("Frequency")
+            plt.show(block=True)
             # Save
             f.create_array("/behavior", "linearizationPoints", self.nnPoints)
             f.flush()
