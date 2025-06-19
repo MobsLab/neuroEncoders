@@ -5,7 +5,10 @@ import numpy as np
 import pandas as pd
 import scipy.interpolate as itp
 import tables
+from pykeops import set_verbose as pykeopsset_verbose
 from pykeops.numpy import LazyTensor as LazyTensor_np
+
+pykeopsset_verbose(False)  # Disable verbose output from PyKeOps
 
 
 class UMazeLinearizer:

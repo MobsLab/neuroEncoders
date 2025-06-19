@@ -13,6 +13,7 @@ class spikeNet:
     This class is a convolutional network that takes as input a spike sequence from nChannels and returns a feature vector of size nFeatures.
 
     args:
+    -----
     nChannels: number of channels in the input
     device: the device on which the network is run
     nFeatures: the size of the output feature vector

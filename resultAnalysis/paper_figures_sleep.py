@@ -28,6 +28,8 @@ white_viridis = LinearSegmentedColormap.from_list(
 )
 EC = np.array([45, 39])  # range of x and y in cm
 
+pykeops.set_verbose(False)
+
 
 class PaperFiguresSleep:
     def __init__(

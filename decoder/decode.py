@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 # Get common libraries
 import numpy as np
 import pandas as pd
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
 
 # Get utility functions
@@ -107,7 +109,7 @@ class Decoder:
         )
         dataset = dataset.filter(lambda x: tf.equal(table.lookup(x["pos_index"]), 1.0))
         if onTheFlyCorrection:
-            maxPos = np.max(
+            maxPos = np.nanmax(
                 behaviorData["Positions"][
                     np.logical_not(np.isnan(np.sum(behaviorData["Positions"], axis=1)))
                 ]
