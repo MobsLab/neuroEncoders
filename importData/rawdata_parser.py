@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
-from tkinter import Button, Entry, Label, Tk, Toplevel
+from tkinter import Button, Entry, Label, Toplevel
 from typing import Literal, Optional
 
 # import matplotlib as mplt
@@ -15,147 +15,30 @@ import tables
 
 sys.path.append("./importData")
 
-# from importData import epochs_management as ep
-import sys
-
 import matplotlib as mplt
-from interval import interval
 
 # Custom codes
 from importData import epochs_management as ep
-
-########### Management of epochs ############
-
-
-# a few tool to help do difference of intervals as sets:
-def obtainCloseComplementary(epochs, boundInterval):
-    # we obtain the close complementary ( intervals share their bounds )
-    # Note: to obtain the open complementary, one would need to add some dt to end and start of intervals....
-    p1 = interval()
-    for i in range(len(epochs) // 2):
-        p1 = p1 | interval([epochs[2 * i], epochs[2 * i + 1]])
-    assert isinstance(p1, interval)
-    assert isinstance(boundInterval, interval)
-    assert len(boundInterval) == 1
-    compInterval = interval([boundInterval[0][0], p1[0][0]])
-    for i in range(len(p1) - 1):
-        compInterval = compInterval | interval([p1[i][1], p1[i + 1][0]])
-    compInterval = compInterval | interval([p1[-1][1], boundInterval[0][1]])
-    return compInterval
-
-
-def intersect_with_session(epochs, keptSession, starts, stops):
-    # we go through the different removed session epoch, and if a train epoch or a test epoch intersect with it we remove it
-    # from the train and test epochs
-    EpochInterval = interval()
-    for i in range(len(epochs) // 2):
-        EpochInterval = EpochInterval | interval([epochs[2 * i], epochs[2 * i + 1]])
-    includeInterval = interval()
-    for id, keptS in enumerate(keptSession):
-        if keptS:
-            includeInterval = includeInterval | interval([starts[id], stops[id]])
-    EpochInterval = EpochInterval & includeInterval
-    Epoch = np.ravel(np.array([[p[0], p[1]] for p in EpochInterval]))
-    return Epoch
-
-
-# Auxilliary function
-def get_epochs(postime, SetData, keptSession, starts=np.empty(0), stops=np.empty(0)):
-    # given the slider values, as well as the selected session, we extract the different sets
-    # if starts and stops (of epochs) are present, it means we work with multi-recording
-
-    pmin = postime[0]
-    pmax = postime[-1]
-
-    testEpochs = np.array(
-        [
-            postime[SetData["testSetId"]],
-            postime[
-                min(SetData["testSetId"] + SetData["sizeTestSet"], postime.shape[0] - 1)
-            ],
-        ]
-    )
-
-    if SetData["useLossPredTrainSet"]:
-        lossPredSetEpochs = np.array(
-            [
-                postime[SetData["lossPredSetId"]],
-                postime[
-                    min(
-                        SetData["lossPredSetId"] + SetData["sizeLossPredSet"],
-                        postime.shape[0] - 1,
-                    )
-                ],
-            ]
-        )
-        lossPredsetinterval = interval(lossPredSetEpochs)
-        lossPredsetinterval = lossPredsetinterval & obtainCloseComplementary(
-            testEpochs, interval([pmin, pmax])
-        )
-        lossPredSetEpochs = np.ravel(
-            np.array([[p[0], p[1]] for p in lossPredsetinterval])
-        )
-
-        trainInterval = obtainCloseComplementary(
-            testEpochs, interval([pmin, pmax])
-        ) & obtainCloseComplementary(lossPredSetEpochs, interval([pmin, pmax]))
-    else:
-        trainInterval = obtainCloseComplementary(testEpochs, interval([pmin, pmax]))
-
-    trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainInterval]))
-
-    if starts.size > 0:
-        trainEpoch = intersect_with_session(trainEpoch, keptSession, starts, stops)
-        testEpochs = intersect_with_session(testEpochs, keptSession, starts, stops)
-        if SetData["useLossPredTrainSet"]:
-            lossPredSetEpochs = intersect_with_session(
-                lossPredSetEpochs, keptSession, starts, stops
-            )
-            return trainEpoch, testEpochs, lossPredSetEpochs
-        else:
-            return trainEpoch, testEpochs, None
-    else:
-        if SetData["useLossPredTrainSet"]:
-            return trainEpoch, testEpochs, lossPredSetEpochs
-        else:
-            return trainEpoch, testEpochs, None
-
-
-def inEpochs(t, epochs):
-    # for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
-    # test if t is among at least one of these epochs
-    # Epochs are treated as closed interval [,]
-    # returns the index where it is the case
-    mask = np.sum(
-        [
-            (t >= epochs[2 * i]) * (t <= epochs[2 * i + 1])
-            for i in range(len(epochs) // 2)
-        ],
-        axis=0,
-    )
-    return np.where(mask >= 1)
-
-
-def inEpochsMask(t, epochs):
-    # for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
-    # test if t is among at least one of these epochs
-    # Epochs are treated as closed interval [,]
-    # return the mask
-    mask = np.sum(
-        [
-            (t >= epochs[2 * i]) * (t <= epochs[2 * i + 1])
-            for i in range(len(epochs) // 2)
-        ],
-        axis=0,
-    )
-    return mask >= 1
-
-
-############################
+from simpleBayes.butils import kdenD
 
 
 def get_params(pathToXml):
+    """
+    This function parses the xml file - as neuroscope would.
+
+    Parameters
+    ----------
+    pathToXml : str, path to the xml file
+
+    Returns
+    -------
+    listChannels : list, list of channels
+    samplingRate : float, sampling rate
+    nChannels : int, number of channels
+    """
     listChannels = []
+    samplingRate = None
+    nChannels = None
     try:
         tree = ET.parse(pathToXml)
     except:
@@ -172,6 +55,8 @@ def get_params(pathToXml):
                 if br3Elem.tag != "group":
                     continue
                 group = []
+                # by filtering for channels, we only get the `Spike Groups` from neuroscope, i.e. the selected channels from each
+                # anatomical group (HPC, PFC, etc.) that seem to have spiking neurons
                 for br4Elem in br3Elem:
                     if br4Elem.tag != "channels":
                         continue
@@ -179,6 +64,7 @@ def get_params(pathToXml):
                         if br5Elem.tag != "channel":
                             continue
                         group.append(int(br5Elem.text))
+                # each channel is a group of spike channels
                 listChannels.append(group)
     for br1Elem in root:
         if br1Elem.tag != "acquisitionSystem":
@@ -189,6 +75,14 @@ def get_params(pathToXml):
             if br2Elem.tag == "nChannels":
                 nChannels = int(br2Elem.text)
 
+    if samplingRate is None or nChannels is None or not listChannels:
+        raise ValueError(
+            f"""The xml file does not contain the required information
+            samplingRate, nChannels, or listChannels. 
+            Did you select the right xml file? 
+            Please check the xml file: {pathToXml}
+            """
+        )
     return listChannels, samplingRate, nChannels
 
 
@@ -1099,109 +993,5 @@ def select_epochs(folder: str, overWrite=True):
             ax.scatter(
                 positionTime[lossPredMask], positions[lossPredMask, 0], c="orange"
             )
-        fig.show()
-
-
-class DataHelper:
-    """
-    A class to detect and describe the main properties on the signal and behavior
-    args:
-    - projectPath: a Project object containing the path to the data (xml & dat)
-    - mode: the argument of the neuroEncoder command
-    - jsonPath: the path to the json file containing the thresholds
-
-    """
-
-    def __init__(
-        self,
-        projectPath,
-        mode: Literal["ann", "bayes", "compare", "decode"],
-        jsonPath=None,
-    ):
-        """
-        Initializes the DataHelper object.
-        path should be a Project object.
-        """
-        self.windowSizeMS = projectPath.windowSize * 1000  # gets converted to ms
-        self.path = projectPath  # the path object
-        self.globalResultsPath = projectPath.resultsPath
-        self.resultsPath = os.path.join(
-            projectPath.resultsPath,
-            "results",
-            str(self.windowSizeMS),
-        )
-        self.mode = mode
-
-        if not os.path.exists(self.path.xml):
-            raise ValueError("this file does not exist: " + self.path.xml)
-        # if not os.path.exists(self.path.dat):
-        # raise ValueError('this file does not exist: '+ self.path.dat)
-
-        # if self.mode == "decode":
-        #     self.list_channels, self.samplingRate, self.nChannels = get_params(self.path.xml)
-        #     if os.path.isfile(self.path.folder + "timestamps.npy"):
-        #         self.nChannels = int( os.path.getsize(self.path.dat) \
-        #             / 2 \
-        #             / np.load(self.path.folder + "timestamps.npy").shape[0] )
-        #     # TODO: change this to allow a varying number of features:
-        #     self.position = np.array([0,0], dtype=float).reshape([1,2])
-        #     self.positionTime = np.array([0], dtype=float)
-        #     self.startTime = 0
-        #     self.stopTime = float("inf")
-        #     # self.epochs = {"train": [], "test": [0, float("inf")]}
-        # else:
-        self.list_channels, self.samplingRate, self.nChannels = get_params(
-            self.path.xml
-        )
-        if self.mode == "decode":
-            self.fullBehavior = get_behavior(
                 self.path.folder, getfilterSpeed=False, decode=True
             )
-        else:
-            self.fullBehavior = get_behavior(self.path.folder)
-        self.positions = self.fullBehavior["Positions"]
-        self.positionTime = self.fullBehavior["positionTime"]
-
-        self.stopTime = self.positionTime[
-            -1
-        ]  # max(self.epochs["train"] + self.epochs["test"])
-        self.startTime = self.positionTime[0]
-
-    def nGroups(self):
-        """
-        Returns the number of groups of channels by looking at the list of channels in the .xml file.
-        """
-        return len(self.list_channels)
-
-    def numChannelsPerGroup(self):
-        """
-        Returns the number of channels per group by looking at the list of channels in the .xml file.
-        """
-        return [len(self.list_channels[n]) for n in range(self.nGroups())]
-
-    def maxPos(self):
-        maxPos = np.max(
-            self.positions[np.logical_not(np.isnan(np.sum(self.positions, axis=1)))]
-        )
-        return maxPos if self.mode != "decode" else 1
-
-    def dim_output(self):
-        """
-        Returns the number of output features by looking at the number of columns in the positions array.
-        """
-        return self.positions.shape[1]
-
-    def getThresholds(self):
-        idx = 0
-        nestedThresholds = []
-        for group in range(len(self.list_channels)):
-            temp = []
-            for channel in range(len(self.list_channels[group])):
-                temp.append(self.thresholds[idx])
-                idx += 1
-            nestedThresholds.append(temp)
-        return nestedThresholds
-
-    def setThresholds(self, thresholds):
-        assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
-        self.thresholds = [i for d in thresholds for i in d]
