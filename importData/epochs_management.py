@@ -1,48 +1,113 @@
-import csv
-import os
-import re
-import struct
-import sys
-
-import matplotlib as mplt
-import matplotlib.pyplot as plt
 import numpy as np
-import tables
-from interval import interval
 
 ########### Management of epochs ############
 
 
 # a few tool to help do difference of intervals as sets:
-def obtainCloseComplementary(epochs, boundInterval):
-    # we obtain the close complementary ( intervals share their bounds )
-    # Note: to obtain the open complementary, one would need to add some dt to end and start of intervals....
-    p1 = interval()
-    for i in range(len(epochs) // 2):
-        p1 = p1 | interval([epochs[2 * i], epochs[2 * i + 1]])
-    assert isinstance(p1, interval)
-    assert isinstance(boundInterval, interval)
-    assert len(boundInterval) == 1
-    compInterval = interval([boundInterval[0][0], p1[0][0]])
-    for i in range(len(p1) - 1):
-        compInterval = compInterval | interval([p1[i][1], p1[i + 1][0]])
-    compInterval = compInterval | interval([p1[-1][1], boundInterval[0][1]])
-    return compInterval
+def obtainCloseComplementary(epochs, bound_interval):
+    """
+    New version using numpy only.
+    Obtain the close complementary of intervals (intervals share their bounds).
+    Note: To obtain the open complementary, one would need to add some dt to the end and start of intervals.
+
+    :param epochs: List of epochs as [start1, end1, start2, end2, ...]
+    :param bound_interval: The bounding interval as [start, end]
+
+    :return: Complementary intervals as a list of [start, end, ...]
+    """
+    epochs = np.array(epochs).reshape(-1, 2)
+    bound_start, bound_end = bound_interval
+
+    complementary = []
+    if epochs[0, 0] > bound_start:
+        complementary.append([bound_start, epochs[0, 0]])
+
+    for i in range(len(epochs) - 1):
+        complementary.append([epochs[i, 1], epochs[i + 1, 0]])
+
+    if epochs[-1, 1] <= bound_end:
+        complementary.append([epochs[-1, 1], bound_end])
+
+    return np.array(complementary).reshape(-1, 2)
 
 
-def intersect_with_session(epochs, keptSession, starts, stops):
-    # we go through the different removed session epoch, and if a train epoch or a test epoch intersect with it we remove it
-    # from the train and test epochs
-    EpochInterval = interval()
-    for i in range(len(epochs) // 2):
-        EpochInterval = EpochInterval | interval([epochs[2 * i], epochs[2 * i + 1]])
-    includeInterval = interval()
-    for id, keptS in enumerate(keptSession):
-        if keptS:
-            includeInterval = includeInterval | interval([starts[id], stops[id]])
-    EpochInterval = EpochInterval & includeInterval
-    Epoch = np.ravel(np.array([[p[0], p[1]] for p in EpochInterval]))
-    return Epoch
+def intersect_with_session(epochs, kept_session, starts, stops):
+    """
+    New version using numpy only.
+    We go through the different removed session epoch, and if a train epoch or a
+    test epoch intersect with it we remove it from the train and test epochs.
+
+    :param epochs: the epochs to be intersected with the kept session
+    :param keptSession: the session kept
+    :param starts: the start of the session
+    :param stops: the stop of the session
+
+    :return: the epochs that are not intersecting with the removed session
+    """
+    epochs = np.array(epochs).reshape(-1, 2)
+    session_intervals = np.array(
+        [[starts[i], stops[i]] for i, keep in enumerate(kept_session) if keep]
+    )
+
+    intersected = []
+    for epoch in epochs:
+        for session in session_intervals:
+            start = max(epoch[0], session[0])
+            end = min(epoch[1], session[1])
+            if start < end:
+                intersected.append([start, end])
+
+    return np.array(intersected).reshape(-1, 2)
+
+
+def interval_union(comp_interval, p1, bound_interval):
+    """
+    Perform the union of intervals using NumPy.
+
+    :param comp_interval: Existing intervals as a 2D NumPy array.
+    :param p1: A 2D NumPy array of intervals.
+    :param bound_interval: A 1D NumPy array representing the bounding interval [start, end].
+    :return: Updated comp_interval with the new interval added.
+    """
+    # Create the new interval to add
+    comp_interval = np.array(comp_interval).reshape(-1, 2)
+    p1 = np.array(p1).reshape(-1, 2)
+    new_interval = np.array([[p1[-1, 1], bound_interval[1]]])
+
+    # Combine the existing intervals with the new interval
+    all_intervals = np.vstack([comp_interval, new_interval])
+
+    # Merge overlapping or adjacent intervals
+    return merge_intervals(all_intervals)
+
+
+def merge_intervals(intervals):
+    """
+    Merge overlapping or adjacent intervals.
+
+    :param intervals: A 2D NumPy array where each row is [start, end].
+    :return: A 2D NumPy array with merged intervals.
+    """
+    if len(intervals) == 0:
+        return intervals
+
+    # Sort intervals by start time
+    intervals = intervals[np.argsort(intervals[:, 0])]
+
+    # Initialize merged intervals
+    merged = [intervals[0]]
+
+    for current in intervals[1:]:
+        previous = merged[-1]
+        # Check if intervals overlap or are adjacent
+        if current[0] <= previous[1]:
+            # Merge intervals
+            merged[-1] = [previous[0], max(previous[1], current[1])]
+        else:
+            # Add non-overlapping interval
+            merged.append(current)
+
+    return np.array(merged).reshape(-1, 2)
 
 
 # Auxilliary function
@@ -74,19 +139,18 @@ def get_epochs(postime, SetData, keptSession, starts=np.empty(0), stops=np.empty
                 ],
             ]
         )
-        lossPredsetinterval = interval(lossPredSetEpochs)
-        lossPredsetinterval = lossPredsetinterval & obtainCloseComplementary(
-            testEpochs, interval([pmin, pmax])
-        )
-        lossPredSetEpochs = np.ravel(
-            np.array([[p[0], p[1]] for p in lossPredsetinterval])
+        lossPredsetinterval = obtainCloseComplementary(testEpochs, [pmin, pmax])
+        lossPredsetinterval = np.ravel(
+            interval_union(lossPredsetinterval, lossPredSetEpochs, [pmin, pmax])
         )
 
-        trainInterval = obtainCloseComplementary(
-            testEpochs, interval([pmin, pmax])
-        ) & obtainCloseComplementary(lossPredSetEpochs, interval([pmin, pmax]))
+        trainInterval = interval_union(
+            obtainCloseComplementary(testEpochs, [pmin, pmax]),
+            obtainCloseComplementary(lossPredSetEpochs, [pmin, pmax]),
+            [pmin, pmax],
+        )
     else:
-        trainInterval = obtainCloseComplementary(testEpochs, interval([pmin, pmax]))
+        trainInterval = obtainCloseComplementary(testEpochs, [pmin, pmax])
 
     trainEpoch = np.ravel(np.array([[p[0], p[1]] for p in trainInterval]))
 
@@ -108,10 +172,15 @@ def get_epochs(postime, SetData, keptSession, starts=np.empty(0), stops=np.empty
 
 
 def inEpochs(t, epochs):
-    # for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
-    # test if t is among at least one of these epochs
-    # Epochs are treated as closed interval [,]
-    # returns the index where it is the case
+    """
+    For a list of epochs, where each epochs starts is on even index [0,2,...
+    and stops on odd index: [1,3,...
+    Test if t is among at least one of these epochs
+    Epochs are treated as closed interval [,]
+
+    returns the index where it is the case
+    """
+    epochs = np.array(epochs).reshape(-1)
     mask = np.sum(
         [
             (t >= epochs[2 * i]) * (t <= epochs[2 * i + 1])
@@ -123,10 +192,20 @@ def inEpochs(t, epochs):
 
 
 def inEpochsMask(t, epochs):
-    # for a list of epochs, where each epochs starts is on even index [0,2,... and stops on odd index: [1,3,...
-    # test if t is among at least one of these epochs
-    # Epochs are treated as closed interval [,]
-    # return the mask
+    """
+    For a list of epochs, where each epochs starts is on even index [0,2,...
+    and stops on odd index: [1,3,...
+    Test if t is among at least one of these epochs
+    Epochs are treated as closed interval [,]
+    returns the mask
+
+    :param t: list of time points
+    :param epochs: list of epochs
+
+    :return: mask
+    """
+
+    epochs = np.array(epochs).reshape(-1)
     mask = np.sum(
         [
             (t >= epochs[2 * i]) * (t <= epochs[2 * i + 1])
