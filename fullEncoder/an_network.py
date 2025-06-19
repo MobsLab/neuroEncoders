@@ -427,10 +427,39 @@ class LSTMandSpikeNetwork:
                 loss_function = _get_loss_function(
                     self.params.loss, alpha=self.params.alpha
                 )
+
+            #### note
+            # bayesian loss function  = sum ((y_true - y_pred)^2 / sigma^2 + log(sigma^2))
+
+            # we assume myoutputPos is in cm x cm,
+            # as self.truePos (modulo [0,1] normalization)
+            # in ~cm2 as no loss is sqrt or log
+
+            tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
+            # for main loss functions:
+            # if loss function is mse
+            # tempPosLoss is in cm2
+            # if loss function is logcosh
+            # tempPosLoss is in cm2
+
+            transform_function = (
+                tf.identity
+                if self.params.transform is None
+                else tf.math.log
+                if self.params.transform == "log"
+                else tf.math.sqrt
             )
-            uncertaintyLoss = tf.identity(
-                tf.math.log(tf.add(preUncertaintyLoss, self.epsilon)),
-                name="UncertaintyLoss",
+            # if transform_function is log: posLoss ~ log(cm) * 0.5
+            # if transform_function is sqrt: posLoss ~ cm
+            # if transform_function is None: posLoss ~ cm2
+            cst = (
+                tf.constant(2.0) if self.params.transform == "log" else tf.constant(1.0)
+            )
+
+            posLoss = tf.identity(
+                tf.math.scalar_mul(
+                    cst, tf.math.reduce_mean(tempPosLoss), name="posLoss"
+                )
             )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
@@ -441,6 +470,10 @@ class LSTMandSpikeNetwork:
 
             # still ~ in cm2
             loss_function_PredLoss = tf.keras.losses.mean_squared_error
+            # # outputPredLoss is supposed to be in cm2 and predict the MSE loss.
+            # outputPredLoss = tf.math.scalar_mul(cst_predLoss, outputPredLoss)
+
+            # preUncertaintyLoss is in cm2^2 as it's the MSE between the predicted loss and the posLoss
             preUncertaintyLoss = loss_function_PredLoss(
                 outputPredLoss, tf.stop_gradient(tempPosLoss)
             )
@@ -817,11 +850,22 @@ class LSTMandSpikeNetwork:
                 ),
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
-            datasets[key] = (
-                datasets[key]
-                .shuffle(self.params.nSteps, reshuffle_each_iteration=True)
-                .cache()
-            )  # .repeat() #
+            # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
+            # and each mini-batch contains a representative sample of the training set.
+            # nSteps represent the buffer size of the shuffle operation - 10 seconds worth of buffer starting
+            # from the 0-timepoint of the dataset.
+            # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
+            # At each epoch, the shuffle order is different.
+
+            # datasets[key] = (
+            #     datasets[key]
+            #     .shuffle(
+            #         self.params.nSteps, reshuffle_each_iteration=True
+            #     )  # NOTE: nSteps = int(10000 * 0.036 / windowSize), 10s worth of buffer
+            #     .cache()
+            #     .repeat()
+            # )  #
+
             datasets[key] = datasets[key].prefetch(tf.data.AUTOTUNE)  #
 
         ### Train the model(s)
