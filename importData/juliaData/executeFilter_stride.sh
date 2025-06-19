@@ -12,7 +12,8 @@
 # $9: The window size in seconds
 # $10: The window stride size in fractions of window size
 
-echo "Starting Spike extraction using the julia language"
+juliaVersion=$(julia -v) 
+echo "Starting Spike extraction using the julia language with version: $juliaVersion"
 cd $1
 pwd
 julia -t auto spikeFilter_withStride.jl --projectDir=$1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11}

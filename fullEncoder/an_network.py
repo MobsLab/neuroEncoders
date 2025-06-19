@@ -22,13 +22,36 @@ from importData.epochs_management import inEpochsMask
 
 
 # We generate a model with the functional Model interface in tensorflow
-########### FULL NETWORK CLASS #####################
+########### START OF FULL NETWORK CLASS #####################
 class LSTMandSpikeNetwork:
-    def __init__(self, projectPath, params, deviceName="/device:CPU:0"):
+    """
+    LSTMandSpikeNetwork class, the main ann Class.
+
+    Parameters
+    ----------
+    projectPath : Project object
+        Contains the path to the project, the xml file, the dat file, the positions...
+
+    params : Params object
+        Contains the parameters of the network (nb of Groups, nb of channels per group, nb of features...)
+
+    deviceName : str, optional, default to CPU
+    debug : bool, optional, default to False (whether to use tf profiler with tensorboard)
+    phase : str, optional, default to None (if the nnBehavior is used in for a specific session (pre, post...))
+    """
+
+    def __init__(
+        self,
+        projectPath,
+        params,
+        deviceName="/device:CPU:0",
+        debug=False,
+        phase=None,
+    ):
         super(LSTMandSpikeNetwork, self).__init__()
         ### Main parameters here
-        self.projectPath = projectPath
-        self.params = params
+        self.projectPath = projectPath  # Project object containing the path to the project, the xml file, the dat file, the positions...
+        self.params = params  # Params object containing the parameters of the network (nb of Groups, nb of channels per group, nb of features...)
         self.deviceName = deviceName
         # Folders
         self.folderResult = os.path.join(self.projectPath.resultsPath, "results")
@@ -174,12 +197,12 @@ class LSTMandSpikeNetwork:
             # Second only with loss corresponding to predicted loss
             self.predLossModel = self.compile_model(outputs, predLossOnly=True)
 
-    def get_theweights(self, behaviorData, windowsizeMS, isPredLoss=0):
+    def get_theweights(self, behaviorData, windowSizeMS, isPredLoss=0):
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"
+                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
                 )
             )
         else:
@@ -195,16 +218,21 @@ class LSTMandSpikeNetwork:
         return wdata
 
     def generate_model(self):
+        """
+        Generate the full model with the CNN, LSTM and Dense layers.
+
+        Returns
+        -------
+        myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
+        """
         # CNN plus dense on every group independently
         with tf.device(self.deviceName):
             allFeatures = []  # store the result of the CNN computation for each group
             for group in range(self.params.nGroups):
-                x = self.inputsToSpikeNets[
-                    group
-                ]  # --> [NbKeptSpike,nbChannels,32] tensors
-                x = self.spikeNets[group].apply(
-                    x
-                )  # outputs a [NbSpikeOfTheGroup,nFeatures=self.params.nFeatures(default 128)] tensor.
+                x = self.inputsToSpikeNets[group]
+                # --> [NbKeptSpike,nbChannels,31] tensors
+                x = self.spikeNets[group].apply(x)
+                # outputs a [NbSpikeOfTheGroup,nFeatures=self.params.nFeatures(default 128)] tensor.
                 # The gather strategy:
                 #   extract the final position of the spikes
                 # Note: inputGroups is already filled with -1 at position that correspond to filling
@@ -228,9 +256,8 @@ class LSTMandSpikeNetwork:
                 # Reshaping the result of the spike net as batchSize:NbTotSpikeDetected:nFeatures
                 # this allow to separate spikes from the same window or from the same batch.
                 allFeatures.append(filledFeatureTrain)
-            allFeatures = tf.tuple(
-                tensors=allFeatures
-            )  # synchronizes the computation of all features (like a join)
+            allFeatures = tf.tuple(tensors=allFeatures)
+            # synchronizes the computation of all features (like a join)
             # The concatenation is made over axis 2, which is the Feature axis
             # So we reserve columns to each output of the spiking networks...
             allFeatures = tf.concat(allFeatures, axis=2)  # , name="concat1"
@@ -298,6 +325,20 @@ class LSTMandSpikeNetwork:
         return myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
 
     def compile_model(self, outputs, modelName="FullModel.png", predLossOnly=False):
+        """
+        Compile the model with the desired losses and optimizer.
+        The model is then plotted and saved in the results folder.
+
+        Parameters
+        ----------
+        outputs : list of tensors ( myoutputPos, outputPredLoss, posLoss, uncertaintyLoss )
+        modelName : str (default "FullModel.png")
+        predLossOnly : bool (default False)
+
+        Returns
+        -------
+        model : tf.keras.Model
+        """
         # Initialize and plot the model
         model = tf.keras.Model(
             inputs=self.inputsToSpikeNets
@@ -436,12 +477,12 @@ class LSTMandSpikeNetwork:
 
         Parameters
         ----------
-        behaviorData : dict
-        onTheFlyCorrection : bool
-        windowsizeMS : int
-        scheduler : str
-        isPredLoss : bool
-        earlyStop : bool
+        behaviorData : dict of arrays containing the times, the feature True...
+        onTheFlyCorrection : bool (default False)
+        windowSizeMS : int (default 36)
+        scheduler : str (default "decay")
+        isPredLoss : bool (default True)
+        earlyStop : bool (default False)
 
         Returns
         -------
@@ -453,42 +494,42 @@ class LSTMandSpikeNetwork:
         csvLogger = {}
         checkpointPath = {}
         # Manage folders
-        if not os.path.isdir(os.path.join(self.folderModels, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderModels, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderModels, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderModels, str(windowSizeMS)))
 
         if not os.path.isdir(
-            os.path.join(self.folderModels, str(windowsizeMS), "full")
+            os.path.join(self.folderModels, str(windowSizeMS), "full")
         ):
-            os.makedirs(os.path.join(self.folderModels, str(windowsizeMS), "full"))
+            os.makedirs(os.path.join(self.folderModels, str(windowSizeMS), "full"))
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0:
             if not os.path.isdir(
-                os.path.join(self.folderModels, str(windowsizeMS), "predLoss")
+                os.path.join(self.folderModels, str(windowSizeMS), "predLoss")
             ):
                 os.makedirs(
-                    os.path.join(self.folderModels, str(windowsizeMS), "predLoss")
+                    os.path.join(self.folderModels, str(windowSizeMS), "predLoss")
                 )
         if not os.path.isdir(
-            os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
+            os.path.join(self.folderModels, str(windowSizeMS), "savedModels")
         ):
             os.makedirs(
-                os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
+                os.path.join(self.folderModels, str(windowSizeMS), "savedModels")
             )
         # Manage callbacks
         csvLogger["full"] = tf.keras.callbacks.CSVLogger(
-            os.path.join(self.folderModels, str(windowsizeMS), "full", "fullmodel.log")
+            os.path.join(self.folderModels, str(windowSizeMS), "full", "fullmodel.log")
         )
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             csvLogger["predLoss"] = tf.keras.callbacks.CSVLogger(
                 os.path.join(
                     self.folderModels,
-                    str(windowsizeMS),
+                    str(windowSizeMS),
                     "predLoss",
                     "predLossmodel.log",
                 )
             )
         for key in csvLogger.keys():
             checkpointPath[key] = os.path.join(
-                self.folderModels, str(windowsizeMS), key + "/cp.ckpt"
+                self.folderModels, str(windowSizeMS), key + "/cp.ckpt"
             )
 
         ## Get speed filter:
@@ -498,7 +539,7 @@ class LSTMandSpikeNetwork:
         ndataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
 
@@ -633,14 +674,22 @@ class LSTMandSpikeNetwork:
                 )
                 self.losses_fig(
                     self.trainLosses[key],
-                    os.path.join(self.folderModels, str(windowsizeMS)),
+                    os.path.join(self.folderModels, str(windowSizeMS)),
                     fullModel=False,
                     valLosses=valLosses,
                 )
                 # Save model for C++ decoder
                 # print("saving full model in savedmodel format, for c++")
                 # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels,
-                #                     str(windowsizeMS), "savedModels","predLossModel"))
+                #                     str(windowSizeMS), "savedModels","predLossModel"))
+                self.predLossModel.save(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "predLossModel.keras",
+                    )
+                )
             else:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
@@ -677,22 +726,28 @@ class LSTMandSpikeNetwork:
                 )
                 self.losses_fig(
                     self.trainLosses[key],
-                    os.path.join(self.folderModels, str(windowsizeMS)),
+                    os.path.join(self.folderModels, str(windowSizeMS)),
                     valLosses=valLosses,
                 )
                 # Save model for C++ decoder
                 # self.cplusplusModel.predict(datasets['train'])
                 # print("saving full model in savedmodel format, for c++")
-                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
-            self.model.save(
-                os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
-            )
+                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowSizeMS), "savedModels","fullModel"))
+                self.model.save(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "fullModel.keras",
+                    )
+                )
+            wandb.tensorboard.unpatch()
 
     def train_binary(
         self,
         behaviorData,
         onTheFlyCorrection=False,
-        windowsizeMS=36,
+        windowSizeMS=36,
         scheduler="decay",
         isPredLoss=True,
         earlyStop=False,
@@ -703,42 +758,42 @@ class LSTMandSpikeNetwork:
         csvLogger = {}
         checkpointPath = {}
         # Manage folders
-        if not os.path.isdir(os.path.join(self.folderModels, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderModels, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderModels, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderModels, str(windowSizeMS)))
 
         if not os.path.isdir(
-            os.path.join(self.folderModels, str(windowsizeMS), "full")
+            os.path.join(self.folderModels, str(windowSizeMS), "full")
         ):
-            os.makedirs(os.path.join(self.folderModels, str(windowsizeMS), "full"))
+            os.makedirs(os.path.join(self.folderModels, str(windowSizeMS), "full"))
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0:
             if not os.path.isdir(
-                os.path.join(self.folderModels, str(windowsizeMS), "predLoss")
+                os.path.join(self.folderModels, str(windowSizeMS), "predLoss")
             ):
                 os.makedirs(
-                    os.path.join(self.folderModels, str(windowsizeMS), "predLoss")
+                    os.path.join(self.folderModels, str(windowSizeMS), "predLoss")
                 )
         if not os.path.isdir(
-            os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
+            os.path.join(self.folderModels, str(windowSizeMS), "savedModels")
         ):
             os.makedirs(
-                os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
+                os.path.join(self.folderModels, str(windowSizeMS), "savedModels")
             )
         # Manage callbacks
         csvLogger["full"] = tf.keras.callbacks.CSVLogger(
-            os.path.join(self.folderModels, str(windowsizeMS), "full", "fullmodel.log")
+            os.path.join(self.folderModels, str(windowSizeMS), "full", "fullmodel.log")
         )
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             csvLogger["predLoss"] = tf.keras.callbacks.CSVLogger(
                 os.path.join(
                     self.folderModels,
-                    str(windowsizeMS),
+                    str(windowSizeMS),
                     "predLoss",
                     "predLossmodel.log",
                 )
             )
         for key in csvLogger.keys():
             checkpointPath[key] = os.path.join(
-                self.folderModels, str(windowsizeMS), key + "/cp.ckpt"
+                self.folderModels, str(windowSizeMS), key + "/cp.ckpt"
             )
 
         ## Get speed filter:
@@ -748,7 +803,7 @@ class LSTMandSpikeNetwork:
         ndataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
         ndataset = ndataset.map(
@@ -881,14 +936,22 @@ class LSTMandSpikeNetwork:
                 )
                 self.losses_fig(
                     self.trainLosses[key],
-                    os.path.join(self.folderModels, str(windowsizeMS)),
+                    os.path.join(self.folderModels, str(windowSizeMS)),
                     fullModel=False,
                     valLosses=valLosses,
                 )
                 # Save model for C++ decoder
                 # print("saving full model in savedmodel format, for c++")
                 # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels,
-                #                     str(windowsizeMS), "savedModels","predLossModel"))
+                #                     str(windowSizeMS), "savedModels","predLossModel"))
+                self.predLossModel.save(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "predLossModel.keras",
+                    )
+                )
             else:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
@@ -925,41 +988,46 @@ class LSTMandSpikeNetwork:
                 )
                 self.losses_fig(
                     self.trainLosses[key],
-                    os.path.join(self.folderModels, str(windowsizeMS)),
+                    os.path.join(self.folderModels, str(windowSizeMS)),
                     valLosses=valLosses,
                 )
                 # Save model for C++ decoder
                 # self.cplusplusModel.predict(datasets['train'])
                 # print("saving full model in savedmodel format, for c++")
-                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowsizeMS), "savedModels","fullModel"))
-            self.model.save(
-                os.path.join(self.folderModels, str(windowsizeMS), "savedModels")
-            )
+                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowSizeMS), "savedModels","fullModel"))
+                self.model.save(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "fullModel.keras",
+                    )
+                )
 
     def test_binary(
         self,
         behaviorData,
         l_function=[],
-        windowsizeMS=36,
+        windowSizeMS=36,
         useSpeedFilter=False,
         useTrain=False,
         onTheFlyCorrection=False,
         isPredLoss=False,
     ):
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"
+                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
                 )
             )
         else:
             self.model.load_weights(
-                os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt")
+                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
             )
 
         # Manage the behavior
@@ -1088,24 +1156,24 @@ class LSTMandSpikeNetwork:
         behaviorData,
         modelPath,
         l_function=[],
-        windowsizeMS=36,
+        windowSizeMS=36,
         useSpeedFilter=False,
         useTrain=False,
         onTheFlyCorrection=False,
         isPredLoss=False,
     ):
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
-                os.path.join(modelPath, str(windowsizeMS), "predLoss" + "/cp.ckpt")
+                os.path.join(modelPath, str(windowSizeMS), "predLoss" + "/cp.ckpt")
             )
         else:
             self.model.load_weights(
-                os.path.join(modelPath, str(windowsizeMS), "full" + "/cp.ckpt")
+                os.path.join(modelPath, str(windowSizeMS), "full" + "/cp.ckpt")
             )
 
         # Manage the behavior
@@ -1127,7 +1195,7 @@ class LSTMandSpikeNetwork:
         dataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
         dataset = dataset.map(
@@ -1240,19 +1308,19 @@ class LSTMandSpikeNetwork:
         isPredLoss=False,
     ):
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"
+                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
                 )
             )
         else:
             self.model.load_weights(
-                os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt")
+                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
             )
 
         # Manage the behavior
@@ -1274,7 +1342,7 @@ class LSTMandSpikeNetwork:
         dataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
         dataset = dataset.map(
@@ -1372,7 +1440,7 @@ class LSTMandSpikeNetwork:
             testOutput["linearTrue"] = linearTrue
 
         # Save the results
-        self.saveResults(testOutput, folderName=windowsizeMS)
+        self.saveResults(testOutput, folderName=windowSizeMS)
 
         return testOutput
 
@@ -1381,7 +1449,7 @@ class LSTMandSpikeNetwork:
         behaviorData,
         l_function=[],
         windowSizeDecoder=None,
-        windowsizeMS=36,
+        windowSizeMS=36,
         isPredLoss=False,
     ):
         """
@@ -1394,21 +1462,21 @@ class LSTMandSpikeNetwork:
             - Times : dict with sleepNames and sleepEpochs keys
         l_function : list
         windowSizeDecoder : int
-        windowsizeMS : int
+        windowSizeMS : int
         isPredLoss : bool
         """
         # Create the folder
         if windowSizeDecoder is None:
-            folderName = str(windowsizeMS)
+            folderName = str(windowSizeMS)
             if not os.path.isdir(os.path.join(self.folderResultSleep, folderName)):
                 os.makedirs(os.path.join(self.folderResultSleep, folderName))
         else:
-            folderName = f"{str(windowsizeMS)}_by_{str(windowSizeDecoder)}"
+            folderName = f"{str(windowSizeMS)}_by_{str(windowSizeDecoder)}"
             if not os.path.isdir(os.path.join(self.folderResultSleep, folderName)):
                 os.makedirs(os.path.join(self.folderResultSleep, folderName))
 
         if windowSizeDecoder is None:
-            windowSizeDecoder = windowsizeMS
+            windowSizeDecoder = windowSizeMS
 
         # Loading the weights
         print("Loading the weights of the trained network")
@@ -1435,7 +1503,7 @@ class LSTMandSpikeNetwork:
             dataset = tf.data.TFRecordDataset(
                 os.path.join(
                     self.projectPath.dataPath,
-                    ("datasetSleep" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                    ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
                 )
             )
             dataset = dataset.map(
@@ -1519,25 +1587,25 @@ class LSTMandSpikeNetwork:
     def get_artificial_spikes(
         self,
         behaviorData,
-        windowsizeMS=36,
+        windowSizeMS=36,
         useSpeedFilter=False,
         useTrain=False,
         isPredLoss=False,
     ):
         # Create the folder
-        if not os.path.isdir(os.path.join(self.folderResult, str(windowsizeMS))):
-            os.makedirs(os.path.join(self.folderResult, str(windowsizeMS)))
+        if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
+            os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowsizeMS), "predLoss" + "/cp.ckpt"
+                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
                 )
             )
         else:
             self.model.load_weights(
-                os.path.join(self.folderModels, str(windowsizeMS), "full" + "/cp.ckpt")
+                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
             )
 
         # Manage the behavior
@@ -1634,9 +1702,9 @@ class LSTMandSpikeNetwork:
 
         return aSpikes
 
-    ########### FULL NETWORK CLASS #####################
+    ########### END OF FULL NETWORK CLASS #####################
 
-    ########### HELPING LSTMandSpikeNetwork FUNCTIONS#####################
+    ########### START OF HELPING LSTMandSpikeNetwork FUNCTIONS#####################
     class LRScheduler:
         def __init__(self, lrs):
             self.lrs = lrs
@@ -1709,8 +1777,7 @@ class LSTMandSpikeNetwork:
             if self.params.usingMixedPrecision:
                 vals.update(
                     {
-                        "group"
-                        + str(group): tf.cast(
+                        "group" + str(group): tf.cast(
                             vals["group" + str(group)], dtype=tf.float16
                         )
                     }
@@ -1731,13 +1798,14 @@ class LSTMandSpikeNetwork:
             df.to_csv(os.path.join(folderModels, "full", "fullModelLosses.csv"))
             # Plot the figure'
             fig, ax = plt.subplots(2, 1)
-            ax[0].plot(trainLosses[:, 0])
+            ax[0].plot(trainLosses[:, 0], label="train losses")
             ax[0].set_title("position loss")
             ax[0].plot(valLosses[:, 0], label="validation position loss", c="orange")
-            ax[1].plot(trainLosses[:, 1])
+            ax[1].plot(trainLosses[:, 1], label="train loss prediction loss")
             ax[1].set_title("log loss prediction loss")
             ax[1].plot(valLosses[:, 1], label="validation log loss prediction loss")
             fig.legend()
+            fig.tight_layout()
             fig.savefig(os.path.join(folderModels, "full", "fullModelLosses.png"))
         else:
             # Save the data
@@ -1748,6 +1816,7 @@ class LSTMandSpikeNetwork:
             ax.plot(trainLosses[:, 0])
             if list(valLosses):
                 ax.plot(valLosses)
+            fig.tight_layout()
             fig.savefig(
                 os.path.join(folderModels, "predLoss", "predLossModelLosses.png")
             )
@@ -2461,7 +2530,7 @@ class LSTMandSpikeNetwork_control:
         dataset = tf.data.TFRecordDataset(
             os.path.join(
                 self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         )
         dataset = dataset.map(

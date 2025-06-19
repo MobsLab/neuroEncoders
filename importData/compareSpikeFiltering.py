@@ -42,7 +42,7 @@ class WaveFormComparator:
         self.behavior_data = behavior_data
         self.useTrain = useTrain
         self.sleepName = sleepName
-        self.windowsizeMS = windowsizeMS
+        self.windowSizeMS = windowSizeMS
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
         self.feat_desc = {
@@ -64,7 +64,7 @@ class WaveFormComparator:
 
         # Manage folder
         self.alignedDataPath = os.path.join(
-            self.projectPath.dataPath, "aligned", str(windowsizeMS)
+            self.projectPath.dataPath, "aligned", str(windowSizeMS)
         )
         if not os.path.isdir(self.alignedDataPath):
             os.makedirs(self.alignedDataPath)
@@ -93,14 +93,14 @@ class WaveFormComparator:
             dataset = tf.data.TFRecordDataset(
                 os.path.join(
                     self.projectPath.dataPath,
-                    ("datasetSleep" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                    ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
                 )
             )
         else:
             dataset = tf.data.TFRecordDataset(
                 os.path.join(
                     self.projectPath.dataPath,
-                    ("dataset" + "_stride" + str(windowsizeMS) + ".tfrec"),
+                    ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
                 )
             )
         self.dataset = dataset.map(
@@ -142,7 +142,7 @@ class WaveFormComparator:
         )
 
     def save_alignment_tools(
-        self, trainerBayes, linearizationFunction, windowsizeMS=36
+        self, trainerBayes, linearizationFunction, windowSizeMS=36
     ):
         # Manage folder
         if self.useTrain:
@@ -154,14 +154,16 @@ class WaveFormComparator:
                 foldertosave = os.path.join(self.alignedDataPath, "test")
         if not os.path.isdir(foldertosave):
             os.makedirs(foldertosave)
-        if os.path.isfile(os.path.join(foldertosave, "spikeMat_times_window.csv")):
+        if os.path.isfile(
+            os.path.join(foldertosave, f"spikeMat_times_window{self.suffix}.csv")
+        ):
             return
 
         # Get data
         self.get_data()
         if not hasattr(trainerBayes, "linearPreferredPos"):
             _ = trainerBayes.train_order_by_pos(
-                self.behavior_data, linearizationFunction
+                self.behavior_data, l_function=linearizationFunction
             )
         # gather all windows in the tensorflow dataset
         inputNN = self.get_NNdataset_spikepos()
@@ -191,7 +193,7 @@ class WaveFormComparator:
             np.logical_not(np.isnan(startTimeWindowInSamples))
         ]
         stopTimeWindowInSamples = goodStartTimeWindowInSamples + int(
-            windowsizeMS / 1000 * self.samplingRate
+            windowSizeMS / 1000 * self.samplingRate
         )
 
         ### Mapping spike sorted spike times to windows
@@ -228,7 +230,9 @@ class WaveFormComparator:
 
         ### Saving
         df = pd.DataFrame(spikeMat_window_popVector)
-        df.to_csv(os.path.join(foldertosave, "spikeMat_window_popVector.csv"))
+        df.to_csv(
+            os.path.join(foldertosave, f"spikeMat_window_popVector{self.suffix}.csv")
+        )
         df = pd.DataFrame(meanTimeWindow)
         df.to_csv(os.path.join(foldertosave, "meanTimeWindow.csv"))
         df = pd.DataFrame(spikeMat_times_window)
