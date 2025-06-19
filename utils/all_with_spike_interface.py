@@ -1,3 +1,4 @@
+#!/home/mickey/miniconda3/envs/neuroencoders/bin/python3.10
 """
 Here is an example of opening viewers directly from spikeinterface objects : recording and sorting.
 
@@ -12,44 +13,100 @@ the clean signal.
 
 """
 
-import argparse
 import os
+import sys
 
 import ephyviewer
+import numpy as np
 import spikeinterface.full as si
-from matplotlib import colormaps
-from matplotlib.colors import rgb2hex
+import spikeinterface.extractors as se
 
-argparser = argparse.ArgumentParser(description="View Neuroscope data")
-argparser.add_argument("--filename", "-f", type=str, help="Path to Neuroscope data")
-args = argparser.parse_args()
+# filename is the first argument
 
-recording = si.NeuroScopeRecordingExtractor(file_path=args.filename)
+filename = sys.argv[1]
 
-channel_groups = recording.get_channel_groups()
+recording = se.extractor_classes.NeuroScopeRecordingExtractor(file_path=filename)
+recording._set_neuroscope_groups()
 
+channel_groups = recording.get_property("neuroscope_group")
+num_channels = recording.get_num_channels()
 
 sig_source = ephyviewer.SpikeInterfaceRecordingSource(recording=recording)
 
 app = ephyviewer.mkQApp()
-win = ephyviewer.MainViewer(debug=True, show_auto_scale=True)
+win = ephyviewer.MainViewer(show_auto_scale=False)
 
 view = ephyviewer.TraceViewer(source=sig_source, name="signals")
 
+view.params["scale_mode"] = "by_channel"
 view.params["scale_mode"] = "same_for_all"
 view.params["display_labels"] = True
+view.params["auto_scale_factor"] = 0.25
 
-cmap = colormaps["tab20"].colors
+colors = recording.get_property("colors")
+discarded = recording.get_property("discarded_channels")
 
-for group_id, numbers in enumerate(channel_groups):
-    channel_id = recording.get_channel_ids()[numbers]
-    view.by_channel_params[f"ch{group_id}", "color"] = rgb2hex(cmap[numbers])
+# Set a group-based offset: the first group will start at n_channels, and then each channel will get -1, until the last channel from the last group, which will be at 0.
+# This way, the first group will be at the top of the plot, and the last group will be at the bottom.:
 
+# 1. Get the number of channels in each group
+group_id, group_sizes = np.unique(channel_groups, return_counts=True)
+# 2. Calculate the offsets for each group
+group_offsets = [sum(group_sizes[:i]) for i in range(len(group_sizes))]
+# 3. Create a list of offsets for each channel by starting at n_channels and then subtracting the index of the channel in the group
+# prefill the offsets with zeros
+offsets = np.zeros(num_channels, dtype=int)
+for group_id in channel_groups:
+    group_offset = group_offsets[group_id]
+    group_channels = np.where(channel_groups == group_id)[0]
+    # Assign the offset for each channel in the group
+    for i, channel in enumerate(group_channels):
+        offsets[channel] = num_channels - 1 - group_offset - i
+# 5. Set the colors and visibility for each channel
+for i, channel in enumerate(channel_groups):
+    view.by_channel_params[f"ch{i}", "color"] = colors[i]
+    if discarded[i]:
+        view.by_channel_params[f"ch{i}", "visible"] = False
 
 view.auto_scale()
 
+current_offsets = np.array(
+    [view.by_channel_params["ch{}".format(i), "offset"] for i in range(num_channels)]
+)
+
+# get indices where the offsets are different by more than 20%
+indices = np.where(np.abs(current_offsets - offsets) > 0.2 * current_offsets)[0]
+
+# 4. Set the offsets for each channel in the view
+for idx in indices:
+    view.by_channel_params[f"ch{idx}", "offset"] = offsets[idx]
+
 win.add_view(view)
 
+# check if the same filename that ends with .clu.1 exists
+if os.path.exists(os.path.splitext(filename)[0] + ".clu.1") or os.path.exists(
+    os.path.splitext(filename)[0] + ".clu.2"
+):
+    try:
+        sorting = si.read_neuroscope_sorting(
+            folder_path=os.path.dirname(filename),
+            xml_file_path=filename.replace(".dat", ".xml"),
+        )
+    except Exception:
+        try:
+            sorting = si.read_neuroscope_sorting(
+                folder_path=os.path.dirname(filename),
+                xml_file_path=filename.replace(".fil", ".xml"),
+            )
+        except Exception:
+            sorting = si.read_neuroscope_sorting(
+                folder_path=os.path.dirname(filename),
+                xml_file_path=filename.replace(".lfp", ".xml"),
+            )
+    spike_source = ephyviewer.SpikeInterfaceSortingSource(sorting=sorting)
+    view2 = ephyviewer.SpikeTrainViewer(source=spike_source, name="spikes")
+
+    win.add_view(view2)
 
 win.show()
 app.exec()
