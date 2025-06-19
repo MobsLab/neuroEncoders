@@ -213,7 +213,7 @@ def main(args):
                 NNTrainer.folderModels,
                 str(windowSizeMS),
                 "savedModels",
-                "predLossModel",
+                "predLossModel.keras",
             )
         else:
             modelPath = os.path.join(
