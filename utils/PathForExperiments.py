@@ -2,7 +2,7 @@
 
 import os
 import warnings
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 import scipy.io
 
