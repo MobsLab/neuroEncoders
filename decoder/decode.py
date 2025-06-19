@@ -46,7 +46,12 @@ class Decoder:
         # Load model
         with tf.device(self.deviceName):
             self.model = tf.keras.models.load_model(
-                os.path.join(self.projectPath.graph, str(windowSizeMS), "savedModels")
+                os.path.join(
+                    self.projectPath.graph,
+                    str(windowSizeMS),
+                    "savedModels",
+                    "fullModel.keras",
+                )
             )
         # The featDesc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
