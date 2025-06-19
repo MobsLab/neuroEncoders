@@ -27,32 +27,67 @@ Behavior=importdata(strcat(folderData,'behavResources.mat'));
 disp('Data Loaded.')
 
 disp(['target: ', target]);
-if strcmp(target, 'pos')
+if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndThigmo') || strcmp(target, 'thigmo') || strcmp(target, 'LinAndDirection')
     try
         X = Data(Behavior.("CleanAlignedXtsd"));
         Y = Data(Behavior.("CleanAlignedYtsd"));
         T = Range(Behavior.("CleanAlignedXtsd"), 's');
+
+        % check if the speed is not just NaN nan_values: if it is, go to next catch
+        if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
+            error('CleanAlignedXtsd or CleanAlignedYtsd contained only NaN values');
+        end
     catch
         try
             X = Data(Behavior.("AlignedXtsd"));
             Y = Data(Behavior.("AlignedYtsd"));
             T = Range(Behavior.("AlignedXtsd"), 's');
+            if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
+                error('AlignedXtsd or AlignedYtsd contained only NaN values');
+            end
         catch
-            warning('No aligned data found, using raw data.')
-            X = Data(Behavior.("Xtsd"));
-            Y = Data(Behavior.("Ytsd"));
-            T = Range(Behavior.("Xtsd"), 's');
+            try
+                X = Data(Behavior.("CleanXtsd"));
+                Y = Data(Behavior.("CleanYtsd"));
+                T = Range(Behavior.("CleanXtsd"), 's');
+                if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
+                    error('CleanXtsd or CleanYtsd contained only NaN values');
+                end
+            catch
+                warning('No aligned nor clean data found, using raw data.')
+                X = Data(Behavior.("Xtsd"));
+                Y = Data(Behavior.("Ytsd"));
+                T = Range(Behavior.("Xtsd"), 's');
+                if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
+                    error('Xtsd or Ytsd contained only NaN values');
+                end
+            end
         end
     end
-    V = Data(Behavior.("Vtsd"));
     behavior.positions     = [X Y];
     behavior.position_time = T;
-    behavior.speed = V;
 else
     % TODO: check if the target exists and refine the script for other targets
-    behavior.positions       = Data(Behavior.(target));
-    behavior.position_time   = Range(Behavior.(target), 's');
+    disp(['Extracting ', target])
+    try
+        behavior.positions       = Data(Behavior.(target));
+        behavior.position_time   = Range(Behavior.(target), 's');
+    catch error
+        disp(['Error: ', error.message])
+        disp(['The target ', target, ' does not exist in the tsd file'])
+        return
+    end
 end
+try
+    V = Data(Behavior.("CleanVtsd"));
+    % check if the speed is not just NaN nan_values
+    if all(isnan(V))
+        V = Data(Behavior.("Vtsd"));
+    end
+catch
+    V = Data(Behavior.("Vtsd"));
+end
+behavior.speed = V;
 
 if isfield(Behavior,'SessionEpoch')
     sessionNames = fieldnames(Behavior.SessionEpoch);
@@ -96,6 +131,13 @@ if isfield(Behavior,'SessionEpoch')
     end
 end
 
+% % Get rid of any Nan values
+% nan_values = isnan(behavior.positions(:,1));
+% behavior.positions(nan_values,:) = [];
+% behavior.position_time(nan_values) = [];
+% behavior.speed(nan_values) = [];
+
+% Save the behavior data
 save(strcat(folderData,'nnBehavior.mat'),'behavior','-v7.3');
 disp('Behavior is successfully extracted')
 end
