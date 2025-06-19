@@ -8,6 +8,7 @@
 
 import os
 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import matplotlib.pyplot as plt
 
 # Get common libraries

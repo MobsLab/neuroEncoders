@@ -1,4 +1,4 @@
-# Load libs
+# Load lib
 # TODO: really need to import the whole folder?
 # sys.path.append("neuroEncoders-master")
 import math
@@ -130,7 +130,7 @@ class Trainer:
             speed_mask = behaviorData["Times"]["speedFilter"][matching_pos_time]
             tSpeedFilt += [speed_mask]
         # Check for bandwidth
-        if self.bandwidth == None:
+        if self.bandwidth is None:
             self.bandwidth = behaviorData["Bandwidth"]
         # Work with position coordinates
         selPositions = behaviorData["Positions"][
@@ -797,9 +797,9 @@ class Trainer:
                 # probability moved back to linear scale
                 positionProba = np.exp(positionProba) / np.sum(np.exp(positionProba))
                 inferResults[bin, 2] = np.max(positionProba)
-                inferResults[
-                    np.isnan(inferResults[:, 2]), 2
-                ] = 0  # to correct for overflow
+                inferResults[np.isnan(inferResults[:, 2]), 2] = (
+                    0  # to correct for overflow
+                )
 
             inferResultsDic[sleepName] = {
                 "featurePred": inferResults[:, :2],
@@ -888,9 +888,28 @@ def find_next_bin(times, clusters, start, stop, start_time, stop_time):
 def parallel_pred_as_NN(
     firstSpikeNNtime, windowSize, allPoisson, clusters, clustersTime, logRF, occupancy
 ):
+    """
+    Predict the position of the animal using a Bayesian approach, in parallel over all bins.
+
+    Args:
+    --------
+        firstSpikeNNtime: array, time of the first spike in the neural network.
+        windowSize: float, size of the window in seconds.
+        allPoisson: array, Poisson term for each tetrode.
+        clusters: list of arrays, clusters for each tetrode.
+        clustersTime: list of arrays, time of the spikes for each tetrode.
+        logRF: list of arrays, log rate functions for each tetrode.
+        occupancy: array, occupancy probability for the position.
+
+    Returns:
+    --------
+        outputPos: tuple, predicted position and probability.
+
+
     # Use pykeops library to perform an efficient computation of the predicted position, in parallel over all bins.
     # Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
     # Here everything in log scale to avoid numerical overflow
+    """
 
     binStartTime = firstSpikeNNtime
     binStopTime = binStartTime + windowSize
@@ -983,7 +1002,7 @@ class LegacyTrainer:
             tetrode_speed_filter_spiketimes += [speed_mask]
 
         # Check for bandwidth
-        if self.bandwidth == None:
+        if self.bandwidth is None:
             self.bandwidth = behavior_data["Bandwidth"]
         # Work with position coordinates
         selected_positions = behavior_data["Positions"][

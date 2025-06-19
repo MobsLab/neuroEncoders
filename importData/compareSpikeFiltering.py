@@ -33,7 +33,7 @@ class WaveFormComparator:
         projectPath,
         params,
         behavior_data,
-        windowsizeMS=36,
+        windowSizeMS=36,
         useTrain=True,
         sleepName=[],
     ):  # todo allow for speed filtering

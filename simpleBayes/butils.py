@@ -50,6 +50,8 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
     feature = feature.reshape(
         [feature.shape[0], -1]
     )  # make sure feature is of the shape [N,n]
+    feature = feature[~np.isnan(feature).any(axis=1)]  # remove NaNs
+
     kernel = kwargs.get("kernel", "gaussian")  #'epanechnikov'
     if "edges" in kwargs:
         gridFeature = kwargs["edges"]
