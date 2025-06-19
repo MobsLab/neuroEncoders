@@ -2,8 +2,6 @@
 import glob
 import os
 import sys
-import xml.etree.ElementTree as ET
-from functools import reduce
 
 import numpy as np
 import pandas as pd

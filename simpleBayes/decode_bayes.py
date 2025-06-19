@@ -5,8 +5,9 @@ import math
 import os
 import sys
 from functools import reduce
-from time import sleep
+from typing import Literal
 
+import dill as pickle
 import numpy as np
 import pykeops as pykeops
 
@@ -19,30 +20,71 @@ from importData.epochs_management import inEpochs
 
 # Load custom code
 from simpleBayes import butils
-from transformData.linearizer import UMazeLinearizer
 
 # !!!! TODO: all train-test in one function, too much repetition
 # TODO: option to remove zero cluster from training and testing
+
+pykeops.set_verbose(False)
 
 
 # trainer class
 class Trainer:
     def __init__(
-        self, projectPath, bandwidth=None, kernel="gaussian", maskingFactor=20
+        self,
+        projectPath,
+        bandwidth=None,
+        kernel="gaussian",
+        maskingFactor=20,
+        phase: Literal[
+            "all",
+            "pre",
+            "preNoHab",
+            "hab",
+            "cond",
+            "post",
+            "postNoExtinction",
+            "extinction",
+            None,
+        ] = None,
+        **kwargs,
     ):  # 'epanechnikov' - TODO?
+        self.phase = phase
         self.projectPath = projectPath
         self.bandwidth = bandwidth
         self.kernel = kernel
         self.maskingFactor = maskingFactor
-        self.clusterData = import_clusters.load_spike_sorting(self.projectPath)
+        self.clusterData = import_clusters.load_spike_sorting(
+            self.projectPath, phase=phase
+        )
         # Folders
-        self.folderResult = os.path.join(self.projectPath.resultsPath, "results")
+        try:
+            self.folderResult = os.path.join(self.projectPath.folderResult)
+        except AttributeError:
+            self.folderResult = os.path.join(self.projectPath.experimentPath, "results")
         if not os.path.isdir(self.folderResult):
             os.makedirs(self.folderResult)
 
-    def train_order_by_pos(
-        self, behaviorData, linearization_function, onTheFlyCorrection=False
-    ):  # bandwidth=0.05
+    def train_order_by_pos(self, behaviorData, *args, **kwargs):  # bandwidth=0.05
+        # l_function, onTheFlyCorrection=False
+
+        """
+        Train the model and order the clusters by their preferred position.
+        Args:
+            behaviorData: dict, containing the position and time data.
+            l_function: callable, optional linearization function.
+            onTheFlyCorrection: bool, whether to correct the positions on the fly.
+
+        Returns:
+            bayesMatrices: dict, containing the trained matrices for Bayesian inference.
+        """
+
+        # Get kwargs parameters
+        if len(args) > 0:
+            l_function = args[1]
+        else:
+            l_function = kwargs.get("l_function", None)
+        onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
+
         # Gather all spikes in large array and sort it in time
         nbSpikes = [a.shape[0] for a in self.clusterData["Spike_labels"]]
         nbNeurons = [a.shape[1] for a in self.clusterData["Spike_labels"]]
@@ -60,9 +102,9 @@ class Trainer:
                     "Spike_times"
                 ][id]
             else:
-                spikeMatLabels[
-                    0 : cnbSpikes[id], 0 : cnbNeurons[id]
-                ] = self.clusterData["Spike_labels"][id]
+                spikeMatLabels[0 : cnbSpikes[id], 0 : cnbNeurons[id]] = (
+                    self.clusterData["Spike_labels"][id]
+                )
                 spikeMatTimes[0 : cnbSpikes[id], :] = self.clusterData["Spike_times"][
                     id
                 ]
@@ -95,13 +137,13 @@ class Trainer:
                             ]
                         ]
         preferredPos = np.array(preferredPos)
-        _, linearPreferredPos = linearization_function(preferredPos)
+        _, linearPreferredPos = l_function(preferredPos)
         self.linearPosArgSort = np.argsort(linearPreferredPos)
         self.linearPreferredPos = linearPreferredPos[self.linearPosArgSort]
         self.spikeMatLabels = self.spikeMatLabels[:, self.linearPosArgSort]
         bs = [np.stack(b) for b in bayesMatrices["rateFunctions"]]
         placefields = np.concatenate(bs)
-        self.orderdePlaceFields = placefields[self.linearPosArgSort, :]
+        self.orderedPlaceFields = placefields[self.linearPosArgSort, :]
 
         return bayesMatrices
 
@@ -265,30 +307,40 @@ class Trainer:
             "spikePositions": spikePositions,
             "mutualInfo": mutualInfo,
         }
+
+        # save the bayes matrices
+        with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
+            pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+
         return bayesMatrices
 
-    def test_legacy(self, bayesMatrices, behaviorData, windowSizeMS=36):
+    def test_legacy(self, bayesMatrices, behaviorData, windowSizeMS=36, useTrain=False):
         windowSizeMS = windowSizeMS / 1000
 
         print("\nBUILDING POSITION PROBAS")
         # find the spikes times in the test epochs
+        if useTrain:
+            epochsTrain = inEpochs(
+                self.clusterData["Spike_times"][0][:, 0],
+                behaviorData["Times"]["trainEpochs"],
+            )
+            epochsTest = inEpochs(
+                self.clusterData["Spike_times"][0][:, 0],
+                behaviorData["Times"]["testEpochs"],
+            )
+            epochs = np.sort(np.concatenate([epochsTrain[0], epochsTest[0]]))
+        else:
+            epochs = inEpochs(
+                self.clusterData["Spike_times"][0][:, 0],
+                behaviorData["Times"]["testEpochs"],
+            )
         guessed_clusters_time = [
-            self.clusterData["Spike_times"][tetrode][
-                inEpochs(
-                    self.clusterData["Spike_times"][tetrode][:, 0],
-                    behaviorData["Times"]["testEpochs"],
-                )
-            ]
+            self.clusterData["Spike_times"][tetrode][epochs]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
         # find the clusters/mua in the test epochs
         guessed_clusters = [
-            self.clusterData["Spike_labels"][tetrode][
-                inEpochs(
-                    self.clusterData["Spike_times"][tetrode][:, 0],
-                    behaviorData["Times"]["testEpochs"],
-                )
-            ]
+            self.clusterData["Spike_labels"][tetrode][epochs]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
 
@@ -479,24 +531,62 @@ class Trainer:
         windowSizeMS=36,
         useTrain=False,
         sleepEpochs=[],
+        l_function=None,
+        **kwargs,
     ):
+        """
+        Test the model using the neural network approach.
+
+        Args:
+        --------
+            behaviorData: dict, containing the position and time data.
+            bayesMatrices: dict, containing the precomputed matrices for Bayesian inference.
+            timeStepPred: array, time steps for prediction.
+            windowSizeMS: int, size of the window in milliseconds.
+            useTrain: bool, whether to use training epochs for prediction.
+            sleepEpochs: list, epochs to consider for sleep decoding.
+            l_function: callable, optional linearization function.
+
+        Returns:
+        --------
+            outputResults: dict, containing the predicted positions, probabilities, and true positions.
+
+        """
         windowSize = windowSizeMS / 1000
 
         if useTrain:
+            epochsTrain = [
+                inEpochs(
+                    self.clusterData["Spike_times"][tetrode][:, 0],
+                    behaviorData["Times"]["trainEpochs"],
+                )
+                for tetrode in range(len(self.clusterData["Spike_times"]))
+            ]
+            epochsTest = [
+                inEpochs(
+                    self.clusterData["Spike_times"][tetrode][:, 0],
+                    behaviorData["Times"]["testEpochs"],
+                )
+                for tetrode in range(len(self.clusterData["Spike_times"]))
+            ]
             clustersTime = [
                 self.clusterData["Spike_times"][tetrode][
-                    inEpochs(
-                        self.clusterData["Spike_times"][tetrode][:, 0],
-                        behaviorData["Times"]["trainEpochs"],
+                    np.sort(
+                        np.concatenate(
+                            [epochsTrain[tetrode][0], epochsTest[tetrode][0]],
+                            axis=0,
+                        )
                     )
                 ]
                 for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
             clusters = [
                 self.clusterData["Spike_labels"][tetrode][
-                    inEpochs(
-                        self.clusterData["Spike_times"][tetrode][:, 0],
-                        behaviorData["Times"]["trainEpochs"],
+                    np.sort(
+                        np.concatenate(
+                            [epochsTrain[tetrode][0], epochsTest[tetrode][0]],
+                            axis=0,
+                        )
                     )
                 ]
                 for tetrode in range(len(self.clusterData["Spike_times"]))
@@ -655,6 +745,14 @@ class Trainer:
             "featureTrue": featTrue,
             "speed_mask": behaviorData["Times"]["speedFilter"],
         }  # , "probaMaps": position_proba
+
+        if l_function:
+            projPredPos, linearPred = l_function(inferResults[:, :2])
+            projTruePos, linearTrue = l_function(featTrue)
+            outputResults["projPred"] = projPredPos
+            outputResults["projTruePos"] = projTruePos
+            outputResults["linearPred"] = linearPred
+            outputResults["linearTrue"] = linearTrue
 
         return outputResults
 
@@ -830,7 +928,7 @@ class Trainer:
             )
         )
         epochForField = np.array([minTime, maxTime])
-        linearTraj = linearization_function(behaviorData["Positions"])[1]
+        _, linearTraj = linearization_function(behaviorData["Positions"])
         timesMask = inEpochs(np.squeeze(behaviorData["positionTime"]), epochForField)[0]
         timeLinear = np.squeeze(behaviorData["positionTime"][timesMask, :])
         linearTraj = linearTraj[timesMask]
