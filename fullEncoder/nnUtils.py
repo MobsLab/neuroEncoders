@@ -147,7 +147,6 @@ def create_attention_mask_from_padding_mask(padding_mask):
     attention_mask = tf.cast(padding_mask, tf.float32)
 
     # Create 4D mask for attention: [batch_size, 1, seq_len, seq_len]
-    batch_size = tf.shape(attention_mask)[0]
     seq_len = tf.shape(attention_mask)[1]
 
     # Expand to [batch_size, 1, 1, seq_len] for broadcasting
@@ -443,7 +442,7 @@ class NeuralDataAugmentation:
 
     def __init__(
         self,
-        num_augmentations: int = 10,
+        num_augmentations: int = 7,
         white_noise_std: float = 5,
         offset_noise_std: float = 1.6,
         offset_scale_factor: float = 0.67,
