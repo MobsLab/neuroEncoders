@@ -37,6 +37,7 @@ if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndTh
         if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
             error('CleanAlignedXtsd or CleanAlignedYtsd contained only NaN values');
         end
+        disp('Behavior data extracted from CleanAlignedXtsd and CleanAlignedYtsd.')
     catch
         try
             X = Data(Behavior.("AlignedXtsd"));
@@ -45,6 +46,7 @@ if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndTh
             if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
                 error('AlignedXtsd or AlignedYtsd contained only NaN values');
             end
+            disp('Behavior data extracted from AlignedXtsd and AlignedYtsd.')
         catch
             try
                 X = Data(Behavior.("CleanXtsd"));
@@ -53,6 +55,7 @@ if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndTh
                 if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
                     error('CleanXtsd or CleanYtsd contained only NaN values');
                 end
+                disp('Behavior data extracted from CleanXtsd and CleanYtsd.')
             catch
                 warning('No aligned nor clean data found, using raw data.')
                 X = Data(Behavior.("Xtsd"));
@@ -61,6 +64,7 @@ if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndTh
                 if all(isnan(X)) || all(isnan(Y)) || all(isnan(T))
                     error('Xtsd or Ytsd contained only NaN values');
                 end
+                disp('Behavior data extracted from Xtsd and Ytsd. snif')
             end
         end
     end
@@ -83,9 +87,14 @@ try
     % check if the speed is not just NaN nan_values
     if all(isnan(V))
         V = Data(Behavior.("Vtsd"));
+        disp('Behavior speed extracted from Vtsd.')
+    else
+        disp('Behavior speed extracted from CleanVtsd.')
     end
+
 catch
     V = Data(Behavior.("Vtsd"));
+    disp('Behavior speed extracted from Vtsd.')
 end
 behavior.speed = V;
 

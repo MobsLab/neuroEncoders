@@ -11,6 +11,9 @@ import subprocess
 import sys
 from warnings import warn
 
+from numpy import max as np_max
+
+from importData.epochs_management import inEpochsMask
 from utils.global_classes import DataHelper as DataHelperClass
 
 # Load custom code
@@ -81,6 +84,10 @@ def main(args):
                 ProjectPath.folder,
                 overWrite=(True if args.redo else False),
                 phase=args.phase,
+                window_range=2000,
+                force=True
+                if (args.phase is not None and not show_figures and not args.redo)
+                else False,
             )
         except Exception as e:
             # If an IndexError occurs, it means that the speed filter failed
@@ -90,6 +97,7 @@ def main(args):
                 ProjectPath.folder,
                 overWrite=(True if args.redo else False),
                 phase=args.phase,
+                force=False,
             )
             warn(
                 f'"IndexError" occurred for {ProjectPath.folder}, setting phase to None.'
@@ -110,18 +118,70 @@ def main(args):
         phase=args.phase,
         nameExp=args.name,
         windowSize=args.window,
+        force_ref=False,
     )
-    # Create linearization function
-    Linearizer = UMazeLinearizer(ProjectPath.folder, phase=args.phase)
-    Linearizer.verify_linearization(
-        DataHelper.positions / DataHelper.maxPos(),
-        ProjectPath.folder,
-        overwrite=(True if args.redo else False),
-    )
-    l_function = Linearizer.pykeops_linearization
+    helpers = [DataHelper]
+    if args.phase != "cond":
+        rawdata_parser.speed_filter(
+            ProjectPath.folder,
+            overWrite=(True if args.redo else True),
+            phase="cond",
+            template=args.phase,
+            window_range=2000,
+            force=True
+            if (args.phase is not None and not show_figures and not args.redo)
+            else False,
+        )
+        rawdata_parser.select_epochs(
+            ProjectPath.folder,
+            overWrite=(True if (args.redo or args.phase is not None) else False),
+            phase="cond",
+            force=True if (args.phase is not None and not show_figures) else False,
+            find_best_sets=True,
+            isPredLoss=isPL,
+        )
+        DataHelper_cond = DataHelperClass(
+            ProjectPath.xml,
+            mode=mode,
+            target=args.target,
+            phase="cond",
+            nameExp=args.name,
+            windowSize=args.window,
+            force_ref=False,
+        )
+        helpers = [DataHelper_cond, DataHelper]
+    for helper in helpers:
+        # Create linearization function
+        Linearizer = UMazeLinearizer(
+            ProjectPath.folder, phase=helper.phase, data_helper=helper
+        )
+        Linearizer.verify_linearization(
+            helper.positions / helper.maxPos(),
+            ProjectPath.folder,
+            overwrite=(True if args.redo else False),
+        )
 
-    # Now that we have the linearization function, we can get the true target
-    DataHelper.get_true_target(l_function, in_place=True, show=show_figures)
+        speedMask = helper.fullBehavior["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            helper.fullBehavior["positionTime"][:, 0],
+            helper.fullBehavior["Times"]["trainEpochs"],
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = helper.fullBehavior["Positions"][totMask]
+
+        Linearizer.plot_linearization_variable(
+            full_training_true_positions / np_max(full_training_true_positions),
+            folder=ProjectPath.folder,
+            show=show_figures,
+            training=True,
+        )
+
+        l_function = Linearizer.pykeops_linearization
+
+        # Now that we have the linearization function, we can get the true target
+        helper.get_true_target(
+            l_function, in_place=True, show=show_figures, speedMask=True
+        )
 
     Parameters = Params(
         helper=DataHelper,
@@ -130,6 +190,9 @@ def main(args):
         phase=args.phase,
         batchSize=256 if args.window < 0.252 else 128,
         save_json=True,
+        isTransformer=not args.lstm,
+        transform_w_log=args.transform_w_log,
+        denseweight=not args.no_dense,
     )
 
     # Save ProjectPath object
@@ -166,7 +229,7 @@ def main(args):
                             f"timeStepsPred{suffix}.csv",
                         )
                     ).values[:, 1:],
-                    dtype=np.float32,
+                    dtype=np.float64,
                 )
             )
         except FileNotFoundError:
@@ -215,8 +278,8 @@ def main(args):
             redo=False,
             BUFFERSIZE=144000,
         )
+
         # Network
-        # return
         NNTrainer = Training.LSTMandSpikeNetwork(
             ProjectPath,
             Parameters,
@@ -224,27 +287,95 @@ def main(args):
             debug=debug,
             phase=args.phase,
             isTransformer=Parameters.isTransformer,
+            verbose=True,
+            behaviorData=DataHelper.fullBehavior,
+            alpha=Parameters.denseweightAlpha,
+            linearizer=Linearizer,
         )
-        NNTrainer.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-        # TODO: if target is not position, change the target
 
-        NNTrainer.train(
-            DataHelper.fullBehavior,
+        if (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    "featurePred_training.csv",
+                )
+            )
+            or args.redo
+        ):
+            NNTrainer.train(
+                DataHelper.fullBehavior,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                earlyStop=args.early_stop,
+                load_model=True,
+                denseweight=True,
+                l_function=l_function,
+            )
+
+        if not os.path.exists(
+            os.path.join(
+                NNTrainer.folderResult,
+                str(windowSizeMS),
+                "errorFig_2d_NN_training_inferring",
+            )
+        ):
+            NNTrainer.test(
+                DataHelper.fullBehavior,
+                l_function=l_function,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                useSpeedFilter=True,
+                phase="training",
+                useTrain=True,
+                template=args.phase,
+            )
+        if not os.path.exists(
+            os.path.join(
+                NNTrainer.folderResult,
+                str(windowSizeMS),
+                f"errorFig_2d_NN_{args.phase}_inferring",
+            )
+        ):
+            NNTrainer.test(
+                DataHelper.fullBehavior,
+                l_function=l_function,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                useSpeedFilter=False,
+                phase=args.phase,
+                useTrain=False,
+                template=args.phase,
+            )
+
+        if not os.path.exists(
+            os.path.join(
+                NNTrainer.folderResult,
+                str(windowSizeMS),
+                "featurePred_cond.csv",
+            )
+        ):
+            NNTrainer.test(
+                DataHelper_cond.fullBehavior,
+                l_function=l_function,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                useSpeedFilter=False,
+                phase="cond",
+                useTrain=True,
+            )
+
+        print_results.print_results(
+            NNTrainer.folderResult,
             windowSizeMS=windowSizeMS,
-            isPredLoss=isPL,
-            earlyStop=args.early_stop,
-            load_model=True,
-        )
-
-        NNTrainer.test(
-            DataHelper.fullBehavior,
+            show=show_figures,
+            lossSelection=0.1,
+            euclidean=False,
+            target=args.target,
+            phase="training",
+            useSpeedMask=False,
+            training_data=NNTrainer.training_data,
             l_function=l_function,
-            windowSizeMS=windowSizeMS,
-            isPredLoss=isPL,
-            useSpeedFilter=False,
-            phase=args.phase,
-            useTrain=False,
-            template=args.phase,
         )
 
         print_results.print_results(
@@ -255,7 +386,24 @@ def main(args):
             euclidean=False,
             target=args.target,
             phase=args.phase,
+            training_data=NNTrainer.training_data,
+            useSpeedMask=False,
+            l_function=l_function,
         )
+
+        print_results.print_results(
+            NNTrainer.folderResult,
+            windowSizeMS=windowSizeMS,
+            show=show_figures,
+            lossSelection=0.1,
+            euclidean=False,
+            target=args.target,
+            phase="cond",
+            training_data=NNTrainer.training_data,
+            useSpeedMask=False,
+            l_function=l_function,
+        )
+
         NNTrainer.clear_session()
         # Create json
         if isPL:
@@ -513,7 +661,7 @@ if __name__ == "__main__":
                 "--predicted_loss",
                 action="store_true",
                 help="defines whether another, predLoss only, "
-                + "network will be train on the piece of data",
+                + "network will be trained on the piece of data",
             )
             p.add_argument(
                 "-s",
@@ -528,6 +676,25 @@ if __name__ == "__main__":
                 action="store_true",
                 help="defines whether to use early stopping during training",
             )
+            p.add_argument(
+                "-lstm",
+                "--lstm",
+                action="store_true",
+                help="defines whether to use a lstm network instead of transformer",
+            )
+            p.add_argument(
+                "-log",
+                "--transform_w_log",
+                action="store_true",
+                help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
+            )
+            p.add_argument(
+                "-nod",
+                "--no-dense",
+                action="store_true",
+                help="defines whether the dense weight loss should be used or not",
+            )
+
     args = Parser.parse_args()
 
     print()
