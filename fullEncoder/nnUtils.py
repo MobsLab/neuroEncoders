@@ -1,11 +1,13 @@
 # Load libs
 import os
 from typing import Dict, Optional, Tuple
+from warnings import warn
 
 import numpy as np
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
+from tensorflow import keras
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
@@ -37,10 +39,12 @@ class spikeNet:
         device: str = "/cpu:0",
         nFeatures=128,
         number="",
+        **kwargs,
     ):
         self.nFeatures = nFeatures
         self.nChannels = nChannels
         self.device = device
+        self.batch_normalization = kwargs.get("batch_normalization", True)
         with tf.device(self.device):
             self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="SAME")
             self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="SAME")
@@ -63,6 +67,33 @@ class spikeNet:
                 self.nFeatures, activation="relu", name=f"outputCNN{number}"
             )
 
+    def get_config(self):
+        base_config = super().get_config()
+        config = {
+            "nChannels": self.nChannels,
+            "device": self.device,
+            "nFeatures": self.nFeatures,
+            "number": self.number,
+        }
+        return {**base_config, **config}
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        nChannels = config.pop("nChannels", 4)
+        device = config.pop("device", "/cpu:0")
+        nFeatures = config.pop("nFeatures", 128)
+        number = config.pop("number", "")
+        return cls(
+            nChannels=nChannels,
+            device=device,
+            nFeatures=nFeatures,
+            number=number,
+        )
+
     def __call__(self, input):
         return self.apply(input)
 
@@ -70,10 +101,16 @@ class spikeNet:
         with tf.device(self.device):
             x = tf.expand_dims(input, axis=3)
             x = self.convLayer1(x)
+            if self.batch_normalization:
+                x = tf.keras.layers.BatchNormalization()(x)
             x = self.maxPoolLayer1(x)
             x = self.convLayer2(x)
+            if self.batch_normalization:
+                x = tf.keras.layers.BatchNormalization()(x)
             x = self.maxPoolLayer2(x)
             x = self.convLayer3(x)
+            if self.batch_normalization:
+                x = tf.keras.layers.BatchNormalization()(x)
             x = self.maxPoolLayer3(x)
 
             x = tf.reshape(
@@ -99,6 +136,19 @@ class spikeNet:
             + self.denseLayer3.variables
         )
 
+    def layers(self):
+        return (
+            self.convLayer1,
+            self.convLayer2,
+            self.convLayer3,
+            self.maxPoolLayer1,
+            self.maxPoolLayer2,
+            self.maxPoolLayer3,
+            self.denseLayer1,
+            self.denseLayer2,
+            self.denseLayer3,
+        )
+
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 
@@ -108,7 +158,7 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     """Global Average Pooling that respects masking"""
 
     def __init__(self, **kwargs):
-        super(MaskedGlobalAveragePooling1D, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def call(self, inputs, mask=None):
         if mask is not None:
@@ -130,6 +180,18 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
             return sum_inputs / count_inputs
         else:
             return tf.reduce_mean(inputs, axis=1)
+
+    def get_config(self):
+        base_config = super().get_config()
+        return {**base_config, "name": self.__class__.__name__}
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        return cls(**config)
 
 
 def create_attention_mask_from_padding_mask(padding_mask):
@@ -181,10 +243,24 @@ class PositionalEncoding(tf.keras.layers.Layer):
         seq_len = tf.shape(x)[1]
         return x + self.pe[:seq_len, :]
 
+    def get_config(self):
+        base_config = super().get_config()
+        return {**base_config, "max_len": self.max_len, "d_model": self.d_model}
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        d_model = config.pop("d_model", 128)
+        max_len = config.pop("max_len", 10000)
+        return cls(d_model=d_model, max_len=max_len)
+
 
 class TransformerEncoderBlock(tf.keras.layers.Layer):
     def __init__(
-        self, d_model=128, num_heads=4, ff_dim1=256, ff_dim2=128, dropout_rate=0.5
+        self, d_model=64, num_heads=8, ff_dim1=256, ff_dim2=64, dropout_rate=0.5
     ):
         super(TransformerEncoderBlock, self).__init__()
         self.d_model = d_model
@@ -235,6 +311,38 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         x = self.norm2(x + ff_output)
 
         return x
+
+    def get_config(self):
+        base_config = super().get_config()
+        config = {
+            "norm1": tf.keras.saving.serialize_keras_object(self.norm1),
+            "mha": tf.keras.saving.serialize_keras_object(self.mha),
+            "dropout1": tf.keras.saving.serialize_keras_object(self.dropout1),
+            "ff_layer1": tf.keras.saving.serialize_keras_object(self.ff_layer1),
+            "ff_layer2": tf.keras.saving.serialize_keras_object(self.ff_layer2),
+            "norm2": tf.keras.saving.serialize_keras_object(self.norm2),
+            "d_model": self.d_model,
+            "num_heads": self.num_heads,
+            "ff_dim1": self.ff_dim1,
+            "ff_dim2": self.ff_dim2,
+            "dropout_rate": self.dropout_rate,
+        }
+        return {**base_config, **config}
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        # The deserialized layers are not used; just pass config values to the constructor.
+        return cls(
+            d_model=config.get("d_model", 64),
+            num_heads=config.get("num_heads", 8),
+            ff_dim1=config.get("ff_dim1", 256),
+            ff_dim2=config.get("d_model", 64),
+            dropout_rate=config.get("dropout_rate", 0.5),
+        )
 
 
 ########### END OF TRANSFORMER ENCODER CLASS #####################
@@ -442,7 +550,7 @@ class NeuralDataAugmentation:
 
     def __init__(
         self,
-        num_augmentations: int = 7,
+        num_augmentations: int = 11,
         white_noise_std: float = 5,
         offset_noise_std: float = 1.6,
         offset_scale_factor: float = 0.67,
@@ -888,3 +996,212 @@ def flatten_augmented_groups(data_dict, params, num_augmentations):
     flattened_dict["pos"] = data_dict["pos"]
 
     return tf.data.Dataset.from_tensor_slices(flattened_dict)
+
+
+class LinearizationLayer(tf.keras.layers.Layer):
+    """
+    A simple layer to linearize Euclidean data into a maze-like structure.
+    Follows the same logic as the linearizer pykeops code.
+    """
+
+    def __init__(self, maze_points, ts_proj, **kwargs):
+        super().__init__(**kwargs)
+        # Convert to TensorFlow constants
+        self.maze_points = tf.constant(maze_points, dtype=tf.float32)
+        self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
+
+    def call(self, euclidean_data):
+        # Ensure consistent dtype
+        euclidean_data = tf.cast(euclidean_data, self.maze_points.dtype)
+
+        # Expand dimensions for broadcasting
+        # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
+        # maze_points: [num_points, features] -> [1, num_points, features]
+        euclidean_expanded = tf.expand_dims(euclidean_data, axis=1)
+        maze_expanded = tf.expand_dims(self.maze_points, axis=0)
+
+        # Calculate squared distances
+        distance_matrix = tf.reduce_sum(
+            tf.square(maze_expanded - euclidean_expanded), axis=-1
+        )
+
+        # Find argmin
+        best_points = tf.argmin(distance_matrix, axis=1)
+
+        # Gather results
+        projected_pos = tf.gather(self.maze_points, best_points)
+        linear_pos = tf.gather(self.ts_proj, best_points)
+
+        return projected_pos, linear_pos
+
+    def get_config(self):
+        base_config = super().get_config()
+        return {
+            **base_config,
+            "maze_points": self.maze_points.numpy().tolist(),
+            "ts_proj": self.ts_proj.numpy().tolist(),
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        maze_points = tf.constant(config.pop("maze_points"), dtype=tf.float32)
+        ts_proj = tf.constant(config.pop("ts_proj"), dtype=tf.float32)
+        return cls(maze_points=maze_points, ts_proj=ts_proj)
+
+
+from denseweight import DenseWeight
+
+
+@keras.saving.register_keras_serializable(
+    package="Custom_Layers", name="DynamicDenseWeightLayer"
+)
+class DynamicDenseWeightLayer(tf.keras.layers.Layer):
+    """Layer that calls fitted DenseWeight for each batch dynamically"""
+
+    def __init__(self, fitted_denseweight, **kwargs):
+        self.training_data = kwargs.pop("training_data", None)
+        self.alpha = kwargs.pop("fitted_dw_alpha", 1.0)
+        super().__init__(**kwargs)
+        self.fitted_dw = fitted_denseweight  # Pre-fitted DenseWeight object
+
+    def _compute_batch_weights(self, linearized_pos):
+        """Compute weights for a batch using fitted DenseWeight"""
+        # Convert tensor to numpy for DenseWeight
+        if hasattr(linearized_pos, "numpy"):
+            linearized_np = linearized_pos.numpy()
+        else:
+            linearized_np = np.array(linearized_pos)
+
+        # Call the fitted DenseWeight to get weights for this batch
+        # This uses the fitted model but computes weights for current samples
+        batch_weights = self.fitted_dw.eval(linearized_np)
+
+        return batch_weights.astype(np.float32)
+
+    def call(self, linearized_pos):
+        """
+        Dynamically compute weights for current batch using fitted DenseWeight
+        """
+        # Use tf.py_function to call the fitted DenseWeight
+        weights = tf.py_function(
+            func=self._compute_batch_weights, inp=[linearized_pos], Tout=tf.float32
+        )
+
+        # Set shape (tf.py_function loses shape info)
+        batch_size = tf.shape(linearized_pos)[0]
+        weights.set_shape([None])
+
+        return weights
+
+    def get_config(self):
+        base_config = super().get_config()
+        return {
+            **base_config,
+            "fitted_dw_alpha": self.alpha,
+            "training_data": self.training_data,
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        fitted_dw_config = config.pop("fitted_dw_alpha")
+        training_data = config.pop("training_data", None)
+        fitted_dw = DenseWeight(fitted_dw_config)
+        if training_data is not None:
+            fitted_dw.fit(training_data)
+        return cls(fitted_denseweight=fitted_dw)
+
+
+class DenseLossProcessor:
+    """Processor for Dense Loss with dynamic weight computation"""
+
+    def __init__(self, maze_points, ts_proj, alpha=1.0, verbose=False):
+        self.maze_points = maze_points
+        self.ts_proj = ts_proj
+        self.alpha = alpha
+        self.linearization_layer = LinearizationLayer(maze_points, ts_proj)
+        self.fitted_dw = None
+        self.weights_layer = None
+        self.verbose = verbose
+
+    def fit_dense_weight_model(self, full_training_positions):
+        """
+        Step 1: Fit DenseWeight ONCE on full dataset to learn imbalance patterns
+        Call this ONCE before training with your complete training dataset
+        """
+        if self.verbose:
+            print("Fitting DenseWeight model on full dataset for imbalance analysis...")
+
+        # Convert to numpy if needed
+        if hasattr(full_training_positions, "numpy"):
+            training_pos_np = full_training_positions.numpy()
+        else:
+            training_pos_np = np.array(full_training_positions)
+
+        # Create temporary model for linearization
+        temp_input = tf.keras.Input(shape=training_pos_np.shape[1:])
+        _, self.linearized_output = self.linearization_layer(temp_input)
+        temp_model = tf.keras.Model(inputs=temp_input, outputs=self.linearized_output)
+
+        # Get linearized positions for full training dataset
+        linearized_training = temp_model.predict(training_pos_np, verbose=0)
+        self.linearized_training = linearized_training
+
+        # Fit DenseWeight model on full dataset
+        self.fitted_dw = DenseWeight(alpha=self.alpha)
+        self.training_weights = self.fitted_dw.fit(linearized_training)
+
+        # Create dynamic weights layer that uses the fitted model
+        self.weights_layer = DynamicDenseWeightLayer(
+            self.fitted_dw,
+            training_data=linearized_training,
+            fitted_dw_alpha=self.alpha,
+        )
+
+        if self.verbose:
+            print(f"✓ DenseWeight model fitted on {len(training_pos_np)} samples")
+            print(f"✓ Ready for dynamic weight computation during training")
+
+        return self.fitted_dw
+
+    def get_weights_layer(self):
+        """Get the dynamic weights layer for use in your model"""
+        if self.weights_layer is None:
+            raise ValueError("Must call fit_dense_weight_model() first!")
+        return self.weights_layer
+
+    def get_config(self):
+        """
+        Get the configuration of the DenseLossProcessor.
+        This is necessary for serialization/deserialization.
+        """
+        return {
+            "maze_points": self.maze_points,
+            "ts_proj": self.ts_proj,
+            "alpha": self.alpha,
+            "fitted_dw": self.fitted_dw if self.fitted_dw else None,
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the DenseLossProcessor from its config.
+        This is necessary for serialization/deserialization.
+        """
+        maze_points = tf.constant(config.pop("maze_points"), dtype=tf.float32)
+        ts_proj = tf.constant(config.pop("ts_proj"), dtype=tf.float32)
+        alpha = config.pop("alpha", 1.0)
+
+        fitted_dw_config = config.pop("fitted_dw", None)
+        fitted_dw = fitted_dw_config if fitted_dw_config else None
+
+        processor = cls(maze_points=maze_points, ts_proj=ts_proj, alpha=alpha)
+        processor.fitted_dw = fitted_dw
+        return processor

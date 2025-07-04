@@ -25,6 +25,7 @@ class UMazeLinearizer:
     folder: str, the folder where the linearization points are saved
     nb_bins: int, the number of bins to use for the linearization, defaults to 100
     phase: str, the phase of the experiment, defaults to None
+    data_helper: object, a helper object to provide custom lines (like maze walls, boundaries, etc.), defaults to None
     """
 
     def __init__(self, *args, **kwargs):
@@ -107,6 +108,21 @@ class UMazeLinearizer:
             else:
                 self.aligned_ref = None
 
+            self.data_helper = kwargs.pop("data_helper", None)
+            custom_lines = kwargs.pop("custom_lines", None)
+            if self.data_helper is not None:
+                print("found data_helper, using its custom lines")
+                self.custom_lines = custom_lines or [
+                    self.data_helper.maze_coords,
+                    self.data_helper.shock_zone,
+                    self.data_helper.safe_zone,
+                ]
+            else:
+                self.custom_lines = None
+            self.custom_line_colors = ["black", "hotpink", "cornflowerblue"]
+            self.custom_line_styles = ["-", "-", "-"]
+            self.custom_line_widths = [4, 2, 2]
+
     def apply_linearization(self, euclideanData, keops=True):
         if keops:
             return self.pykeops_linearization(euclideanData)
@@ -146,7 +162,9 @@ class UMazeLinearizer:
 
         return projectedPos, linearPos
 
-    def verify_linearization(self, ExampleEuclideanData, folder, overwrite=False):
+    def verify_linearization(
+        self, ExampleEuclideanData, folder, overwrite=False, training=False
+    ):
         """
         A function to verify and possibly change the linearization.
         This function will plot the data and allow the user to change the linearization points. The new linearization points will be saved in the folder.
@@ -334,36 +352,116 @@ class UMazeLinearizer:
             self.mazePoints = self.itpObject(self.tsProj)
             # plot the exact linearization variable:
             _, linearTrue = self.apply_linearization(euclidData)
-            cm = plt.get_cmap("Spectral")
-            norm = mcolors.Normalize(vmin=linearTrue.min(), vmax=linearTrue.max())
-            fig, axScatter = plt.subplots()
-            scatter_plot = axScatter.scatter(
-                euclidData[:, 0], euclidData[:, 1], c=linearTrue, cmap=cm, norm=norm
-            )
-            # Display the color bar for the scatter plot using the Spectral colormap
-            plt.colorbar(scatter_plot, ax=axScatter, norm=norm)
-            fig.suptitle("Linearization variable, Spectral colormap")
 
-            # Create new axes on the right and on the top of the current axes
-            divider = make_axes_locatable(axScatter)
-            axHistX = divider.append_axes("bottom", 1.2, pad=0.1, sharex=axScatter)
-            axHistY = divider.append_axes("right", 1.2, pad=0.1, sharey=axScatter)
-
-            # Make some labels invisible
-            axHistX.xaxis.set_tick_params(labelbottom=False)
-            axHistY.yaxis.set_tick_params(labelleft=False)
-
-            # Plot histograms
-            axHistX.hist(euclidData[:, 0], bins=30, color="gray")
-            axHistY.hist(
-                euclidData[:, 1], bins=30, orientation="horizontal", color="gray"
-            )
-
-            # Set labels
-            axHistX.set_ylabel("Frequency")
-            axHistY.set_xlabel("Frequency")
-            plt.show(block=True)
+            self.plot_linearization_variable(euclidData, linearTrue, training, folder)
             # Save
             f.create_array("/behavior", "linearizationPoints", self.nnPoints)
             f.flush()
             f.close()
+
+    def plot_linearization_variable(
+        self, euclidData, linearTrue=None, training=False, folder=None, show=True
+    ):
+        """
+        Plot the linearization variable with a color map.
+
+        Args:
+            euclidData (np.ndarray): The Euclidean data to plot.
+            linearTrue (np.ndarray): The linearization variable.
+            training (bool): Whether the plot is for training data.
+            folder (str): The folder to save the plot.
+        """
+        if linearTrue is None:
+            print("No linearization variable provided, computing it.")
+            _, linearTrue = self.apply_linearization(euclidData)
+        cm = plt.get_cmap("Spectral")
+        norm = mcolors.Normalize(vmin=linearTrue.min(), vmax=linearTrue.max())
+        fig, self.axScatter = plt.subplots()
+        self._add_custom_lines(
+            colors=self.custom_line_colors,
+            styles=self.custom_line_styles,
+            widths=self.custom_line_widths,
+            alpha=0.5,
+        )
+        scatter_plot = self.axScatter.scatter(
+            euclidData[:, 0], euclidData[:, 1], c=linearTrue, cmap=cm, norm=norm
+        )
+        plt.colorbar(scatter_plot, ax=self.axScatter, norm=norm)
+        fig.suptitle(
+            f"Linearization variable, Spectral colormap for mask {training} and phase {self.phase}"
+        )
+        # Create new axes on the right and on the top of the current axes
+        divider = make_axes_locatable(self.axScatter)
+        axHistX = divider.append_axes("bottom", 1.2, pad=0.1, sharex=self.axScatter)
+        axHistY = divider.append_axes("right", 1.2, pad=0.1, sharey=self.axScatter)
+
+        # Make some labels invisible
+        axHistX.xaxis.set_tick_params(labelbottom=False)
+        axHistY.yaxis.set_tick_params(labelleft=False)
+
+        # Plot histograms
+        axHistX.hist(euclidData[:, 0], bins=30, color="gray")
+        axHistY.hist(euclidData[:, 1], bins=30, orientation="horizontal", color="gray")
+
+        # Set labels
+        axHistX.set_ylabel("Frequency")
+        axHistY.set_xlabel("Frequency")
+        fig.savefig(
+            os.path.join(folder, f"linearizationVariable_{self.phase}_{training=}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        if show:
+            plt.show(block=True)
+
+    def _add_custom_lines(self, colors, styles, widths, alpha):
+        """Add custom line segments (like maze walls, boundaries, etc.)."""
+        if not self.custom_lines:
+            return
+
+        # Handle different input formats
+        lines_to_plot = []
+
+        for line_data in self.custom_lines:
+            # Convert to numpy array for easier handling
+            line_array = np.array(line_data)
+
+            if line_array.ndim == 2 and line_array.shape[1] == 2:
+                # Single line segment as array of points
+                lines_to_plot.append(line_array)
+            elif line_array.ndim == 1 and len(line_array) == 4:
+                # Single line as [x1, y1, x2, y2]
+                lines_to_plot.append(
+                    np.array(
+                        [[line_array[0], line_array[1]], [line_array[2], line_array[3]]]
+                    )
+                )
+            else:
+                print(f"Warning: Unrecognized line format: {line_data}")
+
+        if not lines_to_plot:
+            return
+
+        # Ensure parameters are lists
+        def ensure_list(param, default_length):
+            if isinstance(param, (list, tuple)):
+                return list(param)
+            else:
+                return [param] * default_length
+
+        colors = ensure_list(colors, len(lines_to_plot))
+        styles = ensure_list(styles, len(lines_to_plot))
+        widths = ensure_list(widths, len(lines_to_plot))
+        alphas = ensure_list(alpha, len(lines_to_plot))
+
+        # Plot each line segment
+        for i, line_points in enumerate(lines_to_plot):
+            self.axScatter.plot(
+                line_points[:, 0],  # X coordinates
+                line_points[:, 1],  # Y coordinates
+                color=colors[i % len(colors)],
+                linestyle=styles[i % len(styles)],
+                linewidth=widths[i % len(widths)],
+                alpha=alphas[i % len(alphas)],
+                zorder=10,  # Behind the trajectory
+            )
