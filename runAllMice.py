@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 import fnmatch
+import gc
 import os
 import subprocess
 import sys
 import time
-import gc
-import psutil
 from concurrent.futures import ProcessPoolExecutor
+
+import psutil
+
 from utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [2.16]

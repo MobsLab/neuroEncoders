@@ -28,6 +28,32 @@ sys.path.append("./importData")
 # Custom codes
 from importData import epochs_management as ep
 
+MAZE_COORDS = np.array(
+    [
+        [0, 0],
+        [0, 1],
+        [1, 1],
+        [1, 0],
+        [0.65, 0],
+        [0.65, 0.75],
+        [0.35, 0.75],
+        [0.35, 0],
+        [0, 0],
+    ]
+)
+ZONEDEF = np.array(
+    [
+        [[0, 0.35], [0, 0.43]],  # shock
+        [[0.65, 1], [0, 0.43]],  # safe
+        [[0.35, 0.65], [0.75, 1]],  # center
+        [[0, 0.35], [0.43, 1]],  # shock center
+        [[0.65, 1], [0.43, 1]],  # safe center
+    ]
+)
+ZONELABELS = ["Shock", "Safe", "Center", "ShockCenter", "SafeCenter"]
+
+ZONE_COLORS = ["r", "b", "k", "m", "c"]
+
 
 class Project:
     """
@@ -294,7 +320,7 @@ class DataHelper(Project):
         assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
         self.thresholds = [i for d in thresholds for i in d]
 
-    def get_true_target(self, l_function=None, in_place=False, show=False):
+    def get_true_target(self, l_function=None, in_place=False, show=False, **kwargs):
         """
         Returns the true target of interest by looking and modifying the positions array.
 
@@ -302,6 +328,8 @@ class DataHelper(Project):
         - l_function: a function that takes a position and returns the linearized position
         - in_place: whether to modify the positions array in place
         - show: whether to show the distance to the wall
+        - **kwargs: additional keyword arguments to pass to the l_function
+            - speedMask : whether to use a speed mask to filter the positions based on speed, defaults to False
 
         Returns:
         - the modified positions array
@@ -353,7 +381,7 @@ class DataHelper(Project):
         if show:
             from importData.gui_elements import AnimatedPositionPlotter
 
-            plotter = AnimatedPositionPlotter(self, trail_length=40)
+            plotter = AnimatedPositionPlotter(self, trail_length=40, **kwargs)
             anim = plotter.show(interval=10, repeat=True, block=True)
 
         if in_place:
@@ -510,7 +538,7 @@ class DataHelper(Project):
             self.aligned_ref = self.fullBehavior["aligned_ref"]
             self.xyOutput = self.fullBehavior["xyOutput"]
             self.ratioIMAonREAL = self.fullBehavior["ratioIMAonREAL"]
-            self.shock_zone = self.fullBehavior["shock_zone"]
+            self.shock_zone_mask = self.fullBehavior["shock_zone_mask"]
             if plot:
                 self._plot_coordinates_and_ref(normalized_positions=positions)
         elif (
@@ -519,7 +547,7 @@ class DataHelper(Project):
             print("ref found but not aligned_ref")
             self.ref = self.fullBehavior["ref"]
             self.xyOutput = self.fullBehavior["xyOutput"]
-            self.shock_zone = self.fullBehavior["shock_zone"]
+            self.shock_zone_mask = self.fullBehavior["shock_zone_mask"]
             self.ratioIMAonREAL = self.fullBehavior["ratioIMAonREAL"]
             self.normalized_positions, self.aligned_ref = (
                 self._transform_coordinates_and_image(positions=None)
@@ -592,17 +620,17 @@ class DataHelper(Project):
         try:
             self.ref = root["ref"][0][idx]
             idx_shock = list(root["ZoneLabels"][0][idx][0]).index("Shock")
-            self.shock_zone = root["Zone"][0][idx][0][idx_shock]
+            self.shock_zone_mask = root["Zone"][0][idx][0][idx_shock]
             Xdata = root["Xtsd"][0][idx][0][0][-2].flatten()
             Ydata = root["Ytsd"][0][idx][0][0][-2].flatten()
         except ValueError:
             idx_shock = list(root["ZoneLabels"][idx]).index("Shock")
-            self.shock_zone = root["Zone"][idx][idx_shock]
+            self.shock_zone_mask = root["Zone"][idx][idx_shock]
             self.ref = root["ref"]
             Xdata = root["Xtsd"][0][idx][-2].flatten()
             Ydata = root["Ytsd"][0][idx][-2].flatten()
 
-        assert self.ref.shape == self.shock_zone.shape
+        assert self.ref.shape == self.shock_zone_mask.shape
         self.ratioIMAonREAL = root["Ratio_IMAonREAL"][0][idx].flatten()[
             0
         ]  # only a digit
@@ -610,7 +638,7 @@ class DataHelper(Project):
         positions = np.array([Xdata, Ydata]).T
 
         self.xyOutput = self._get_XYOutput_morph_maze(
-            positions, self.shock_zone, self.ref, self.ratioIMAonREAL
+            positions, self.shock_zone_mask, self.ref, self.ratioIMAonREAL
         )
 
         self.normalized_positions, self.aligned_ref = (
@@ -624,7 +652,7 @@ class DataHelper(Project):
             self.fullBehavior["ref"] = self.ref
             self.fullBehavior["xyOutput"] = self.xyOutput
             self.fullBehavior["ratioIMAonREAL"] = self.ratioIMAonREAL
-            self.fullBehavior["shock_zone"] = self.shock_zone
+            self.fullBehavior["shock_zone_mask"] = self.shock_zone_mask
             self.fullBehavior["aligned_ref"] = self.aligned_ref
 
             # save theses infos in the nnBehavior file.
@@ -639,7 +667,11 @@ class DataHelper(Project):
                 nnBehavior.create_array("/behavior", "xyOutput", self.xyOutput)
                 if "shock_zone" in children:
                     nnBehavior.remove_node("/behavior", "shock_zone")
-                nnBehavior.create_array("/behavior", "shock_zone", self.shock_zone)
+                if "shock_zone_mask" in children:
+                    nnBehavior.remove_node("/behavior", "shock_zone_mask")
+                nnBehavior.create_array(
+                    "/behavior", "shock_zone_mask", self.shock_zone_mask
+                )
                 if "aligned_ref" in children:
                     nnBehavior.remove_node("/behavior", "aligned_ref")
                 nnBehavior.create_array("/behavior", "aligned_ref", self.aligned_ref)
@@ -653,14 +685,16 @@ class DataHelper(Project):
 
         return self.ref, self.xyOutput
 
-    def _get_XYOutput_morph_maze(self, positions, shock_zone, ref, Ratio_IMAonREAL):
+    def _get_XYOutput_morph_maze(
+        self, positions, shock_zone_mask, ref, Ratio_IMAonREAL
+    ):
         """
         Morphs UMaze coordinates into a system with (0,0) as the bottom corner of the shock zone
         and the rest of the maze going from 0 to 1.
 
         Parameters:
             positions [Xtsd, Ytsd]: numpy array of positions
-            ShockZone: binary mask of the shock zone
+            shock_zone_mask: binary mask of the shock zone
             Ref: reference image of the maze
             Ratio_IMAonREAL: scaling factor between image and real-world coordinates
 
@@ -681,7 +715,7 @@ class DataHelper(Project):
             positions[:, 0] * Ratio_IMAonREAL,
             color=[0.8, 0.8, 0.8],
         )[0]
-        props = regionprops(shock_zone.astype(int))
+        props = regionprops(shock_zone_mask.astype(int))
         centroid = props[0].centroid
         ax.plot(centroid[1], centroid[0], "r.", markersize=30)
         ax.plot(centroid[1], centroid[0], "w*", markersize=10)
@@ -1036,6 +1070,8 @@ class Params:
                 - phase (str, optional)
                 - batchSize (int, default 256)
                 - save_json (bool, default False)
+                - isTransformer (bool, optional, default True)
+                - transform_w_log (bool, optional, default False)
         """
         # Extract required parameters
         if len(args) >= 1:
@@ -1075,18 +1111,20 @@ class Params:
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
-        self._initialize_params_attributes(helper)
+        self._initialize_params_attributes(helper, **kwargs)
         # save those to json file
         if save_json:
             self.save_params_to_json()
-        save_project_to_pickle(
-            self, output=os.path.join(self.resultsPath, "Parameters.pkl")
-        )
+        if not os.path.isfile(os.path.join(self.resultsPath, "Parameters.pkl")):
+            # save the parameters to a pickle file
+            save_project_to_pickle(
+                self, output=os.path.join(self.resultsPath, "Parameters.pkl")
+            )
         self._copy_from_helper(helper)
         # re initialize for method vs attribute
-        self._initialize_params_attributes(helper)
+        self._initialize_params_attributes(helper, **kwargs)
 
-    def _initialize_params_attributes(self, helper):
+    def _initialize_params_attributes(self, helper, **kwargs):
         """
         Initialize all parameters from the helper object and set default values.
         This is where you want to modify or add any additional parameters.
@@ -1118,25 +1156,50 @@ class Params:
         self.masking = 20
 
         ### full encoder params
-        self.nFeatures = 128
-        self.isTransformer = True  # use transformer instead of LSTM
-        self.nHeads = 8  # number of attention heads in the transformer if used
+        self.nFeatures = kwargs.pop("nFeatures", 64)
+        self.isTransformer = (
+            True
+            if kwargs.get("isTransformer", None) is None
+            else kwargs.get("isTransformer", None)
+        )  # use transformer instead of LSTM
+        self.nHeads = kwargs.pop(
+            "nHeads", 8
+        )  # number of attention heads in the transformer if used
 
-        self.lstmLayers = 2 if not self.isTransformer else 8
-        self.dropoutCNN = 0.5
-        self.lstmSize = 128
-        self.dropoutLSTM = 0 if not self.isTransformer else 0.5
-        self.ff_dim1 = 256  # first fully connected layer in Transformer arch dimension
+        default_lstm_layers = 2 if not self.isTransformer else 4
+        self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
+        self.lstmSize = kwargs.pop("lstmSize", 64)
+        default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
+        self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
+        self.ff_dim1 = kwargs.pop(
+            "ff_dim1", self.nFeatures * 2
+        )  # first fully connected layer in Transformer arch dimension
         self.ff_dim2 = (
             self.nFeatures
         )  # second fully connected layer in Transformer arch dimension
 
+        # if using transformer, we need to set 2 other dense layers output (after the multihead attention blocks)
+        self.TransformerDenseSize1 = kwargs.pop("TransformerDense1", self.nFeatures * 8)
+        self.TransformerDenseSize2 = kwargs.pop("TransformerDense2", self.nFeatures * 4)
+
+        self.nDenseLayers = kwargs.pop(
+            "nDenseLayers", 2
+        )  # number of dense layers in the network
+
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
-        self.learningRates = [0.0003]  #  [0.00003, 0.00003, 0.00001]
-        self.learningRates = [0.001]  #  [0.00003, 0.00003, 0.00001]
-        self.lossActivation = "softplus"  # activation function for the loss layer
-        self.loss = "mse"  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
+        self.learningRates = kwargs.pop(
+            "learningRates", [0.0003]
+        )  #  [0.00003, 0.00003, 0.00001]
+
+        self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
+
+        self.lossActivation = None  # activation function for the loss layer
+
+        self.loss = kwargs.pop(
+            "loss", "mse"
+        )  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
         if self.target.lower() == "direction":
             self.loss = "binary_crossentropy"
 
@@ -1144,9 +1207,15 @@ class Params:
         self.column_weights = (
             {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
         )
+        self.denseweight = kwargs.pop(
+            "denseweight", True
+        )  # dense weight loss for dataset imbalance
+        self.denseweightAlpha = 1
 
         # self.transform = "log"  # "log" or "sqrt" or None
-        self.transform = None  # "log" or "sqrt" or None
+        self.transform_w_log = kwargs.pop(
+            "transform_w_log", False
+        )  # "log" or "sqrt" or None
         self.delta = 0.4  # for the huber loss - roughly the random prediction threshold
         self.alpha = 5
 

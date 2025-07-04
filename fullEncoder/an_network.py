@@ -68,7 +68,27 @@ class LSTMandSpikeNetwork:
         self.suffix = f"_{phase}" if phase is not None else ""
         self._setup_folders()
         self._setup_feature_description()
+
+        # Moved the initialization of the DataHelper here
+        if kwargs.get("linearizer", None) is not None:
+            Linearizer = kwargs["linearizer"]
+            self.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
+        if params.denseweight:
+            if kwargs.get("behaviorData", None) is None:
+                warnings.warn(
+                    '"behaviorData" not provided, using default setup WITHOUT Dense Weight. Is your code version deprecated?'
+                )
+            else:
+                self.setup_dynamic_dense_loss(**kwargs)
+
         self._build_model(**kwargs)
+        # if kwargs.get("extractTransformer", False):
+        #     self.create_separable_models(
+        #         self.model,
+        #         spikeNetsoutputsName="dropoutCNN",
+        #         transformer_start_layer_name="feature_projection_transformer",
+        #         save=True,
+        #     )
 
     def _setup_folders(self):
         self.folderResult = os.path.join(self.projectPath.experimentPath, "results")
@@ -165,6 +185,7 @@ class LSTMandSpikeNetwork:
 
             # LSTMs
             if not kwargs.get("isTransformer", False):
+                self.isTransformer = False
                 self.lstmsNets = [
                     tf.keras.layers.LSTM(
                         self.params.lstmSize,
@@ -175,6 +196,7 @@ class LSTMandSpikeNetwork:
                     for ilayer in range(self.params.lstmLayers)
                 ]
             else:
+                self.isTransformer = True
                 from fullEncoder.nnUtils import (
                     MaskedGlobalAveragePooling1D,
                     PositionalEncoding,
@@ -196,12 +218,12 @@ class LSTMandSpikeNetwork:
                     + [
                         MaskedGlobalAveragePooling1D(),
                         tf.keras.layers.Dense(
-                            1024,
+                            self.params.TransformerDenseSize1,
                             activation=tf.nn.relu,
                             kernel_regularizer="l2",
                         ),
                         tf.keras.layers.Dense(
-                            512,
+                            self.params.TransformerDenseSize2,
                             activation=tf.nn.relu,
                             kernel_regularizer="l2",
                         ),
@@ -214,38 +236,51 @@ class LSTMandSpikeNetwork:
                 shape=(self.params.dimOutput), name="pos"
             )
             self.denseLoss1 = tf.keras.layers.Dense(
-                self.params.lstmSize, activation=tf.nn.silu, kernel_regularizer="l2"
+                self.params.lstmSize - 0.5 * self.params.lstmSize,
+                activation=tf.nn.silu,
+                kernel_regularizer=tf.keras.regularizers.l2(0.001),
             )
             self.denseLoss3 = tf.keras.layers.Dense(
-                self.params.lstmSize, activation=tf.nn.silu, kernel_regularizer="l2"
+                self.params.lstmSize - 0.75 * self.params.lstmSize,
+                activation=tf.nn.silu,
+                kernel_regularizer=tf.keras.regularizers.l2(0.001),
             )
             self.denseLoss4 = tf.keras.layers.Dense(
-                self.params.lstmSize, activation=tf.nn.silu, kernel_regularizer="l2"
+                self.params.lstmSize - 0.75 * self.params.lstmSize,
+                activation=tf.nn.silu,
+                kernel_regularizer=tf.keras.regularizers.l2(0.001),
             )
             self.denseLoss5 = tf.keras.layers.Dense(
-                self.params.lstmSize, activation=tf.nn.silu, kernel_regularizer="l2"
+                self.params.lstmSize - 0.75 * self.params.lstmSize,
+                activation=tf.nn.silu,
+                kernel_regularizer=tf.keras.regularizers.l2(0.001),
             )
             self.denseLoss2 = tf.keras.layers.Dense(
                 1,
                 activation=kwargs.get("lossActivation", self.params.lossActivation),
-                bias_initializer="ones",
                 name="predicted_loss",
             )
+            self.denseLossLayers = [
+                self.denseLoss1,
+                self.denseLoss3,
+                self.denseLoss4,
+                self.denseLoss5,
+            ]
             self.epsilon = tf.constant(10 ** (-8))
             # Outputs
             self.denseFeatureOutput = tf.keras.layers.Dense(
                 self.params.dimOutput,
-                activation=tf.keras.activations.hard_sigmoid,  # ensures output is in [0,1]
+                activation=tf.keras.activations.sigmoid,  # ensures output is in [0,1]
                 dtype=tf.float32,
                 name="feature_output",
-                # kernel_regularizer="l2",
+                kernel_regularizer="l2",
             )
 
             self.projection_layer = tf.keras.layers.Dense(
                 self.params.nFeatures,
                 activation="relu",
                 dtype=tf.float32,
-                name="feature_projection",
+                name="feature_projection_transformer",
             )
 
             # Gather the full model
@@ -257,7 +292,7 @@ class LSTMandSpikeNetwork:
             # In theory, the predicted loss could be not learning enough in the first network (optional)
             # Second only with loss corresponding to predicted loss
             self.predLossModel = self.compile_model(
-                outputs, predLossOnly=True, **kwargs
+                outputs, predLossOnly=True, modelName="predLossModel.png", **kwargs
             )
 
     def get_theweights(self, behaviorData, windowSizeMS, isPredLoss=0):
@@ -279,6 +314,86 @@ class LSTMandSpikeNetwork:
         # reshaped_w = [tf.reshape(w,(2,3,1,8)) if w.shape == (2,3,8,16) else w for w in wdata]
         # return reshaped_w
         return wdata
+
+    def apply_transformer_architecture(
+        self, allFeatures, allFeatures_raw, mymask, **kwargs
+    ):
+        """
+        Shared transformer logic that can be called from both generate_model and extract_transformer_model.
+        This ensures the transformer architecture is defined only once.
+
+        Args:
+            allFeatures: Features after dropout (batch_size, seq_len, feature_dim)
+            allFeatures_raw: Raw features before dropout (for sumFeatures calculation)
+            mymask: Attention mask (batch_size, seq_len)
+            **kwargs: Additional arguments
+
+        Returns:
+            tuple: (myoutputPos, outputPredLoss, output, sumFeatures)
+        """
+
+        print("Using Transformer architecture !")
+
+        # 1. Projection layer
+        allFeatures = self.projection_layer(allFeatures)
+        masked_features = tf.where(
+            tf.expand_dims(mymask, axis=-1),
+            allFeatures_raw,
+            tf.zeros_like(allFeatures_raw, dtype=allFeatures_raw.dtype),
+        )
+        sumFeatures = tf.math.reduce_sum(self.projection_layer(masked_features), axis=1)
+
+        # 2. Positional encoding
+        allFeatures = self.lstmsNets[0](allFeatures)
+
+        # 3. Transformer blocks with residual connections
+        for ilstm, transformerLayer in enumerate(self.lstmsNets[1:-3]):
+            if ilstm == 0:
+                if (
+                    len(self.lstmsNets) == 5
+                ):  # num of transformer layers + one positional encoding + one pooling layer + 2 dense layers == 4 + ##transformer layers
+                    output = transformerLayer(allFeatures, mask=mymask)
+                else:
+                    outputSeq = transformerLayer(allFeatures, mask=mymask)
+                    # residual connections between transformer layers
+                    outputSeq = outputSeq + allFeatures
+            elif (
+                ilstm == len(self.lstmsNets) - 5
+            ):  # last transformer layer before pooling
+                prevSeq = outputSeq
+                output = transformerLayer(outputSeq, mask=mymask)
+                # residual connections between transformer layers
+                output = output + prevSeq
+            else:
+                prevSeq = outputSeq
+                outputSeq = transformerLayer(outputSeq, mask=mymask)
+                outputSeq = outputSeq + prevSeq
+
+        # 4. Pooling and final dense layers
+        output = self.lstmsNets[-3](output, mask=mymask)  # pooling
+        x = self.lstmsNets[-2](output)  # dense layer after pooling
+        x = self.lstmsNets[-1](x)  # another dense layer after pooling
+        myoutputPos = self.denseFeatureOutput(x)
+
+        # 5. Loss prediction
+
+        output_norm = tf.nn.l2_normalize(output, axis=1)
+        sumFeatures_norm = tf.nn.l2_normalize(sumFeatures, axis=1)
+
+        output_features = tf.stop_gradient(
+            tf.concat([output_norm, sumFeatures_norm], axis=1)
+        )
+
+        for i, denseLayer in enumerate(self.denseLossLayers):
+            if i == self.params.nDenseLayers - 1:
+                break
+            else:
+                output_features = denseLayer(output_features)
+                output_features = self.dropoutLayer(output_features)
+        # output_features is now the output of the forelast dense layer
+        outputPredLoss = self.denseLoss2(output_features)
+
+        return myoutputPos, outputPredLoss, output, sumFeatures
 
     def generate_model(self, **kwargs):
         """
@@ -324,15 +439,22 @@ class LSTMandSpikeNetwork:
             # synchronizes the computation of all features (like a join)
             # The concatenation is made over axis 2, which is the Feature axis
             # So we reserve columns to each output of the spiking networks...
-            allFeatures = tf.concat(allFeatures, axis=2)  # , name="concat1"
+            allFeatures = tf.concat(
+                allFeatures, axis=2, name="concat_CNNs"
+            )  # , name="concat1"
             # We would like to mask timesteps that were added for batching purpose, before running the RNN
             batchedInputGroups = tf.reshape(
                 self.inputGroups, [self.params.batchSize, -1]
             )
             mymask = tf.not_equal(batchedInputGroups, -1)
 
+            masked_features = tf.where(
+                tf.expand_dims(mymask, axis=-1),
+                allFeatures,
+                tf.zeros_like(allFeatures, dtype=allFeatures.dtype),
+            )
             sumFeatures = tf.math.reduce_sum(
-                allFeatures, axis=1
+                masked_features, axis=1
             )  # This var will be used in the predLoss loss
 
             allFeatures_raw = allFeatures
@@ -358,57 +480,33 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.denseFeatureOutput(
                     self.dropoutLayer(output)
                 )  # positions
-            else:
-                print("Using Transformer architecture !")
-                allFeatures = self.projection_layer(allFeatures)
-                sumFeatures = tf.math.reduce_sum(
-                    self.projection_layer(allFeatures_raw), axis=1
+
+                # normalize the lstm output and the cnn features
+                output_norm = tf.nn.l2_normalize(output, axis=1)
+                sumFeatures_norm = tf.nn.l2_normalize(sumFeatures, axis=1)
+
+                output_features = tf.stop_gradient(
+                    tf.concat([output_norm, sumFeatures_norm], axis=1)
                 )
-                allFeatures = self.lstmsNets[0](allFeatures)
-                for ilstm, transformerLayer in enumerate(self.lstmsNets[1:-3]):
-                    if ilstm == 0:
-                        if (
-                            len(self.lstmsNets) == 5
-                        ):  # num of transformer layers + one positional encoding + one pooling layer + 2 dense layers == 4 + ##transformer layers
-                            output = transformerLayer(allFeatures, mask=mymask)
-                        else:
-                            outputSeq = transformerLayer(allFeatures, mask=mymask)
-                            # residual connections between transformer layers
-                            outputSeq = outputSeq + allFeatures
-                    elif (
-                        ilstm == len(self.lstmsNets) - 5
-                    ):  # last transformer layer before pooling
-                        prevSeq = outputSeq
-                        output = transformerLayer(outputSeq, mask=mymask)
-                        # residual connections between transformer layers
-                        output = output + prevSeq
+
+                for i, denseLayer in enumerate(self.denseLossLayers):
+                    if i == self.params.nDenseLayers - 1:
+                        break
                     else:
-                        prevSeq = outputSeq
-                        outputSeq = transformerLayer(outputSeq, mask=mymask)
-                        outputSeq = outputSeq + prevSeq
+                        output_features = denseLayer(output_features)
+                        output_features = self.dropoutLayer(output_features)
+                # output_features is now the output of the forelast dense layer
+                outputPredLoss = self.denseLoss2(output_features)
 
-                output = self.lstmsNets[-3](output, mask=mymask)
-                x = self.lstmsNets[-2](output)
-                x = self.lstmsNets[-1](x)
-                myoutputPos = self.denseFeatureOutput(x)
-
-            print("myoutputPos =", myoutputPos)
-
-            outputPredLoss = self.denseLoss2(
-                # WARNING: might have an activation function here.
-                self.denseLoss3(
-                    self.denseLoss4(
-                        self.denseLoss5(
-                            self.denseLoss1(
-                                tf.stop_gradient(
-                                    tf.concat([output, sumFeatures], axis=1)
-                                )
-                            )
-                        )
+            else:
+                # Use shared transformer logic
+                myoutputPos, outputPredLoss, output, sumFeatures = (
+                    self.apply_transformer_architecture(
+                        allFeatures, allFeatures_raw, mymask, **kwargs
                     )
                 )
-            )
 
+            # TODO: change
             ### Multi-column loss configuration
             column_losses = getattr(
                 self.params,
@@ -443,22 +541,48 @@ class LSTMandSpikeNetwork:
             # if loss function is logcosh
             # tempPosLoss is in cm2
 
-            posLoss = tf.identity(tf.math.reduce_mean(tempPosLoss), name="posLoss")
+            if self.params.denseweight:
+                tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
+
+            if self.params.transform_w_log:
+                posLoss = tf.identity(
+                    tf.math.log(tf.math.reduce_mean(tempPosLoss)), name="posLoss"
+                )
+            else:
+                posLoss = tf.identity(
+                    tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)), name="posLoss"
+                )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
             # the computations for the loss of the loss predictor
             # still ~ in cm2
-            loss_function_PredLoss = tf.keras.losses.mean_squared_error
             # # outputPredLoss is supposed to be in cm2 and predict the MSE loss.
-            # outputPredLoss = tf.math.scalar_mul(cst_predLoss, outputPredLoss)
-
             # preUncertaintyLoss is in cm2^2 as it's the MSE between the predicted loss and the posLoss
-            preUncertaintyLoss = loss_function_PredLoss(
-                outputPredLoss, tf.stop_gradient(tempPosLoss)
-            )
+            if self.params.transform_w_log:
+                logPosLoss = tf.math.log(tf.add(tempPosLoss, self.epsilon))
+                preUncertaintyLoss = tf.losses.mean_squared_error(
+                    outputPredLoss, tf.stop_gradient(logPosLoss)
+                )
+                uncertaintyLoss = tf.identity(
+                    tf.math.log(
+                        tf.add(tf.math.reduce_mean(preUncertaintyLoss), self.epsilon)
+                    ),
+                    name="uncertaintyLoss",
+                )
+            else:
+                preUncertaintyLoss = tf.math.sqrt(
+                    tf.math.sqrt(
+                        tf.losses.mean_squared_error(
+                            outputPredLoss, tf.stop_gradient(tempPosLoss)
+                        )
+                    )
+                )
 
-            # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
-            uncertaintyLoss = tf.identity(preUncertaintyLoss, name="uncertaintyLoss")
+                # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
+                uncertaintyLoss = tf.identity(
+                    tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
+                )
+
         return myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
 
     def compile_model(
@@ -500,14 +624,18 @@ class LSTMandSpikeNetwork:
             return y
 
         # Compile the model
+        self.optimizer = tf.keras.optimizers.RMSprop(
+            learning_rate=kwargs.get("lr", self.params.learningRates[0])
+        )
+        self.optimizerPredLoss = tf.keras.optimizers.RMSprop(
+            learning_rate=kwargs.get("lr", self.params.learningRates[0])
+        )
         if not predLossOnly:
             # Full model
             model.compile(
                 # TODO: Adam or AdaGrad?
                 # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
-                optimizer=tf.keras.optimizers.Adagrad(
-                    learning_rate=kwargs.get("lr", self.params.learningRates[0])
-                ),  # Initially compile with first lr.
+                optimizer=self.optimizer,
                 loss={
                     # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
                     outputs[2].name.split("/Identity")[0]: pos_loss,
@@ -521,12 +649,29 @@ class LSTMandSpikeNetwork:
                 outputs[3].name.split("/Identity")[0],
             ]
         else:
+            # set all non trainable layers
+            # first the spike nets
+            for group in range(self.params.nGroups):
+                for layer in self.spikeNets[group].layers():
+                    if hasattr(layer, "trainable"):
+                        layer.trainable = False
+            # then the lstm layers
+            if hasattr(self, "projection_layer") and hasattr(
+                self.projection_layer, "trainable"
+            ):
+                self.projection_layer.trainable = False
+            for lstmLayer in self.lstmsNets:
+                if hasattr(lstmLayer, "trainable"):
+                    lstmLayer.trainable = False
+
+            # finally, the densefeatureoutput
+            if hasattr(self.denseFeatureOutput, "trainable"):
+                self.denseFeatureOutput.trainable = False
+
             # Only used to create the self.predLossModel
             model.compile(
                 # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]),
-                optimizer=tf.keras.optimizers.Adagrad(
-                    learning_rate=kwargs.get("lr", self.params.learningRates[0])
-                ),
+                optimizer=self.optimizerPredLoss,
                 loss={
                     outputs[3].name.split("/Identity")[0]: uncertainty_loss
                 },  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss) },
@@ -631,6 +776,7 @@ class LSTMandSpikeNetwork:
         load_model : bool (default False) : whether to load a previously trained model if it exists
         **kwargs : dict, optional
             Additional parameters for the training, such as batch size, scheduler, learning rate, load_model etc.
+            l_function : func, needed for dense weight regularization
 
         Returns
         -------
@@ -819,8 +965,11 @@ class LSTMandSpikeNetwork:
             datasets[key] = datasets[key].map(
                 self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
             )
-            datasets[key] = datasets[key].map(
-                map_outputs, num_parallel_calls=tf.data.AUTOTUNE
+            datasets[key] = (
+                datasets[key]
+                .map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
+                .cache()
+                # .shuffle(buffer_size=self.params.nSteps, reshuffle_each_iteration=True)
             )
             # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
             # and each mini-batch contains a representative sample of the training set.
@@ -828,17 +977,13 @@ class LSTMandSpikeNetwork:
             # from the 0-timepoint of the dataset.
             # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
             # At each epoch, the shuffle order is different.
-
-            # datasets[key] = (
-            #     datasets[key]
-            #     .shuffle(
-            #         self.params.nSteps, reshuffle_each_iteration=True
-            #     )  # NOTE: nSteps = int(10000 * 0.036 / windowSize), 10s worth of buffer
-            #     .cache()
-            #     .repeat()
-            # )  #
-
-            datasets[key] = datasets[key].prefetch(tf.data.AUTOTUNE)  #
+            datasets[key] = datasets[key].shuffle(
+                buffer_size=4,
+                reshuffle_each_iteration=True,
+            )  # were talking in number of batches here, not time
+            datasets[key] = datasets[key].prefetch(
+                tf.data.AUTOTUNE
+            )  # prefetch entire batches
 
         ### Train the model(s)
         # Initialize the model for C++ decoder
@@ -846,7 +991,22 @@ class LSTMandSpikeNetwork:
         # Train
         for key in checkpointPath.keys():
             print("Training the", key, "model")
+            nb_epochs_already_trained = 10
+            loaded = False
             if load_model and os.path.exists(os.path.dirname(checkpointPath[key])):
+                # self.custom_objects = {
+                #     "spikeNet": self.spikeNets,
+                #     "MaskedGlobalAveragePooling1D": self.lstmsNets[-3],
+                #     "PositionalEncoding": self.lstmsNets[0],
+                #     "TransformerEncoderBlock": self.lstmsNets[1],
+                #     "LinearizationLayer": self.linearization_layer,
+                #     "DynamicDenseWeightLayer": self.weights_layer,
+                #     "d_model": self.params.nFeatures,
+                #     "num_heads": self.params.nHeads,
+                #     "ff_dim1": self.params.ff_dim1,
+                #     "ff_dim2": self.params.ff_dim2,
+                #     "dropout_rate": self.params.dropoutLSTM,
+                # }
                 if key != "predLoss":
                     print(
                         "Loading the weights of the loss training model from",
@@ -854,24 +1014,17 @@ class LSTMandSpikeNetwork:
                     )
                     try:
                         self.model.load_weights(checkpointPath[key])
-                        continue
-                    except Exception as e:
-                        print(
-                            "Error loading weights for",
-                            key,
-                            "from",
-                            checkpointPath[key],
-                            ":",
-                            e,
+                        csv_hist = pd.read_csv(
+                            os.path.join(
+                                self.folderModels,
+                                str(windowSizeMS),
+                                "full",
+                                "fullmodel.log",
+                            )
                         )
-                elif key == "predLoss":
-                    print(
-                        "Loading the weights of the loss predictor model from",
-                        checkpointPath[key],
-                    )
-                    try:
-                        self.predLossModel.load_weights(checkpointPath[key])
-                        continue
+                        nb_epochs_already_trained = csv_hist["epoch"].max() + 1
+                        print("nb_epochs_already_trained =", nb_epochs_already_trained)
+                        loaded = True
                     except Exception as e:
                         print(
                             "Error loading weights for",
@@ -887,6 +1040,9 @@ class LSTMandSpikeNetwork:
                 filepath=checkpointPath[key], save_weights_only=True, verbose=1
             )
             # Manage learning rates schedule
+            if loaded:
+                self.optimizer.learning_rate.assign(0.0001)
+                self.optimizerPredLoss.learning_rate.assign(0.0001)
             LRScheduler = self.LRScheduler(self.params.learningRates)
             if scheduler == "fixed":
                 schedule = tf.keras.callbacks.LearningRateScheduler(
@@ -904,17 +1060,17 @@ class LSTMandSpikeNetwork:
             if self.debug:
                 print("Debugging mode is ON, enabling TensorBoard callback")
                 is_tbcallback = True
-                log_dir = os.path.join(
-                    "logs",
-                    os.path.basename(self.projectPath.experimentPath),
-                    str(windowSizeMS),
-                    os.path.basename(os.path.dirname(self.projectPath.xml)),
-                    key,
-                )
-                tb_callbacks = tf.keras.callbacks.TensorBoard(
-                    log_dir=log_dir,
-                    histogram_freq=1,
-                )
+                # log_dir = os.path.join(
+                #     "logs",
+                #     os.path.basename(self.projectPath.experimentPath),
+                #     str(windowSizeMS),
+                #     os.path.basename(os.path.dirname(self.projectPath.xml)),
+                #     key,
+                # )
+                # tb_callbacks = tf.keras.callbacks.TensorBoard(
+                #     log_dir=log_dir,
+                #     histogram_freq=1,
+                # )
 
                 # tf.debugging.experimental.enable_dump_debug_info(
                 #     self.folderResult,
@@ -929,12 +1085,12 @@ class LSTMandSpikeNetwork:
 
                     import wandb
 
-                    wandb.tensorboard.patch(
-                        root_logdir=os.path.join(
-                            "logs",
-                            os.path.basename(self.projectPath.experimentPath),
-                        )
-                    )
+                    # wandb.tensorboard.patch(
+                    #     root_logdir=os.path.join(
+                    #         "logs",
+                    #         os.path.basename(self.projectPath.experimentPath),
+                    #     )
+                    # )
                     # ann config
                     ann_config = {
                         k: v
@@ -946,23 +1102,13 @@ class LSTMandSpikeNetwork:
                         and not isinstance(v, tf.Tensor)
                         and not isinstance(v, DataHelper)
                     }
+                    ann_config["loaded"] = loaded
 
+                    prefix = "LOADED_" if loaded else ""
                     wandb.init(
                         entity="touseul",
-                        project="neuroEncoder",
-                        notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
-                        sync_tensorboard=True,
-                        config=ann_config,
-                    )
-
-                    wandb_callback = WandbMetricsLogger()
-                        and not isinstance(v, tf.Tensor)
-                        and not isinstance(v, DataHelper)
-                    }
-
-                    wandb.init(
-                        entity="touseul",
-                        project="neuroEncoder",
+                        project="rien de rien",
+                        name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
                         config=ann_config,
@@ -976,18 +1122,21 @@ class LSTMandSpikeNetwork:
                 )  # Load weights from full network if we train
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
-                        monitor="val_tf.identity_1_loss", patience=5, min_delta=0.01
+                        monitor="val_tf.identity_1_loss",
+                        patience=10,
+                        min_delta=0.01,
+                        restore_best_weights=True,
                     )
                     callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
                 else:
                     callbacks = [csvLogger[key], cp_callback, schedule]
 
-                if is_tbcallback:
-                    callbacks.append(tb_callbacks)
+                # if is_tbcallback:
+                #     callbacks.append(tb_callbacks)
 
                 hist = self.predLossModel.fit(
                     datasets["predLoss"],
-                    epochs=self.params.nEpochs,
+                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,
                     validation_data=datasets["test"],
                 )
@@ -1019,23 +1168,25 @@ class LSTMandSpikeNetwork:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
                         monitor="val_loss",
-                        patience=5,
-                        min_delta=0.01,
+                        patience=10,
+                        min_delta=0.05,
                         verbose=1,
                         restore_best_weights=True,
-                        start_from_epoch=5,
+                        start_from_epoch=80,
                     )
                     callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
                 else:
                     callbacks = [csvLogger[key], cp_callback, schedule]
 
                 if is_tbcallback:
-                    callbacks.append(tb_callbacks)
+                    # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
                 hist = self.model.fit(
                     datasets["train"],
-                    epochs=self.params.nEpochs,
+                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10
+                    if not loaded
+                    else 15,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                 )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
@@ -1136,15 +1287,41 @@ class LSTMandSpikeNetwork:
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
-            self.model.load_weights(
-                os.path.join(
-                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
+            try:
+                with tf.keras.saving.custom_object_scope(self.custom_objects):
+                    self.model = tf.keras.models.load_model(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "savedModels",
+                            "predLossModel.keras",
+                        )
+                    )
+                print("found predLossModel.keras, loaded it")
+            except:
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
+                    )
                 )
-            )
         else:
-            self.model.load_weights(
-                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
-            )
+            try:
+                with tf.keras.saving.custom_object_scope(self.custom_objects):
+                    self.model = tf.keras.models.load_model(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "savedModels",
+                            "fullModel.keras",
+                        )
+                    )
+                print("found fullModel.keras, loaded it")
+            except:
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
+                    )
+                )
 
         # Manage the behavior
         if speedValue is None:
@@ -1198,6 +1375,7 @@ class LSTMandSpikeNetwork:
             return nnUtils.parse_serialized_spike(self.featDesc, *vals)
 
         dataset = dataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
+
         table = tf.lookup.StaticHashTable(
             tf.lookup.KeyValueTensorInitializer(
                 tf.constant(np.arange(len(totMask)), dtype=tf.int64),
@@ -1208,7 +1386,7 @@ class LSTMandSpikeNetwork:
 
         def filter_by_pos_index(x):
             # check previous commits for this line
-            return tf.math.greater(table.lookup(x["pos_index"]), 0)
+            return tf.equal(table.lookup(x["pos_index"]), 1.0)
 
         def filter_nan_pos(x):
             pos_data = x["pos"]
@@ -1217,15 +1395,17 @@ class LSTMandSpikeNetwork:
                 pos_data = tf.cast(pos_data, tf.float64)
             return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
+        @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
 
+        @tf.autograph.experimental.do_not_convert
         def map_outputs(vals):
             return (
                 vals,
                 {
                     "tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
-                    "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize),
+                    "tf_op_layer_uncertaintyLoss": tf.zeros(self.params.batchSize),
                 },
             )
 
@@ -1248,7 +1428,7 @@ class LSTMandSpikeNetwork:
             map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
         )
         dataset = dataset.map(self.create_indices, num_parallel_calls=tf.data.AUTOTUNE)
-        dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
+        dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE).cache()
 
         print("INFERRING")
         outputTest = self.model.predict(dataset, verbose=1)
@@ -1276,22 +1456,29 @@ class LSTMandSpikeNetwork:
         datasetPos_index = dataset.map(
             lambda x, y: x["pos_index"], num_parallel_calls=tf.data.AUTOTUNE
         )
+        datasetIndexInDat = dataset.map(
+            lambda x, y: x["indexInDat"], num_parallel_calls=tf.data.AUTOTUNE
+        )
+        IDdat = list(datasetIndexInDat.as_numpy_iterator())
         posIndex = list(datasetPos_index.as_numpy_iterator())
         posIndex = np.ravel(np.array(posIndex))
         print("gathering speed mask")
-        windowmaskSpeed = speedMask[posIndex]
-        outLoss = np.expand_dims(outputTest[2], axis=1)
-        loss_from_output_loss = np.expand_dims(outputTest[3], axis=1)
+        windowmaskSpeed = speedMask[
+            posIndex
+        ]  # the speedMask used in the table lookup call
+        posLoss = outputTest[2]
+        uncertaintyLoss = outputTest[3]
 
         testOutput = {
             "featurePred": outputTest[0],
             "featureTrue": featureTrue,
             "times": times,
             "predLoss": outputTest[1],
-            "lossFromOutputLoss": outLoss,
+            "posLoss": posLoss,
             "posIndex": posIndex,
             "speedMask": windowmaskSpeed,
-            "LossFromUncertaintyLoss": loss_from_output_loss,
+            "uncertaintyLoss": uncertaintyLoss,
+            "indexInDat": IDdat,
         }
 
         if l_function:
@@ -1391,7 +1578,7 @@ class LSTMandSpikeNetwork:
                     vals,
                     {
                         "tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
-                        "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize),
+                        "tf_op_layer_uncertaintyLoss": tf.zeros(self.params.batchSize),
                     },
                 )
 
@@ -1528,7 +1715,7 @@ class LSTMandSpikeNetwork:
                 vals,
                 {
                     "tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
-                    "tf_op_layer_UncertaintyLoss": tf.zeros(self.params.batchSize),
+                    "tf_op_layer_uncertaintyLoss": tf.zeros(self.params.batchSize),
                 },
             )
 
@@ -1616,6 +1803,8 @@ class LSTMandSpikeNetwork:
 
     def fix_linearizer(self, mazePoints, tsProj):
         ## For the linearization we define two fixed inputs:
+        self.maze_points = mazePoints
+        self.ts_proj = tsProj
         self.mazePoints_tensor = tf.convert_to_tensor(
             mazePoints[None, :], dtype=tf.float32
         )
@@ -1677,7 +1866,7 @@ class LSTMandSpikeNetwork:
             ax[0].set_title("position loss")
             ax[0].plot(valLosses[:, 0], label="validation position loss", c="orange")
             ax[1].plot(trainLosses[:, 1], label="train loss prediction loss")
-            ax[1].set_title("log loss prediction loss")
+            ax[1].set_title("loss predictor loss")
             ax[1].plot(valLosses[:, 1], label="validation loss prediction loss")
             fig.legend()
             fig.tight_layout()
@@ -1724,6 +1913,12 @@ class LSTMandSpikeNetwork:
         if not sleep:
             df = pd.DataFrame(test_output["featureTrue"])
             df.to_csv(os.path.join(folderToSave, f"featureTrue{suffix}.csv"))
+            # Position loss
+            df = pd.DataFrame(test_output["posLoss"])
+            df.to_csv(os.path.join(folderToSave, f"posLoss{suffix}.csv"))
+            # Uncertainty loss
+            df = pd.DataFrame(test_output["uncertaintyLoss"])
+            df.to_csv(os.path.join(folderToSave, f"uncertaintyLoss{suffix}.csv"))
         # Times of prediction
         df = pd.DataFrame(test_output["times"])
         df.to_csv(os.path.join(folderToSave, f"timeStepsPred{suffix}.csv"))
@@ -1750,6 +1945,358 @@ class LSTMandSpikeNetwork:
         if "linearTrue" in test_output:
             df = pd.DataFrame(test_output["linearTrue"])
             df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
+
+    def setup_dynamic_dense_loss(self, **kwargs):
+        """
+        Call this ONCE before training to fit the DenseWeight model
+        """
+        from fullEncoder.nnUtils import DenseLossProcessor
+
+        # Unpack kwargs
+        behaviorData = kwargs.get("behaviorData", None)
+        alpha = kwargs.get("alpha", 1.3)
+        verbose = kwargs.get("verbose", False)
+        self.dynamicdense_verbose = verbose
+        if behaviorData is None:
+            raise ValueError(
+                "You must provide behaviorData to setup dynamic dense loss."
+            )
+
+        if verbose:
+            print("Setting up Dynamic Dense Loss...")
+
+        # Create the processor
+        self.dense_loss_processor = DenseLossProcessor(
+            maze_points=self.maze_points,
+            ts_proj=self.ts_proj,
+            alpha=alpha,
+            verbose=verbose,
+        )
+
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][totMask]
+        # Fit DenseWeight model on full training dataset
+        self.dense_loss_processor.fit_dense_weight_model(full_training_true_positions)
+        self.training_data = full_training_true_positions
+        self.training_weights = self.dense_loss_processor.training_weights
+        self.linearized_training = self.dense_loss_processor.linearized_training
+
+        # Set up components for your existing code
+        self.linearization_layer = self.dense_loss_processor.linearization_layer
+        self.weights_layer = self.dense_loss_processor.get_weights_layer()
+        import termplotlib as tpl
+
+        # Store the fitted dynamic weights
+
+        self.dw = self.dense_loss_processor.fitted_dw
+
+        if verbose:
+            print("✓ Dynamic Dense Loss ready!")
+            fig = tpl.figure()
+            fig.plot(
+                self.linearized_training,
+                self.training_weights,
+                label="weight of linearized position due to imbalance",
+            )
+            fig.show()
+
+    # Your existing loss computation (now works with dynamic weights):
+    def apply_dynamic_dense_loss(self, temp_pos_loss, true_pos):
+        """
+        Your existing code - now dynamically computes weights for each batch
+        """
+        if hasattr(self, "dw") and hasattr(self, "linearization_layer"):
+            print("Applying Dynamic Dense Loss reweighting...")
+
+            # Get linearized position for current batch
+            _, linearized_pos = self.linearization_layer(true_pos)
+            if self.dynamicdense_verbose:
+                print(f"Loss shape: {temp_pos_loss.shape}")
+                print(f"Linearized pos shape: {linearized_pos.shape}")
+
+            # Dynamically compute weights using fitted DenseWeight model
+            # This calls the fitted model with current batch samples
+            weightings = self.weights_layer(linearized_pos)
+            if self.dynamicdense_verbose:
+                print(f"Dynamic weights shape: {weightings.shape}")
+
+            # Apply Dense Loss: f_w(α, current_batch) * M(ŷ_i, y_i)
+            temp_pos_loss = tf.math.multiply(temp_pos_loss, weightings[:, tf.newaxis])
+
+            if self.dynamicdense_verbose:
+                print("✓ Applied Dynamic Dense Loss reweighting")
+
+        return temp_pos_loss
+
+    def extract_cnn_model(self):
+        """
+        Extract CNN feature extractor from the complete model.
+        Uses existing CNN layers from the class.
+
+        Returns:
+            cnn_model: Model that extracts CNN features from group inputs
+        """
+
+        # Get CNN input layers
+        cnn_inputs = [self.inputsToSpikeNets[i] for i in range(self.params.nGroups)]
+
+        # Get CNN output layers - the outputs of your spikeNets
+        cnn_outputs = []
+        for group in range(self.params.nGroups):
+            x = self.inputsToSpikeNets[group]
+            cnn_output = self.spikeNets[group].apply(x)
+            cnn_outputs.append(cnn_output)
+
+        # Create CNN model
+        cnn_model = tf.keras.Model(
+            inputs=cnn_inputs, outputs=cnn_outputs, name="cnn_feature_extractor"
+        )
+
+        print(f"CNN Model created with {len(cnn_model.layers)} layers")
+        print("CNN Model summary:")
+        cnn_model.summary()
+
+        return cnn_model
+
+    def extract_transformer_model(self):
+        """
+        Extract transformer part using the shared transformer logic.
+        Creates new model that takes CNN features as input.
+
+        Returns:
+            transformer_model: Model that processes CNN features through transformer
+        """
+
+        with tf.device(self.deviceName):
+            # Create new inputs for transformer model
+            cnn_feature_inputs = [
+                tf.keras.Input(shape=(self.params.nFeatures,), name=f"cnn_features_{i}")
+                for i in range(self.params.nGroups)
+            ]
+
+            # Other inputs needed by transformer
+            groups_input = tf.keras.layers.Input(shape=(), name="groups", dtype="int32")
+            pos_input = tf.keras.layers.Input(shape=(2,), name="pos")
+
+            # Create indices inputs (these would normally come from self.indices)
+            indices_inputs = [
+                tf.keras.layers.Input(shape=(), name=f"indices_{i}", dtype="int32")
+                for i in range(self.params.nGroups)
+            ]
+
+            # Recreate the feature gathering and concatenation logic
+            allFeatures = []
+            for group in range(self.params.nGroups):
+                filledFeatureTrain = tf.gather(
+                    tf.concat([self.zeroForGather, cnn_feature_inputs[group]], axis=0),
+                    indices_inputs[group],
+                    axis=0,
+                )
+
+                filledFeatureTrain = tf.reshape(
+                    filledFeatureTrain,
+                    [self.params.batchSize, -1, self.params.nFeatures],
+                )
+                allFeatures.append(filledFeatureTrain)
+
+            allFeatures = tf.tuple(tensors=allFeatures)
+            allFeatures = tf.concat(allFeatures, axis=2, name="concat_CNNs")
+
+            # Create mask
+            batchedInputGroups = tf.reshape(groups_input, [self.params.batchSize, -1])
+            mymask = tf.not_equal(batchedInputGroups, -1)
+
+            # Store raw features and apply dropout
+            allFeatures_raw = allFeatures
+            allFeatures = self.dropoutLayer(allFeatures)
+
+            # Use the shared transformer logic
+            myoutputPos, outputPredLoss, output, sumFeatures = (
+                self.apply_transformer_architecture(
+                    allFeatures, allFeatures_raw, mymask
+                )
+            )
+
+            # Create all inputs for the transformer model
+            all_transformer_inputs = (
+                cnn_feature_inputs + indices_inputs + [groups_input, pos_input]
+            )
+
+            # Create transformer model
+            transformer_model = tf.keras.Model(
+                inputs=all_transformer_inputs,
+                outputs=[myoutputPos, outputPredLoss],
+                name="transformer_model",
+            )
+
+            print(
+                f"Transformer Model created with {len(transformer_model.layers)} layers"
+            )
+            print("Transformer Model summary:")
+            transformer_model.summary()
+
+            return transformer_model
+
+    def create_separated_models(self):
+        """
+        Main method to create separated CNN and Transformer models.
+
+        Returns:
+            tuple: (cnn_model, transformer_model)
+        """
+
+        print("=" * 60)
+        print("EXTRACTING CNN MODEL")
+        print("=" * 60)
+        cnn_model = self.extract_cnn_model()
+
+        print("\n" + "=" * 60)
+        print("EXTRACTING TRANSFORMER MODEL")
+        print("=" * 60)
+        transformer_model = self.extract_transformer_model()
+
+        print("\n" + "=" * 60)
+        print("MODELS CREATED SUCCESSFULLY")
+        print("=" * 60)
+
+        return cnn_model, transformer_model
+
+    def fine_tune_transformer(
+        self, transformer_model, train_data, val_data, epochs=20, learning_rate=1e-4
+    ):
+        """
+        Fine-tune transformer model with pre-extracted CNN features
+
+        Args:
+            transformer_model: Extracted transformer model
+            train_data: Training data tuple (inputs, targets)
+            val_data: Validation data tuple (inputs, targets)
+            epochs: Number of training epochs
+            learning_rate: Learning rate for optimization
+        """
+
+        print("Fine-tuning Transformer model...")
+
+        # Compile model
+        transformer_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            loss=["mse", "mse"],  # For position and loss prediction
+            loss_weights=[1.0, 0.1],  # Adjust based on your needs
+            metrics=["mae"],
+        )
+
+        # Train
+        history = transformer_model.fit(
+            train_data[0],  # inputs
+            train_data[1],  # targets
+            validation_data=val_data,
+            epochs=epochs,
+            verbose=1,
+            batch_size=self.params.batchSize,
+        )
+
+        return history
+
+    def train_subject_cnn(
+        self, cnn_model, train_data, val_data, epochs=10, learning_rate=1e-5
+    ):
+        """
+        Train CNN model for specific subject
+
+        Args:
+            cnn_model: Extracted CNN model
+            train_data: Training data tuple (inputs, targets)
+            val_data: Validation data tuple (inputs, targets)
+            epochs: Number of training epochs
+            learning_rate: Learning rate for optimization
+        """
+
+        print("Training CNN for specific subject...")
+
+        # Compile CNN model
+        cnn_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            loss=["mse"] * self.params.nGroups,  # One loss per group
+            metrics=["mae"],
+        )
+
+        # Train
+        history = cnn_model.fit(
+            train_data[0],  # inputs
+            train_data[1],  # targets
+            validation_data=val_data,
+            epochs=epochs,
+            verbose=1,
+            batch_size=self.params.batchSize,
+        )
+
+        return history
+
+    def save_separated_models(
+        self, cnn_model, transformer_model, base_name="separated"
+    ):
+        """Save the separated models"""
+
+        cnn_path = f"{base_name}_cnn.h5"
+        transformer_path = f"{base_name}_transformer.h5"
+
+        cnn_model.save(cnn_path)
+        transformer_model.save(transformer_path)
+
+        print(f"CNN model saved: {cnn_path}")
+        print(f"Transformer model saved: {transformer_path}")
+
+        return cnn_path, transformer_path
+
+    def load_separated_models(self, cnn_path, transformer_path):
+        """Load separated models"""
+
+        cnn_model = tf.keras.models.load_model(cnn_path)
+        transformer_model = tf.keras.models.load_model(transformer_path)
+
+        print(f"CNN model loaded: {cnn_path}")
+        print(f"Transformer model loaded: {transformer_path}")
+
+        return cnn_model, transformer_model
+
+    def inference_with_separated_models(
+        self,
+        cnn_model,
+        transformer_model,
+        group_data,
+        indices_data,
+        groups_data,
+        pos_data,
+    ):
+        """
+        Perform inference using separated models
+
+        Args:
+            cnn_model: CNN feature extractor
+            transformer_model: Transformer model
+            group_data: List of group input data
+            indices_data: List of indices for each group
+            groups_data: Groups data
+            pos_data: Position data
+
+        Returns:
+            predictions: [position_pred, loss_pred]
+        """
+
+        # Extract CNN features
+        cnn_features = cnn_model.predict(group_data)
+
+        # Combine with other inputs for transformer
+        transformer_inputs = (
+            list(cnn_features) + list(indices_data) + [groups_data, pos_data]
+        )
+
+        # Get final predictions
+        predictions = transformer_model.predict(transformer_inputs)
 
     @classmethod
     def clear_session(cls):
@@ -1841,7 +2388,6 @@ def combined_loss(params):
     return loss_function
 
 
-@tf.keras.utils.register_keras_serializable(package="Custom")
 class MultiColumnLoss(tf.keras.losses.Loss):
     def __init__(
         self,
