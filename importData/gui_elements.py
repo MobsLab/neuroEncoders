@@ -4,6 +4,7 @@
 # mplt.use("TkAgg")
 from tkinter import Button, Entry, Label, Toplevel
 from typing import Optional, Tuple
+from warnings import warn
 
 import matplotlib as matplotlib
 import matplotlib.animation as animation
@@ -20,6 +21,8 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
+
+from importData.epochs_management import inEpochsMask
 
 
 class rangeButton:
@@ -102,6 +105,7 @@ class AnimatedPositionPlotter:
         dim=None,
         trail_length: int = 40,
         figsize: Tuple[int, int] = (10, 8),
+        **kwargs,
     ):
         """
         Initialize the animated position plotter.
@@ -109,7 +113,12 @@ class AnimatedPositionPlotter:
         Args:
             data_helper: DataHelper instance with .positions and .dim attributes
             trail_length: Number of recent points to show in the trail (default: 40)
+            dim: Dimension to use for color coding (default: None, auto-detected as pos, direction, or distance)
             figsize: Figure size as (width, height)
+            **kwargs: Additional keyword arguments for customization
+                speedMask : Speed mask for the trajectory (default: False)
+                speedMaskArray: Pre-computed speed mask array instead of simple boolean (optional)
+                predicted : Pre-computed predicted positions (optional)
         """
         self.data_helper = data_helper
         self.trail_length = trail_length
@@ -117,19 +126,57 @@ class AnimatedPositionPlotter:
         self.dim_name = self.data_helper.target.capitalize()  # Default dimension name
 
         # Extract data
+        if kwargs.get("positions", None) is not None:
+            self.positions = np.array(kwargs["positions"])
+        else:
+            try:
+                self.positions = np.array(
+                    data_helper.old_positions
+                )  # Shape: (n_timepoints, 2)
+                # get rid of nan values
+            except AttributeError:
+                self.positions = np.array(
+                    data_helper.positions
+                )  # Shape: (n_timepoints, ?? depends on get_true_target return value)
+        epochMask = inEpochsMask(
+            data_helper.fullBehavior["positionTime"][:, 0],
+            data_helper.fullBehavior["Times"]["trainEpochs"],
+        ) + inEpochsMask(
+            data_helper.fullBehavior["positionTime"][:, 0],
+            data_helper.fullBehavior["Times"]["testEpochs"],
+        )
+
+        if kwargs.get("speedMaskArray", None) is not None:
+            speed_mask = np.array(kwargs["speedMaskArray"])
+
+        elif kwargs.get("speedMask", False):
+            try:
+                speed_mask = np.array(data_helper.fullBehavior["Times"]["speedFilter"])
+            except AttributeError:
+                warn("No speed mask found in data_helper. Using all positions.")
+                speed_mask = np.ones(len(self.positions), dtype=bool)
+        else:
+            speed_mask = np.ones(len(self.positions), dtype=bool)
+
         try:
-            self.positions = np.array(
-                data_helper.old_positions
-            )  # Shape: (n_timepoints, 2)
-            # get rid of nan values
-            indices = ~np.isnan(self.positions).any(axis=1)
-            self.positions = self.positions[indices]
-        except AttributeError:
-            self.positions = np.array(
-                data_helper.positions
-            )  # Shape: (n_timepoints, ?? depends on get_true_target return value)
-            indices = ~np.isnan(self.positions).any(axis=1)
-            self.positions = self.positions[indices]
+            totMask = epochMask * speed_mask
+        except ValueError:
+            print(
+                "Warning: Epoch mask and speed mask have different lengths. Using speed mask only."
+            )
+            totMask = speed_mask
+
+        self.positions = self.positions[totMask]
+
+        indices = ~np.isnan(self.positions).any(axis=1)
+        self.positions = self.positions[indices]
+
+        if kwargs.get("predicted", None) is not None:
+            self.predicted = np.array(kwargs["predicted"])
+            self.predicted = self.predicted[totMask]
+            self.predicted = self.predicted[indices]
+        else:
+            self.predicted = None
 
         if dim is None:
             if self.data_helper.target == "pos":
@@ -166,7 +213,10 @@ class AnimatedPositionPlotter:
                 self.dim = self.dim[indices]
         elif isinstance(dim, np.ndarray):
             self.dim = dim
-            self.dim = self.dim[indices]
+            try:
+                self.dim = self.dim[indices]
+            except IndexError:
+                self.dim = self.dim[totMask][indices]
 
         # Validate data
         self._validate_data()
@@ -202,23 +252,7 @@ class AnimatedPositionPlotter:
 
     def setup_plot(
         self,
-        colormap=cmc.buda,
-        alpha_trail: float = 0.7,
-        binary_colors=None,
-        shock_color: str = "hotpink",
-        safe_color: str = "cornflowerblue",
-        hlines: list = None,
-        vlines: list = None,
-        line_colors: str = "black",
-        line_styles: str = "--",
-        line_widths: float = 1.0,
-        line_alpha: float = 0.7,
-        custom_lines: list = None,
-        custom_line_colors: str = "black",
-        custom_line_styles: str = "-",
-        custom_line_widths: float = 2.0,
-        custom_line_alpha: float = 0.8,
-        with_ref_bg: bool = True,
+        **kwargs,
     ):
         """
         Setup the matplotlib figure and axes.
@@ -240,7 +274,29 @@ class AnimatedPositionPlotter:
             custom_line_styles: Style(s) for custom lines (default: '-')
             custom_line_widths: Width(s) for custom lines (default: 2.0)
             custom_line_alpha: Transparency for custom lines (default: 0.8)
+            with_ref_bg: Whether to use a reference background image (default: True)
         """
+        colormap = kwargs.get("colormap", cmc.buda)
+        predicted_cmap = kwargs.get("predicted_cmap", cmc.imola)
+        alpha_trail = kwargs.get("alpha_trail", 0.7)
+        binary_colors = kwargs.get("binary_colors", None)
+        shock_color = kwargs.get("shock_color", "hotpink")
+        safe_color = kwargs.get("safe_color", "cornflowerblue")
+        shock_color_predicted = kwargs.get("shock_color", "lightpink")
+        safe_color_predicted = kwargs.get("safe_color", "lightskyblue")
+        hlines = kwargs.get("hlines", None)
+        vlines = kwargs.get("vlines", None)
+        line_colors = kwargs.get("line_colors", "black")
+        line_styles = kwargs.get("line_styles", "--")
+        line_widths = kwargs.get("line_widths", 1.0)
+        line_alpha = kwargs.get("line_alpha", 0.7)
+        custom_lines = kwargs.get("custom_lines", None)
+        custom_line_colors = kwargs.get("custom_line_colors", "black")
+        custom_line_styles = kwargs.get("custom_line_styles", "-")
+        custom_line_widths = kwargs.get("custom_line_widths", 2.0)
+        custom_line_alpha = kwargs.get("custom_line_alpha", 0.8)
+        with_ref_bg = kwargs.get("with_ref_bg", True)
+
         self.fig, self.ax = plt.subplots(figsize=self.figsize)
 
         # Store line parameters
@@ -276,37 +332,77 @@ class AnimatedPositionPlotter:
         if self.binary_colors:
             # Binary color mapping
             self.colormap = None
+            self.predicted_colormap = None
             self.norm = None
             # Create custom colors for binary data
-            self.color_map = {0: shock_color, 1: safe_color}
+            self.colormap = {0: shock_color, 1: safe_color}
+            self.predicted_colormap = {
+                0: shock_color_predicted,
+                1: safe_color_predicted,
+            }
         else:
             # Continuous color mapping
             if isinstance(colormap, str):
                 self.colormap = cm.get_cmap(colormap)
+                self.predicted_colormap = cm.get_cmap(predicted_cmap)
             else:
                 self.colormap = colormap
+                self.predicted_colormap = predicted_cmap
 
             if self.dim_name == "Dist2Threat":
                 colormap = LinearSegmentedColormap.from_list(
                     "direction_cmap", [shock_color, safe_color], N=256
                 )
+                predicted_colormap = LinearSegmentedColormap.from_list(
+                    "predicted_direction_cmap",
+                    [shock_color_predicted, safe_color_predicted],
+                    N=256,
+                )
                 self.colormap = colormap
+                self.predicted_colormap = predicted_colormap
             self.norm = Normalize(vmin=np.min(self.dim), vmax=np.max(self.dim))
 
         # Initialize empty line for trail
         (self.line,) = self.ax.plot(
             [], [], "-", alpha=alpha_trail, linewidth=2, color="gray"
         )
+        (self.predicted_line,) = self.ax.plot(
+            [], [], "-", alpha=alpha_trail, linewidth=2, color="xkcd:seafoam"
+        )
+        (self.delta_predicted_true,) = self.ax.plot(
+            [], [], "-", alpha=alpha_trail, linewidth=4, color="xkcd:browny green"
+        )
 
         # Initialize scatter plot for trail points
         if self.binary_colors:
             # For binary data, we'll update colors manually
             self.points = self.ax.scatter([], [], s=50, alpha=alpha_trail)
+            if self.predicted is not None:
+                self.predicted_points = self.ax.scatter([], [], s=50, alpha=alpha_trail)
+            else:
+                self.predicted_points = None
         else:
             # For continuous data, use colormap
             self.points = self.ax.scatter(
-                [], [], c=[], s=50, alpha=alpha_trail, cmap=colormap, norm=self.norm
+                [],
+                [],
+                c=[],
+                s=50,
+                alpha=alpha_trail,
+                cmap=self.colormap,
+                norm=self.norm,
             )
+            if self.predicted is not None:
+                self.predicted_points = self.ax.scatter(
+                    [],
+                    [],
+                    s=50,
+                    alpha=alpha_trail,
+                    cmap=self.predicted_colormap,
+                    norm=self.norm,
+                )
+            else:
+                self.predicted_points = None
 
         # Initialize current position marker
         self.current_point = self.ax.scatter(
@@ -319,6 +415,17 @@ class AnimatedPositionPlotter:
             linewidth=2,
             zorder=10,
         )
+        if self.predicted is not None:
+            self.current_predicted_point = self.ax.scatter(
+                [],
+                [],
+                c="xkcd:reddish pink",
+                s=100,
+                marker="x",
+                edgecolors="black",
+                linewidth=2,
+                zorder=10,
+            )
 
         self.ax.set_xlim(0, 1)
         self.ax.set_ylim(0, 1)
@@ -494,38 +601,77 @@ class AnimatedPositionPlotter:
         # Get trail data
         trail_positions = self.positions[start_idx:end_idx]
         trail_directions = self.dim[start_idx:end_idx]
+        if self.predicted is not None:
+            trail_predicted = self.predicted[start_idx:end_idx]
+            trail_directions_predicted = self.dim[start_idx:end_idx]
+        else:
+            trail_predicted = None
+            trail_directions_predicted = None
 
         # Update trail line
         self.line.set_data(trail_positions[:, 0], trail_positions[:, 1])
+        if self.predicted is not None:
+            self.predicted_line.set_data(trail_predicted[:, 0], trail_predicted[:, 1])
 
         # Update trail points with direction colors
         if self.binary_colors:
             # Binary color mapping
-            trail_colors = [self.color_map[int(d)] for d in trail_directions]
+            trail_colors = [self.colormap[int(d)] for d in trail_directions]
             self.points.set_offsets(trail_positions)
             self.points.set_color(trail_colors)
+            if self.predicted is not None:
+                self.predicted_points.set_offsets(trail_predicted)
+                self.predicted_points.set_color(
+                    [
+                        self.predicted_colormap[int(d)]
+                        for d in trail_directions_predicted
+                    ]
+                )
         else:
             # Continuous color mapping
             trail_colors = self.colormap(self.norm(trail_directions))
             self.points.set_offsets(trail_positions)
             self.points.set_color(trail_colors)
+            if self.predicted is not None:
+                trail_predicted_colors = self.predicted_colormap(
+                    self.norm(trail_directions_predicted)
+                )
+                self.predicted_points.set_offsets(trail_predicted)
+                self.predicted_points.set_color(trail_predicted_colors)
 
         # Create alpha gradient for trail (most recent points are more opaque)
         n_trail_points = len(trail_positions)
         alphas = np.linspace(0.2, 0.8, n_trail_points)
         if n_trail_points > 0:
             self.points.set_alpha(alphas[-1])  # Use the alpha of the most recent point
+            self.predicted_points.set_alpha(
+                alphas[-1]
+            ) if self.predicted is not None else None
 
         # Update current position with color based on direction
         current_pos = self.positions[frame : frame + 1]
         current_dir = self.dim[frame]
+        if self.predicted is not None:
+            current_predicted_pos = self.predicted[frame : frame + 1]
+            current_predicted_dir = self.dim[frame]
+            self.delta_predicted_true.set_data(
+                [current_pos[0, 0], current_predicted_pos[0, 0]],
+                [current_pos[0, 1], current_predicted_pos[0, 1]],
+            )
 
         if self.binary_colors:
-            current_color = self.color_map[int(current_dir)]
+            current_color = self.colormap[int(current_dir)]
             self.current_point.set_offsets(current_pos)
             self.current_point.set_color(current_color)
+            if self.predicted is not None:
+                self.current_predicted_point.set_offsets(current_predicted_pos)
+                self.current_predicted_point.set_color(
+                    self.predicted_colormap[int(current_predicted_dir)]
+                )
         else:
             self.current_point.set_offsets(current_pos)
+            if self.predicted is not None:
+                self.current_predicted_point.set_offsets(current_predicted_pos)
             # Keep current point red for continuous data for visibility
 
         # Update title with current frame info and direction
@@ -561,14 +707,13 @@ class AnimatedPositionPlotter:
             matplotlib.animation.FuncAnimation object
         """
         if self.fig is None:
-            self.setup_plot()
+            self.setup_plot(**kwargs)
 
         # Default kwargs for better Qt compatibility
         anim_kwargs = {
             "blit": False,  # Better compatibility with Qt
             "cache_frame_data": False,  # Reduce memory usage
         }
-        anim_kwargs.update(kwargs)
 
         self.animation = animation.FuncAnimation(
             self.fig,
@@ -590,7 +735,7 @@ class AnimatedPositionPlotter:
 
         return self.animation
 
-    def show(self, interval: int = 50, repeat: bool = True, block=False):
+    def show(self, interval: int = 50, repeat: bool = True, block=False, **kwargs):
         """
         Show the animation with Qt backend support.
 
@@ -599,7 +744,7 @@ class AnimatedPositionPlotter:
             repeat: Whether to repeat the animation (default: True)
             block: Whether to block execution (auto-detected based on environment)
         """
-        self.create_animation(interval=interval, repeat=repeat)
+        self.create_animation(interval=interval, repeat=repeat, **kwargs)
 
         # Auto-detect blocking behavior
         # Show the plot

@@ -1,7 +1,9 @@
 # Get libs
+from logging import warn
 import os
 import stat
 import sys
+from turtle import speed
 import warnings
 
 import matplotlib.pyplot as plt
@@ -30,10 +32,10 @@ def print_results(
     # force=True,
     # target="pos",
     # phase=None,
+    # useSpeedMask=True,
     # with_hist_distribution=True,
     # skip_linear_plots=None,
-    # fullTrainBehaviorData=None,
-    # template=None,
+    # training_data=None,
     """
     This function is used to print the results of the decoding and save some associated figures.
 
@@ -52,6 +54,9 @@ def print_results(
     - target: the target of the decoding (pos or lin or linAndThigmo #TODO)
     - phase: the phase of the experiment (e.g. "pre", "cond", "post")
     - with_hist_distribution: if True, the histogram distribution of the error will be plotted
+    - save: if True, the figures will be saved (default: True)
+    - training_data: the training data used for the decoding (optional for histogram)
+    - useSpeedMask: if True, the speed mask will be used to select the windows
 
     return:
     ---
@@ -61,22 +66,19 @@ def print_results(
     """
 
     # Manage kwargs arguments
-    show = kwargs.get("show", True)
+    show = kwargs.pop("show", True)
     typeDec = kwargs.get("typeDec", "NN")
     euclidean = kwargs.get("euclidean", False)
     results = kwargs.get("results", [])
     lossSelection = kwargs.get("lossSelection", 0.3)
     avoid_zero = kwargs.get("avoid_zero", False)
     windowSizeMS = kwargs.get("windowSizeMS", 36)
-    force = kwargs.get("force", True)
     target = kwargs.get("target", "pos")
     phase = kwargs.get("phase", None)
-    with_hist_distribution = kwargs.get("with_hist_distribution", True)
     skip_linear_plots = kwargs.get("skip_linear_plots", None)
+    l_function = kwargs.get("l_function", None)
     if skip_linear_plots is None:
         skip_linear_plots = False
-    fullTrainBehaviorData = kwargs.get("fullTrainBehaviorData", None)
-    template = kwargs.get("template", None)
 
     # Check if the directory exists
     if not os.path.isdir(dir):
@@ -112,6 +114,24 @@ def print_results(
             .values[:, 1:]
             .flatten()
             .astype(bool)
+        )
+        posIndex = (
+            pd.read_csv(
+                os.path.expanduser(
+                    os.path.join(dir, str(windowSizeMS), f"posIndex{suffix}.csv")
+                )
+            )
+            .values[:, 1]
+            .astype(int)
+        )
+        timeStepsPred = (
+            pd.read_csv(
+                os.path.expanduser(
+                    os.path.join(dir, str(windowSizeMS), f"timeStepsPred{suffix}.csv")
+                )
+            )
+            .values[:, 1]
+            .astype(int)
         )
         qControl = np.squeeze(
             pd.read_csv(
@@ -154,7 +174,11 @@ def print_results(
         else:
             linear = False
         # create a fake speedMask for all timepoints
-        speedMask = np.ones(pos.shape[0], dtype=bool)
+        speedMask = np.ones(
+            shape=pos.shape[0], dtype=bool
+        )  # TODO:dont know how to use speedMask in bayes, it returns the full speedFilter mask which is not what we want.
+        posIndex = np.arange(pos.shape[0])
+        timeStepsPred = results["times"]
     else:
         raise ValueError('typeDec should be either "NN" or bayes"')
     dimOutput = pos.shape[1]
@@ -188,6 +212,11 @@ def print_results(
     elif typeDec == "bayes":
         thresh = qControltmp[temp[int(len(temp) * (1 - lossSelection))]]
         selection = np.squeeze(qControl >= thresh)
+
+    if kwargs.get("training_data", None) is not None and kwargs.get(
+        "useSpeedMask", True
+    ):
+        selection = np.logical_and(selection, speedMask)
     frames = np.where(selection)[0]
     print(
         "total windows:",
@@ -255,28 +284,22 @@ def print_results(
 
     sys.stdout.write("threshold value: " + str(thresh) + "\r")
     sys.stdout.flush()
+    training_data = kwargs.pop("training_data", None)
+    if (
+        l_function is not None
+        and training_data is not None
+        and dimOutput == 1
+        and training_data.shape[1] == 2
+    ):
+        twoDtraining_data = training_data.copy()
+        _, training_data = l_function(twoDtraining_data)
     # Plot things
-    overview_fig(
-        pos,
-        inferring,
-        selection,
-        outdir,
-        dimOutput=dimOutput,
-        show=block,
-        typeDec=typeDec,
-        force=force,
-        phase=phase,
-        target=target,
-        with_hist_distribution=with_hist_distribution,
-        speedMask=speedMask,
-        fullTrainBehaviorData=fullTrainBehaviorData,
-        template=template,
-    )
+
     if (np.nanmax(qControl) != 0) | (
         np.nanmax(qControl) == 0 and avoid_zero
     ) and not skip_fig_interror:
         qControl = qControltmp
-        fig_interror(
+        thresh, selection = fig_interror(
             pos,
             error,
             qControl,
@@ -285,13 +308,14 @@ def print_results(
             outdir,
             dimOutput=dimOutput,
             show=block,
-            typeDec=typeDec,
-            force=force,
-            phase=phase,
             name="pos",
             plotMaze=target == "pos",
+            speedMask=speedMask,
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
         )
-        fig_interror(
+        thresh, selection = fig_interror(
             inferring,
             error,
             qControl,
@@ -300,16 +324,70 @@ def print_results(
             outdir,
             dimOutput=dimOutput,
             show=block,
-            typeDec=typeDec,
-            force=force,
-            phase=phase,
             name="inferring",
+            speedMask=speedMask,
             plotMaze=target == "pos",
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
         )
     else:
         warnings.warn("qControl is all zeros, not plotting the interactive figure")
+    overview_fig(
+        pos,
+        inferring,
+        selection,
+        outdir,
+        dimOutput=dimOutput,
+        show=block,
+        speedMask=speedMask,
+        training_data=training_data,
+        posIndex=posIndex,
+        timeStepsPred=timeStepsPred,
+        **kwargs,
+    )
 
     if not skip_linear_plots:
+        if training_data is not None and training_data.shape[1] == 2:
+            if l_function is not None:
+                twoDtraining_data = training_data.copy()
+                _, training_data = l_function(twoDtraining_data)
+            else:
+                raise ValueError(
+                    "l_function is None, if you want 1D plot with training_data, you should provide a l_function to convert the 2D data to 1D"
+                )
+        thresh, selection = fig_interror(
+            lpos,
+            lError,
+            qControl,
+            selection,
+            thresh,
+            outdir,
+            dimOutput=1,
+            speedMask=speedMask,
+            show=block,
+            name="lpos",
+            plotMaze=target == "pos",
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
+        )
+        thresh, selection = fig_interror(
+            linferring,
+            lError,
+            qControl,
+            selection,
+            thresh,
+            outdir,
+            dimOutput=1,
+            show=block,
+            speedMask=speedMask,
+            name="linferring",
+            plotMaze=target == "pos",
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
+        )
         overview_fig(
             lpos,
             linferring,
@@ -317,43 +395,11 @@ def print_results(
             outdir,
             dimOutput=1,
             show=block,
-            typeDec=typeDec,
-            force=force,
-            phase=phase,
-            with_hist_distribution=with_hist_distribution,
             speedMask=speedMask,
-            fullTrainBehaviorData=fullTrainBehaviorData,
-            template=template,
-        )
-        fig_interror(
-            lpos,
-            lError,
-            qControl,
-            selection,
-            thresh,
-            outdir,
-            dimOutput=1,
-            show=block,
-            typeDec=typeDec,
-            force=force,
-            phase=phase,
-            name="lpos",
-            plotMaze=target == "pos",
-        )
-        fig_interror(
-            linferring,
-            lError,
-            qControl,
-            selection,
-            thresh,
-            outdir,
-            dimOutput=1,
-            show=block,
-            typeDec=typeDec,
-            force=force,
-            phase=phase,
-            name="linferring",
-            plotMaze=target == "pos",
+            training_data=training_data,
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
         )
 
     return (
@@ -376,12 +422,9 @@ def overview_fig(
     show=False,
     typeDec="NN",
     force=True,
-    phase=None,
-    target="pos",
     with_hist_distribution: bool = True,
     speedMask=None,
-    fullTrainBehaviorData=None,
-    template=None,
+    **kwargs,
 ):
     """
     This function is used to plot the overview figure of the decoding.
@@ -393,17 +436,26 @@ def overview_fig(
     - selection: the selected windows
     - outfolder: the folder where to save the figure
     - dimOutput: the dimension of the output (1 or 2)
-    - show: if True, the figure will be shown
+    - show: if True, the figure will be shown (default: True)
     - typeDec: the type of decoder used (NN or bayes)
     - force: if True, the figure will be re-computed even if it already exists
     - phase: the phase of the experiment (e.g. "pre", "cond", "post")
     - target: the target of the decoding (pos or lin or linAndThigmo)
     - with_hist_distribution: if True, the histogram distribution of the error will be plotted
+    - speedMask : a mask to select the speed of the mouse (optional, if not provided, all data will be used)
+    - training_data: the training data used for the decoding (optional for histogram) /!\ Should be already speed masked!!!
+    - posIndex: the index of the position in the original data (optional, used for plotting)
 
     return:
     ---
     - None
     """
+    phase = kwargs.pop("phase", None)
+    target = kwargs.pop("target", "pos")
+    training_data = kwargs.pop("training_data", None)
+    posIndex = kwargs.pop("posIndex", None)
+    timeStepsPred = kwargs.pop("timeStepsPred", None)
+
     suffix = f"_{phase}" if phase is not None else ""
     if (
         os.path.isfile(
@@ -429,11 +481,18 @@ def overview_fig(
     else:
         dim_names = ["position 0", "position 1", "Linear Position"]
 
-    pos_to_show = fullTrainBehaviorData if fullTrainBehaviorData is not None else pos
-    speedMask = (
-        speedMask if speedMask is not None else np.ones_like(pos_to_show, dtype=bool)
+    pos_to_show = training_data if training_data is not None else pos
+    speedMask_train = (
+        speedMask
+        if speedMask is not None
+        else np.ones(shape=pos_to_show.shape[0], dtype=bool)
     )
-    shown = "speedMask" if fullTrainBehaviorData is None else "speedMask on fullTrain"
+    speedMask = (
+        speedMask
+        if speedMask is not None and training_data is None
+        else np.ones(shape=pos_to_show.shape[0], dtype=bool)
+    )
+    shown = "speedMask" if training_data is None else "speedMask on fullTrain"
 
     if dimOutput == 2:
         fig, ax = plt.subplots(figsize=(15, 9))
@@ -453,14 +512,19 @@ def overview_fig(
                         colspan=4,
                     )
                     plt.setp(ax1.get_xticklabels(), visible=False)
-                ax1.plot(
-                    np.where(selection)[0],
+                ax1.scatter(
+                    timeStepsPred[selection],
                     inferring[selection, dim],
-                    "--.",
                     label=f"guessed {dim_names[dim]} selection",
+                    s=20,
                 )
-                ax1.plot(
-                    pos[:, dim],
+                ax1.scatter(
+                    timeStepsPred
+                    if phase != "training"
+                    else timeStepsPred[speedMask_train],
+                    pos[:, dim] if phase != "training" else pos[speedMask_train, dim],
+                    s=24,
+                    alpha=0.6,
                     label=f"true {dim_names[dim]}" + str(dim),
                     color="xkcd:dark pink",
                 )
@@ -511,7 +575,7 @@ def overview_fig(
             from matplotlib.colors import ListedColormap
 
             ax1.plot(
-                np.where(selection)[0],
+                timeStepsPred[selection],
                 inferring[selection, 0],
                 "--.",
                 zorder=2,
@@ -519,7 +583,7 @@ def overview_fig(
                 alpha=0.5,
             )
             ax1.scatter(
-                np.where(selection)[0],
+                timeStepsPred[selection],
                 inferring[selection, 0],
                 s=36,
                 c=inferring[selection, 1],
@@ -530,8 +594,13 @@ def overview_fig(
                 zorder=3,
             )
             ax1.plot(
-                pos[:, 0],
+                timeStepsPred
+                if phase != "training"
+                else timeStepsPred[speedMask_train],
+                pos[:, 0] if phase != "training" else pos[speedMask_train, 0],
+                ".-" if phase == "training" else "-",
                 markersize=6,
+                alpha=0.6,
                 label=f"true {dim_names[0]}",
                 color="xkcd:dark pink",
                 zorder=1,
@@ -610,13 +679,22 @@ def overview_fig(
             ax2 = plt.subplot2grid(
                 (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
             )
-            ax2.plot(
-                np.where(selection)[0],
+            ax2.scatter(
+                timeStepsPred[selection],
                 inferring[selection],
-                "--.",
+                s=20,
                 label=f"guessed {dim_names[2]} selection",
             )
-            ax2.plot(pos, label=f"true {dim_names[2]}", color="xkcd:dark pink")
+            ax2.scatter(
+                timeStepsPred
+                if phase != "training"
+                else timeStepsPred[speedMask_train],
+                pos if phase != "training" else pos[speedMask_train],
+                s=24,
+                alpha=0.6,
+                label=f"true {dim_names[2]}",
+                color="xkcd:dark pink",
+            )
             ax2.legend()
             ax2.set_title(f"{dim_names[2]}")
             if with_hist_distribution and selection.sum() > 0:
@@ -666,12 +744,15 @@ def overview_fig(
             if selection.sum() > 0:
                 ax2 = plt.subplot2grid((dimOutput, 2), (1, 1))
                 visualizer._plot_error_distribution(ax=ax2)
-    plt.savefig(
-        os.path.expanduser(
-            os.path.join(outfolder, f"overviewFig_{dimOutput}d_{typeDec}{suffix}.png")
-        ),
-        bbox_inches="tight",
-    )
+    if kwargs.get("save", True):
+        plt.savefig(
+            os.path.expanduser(
+                os.path.join(
+                    outfolder, f"overviewFig_{dimOutput}d_{typeDec}{suffix}.png"
+                )
+            ),
+            bbox_inches="tight",
+        )
     if show:
         if mplt.get_backend() == "QtAgg":
             plt.get_current_fig_manager().window.showMaximized()
@@ -688,12 +769,12 @@ def overview_fig(
 
 
 def fig_interror(
-    pos,
-    Error,
-    q_control,
-    selection,
-    thresh,
-    outfolder,
+    pos: np.ndarray,
+    Error: np.ndarray,
+    q_control: np.ndarray,
+    selection: np.ndarray,
+    thresh: float,
+    outfolder: str,
     dimOutput=2,
     show=False,
     typeDec="NN",
@@ -701,9 +782,10 @@ def fig_interror(
     phase=None,
     name=None,
     plotMaze=False,
+    **kwargs,
 ):
     """
-    This function is used to plot the interactive figure of the decoding.
+    This function is used to plot the interactive figure of the decoding and returns the new threshold value set by the slider.
 
         args:
         ----
@@ -717,11 +799,21 @@ def fig_interror(
         - show: if True, the figure will be shown
         - typeDec: the type of decoder used (NN or bayes)
         - force: if True, the figure will be re-computed even if it already exists
+        - save: if True, the figure will be saved
 
         return:
         ---
-        - None
+        - new_thresh: the new threshold value set by the slider
+        - selection: the selection of the windows based on the threshold
     """
+    typeDec = kwargs.pop("typeDec", typeDec)
+    new_thresh = thresh
+    timeStepsPred = kwargs.pop("timeStepsPred", None)
+    speedMask = kwargs.pop("speedMask", None)
+    if speedMask is None:
+        print("Warning: speedMask is None, using all data")
+        speedMask = np.ones(shape=pos.shape[0], dtype=bool)
+
     suffix = f"_{phase}" if phase is not None else ""
     suffix = f"{suffix}_{name}" if name is not None else suffix
     if (
@@ -767,7 +859,7 @@ def fig_interror(
             )
     elif dimOutput == 1:
         s = plt.scatter(
-            np.where(selection)[0], pos[selection], c=Error[selection], s=10
+            timeStepsPred[selection], pos[selection], c=Error[selection], s=10
         )
     rangey = ax.get_ylim()[1] - ax.get_ylim()[0]
     rangex = ax.get_xlim()[1] - ax.get_xlim()[0]
@@ -785,27 +877,27 @@ def fig_interror(
     ax.set_ylabel("Y")
 
     def update(val):
+        nonlocal new_thresh, selection
+        new_thresh = val
         sys.stdout.write("threshold value: " + str(val) + "\r")
         sys.stdout.flush()
-        thresh_line.set_ydata([val, val])
+        thresh_line.set_xdata([val, val])  # Changed from set_ydata to set_xdata
         if typeDec == "NN":
             selection = np.squeeze(q_control <= val)
+            if phase == "training":
+                selection = np.logical_and(selection, speedMask)
         elif typeDec == "bayes":
             selection = np.squeeze(q_control >= val)
         if dimOutput == 2:
             s.set_offsets(pos[selection, :])
             s.set_array(Error[selection])
             sel2 = selection[selNoNans]
-            scatt.set_array(
-                np.array([1 if sel2[n] else 0.2 for n in range(len(selNoNans))])
-            )
+            scatt.set_array(np.array([1 if sel2[n] else 0.2 for n in range(len(sel2))]))
         elif dimOutput == 1:
             s.set_offsets(np.c_[np.where(selection)[0], pos[selection]])
             s.set_array(Error[selection])
             sel2 = selection[selNoNans]
-            scatt.set_array(
-                np.array([1 if sel2[n] else 0.2 for n in range(len(selNoNans))])
-            )
+            scatt.set_array(np.array([1 if sel2[n] else 0.2 for n in range(len(sel2))]))
         fig.canvas.draw_idle()
 
     axcolor = "lightgoldenrodyellow"
@@ -825,14 +917,17 @@ def fig_interror(
     )
     slider.on_changed(update)
 
-    # ERROR & STD
+    # ERROR & STD - AXES SWAPPED
     ax = plt.subplot2grid((1, 2), (0, 1))
     selNoNans = np.squeeze(~np.isnan(Error))
+    if phase == "training":
+        selNoNans = np.squeeze(np.logical_and(selNoNans, speedMask))
     sel2 = selection[selNoNans]
     z = [1 if sel2[n] else 0.2 for n in range(len(sel2))]
+    # Swapped: q_control on x-axis, Error on y-axis
     scatt = plt.scatter(
-        Error[selNoNans],
         q_control[selNoNans],
+        Error[selNoNans],
         c=z,
         s=10,
         cmap=plt.cm.get_cmap("Greys"),
@@ -840,45 +935,41 @@ def fig_interror(
         vmax=1,
     )
     # plt.scatter(Error[selNoNans], inferring[selNoNans,dim_output], c=z, s=10)
-    nBins = 20
-    _, edges = np.histogram(Error[selNoNans], nBins)
+    nBins = 30
+    _, edges = np.histogram(q_control[selNoNans], nBins)
     histIdx = []
     for bin in range(nBins):
         temp = []
         for n in range(len(Error)):
             if not selNoNans[n]:
                 continue
-            if Error[n] <= edges[bin + 1] and Error[n] > edges[bin]:
+            if q_control[n] <= edges[bin + 1] and q_control[n] > edges[bin]:
                 temp.append(n)
         histIdx.append(temp)
     err = np.array(
         [
             [
-                np.median(q_control[histIdx[n]])
-                - np.percentile(q_control[histIdx[n]], 30)
+                np.median(Error[histIdx[n]]) - np.percentile(Error[histIdx[n]], 30)
                 for n in range(nBins)
                 if len(histIdx[n]) > 10
             ],
             [
-                np.percentile(q_control[histIdx[n]], 70)
-                - np.median(q_control[histIdx[n]])
+                np.percentile(Error[histIdx[n]], 70) - np.median(Error[histIdx[n]])
                 for n in range(nBins)
                 if len(histIdx[n]) > 10
             ],
         ]
     )
+    # Swapped: q_control median on x-axis, bin centers on y-axis
     plt.errorbar(
         [(edges[n + 1] + edges[n]) / 2 for n in range(nBins) if len(histIdx[n]) > 10],
-        [
-            np.median(q_control[histIdx[n]])
-            for n in range(nBins)
-            if len(histIdx[n]) > 10
-        ],
+        [np.median(Error[histIdx[n]]) for n in range(nBins) if len(histIdx[n]) > 10],
         c="xkcd:cherry red",
         yerr=err,
         label=r"$median \pm 20 percentile$",
         linewidth=3,
     )
+    # Create new range based on q_control values instead of Error
     x_new = np.linspace(
         np.min(
             [
@@ -896,13 +987,10 @@ def fig_interror(
         ),
         num=len(Error),
     )
+    # Fit polynomial with swapped axes: q_control vs Error (bin centers)
     coefs = poly.polyfit(
         [(edges[n + 1] + edges[n]) / 2 for n in range(nBins) if len(histIdx[n]) > 10],
-        [
-            np.median(q_control[histIdx[n]])
-            for n in range(nBins)
-            if len(histIdx[n]) > 10
-        ],
+        [np.median(Error[histIdx[n]]) for n in range(nBins) if len(histIdx[n]) > 10],
         2,
     )
     # coefs = poly.polyfit(Error[selNoNans], inferring[selNoNans,dim_output], 2)
@@ -910,16 +998,19 @@ def fig_interror(
     plt.plot(x_new, ffit, "k", linewidth=3)
     # # add a linear fit to the plot = y =x
     # plt.plot(x_new, x_new, "c--", linewidth=1)
-    thresh_line = plt.axhline(thresh, c="k")
-    ax.set_ylabel("evaluated loss")
-    ax.set_xlabel("decoding error")
-    ax.set_title(f"decoding error vs. evaluated loss, {phase=}")
-    plt.savefig(
-        os.path.expanduser(
-            os.path.join(outfolder, f"errorFig_{dimOutput}d_{typeDec}{suffix}.png")
-        ),
-        bbox_inches="tight",
-    )
+    thresh_line = plt.axvline(thresh, c="k")  # Changed from axhline to axvline
+    ax.set_xlabel("evaluated loss")  # Swapped labels
+    if typeDec == "bayes":
+        ax.set_xlabel("bayes probability")
+    ax.set_ylabel("decoding error")  # Swapped labels
+    ax.set_title(f"evaluated loss vs. decoding error, {phase=}")  # Updated title
+    if kwargs.get("save", True):
+        plt.savefig(
+            os.path.expanduser(
+                os.path.join(outfolder, f"errorFig_{dimOutput}d_{typeDec}{suffix}.png")
+            ),
+            bbox_inches="tight",
+        )
     if show:
         if mplt.get_backend() == "QtAgg":
             plt.get_current_fig_manager().window.showMaximized()
@@ -930,6 +1021,7 @@ def fig_interror(
         plt.show(block=True)
     plt.close("all")
     print()
+    return new_thresh, selection
 
 
 # Re-do (or do the figures)
