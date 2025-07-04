@@ -596,6 +596,20 @@ wheels = [
 ]
 
 [[package]]
+name = "denseweight"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "kdepy" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/54/11e7547fd4b63f36bc707ec3bd0ca97079a82621f13edff8962614104067/denseweight-0.1.2.tar.gz", hash = "sha256:281cf1fe4be364366363ee822b524620dcb629c5b9ff7852aa80f91a27c98b1e", size = 17242 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/7b/bdea1bf4ae7d6f2251f5ae14f701929dc6785d0c0a7a095e43bec28c75d5/denseweight-0.1.2-py3-none-any.whl", hash = "sha256:8d939ff5d34e31e001aa16b8f0731c33555712e0e54ca1d28eb29604d669ab2b", size = 16784 },
+]
+
+[[package]]
 name = "dill"
 version = "0.3.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1422,10 +1436,46 @@ wheels = [
 ]
 
 [[package]]
-name = "keopscore"
-version = "2.2.3"
+name = "kdepy"
+version = "1.1.12"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/31/1da3877139d75e392f5fd0cbdc3b718ae726f5308ed792d385250c43167c/keopscore-2.2.3.tar.gz", hash = "sha256:64d5dad1e8c806d7070cdc60e48fd5bbf006f2bf1afd39ad3fa5e9fb213517d2", size = 100286 }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/a4/ee1680051ef29215e9ef2d4c09719076d93e0a48c7a8784523fbb59368a8/kdepy-1.1.12.tar.gz", hash = "sha256:eb3a62abc5a982f5a30ec0a3560e2f9cbd3d19bc4f721b2ebbde06949d52af61", size = 171716 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/52/5ff42853ade0365d4f7a1335c829d037c2b95a24e44db2a781379a8f5e76/kdepy-1.1.12-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:aea3587396e458b53c63c8a070505bcd7fd7e60756f99d3390ee344e22d08f41", size = 269631 },
+    { url = "https://files.pythonhosted.org/packages/de/24/9ca4380a635ab07b41522e9a8146ddcfa9c6a2d3330c721fa32bf4c3f64e/kdepy-1.1.12-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:64a837b0c552d681ef7bdfa5b0e18bbbc66e3d5dac7ad7fc9919c881e0f16498", size = 265061 },
+    { url = "https://files.pythonhosted.org/packages/ee/b2/78d97b9b291a34a9905e5796a6830e984de843de1570cd8002796c4e2566/kdepy-1.1.12-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ff27b711d3e914da68a80bdd8044d7992a9a48be090378be246f6b39d91b6e46", size = 652108 },
+    { url = "https://files.pythonhosted.org/packages/63/5a/596c179ca5cfc6d137b6d2b2b48106371ba475c1b264834d8097707f4721/kdepy-1.1.12-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f3fccc80e33e291752d2cee7686628c19f066806b9b3f62d7d007c09c252c8fc", size = 656824 },
+    { url = "https://files.pythonhosted.org/packages/5b/48/c7f11143dc2e158ea4f814debc22d1cdcfae3406f05bdb82ea56a1a7d486/kdepy-1.1.12-cp310-cp310-win32.whl", hash = "sha256:d3839f95cfd45084901a0d9c98b4ac83a5eb57449a6be7004d422cf29d9eedff", size = 249688 },
+    { url = "https://files.pythonhosted.org/packages/08/6c/459fbef9332423af790bc03d9cfccb2e3868b09cd17c71da8b12216bcc05/kdepy-1.1.12-cp310-cp310-win_amd64.whl", hash = "sha256:c7c5b091e3034d026bcf718a5efecbe2a1eee5100d1328621387d7fadb164dd8", size = 262081 },
+    { url = "https://files.pythonhosted.org/packages/66/61/211c8c0e63943c2274ea87c15f3a1e18d253eb71b783166a3219f66c8ec9/kdepy-1.1.12-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:4f7deb921bbe944247bf8c4d2b2078dd67be8130d3be4a32f947766daed60095", size = 269809 },
+    { url = "https://files.pythonhosted.org/packages/26/a6/7559ae97ec9a178899469eb8d5fff49ef9cff53bbabacf2a986ef9e6dd03/kdepy-1.1.12-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b2f04a95a6d706ab6fcfba104c49b97e4b6ade40212bcface291e4ab6747eed0", size = 265130 },
+    { url = "https://files.pythonhosted.org/packages/24/ab/83658a77d77de77e72785bebe3c26a3c99583bca269223a805b19c6eaa95/kdepy-1.1.12-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9e5115b65531d36ab48b9e9dd952221bb7789999f95c7b44564367f885f5ade5", size = 686249 },
+    { url = "https://files.pythonhosted.org/packages/db/40/075110da71dd4240205803d8533ea588e6ed929d42d96c08764b5eecf93e/kdepy-1.1.12-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e1928bf44c9ee7f78239461d5670e8515f5d4a201eff5622547967c7c20fa82d", size = 691483 },
+    { url = "https://files.pythonhosted.org/packages/6e/76/570c619625ac546fcbb5b4d7b1d8d928dd9eaad7dba03b07898e7b710d33/kdepy-1.1.12-cp311-cp311-win32.whl", hash = "sha256:1089bbdc007c0495556d6409f7c9235abfc79071c7147781ca6f644aad4e5eb4", size = 249361 },
+    { url = "https://files.pythonhosted.org/packages/08/f4/b83f74465c9923e32b0c0bf038aa50551908fde7c95865ba63101c781c2d/kdepy-1.1.12-cp311-cp311-win_amd64.whl", hash = "sha256:ff6a4db7b40a63b9accde48ebfd25e664138f37eda56ad1be34fe37f60ce3d84", size = 262249 },
+    { url = "https://files.pythonhosted.org/packages/80/ec/b27b63a6fe7165d6679bfc6f62e73b56d8b6ad0377d0703c53493649a5a1/kdepy-1.1.12-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:35bdfc7f046014b6bdf83d6d14b2adbd8f08c1d3b83d63a91d74970dc8085972", size = 271481 },
+    { url = "https://files.pythonhosted.org/packages/f7/2e/5e4eb6fdb929f293b6e3db55eb021d09b51bafb71104ea0e73acd6f21b7e/kdepy-1.1.12-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:e9ffa424aa96988a9b7f0154168c17cf64cba46ad691a556e77e51cae7992864", size = 266528 },
+    { url = "https://files.pythonhosted.org/packages/0d/45/95c70b4934690e69ab74b4f165b6c87609399253f2fa57d13b9441aa0975/kdepy-1.1.12-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f6a98453558eb39fe093601dea19769ebb13e371e11a212be516b27b4f059a55", size = 676186 },
+    { url = "https://files.pythonhosted.org/packages/8c/a1/7d3ab60c558d70fef89b92f27f51f361d8107b2b5f7ec2fab0d20531a1ec/kdepy-1.1.12-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6e5d59f51dd1797b7729e09993986f2920f45e62609c3704c5946aa5f05171f1", size = 686217 },
+    { url = "https://files.pythonhosted.org/packages/09/bd/390672f54d60c7f8094bdab68eca586e062fb97b622db9da3e97cc17fc2e/kdepy-1.1.12-cp312-cp312-win32.whl", hash = "sha256:2b00d31897ce5c88362149a5651048e594a5c0f7db7b85f0ace7767604bf004f", size = 250282 },
+    { url = "https://files.pythonhosted.org/packages/c8/5e/30b7fe14f16e331ccc68331dda83567200e691baffa5ccc60aa326499034/kdepy-1.1.12-cp312-cp312-win_amd64.whl", hash = "sha256:0834ff21a74fbd85ee748a8e9ff0edc886e0dd2c9a7011d4f69a943029a61e3d", size = 263179 },
+    { url = "https://files.pythonhosted.org/packages/41/36/2f6f8726b88ac6552534cb7094fdf6fc4eaa5f5b4db2af77ed15667ee030/kdepy-1.1.12-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:562d1d7a63e61209a9c2852e0de67090abe90def2e47deaf7d4bd935d36ba67b", size = 270451 },
+    { url = "https://files.pythonhosted.org/packages/a4/08/85c362e1bc5180ce6095aed9154ae86a48c9c21d001422defcd96fc0faca/kdepy-1.1.12-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:df4335cac2eb387265ec93911a1fcf6520d5a6d2a7762cb00e134e6c3beae18d", size = 265489 },
+    { url = "https://files.pythonhosted.org/packages/3c/9f/7f57e42a6dbec5d6275bf7d960cc3ef9408200c72aa7bbcd8b79a08cff9d/kdepy-1.1.12-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e0c5a22798499154e1aef0378fbeb04f8832dd74d05246fcdbb5438e3c4424e1", size = 670413 },
+    { url = "https://files.pythonhosted.org/packages/57/7e/53bc000edbe1ac835b351ade98e1b12d9e152814f6cf11021f7766460905/kdepy-1.1.12-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e62facb46ea6d6eff92a0f8ad054bdf4b5a84ec66444b5cae9d5af1f828b07b7", size = 679756 },
+    { url = "https://files.pythonhosted.org/packages/d1/a4/4a0ca91bc6dce8be7bb7dd647fbd576d22c7ea7cb58a6bfc96dc49f6064b/kdepy-1.1.12-cp313-cp313-win32.whl", hash = "sha256:c5fdc115c212df1a622997a9d8ff9c1bae8179562cc8f2e9710adced96abfd20", size = 250176 },
+    { url = "https://files.pythonhosted.org/packages/9f/79/8cf9f01f653f2db7a48c9ae249dd818b2664ed9e30f5f0bb2414af783c70/kdepy-1.1.12-cp313-cp313-win_amd64.whl", hash = "sha256:f64b740a61f60076630cfcdd1ff011c70d1ce1a7ceab05b14763d95163140e46", size = 262924 },
+]
+
+[[package]]
+name = "keopscore"
+version = "2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/28/94f516c55fca15be37cc75d56f9560d3be5a4badc87ca78202e06dd2d526/keopscore-2.3.tar.gz", hash = "sha256:e8a700c22efee59a7723ed7516c2d88ab143a11290dd23b07eb7bba1c9d16fef", size = 118471 }
 
 [[package]]
 name = "keras"
@@ -2028,13 +2078,15 @@ wheels = [
 
 [[package]]
 name = "neuroencoders"
-version = "2.0.1"
+version = "2.1"
 source = { virtual = "." }
 dependencies = [
     { name = "bokeh" },
     { name = "cmcrameri" },
+    { name = "denseweight" },
     { name = "dill" },
     { name = "graphviz" },
+    { name = "h5py" },
     { name = "ipykernel" },
     { name = "ipympl" },
     { name = "isort" },
@@ -2056,6 +2108,7 @@ dependencies = [
     { name = "pykeops" },
     { name = "pynapple" },
     { name = "pyqt5" },
+    { name = "pyyaml" },
     { name = "scikeras" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
@@ -2067,6 +2120,7 @@ dependencies = [
     { name = "tables", version = "3.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "tables", version = "3.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tensorflow" },
+    { name = "termplotlib" },
     { name = "tqdm" },
     { name = "wandb" },
 ]
@@ -2081,8 +2135,10 @@ dev = [
 requires-dist = [
     { name = "bokeh", specifier = ">=3.7.3" },
     { name = "cmcrameri", specifier = ">=1.9" },
+    { name = "denseweight", specifier = ">=0.1.2" },
     { name = "dill", specifier = ">=0.3.9" },
     { name = "graphviz", specifier = ">=0.20.3" },
+    { name = "h5py", specifier = ">=3.13.0" },
     { name = "ipykernel", specifier = ">=6.29.5" },
     { name = "ipympl", specifier = ">=0.9.7" },
     { name = "isort", specifier = ">=6.0.1" },
@@ -2100,9 +2156,10 @@ requires-dist = [
     { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pydot", specifier = ">=3.0.4" },
     { name = "pydotplus", specifier = ">=2.0.2" },
-    { name = "pykeops", specifier = ">=2.2.3" },
+    { name = "pykeops", specifier = ">=2.3" },
     { name = "pynapple", specifier = ">=0.9.0" },
     { name = "pyqt5", specifier = ">=5.15.11" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "scikeras", specifier = ">=0.12.0" },
     { name = "scikit-image", specifier = ">=0.24.0" },
     { name = "scikit-learn", specifier = ">=1.6.1" },
@@ -2113,6 +2170,7 @@ requires-dist = [
     { name = "statannotations", specifier = ">=0.7.2" },
     { name = "tables", specifier = ">=3.10.1" },
     { name = "tensorflow", specifier = "==2.15.0" },
+    { name = "termplotlib", specifier = ">=0.3.9" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "wandb", specifier = ">=0.20.1" },
 ]
@@ -2827,14 +2885,14 @@ wheels = [
 
 [[package]]
 name = "pykeops"
-version = "2.2.3"
+version = "2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "keopscore" },
     { name = "numpy" },
     { name = "pybind11" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/64/2c7b49954aeac6b10e1fd553e190aef8e4737d48506aae60aa6f2b035809/pykeops-2.2.3.tar.gz", hash = "sha256:2e2cba1de5e05c35559957a14f41cb5165dc667cc51b3b2118d7e0027eb435a1", size = 92458 }
+sdist = { url = "https://files.pythonhosted.org/packages/3b/e1/3bb0af9916632e712cc0b0326679647d7452e626811dbc2b15b277add460/pykeops-2.3.tar.gz", hash = "sha256:458fa77985efd2161be9c719e8dd41e495526cd735d3262aec09902505f5bdba", size = 552155 }
 
 [[package]]
 name = "pynapple"
@@ -4039,6 +4097,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8a/11/965c6fd8e5cc254f1fe142d547387da17a8ebfd75a3455f637c663fb38a0/terminado-0.18.1.tar.gz", hash = "sha256:de09f2c4b85de4765f7714688fff57d3e75bad1f909b589fde880460c753fd2e", size = 32701 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/9e/2064975477fdc887e47ad42157e214526dcad8f317a948dee17e1659a62f/terminado-0.18.1-py3-none-any.whl", hash = "sha256:a4468e1b37bb318f8a86514f65814e1afc977cf29b3992a4500d9dd305dcceb0", size = 14154 },
+]
+
+[[package]]
+name = "termplotlib"
+version = "0.3.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b4/60/8a74d2503dd64975402c7b8d00f6e201e8cbba5348282433fa5fb8d41b67/termplotlib-0.3.9.tar.gz", hash = "sha256:c04cbd67ac61753eac9162a99cbe87c379d4c5daf720af1df55f4423c094203e", size = 24517 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/d0/ea24907a6d1e3c5e40ff5b58920552c3e1e4e73181a8583d5bd9d5217305/termplotlib-0.3.9-py3-none-any.whl", hash = "sha256:827bec59e0de24dfe265b9d9a4adc4df8335aa98f49c1122bd53ced9b72c5206", size = 21535 },
 ]
 
 [[package]]

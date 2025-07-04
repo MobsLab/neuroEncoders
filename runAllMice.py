@@ -3,28 +3,52 @@ import fnmatch
 import os
 import subprocess
 import sys
+import time
+import gc
+import psutil
 from concurrent.futures import ProcessPoolExecutor
+from utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [2.16]
 win_values = [0.036, 0.108, 0.18, 0.252, 0.504, 1.08, 2.16]
 win_values = [0.18, 2.16]
 win_values = [0.036, 0.108]
 win_values = [0.108, 0.18, 0.252, 0.504]
+win_values = [0.504]  # only kept for new dataset
+win_values = [0.108, 0.252]
+win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
 # Mice name
-mice_nb = ["M1199_PAG"]
 mice_nb = []
+mice_nb = ["M1199_PAG", "M1239_MFB", "M1230_Known", "M1230_Novel"]
 nameExpBayes = "Pos_pre_Retracked"
 nameExp = "LinAndThigmo"
 nameExp = "LinAndDirection_SpecificLoss"
-nameExp = "pos_transformer"
-nbEpochs = str(100)
+nameExp = "position_NormalLoss_RMS_newUncertainty_DENSE"
+nbEpochs = str(400)
+run_bayes = False
 targetBayes = "pos"
 target = "pos"
 phase = "pre"
 
 
-def process_directory(dir, win, force):
+def check_memory_usage():
+    """Monitor memory usage and print warnings if getting high"""
+    memory = psutil.virtual_memory()
+    if memory.percent > 80:
+        print(f"WARNING: Memory usage at {memory.percent:.1f}%")
+        return True
+    return False
+
+
+def cleanup_memory():
+    """Force garbage collection and print memory stats"""
+    gc.collect()
+    memory = psutil.virtual_memory()
+    print(f"Memory usage after cleanup: {memory.percent:.1f}%")
+
+
+def process_directory(dir, win, force, lstmAndTransfo=False):
     xml_file = None
     for pattern in [
         "*SpikeRef*.xml",
@@ -59,11 +83,117 @@ def process_directory(dir, win, force):
                 f"featurePred_{phase}.csv",
             )
         )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp,
+                "results",
+                str(int(win * 1000)),
+                "featurePred_training.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_LSTM",
+                "results",
+                str(int(win * 1000)),
+                "featurePred.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_LSTM",
+                "results",
+                str(int(win * 1000)),
+                f"featurePred_{phase}.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_LSTM",
+                "results",
+                str(int(win * 1000)),
+                "featurePred_training.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_Transformer",
+                "results",
+                str(int(win * 1000)),
+                "featurePred_training.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_Transformer",
+                "results",
+                str(int(win * 1000)),
+                "featurePred.csv",
+            )
+        )
+        or os.path.exists(
+            os.path.join(
+                dir,
+                nameExp + "_Transformer",
+                "results",
+                str(int(win * 1000)),
+                f"featurePred_{phase}.csv",
+            )
+        )
     ) and (not force):
         print(f"featurePred+-{phase}.csv already exists in {dir}. Skipping...")
         return None, None
 
     if xml_file:
+        if lstmAndTransfo:
+            cmd_ann = [
+                "/usr/bin/env",
+                "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
+                "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
+                "ann",
+                xml_file,
+                "--window",
+                str(win),
+                "--striding",
+                str(win),
+                "-e",
+                nbEpochs,
+                "--gpu",
+                "--name",
+                nameExp + "_LSTM",
+                "--lstm",
+                "--target",
+                target,
+                # "--predicted_loss",
+                "--early_stop",
+            ]
+        else:
+            cmd_ann = [
+                "/usr/bin/env",
+                "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
+                "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
+                "ann",
+                xml_file,
+                "--window",
+                str(win),
+                "--striding",
+                str(win),
+                "-e",
+                nbEpochs,
+                "--gpu",
+                "--name",
+                nameExp + "_Transformer",
+                "--target",
+                target,
+                # "--predicted_loss",
+                "--early_stop",
+            ]
         cmd_bayes = [
             "/usr/bin/env",
             "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
@@ -79,31 +209,14 @@ def process_directory(dir, win, force):
             "--target",
             target,
         ]
+
         if "_test" not in xml_file:
             cmd_bayes += ["--phase", phase]
-        cmd_ann = [
-            "/usr/bin/env",
-            "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
-            "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
-            "ann",
-            xml_file,
-            "--window",
-            str(win),
-            "-e",
-            nbEpochs,
-            "--gpu",
-            "--name",
-            nameExp,
-            "--target",
-            target,
-            "--predicted_loss",
-            "--early_stop",
-        ]
         if force:
             cmd_ann += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
-        if win == 0.108:
+        if win == 0.108 and run_bayes:
             return cmd_ann, cmd_bayes
         else:
             return cmd_ann, None
@@ -114,7 +227,11 @@ def process_directory(dir, win, force):
 
 def run_commands_for_mouse(commands):
     """Run all commands for a single mouse sequentially."""
-    for cmd in commands:
+    for cmd in commands:  # Check memory before running command
+        if check_memory_usage():
+            print("High memory usage detected, forcing cleanup...")
+            cleanup_memory()
+            time.sleep(2)
         subprocess.run(cmd)
 
 
@@ -124,7 +241,12 @@ def run_commands_sequentially(mouse_commands):
         print(f"Processing mouse directory: {dir}")
         for cmd in commands:
             print(f"Running command: {cmd}")
+            if check_memory_usage():
+                print("High memory usage detected, forcing cleanup...")
+                cleanup_memory()
+                time.sleep(2)
             subprocess.run(cmd)
+            cleanup_memory()
             print(f"Finished command: {cmd}")
 
 
@@ -143,33 +265,70 @@ if __name__ == "__main__":
         print("       !!!sequential!!!")
         print("Force: force")
         mode = "sequential"
-    else:
-        mode = sys.argv[1].lower()
-    if mode not in ["sequential", "parallel"]:
-        print("Invalid mode. Use 'sequential' or 'parallel'.")
-        sys.exit(1)
 
+    mode = "sequential"
     force = False
-    if len(sys.argv) > 2 and sys.argv[2].lower() == "force":
+    lstm = False
+    rsync = "--rsync" in sys.argv
+
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "sequential":
+        mode = "sequential"
+        print("Running in sequential mode")
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == "parallel":
+        mode = "parallel"
+        print("Running in parallel mode")
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == "force":
         force = True
+        print("Running with force option")
+    elif len(sys.argv) > 1 and sys.argv[1].lower() == "lstm":
+        lstm = True
+        print("Running with LSTM option")
+    elif len(sys.argv) > 2 and sys.argv[2].lower() == "force":
+        force = True
+    elif len(sys.argv) > 2 and sys.argv[2].lower() == "lstm":
+        lstm = True
+        print("Running with LSTM and Transformer")
+
+    if len(sys.argv) > 3 and sys.argv[3].lower() == "lstm":
+        lstm = True
+        print("Running with LSTM and Transformer")
 
     dirs = [
         os.path.abspath(os.path.expanduser(d))
         for d in os.listdir(".")
         if os.path.isdir(d)
     ]
-    print(f"Found directories: {dirs}")
+
+    PathForExperiments = path_for_experiments_df("Sub", training_name=nameExp)
+
+    # print(f"Found directories: {dirs}")
     mouse_commands = {}
     for dir in dirs:
         if any(mouse in dir for mouse in mice_nb) or not mice_nb:
             if "M1199_MFB" not in dir:
                 mouse_commands[dir] = []
                 for win in win_values:
-                    cmd_ann, cmd_bayes = process_directory(dir, win, force)
-                    if cmd_ann:
-                        mouse_commands[dir].append(cmd_ann)
-                    if cmd_bayes:
-                        mouse_commands[dir].append(cmd_bayes)
+                    if lstm:
+                        for lstmAndTransfo in [True, False]:
+                            # print(
+                            #     f"Processing {dir} with window {win} and lstmAndTransfo {lstmAndTransfo}"
+                            # )
+                            cmd_ann, cmd_bayes = process_directory(
+                                dir=dir,
+                                win=win,
+                                force=force,
+                                lstmAndTransfo=lstmAndTransfo,
+                            )
+                            if cmd_ann:
+                                mouse_commands[dir].append(cmd_ann)
+                            if cmd_bayes:
+                                mouse_commands[dir].append(cmd_bayes)
+                    else:
+                        cmd_ann, cmd_bayes = process_directory(dir, win, force)
+                        if cmd_ann:
+                            mouse_commands[dir].append(cmd_ann)
+                        if cmd_bayes:
+                            mouse_commands[dir].append(cmd_bayes)
             else:
                 print(f"Processing M1199MFB mouse in directory: {dir}")
                 for dirmfb in ["exp1", "exp2"]:
@@ -182,6 +341,36 @@ if __name__ == "__main__":
                             mouse_commands[os.path.join(dir, dirmfb)].append(cmd_ann)
                         if cmd_bayes:
                             mouse_commands[os.path.join(dir, dirmfb)].append(cmd_bayes)
+
+            if rsync:
+                PathForExperiments["realPath"] = PathForExperiments["path"].apply(
+                    lambda x: os.path.realpath(x)
+                )
+                try:
+                    Mouse = PathForExperiments[
+                        PathForExperiments["realPath"] == os.path.realpath(dir)
+                    ].iloc[0]["name"]
+                    print(f"Mouse: {Mouse} from PathForExperiments")
+                    SOURCE = os.path.realpath(dir)
+                    DESTINATION = PathForExperiments[
+                        PathForExperiments["name"] == Mouse
+                    ].iloc[0]["network_path"]
+
+                    runNasCMD = [
+                        "/usr/bin/env",
+                        "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
+                        "/home/mickey/Documents/Theotime/neuroEncoders/utils/NAS.py",
+                        SOURCE,
+                        DESTINATION,
+                        "--force",
+                    ]
+                    if "M1199_MFB" not in dir:
+                        mouse_commands[dir].append(runNasCMD)
+                    else:
+                        for dirmfb in ["exp1", "exp2"]:
+                            mouse_commands[os.path.join(dir, dirmfb)].append(runNasCMD)
+                except:
+                    pass
 
     if mode == "sequential":
         run_commands_sequentially(mouse_commands)
