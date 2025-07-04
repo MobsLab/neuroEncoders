@@ -290,8 +290,8 @@ def get_behavior(
             behavior_data["ratioIMAonREAL"] = float(
                 f.root.behavior.ratioIMAonREAL.read()
             )
-        if "shock_zone" in f.root.behavior:
-            behavior_data["shock_zone"] = f.root.behavior.shock_zone[:]
+        if "shock_zone_mask" in f.root.behavior:
+            behavior_data["shock_zone_mask"] = f.root.behavior.shock_zone_mask[:]
 
         f.close()
 
@@ -299,7 +299,13 @@ def get_behavior(
 
 
 def speed_filter(
-    folder: str, overWrite: bool = True, phase=None, template=None, force: bool = False
+    folder: str,
+    overWrite: bool = True,
+    phase=None,
+    template=None,
+    force: bool = False,
+    window_range=-1,  # -1 means no window range
+    get_rid_of_sleep: bool = True,
 ) -> None:
     """
     A simple tool to set up a threshold on the speed value
@@ -307,10 +313,29 @@ def speed_filter(
     a boolean array indicating for each index (i.e measured feature time step)
     if it is above threshold or not.
 
+    Parameters
+    ----------
+    folder : str
+        path to the folder containing the nnBehavior.mat file
+    overWrite : bool, optional
+        whether to overwrite the existing speedMask or not (default is True)
+    phase : str, optional
+        whether to pre-select only some specific sessions (pre, hab, cond, or post for now) (default is None)
+    template : str, optional
+        if phase is not None, the template to use for the nnBehavior file (default is None)
+    force : bool, optional
+        whether to force the function to run without figure preview (default is False)
+    window_range : int, optional
+        the range of the window to show (default is -1, which means no window range)
+    get_rid_of_sleep : bool, optional
+        whether to get rid of sleep epochs in the nnBehavior and replace by NaN. Otherwise it messes with the next functions (default is True)
+
     """
     # TODO: change the order of the epochs AND be able to select the training set in the middle of the dataset
     # Parameters
     window_len = 14  # changed following Dima's advice
+    window_idx = 0  # index of the window to show
+    from utils.global_classes import MAZE_COORDS
 
     filename = os.path.join(folder, "nnBehavior.mat")
     # as this if the first function, it should create the appropriate nnbehavior. Next functions will check for file existence
@@ -330,10 +355,25 @@ def speed_filter(
                 follow_symlinks=True,
             )
     # Extract basic behavior
+    speedOG = None
     with tables.open_file(filename, "a") as f:
         children = [c.name for c in f.list_nodes("/behavior")]
         if "speedMask" in children:
             print("speedMask already created")
+            try:
+                # check the value is a numeric value
+                speedThresholdOG = (
+                    pd.read_csv(os.path.join(folder, "speedFilterValue.csv"))
+                    .values[:, 1:]
+                    .flatten()[-1]
+                )
+                try:
+                    speedOG = speedThresholdOG.astype(float)
+                except:
+                    speedOG = None
+
+            except FileNotFoundError:
+                speedOG = None
             if overWrite:
                 f.remove_node("/behavior", "speedMask")
             else:
@@ -408,107 +448,268 @@ def speed_filter(
         ]
 
         speedToshowSm = myspeed2[maskToShow]
-        speedThreshold = np.mean(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8)))
+        if speedOG is None:
+            speedThreshold = max(
+                np.log(
+                    np.percentile(speedToshowSm[speedToshowSm >= 0], 70) + 10 ** (-8)
+                ),  # take 30% highest
+                np.log(4),  # default minimal threshold
+            )
+        else:
+            speedThreshold = speedOG
+            if phase != "pre":
+                speedThreshold = min(
+                    speedOG, np.log(1.5)
+                )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
+        if phase != "pre":
+            speedThreshold = min(
+                speedThreshold, np.log(1.5)
+            )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
         speedFilter = speedToshowSm > np.exp(speedThreshold)
 
-        if not force:
-            # Figure
-            fig = plt.figure(figsize=(7, 15))
-            fig.suptitle("Speed threshold selection", fontsize=18, fontweight="bold")
-            # Coordinates over time
-            ax0 = fig.add_subplot(6, 2, (1, 2))
-            (l1,) = ax0.plot(
-                timeToShow[speedFilter], behToShow[speedFilter, 0], c="red"
-            )
-            (l2,) = ax0.plot(
-                timeToShow[speedFilter], behToShow[speedFilter, 1], c="orange"
-            )
-            l3 = ax0.scatter(
-                timeToShow[speedFilter],
-                np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
-                c="black",
-                s=0.2,
-            )
-            ax0.set_ylabel("environmental \n variable")
-            # Speed over time
-            ax1 = fig.add_subplot(6, 2, (3, 4), sharex=ax0)
-            (l4,) = ax1.plot(
-                timeToShow[speedFilter], speedToshowSm[speedFilter], c="purple"
-            )  # smoothed
-            ax1.set_ylabel("speed")
-            ax1.set_xlabel("Time (s)")
+        # Figure
+        fig = plt.figure(figsize=(7, 15))
+        fig.suptitle(
+            f"Speed threshold selection for {phase}", fontsize=18, fontweight="bold"
+        )
+        # Coordinates over time
+        ax0 = fig.add_subplot(6, 2, (1, 2))
+        (l1,) = ax0.plot(
+            timeToShow[speedFilter],
+            behToShow[speedFilter, 0],
+            "--.",
+            markersize=5,
+            c="red",
+        )
+        (l2,) = ax0.plot(
+            timeToShow[speedFilter],
+            behToShow[speedFilter, 1],
+            "--.",
+            markersize=5,
+            c="orange",
+        )
+        l3 = ax0.scatter(
+            timeToShow[speedFilter],
+            np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
+            c="black",
+            s=0.2,
+        )
+        ax0.set_ylabel("environmental \n variable")
+        # Speed over time
+        ax1 = fig.add_subplot(6, 2, (3, 4), sharex=ax0)
+        (l4,) = ax1.plot(
+            timeToShow[speedFilter], speedToshowSm[speedFilter], c="purple"
+        )  # smoothed
+        ax1.set_ylabel("speed")
+        ax1.set_xlabel("Time (s)")
 
-            # override default matplotlib rc ticks
-            plt.setp(ax0.get_xticklabels(), visible=False)
-            ax0.tick_params(which="both", labelsize=15, labelbottom=False)
-            ax1.tick_params(which="both", labelsize=15)
+        # override default matplotlib rc ticks
+        plt.setp(ax0.get_xticklabels(), visible=False)
+        ax0.tick_params(which="both", labelsize=15, labelbottom=False)
+        ax1.tick_params(which="both", labelsize=15)
 
-            # Speed histogram
-            ax2 = fig.add_subplot(6, 2, 7)
-            speed_log = np.log(
-                speedToshowSm[np.not_equal(speedToshowSm, 0)] + 10 ** (-8)
-            )
-            ax2.hist(speed_log, histtype="step", bins=200, color="blue")
-            plt.setp(ax2.get_yticklabels(), visible=False)
-            l5 = ax2.axvline(speedThreshold, color="black")
-            ax2.set_xlabel("log speed")
-            ax2.set_xlim(
-                np.percentile(speed_log[~np.isnan(speed_log)], 0.3),
-                np.max(speed_log[~np.isnan(speed_log)]),
-            )
-            ax3 = fig.add_subplot(6, 2, 8)
-            speed_plot = speedToshowSm[np.not_equal(speedToshowSm, 0)]
-            ax3.hist(speed_plot, histtype="step", bins=200, color="blue")
-            plt.setp(ax3.get_yticklabels(), visible=False)
-            l6 = ax3.axvline(np.exp(speedThreshold), color="black")
-            ax3.set_xlabel(f"raw speed ({np.exp(speedThreshold):.2f} cm/s)")
-            ax3.set_xlim(0, np.percentile(speed_plot[~np.isnan(speed_plot)], 98))
-            ax4 = fig.add_subplot(6, 2, (11, 12))
-            slider = plt.Slider(
-                ax4,
-                " ",
-                np.min(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
-                np.max(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
-                valinit=speedThreshold,
-                valstep=0.01,
-            )
-            ax4.set_ylabel("speed Threshold")
-            ax = [ax0, ax1, ax2, ax3, ax4]
+        # Speed histogram
+        ax2 = fig.add_subplot(6, 2, 7)
+        speed_log = np.log(speedToshowSm[np.not_equal(speedToshowSm, 0)] + 10 ** (-8))
+        ax2.hist(speed_log, histtype="step", bins=200, color="blue")
+        plt.setp(ax2.get_yticklabels(), visible=False)
+        l5 = ax2.axvline(speedThreshold, color="black")
+        ax2.set_xlabel("log speed")
+        ax2.set_xlim(
+            np.percentile(speed_log[~np.isnan(speed_log)], 0.3),
+            np.max(speed_log[~np.isnan(speed_log)]),
+        )
+        ax3 = fig.add_subplot(6, 2, 8)
+        speed_plot = speedToshowSm[np.not_equal(speedToshowSm, 0)]
+        ax3.hist(speed_plot, histtype="step", bins=200, color="blue")
+        plt.setp(ax3.get_yticklabels(), visible=False)
+        l6 = ax3.axvline(np.exp(speedThreshold), color="black")
+        ax3.set_xlabel(f"raw speed ({np.exp(speedThreshold):.2f} cm/s)")
+        ax3.set_xlim(0, np.percentile(speed_plot[~np.isnan(speed_plot)], 98))
+        ax4 = fig.add_subplot(7, 2, (11, 12))
+        ax5 = fig.add_subplot(7, 2, (13, 14))
+        slider = plt.Slider(
+            ax4,
+            " ",
+            np.min(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
+            np.max(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
+            valinit=speedThreshold,
+            valstep=0.01,
+        )
+        slider_range = plt.Slider(
+            ax5,
+            " ",
+            -1,
+            behToShow.shape[0],
+            valinit=window_range,
+            valstep=1,
+        )
+        ax4.set_ylabel("speed Threshold")
+        ax5.set_ylabel("window range")
+        ax = [ax0, ax1, ax2, ax3, ax4, ax5]
 
-            def update(val):
-                speedThreshold = val
-                speedFilter = speedToshowSm > np.exp(speedThreshold)
-                l1.set_ydata(behToShow[speedFilter, 0])
-                l2.set_ydata(behToShow[speedFilter, 1])
-                l1.set_xdata(timeToShow[speedFilter])
-                l2.set_xdata(timeToShow[speedFilter])
-                l3.set_offsets(
-                    np.transpose(
-                        np.stack(
-                            [
-                                timeToShow[speedFilter],
-                                np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
-                            ]
-                        )
+        # create scatter plot of environmental variable depending on speed
+        fig2d, ax2d = plt.subplots(figsize=(7, 7))
+        idxs = np.arange(0, behToShow.shape[0])
+        to_show = (
+            (window_idx * window_range < idxs)
+            & (idxs < window_range * (window_idx + 1))
+            if window_range > 0
+            else np.ones_like(idxs, dtype=bool)
+        )
+        newfilter = speedFilter & to_show
+        (pos2d,) = ax2d.plot(
+            behToShow[newfilter, 0],
+            behToShow[newfilter, 1],
+            "--.",
+            zorder=2,
+            linewidth=0.7,
+            alpha=0.5,
+        )
+        ax2d.set_xlabel(f"raw speed ({np.exp(speedThreshold):.2f} cm/s)")
+        sc = ax2d.scatter(
+            behToShow[newfilter, 0],
+            behToShow[newfilter, 1],
+            c=speedToshowSm[newfilter],
+            s=36,
+            alpha=1,
+            zorder=3,
+        )
+
+        ax2d.plot(
+            MAZE_COORDS[:, 0],
+            MAZE_COORDS[:, 1],
+            color="black",
+            linewidth=1,
+            zorder=10,
+        )
+        cbar = plt.colorbar(sc)
+        cbar.set_label("speed (cm/s)")
+        ax2d.set_xlabel("X")
+        ax2d.set_ylabel("Y")
+        ax2d.set_xlim(
+            [min(0, np.min(behToShow[:, 0])), max(1, np.max(behToShow[:, 0]))]
+        )
+        ax2d.set_ylim(
+            [min(0, np.min(behToShow[:, 1])), max(1, np.max(behToShow[:, 1]))]
+        )
+        fig2d.suptitle(
+            f"Environmental variable depending on speed for phase {phase}",
+            fontsize=18,
+            fontweight="bold",
+        )
+        button_ax = fig2d.add_axes([0.4, 0.2, 0.1, 0.09])
+        button_ax_prev = fig2d.add_axes([0.4, 0.3, 0.1, 0.1])
+        button_next = plt.Button(button_ax, "Show next positions")
+        button_prev = plt.Button(button_ax_prev, "Show previous positions")
+        [
+            button.label.set_fontsize(10) for button in [button_next, button_prev]
+        ]  # Reduce font size (adjust as needed)
+
+        def update(val):
+            nonlocal speedThreshold, window_idx, window_range
+            speedThreshold = slider.val
+            window_range = slider_range.val
+            speedFilter = speedToshowSm > np.exp(speedThreshold)
+            l1.set_ydata(behToShow[speedFilter, 0])
+            l2.set_ydata(behToShow[speedFilter, 1])
+            l1.set_xdata(timeToShow[speedFilter])
+            l2.set_xdata(timeToShow[speedFilter])
+            l3.set_offsets(
+                np.transpose(
+                    np.stack(
+                        [
+                            timeToShow[speedFilter],
+                            np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
+                        ]
                     )
                 )
-                l4.set_ydata(speedToshowSm[speedFilter])
-                l4.set_xdata(timeToShow[speedFilter])
-                l5.set_xdata(val)
-                l6.set_xdata(np.exp(val))
-                ax3.set_xlabel(f"raw speed ({np.exp(val):.2f} cm/s)")
-                fig.canvas.draw_idle()
+            )
+            l4.set_ydata(speedToshowSm[speedFilter])
+            l4.set_xdata(timeToShow[speedFilter])
+            l5.set_xdata(slider.val)
+            l6.set_xdata(np.exp(slider.val))
+            ax3.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
+            ax2d.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
 
+            # 2D call
+            to_show = (
+                (window_idx * window_range < idxs)
+                & (idxs < window_range * (window_idx + 1))
+                if window_range > 0
+                else np.ones_like(idxs, dtype=bool)
+            )
+
+            newfilter = speedFilter & to_show
+            pos2d.set_xdata(behToShow[newfilter, 0])
+            pos2d.set_ydata(behToShow[newfilter, 1])
+            sc.set_offsets(
+                np.transpose(
+                    np.stack(
+                        [
+                            behToShow[newfilter, 0],
+                            behToShow[newfilter, 1],
+                        ]
+                    )
+                )
+            )
+            sc.set_array(speedToshowSm[newfilter])
+
+            fig.canvas.draw_idle()
+            fig2d.canvas.draw_idle()
+
+        def on_click_next(event):
+            nonlocal window_idx
+            window_idx += 1
+            update(0)
+
+        def on_click_prev(event):
+            nonlocal window_idx
+            window_idx -= 1
+            update(0)
+
+        if not force:
             slider.on_changed(update)
-            if not force:
-                plt.show(block=not force)
+            slider_range.on_changed(update)
+            button_next.on_clicked(on_click_next)
+            button_prev.on_clicked(on_click_prev)
+
+            mngr1 = fig.canvas.manager
+            mngr2 = fig2d.canvas.manager
+            if mplt.get_backend() == "QtAgg":
+                mngr1.window.move(0, 0)  # Position at left monitor
+                mngr1.window.showMaximized()
+                mngr2.window.move(2560, 0)  # Position at right monitor
+                mngr2.window.showMaximized()
+            elif mplt.get_backend() == "TkAgg":
+                mngr1.window.wm_geometry("+0+0")
+                mngr1.resize(*mngr1.window.maxsize())
+                mngr2.window.wm_geometry("+2560+0")
+                mngr2.resize(*mngr2.window.maxsize())
+            plt.show(block=not force)
             speedThreshold = slider.val
+        fig2d.savefig(
+            os.path.join(folder, f"speed_filter_2d_{phase}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
         # Final value
         speedFilter = myspeed2 > np.exp(
             speedThreshold
         )  # Apply the value to the whole dataset
 
         f.create_array("/behavior", "speedMask", speedFilter)
+        if get_rid_of_sleep and id_sleep:
+            # replace the sleep epochs by NaN
+            epochSleep = []
+            for id in id_sleep:
+                epochSleep.extend([sessionStart[id], sessionStop[id]])
+            maskSleep = ep.inEpochsMask(posTime[:, 0], epochSleep)
+            positions[maskSleep, :] = np.nan
+            if "positions" in children:
+                f.remove_node("/behavior", "positions")
+            f.create_array("/behavior", "positions", np.swapaxes(positions, 1, 0))
+
         f.flush()
         f.close()
         # Change the way you save
@@ -664,9 +865,12 @@ def select_epochs(
             )  # if no sleeps, or session names, or hab take everything
 
         maskToShow = ep.inEpochsMask(positionTime[:, 0], epochToShow)
+        maskToShowPRE = maskToShow.copy()  # copy the mask to show for pre selection
         behToShow = positions[maskToShow, :]
         timeToShow = positionTime[maskToShow, 0]
         speedsToShow = speeds[maskToShow, :]
+        speedMaskToShow = speedMask[maskToShow]
+        speedMaskToShowPRE = speedMaskToShow
         timeToShowPRE = timeToShow
         speedsToShowPRE = speedsToShow
         xmin, xmax = timeToShow[0], timeToShow[-1]
@@ -675,7 +879,8 @@ def select_epochs(
         if phase is not None:
             maskToShowPRE = ep.inEpochsMask(positionTime[:, 0], epochToSelectPRE)
             timeToShowPRE = positionTime[maskToShowPRE, 0]
-            speedsToShowPRE = speeds[maskToShowPRE, :]
+            speedsToShowPRE = speeds[maskToShowPRE]
+            speedMaskToShowPRE = speedMask[maskToShowPRE]
             xmin, xmax = timeToShowPRE[0], timeToShowPRE[-1]
 
         try:
@@ -740,40 +945,56 @@ def select_epochs(
             print("Evaluating the entropy of each possible test set")
             entropiesPositions = []
             entropiesSpeeds = []
+            nb_points = []
             epsilon = 10 ** (-9)
+            # TODO: This iterates over the full behavior, which is not ideal (we would prefere to iterate over speedMasked behavior)
             for idx_testSet in tqdm(
                 np.arange(
-                    idx_cut,
-                    stop=idx_cut + timeToShowPRE.shape[0] - sizeTest,
+                    0,
+                    stop=timeToShowPRE.shape[0] - sizeTest,
                     step=sizeTest,
                 )
             ):
+                # we want to select only the idx that are in the speedMask
+                idx = np.arange(idx_testSet, idx_testSet + sizeTest)
+                idx_valid = np.where(speedMaskToShowPRE[idx])[0]
                 # The environmental variable are discretized by equally space bins
                 # such that there is 45*...*45 bins per dimension
                 # we then fit over the test set a kernel estimation of the probability distribution
                 # and evaluate it over the bins
-                _, probaFeatures = kdenD(
-                    behToShow[idx_testSet : idx_testSet + sizeTest, :], bandwidth=1.0
-                )
+                _, probaFeatures = kdenD(behToShow[idx_valid, :], bandwidth=1.0)
                 # We then compute the entropy of the obtained distribution:
                 entropiesPositions += [
                     -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
                 ]
-                _, probaFeatures = kdenD(
-                    speedsToShow[idx_testSet : idx_testSet + sizeTest, :], bandwidth=1.0
-                )
+                _, probaFeatures = kdenD(speedsToShow[idx_valid, :], bandwidth=1.0)
                 # We then compute the entropy of the obtained distribution:
                 entropiesSpeeds += [
                     -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
                 ]
-            totEntropy = np.array(entropiesSpeeds) + np.array(entropiesPositions)
+                nb_points += [idx_valid.shape[0]]
+            totEntropy = (
+                np.array(entropiesSpeeds)
+                + np.array(entropiesPositions)
+                - np.exp(-1 / 40 * np.array(nb_points))
+            )  # penalize small sets
             bestTestSet = np.argmax(totEntropy)
             testSetId = bestTestSet * sizeTest + idx_cut
-            print("Found best test set at index", bestTestSet)
+            print(
+                "Found best test set at index",
+                bestTestSet,
+                "with real (speedMasked) size",
+                nb_points[bestTestSet],
+            )
             if isPredLoss:
                 useLossPredTrainSet = True
-                bestPLSet = np.argsort(entropiesPositions)[-2]
-                print("Found best loss pred set at index", bestPLSet)
+                bestPLSet = np.argsort(totEntropy)[-2]
+                print(
+                    "Found best loss pred set at index",
+                    bestPLSet,
+                    "with real (speedMasked) size",
+                    nb_points[bestPLSet],
+                )
                 lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
             else:
                 bestPLSet = 0
@@ -929,13 +1150,14 @@ def select_epochs(
                 if IsMultiSessions:
                     for idk, k in enumerate(id_toshow):
                         if len(np.where(np.equal(sessionValue_toshow, k))[0]) > 0:
-                            ax[id].hlines(
+                            ax[dim].hlines(
                                 np.min(
                                     behToShow[
                                         np.logical_not(np.isnan(behToShow[:, dim])), dim
                                     ]
                                 )
-                                - np.std(
+                                - 0.5
+                                * np.std(
                                     behToShow[
                                         np.logical_not(np.isnan(behToShow[:, dim])), dim
                                     ]
@@ -946,7 +1168,7 @@ def select_epochs(
                                 xmax=timeToShow[
                                     np.max(np.where(np.equal(sessionValue_toshow, k)))
                                 ],
-                                color=colorSess[id],
+                                color=colorSess[idk],
                                 linewidth=3.0,
                             )
 
@@ -987,7 +1209,7 @@ def select_epochs(
                 "loss network training\nset starting index",
                 0,
                 behToShow.shape[0],
-                valinit=0,
+                valinit=SetData["lossPredSetId"],
                 valstep=1,
             )
             sliderLossPredTrain.label.set_size(10)
@@ -1504,6 +1726,7 @@ def select_epochs(
                 )
                 # plt.get_current_fig_manager().window.state('zoomed') # on windows
             plt.show(block=not force)
+            fig.savefig(os.path.join(folder, f"epochs_{phase}.png"))
 
             if IsMultiSessions:
                 trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
