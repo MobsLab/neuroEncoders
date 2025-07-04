@@ -12,13 +12,15 @@ from typing import Any, Dict, List, Union
 from warnings import warn
 
 import dill as pickle
+import numpy as np
 import pandas as pd
 
+from resultAnalysis import print_results
 from resultAnalysis.paper_figures import PaperFigures
+from importData.epochs_management import inEpochs, inEpochsMask
 
 sys.path.append(".")
 
-from importData.epochs_management import inEpochs
 from transformData.linearizer import UMazeLinearizer
 from utils.PathForExperiments import path_for_experiments
 from utils.global_classes import DataHelper as DataHelperClass
@@ -909,12 +911,15 @@ class Mouse_Results(Params, PaperFigures):
         if not os.path.isdir(self.folderResult):
             raise FileNotFoundError(f"Results path {self.folderResult} does not exist.")
         windows = kwargs.get("windows", None)
+        # convert to strings if windows is a list of integers
+        if isinstance(windows, list):
+            windows = [str(window) for window in windows]
 
         if windows is None:
             self.windows = [
-                d
+                str(d)
                 for d in os.listdir(self.folderResult)
-                if os.path.isdir(os.path.join(self.folderResult, d)) and d.isdigit()
+                if os.path.isdir(os.path.join(self.folderResult, d))
             ]
             if not self.windows:
                 raise ValueError(
@@ -927,9 +932,7 @@ class Mouse_Results(Params, PaperFigures):
         # order windows by their name (assuming they are named only with a number)
         self.windows.sort(key=lambda x: int(x))
         # convert windows str to int
-        self.windows_values = [
-            int(window) for window in self.windows if window.isdigit()
-        ]
+        self.windows_values = [int(window) for window in self.windows]
         print(f"Windows found for {self.mouse_name}: {self.windows}")
 
     def __repr__(self):
@@ -985,6 +988,13 @@ class Mouse_Results(Params, PaperFigures):
                         self.parameters[winMS],
                         deviceName=deviceName,
                         phase=phase,
+                        isTransformer=kwargs.pop(
+                            "isTransformer", self.parameters[winMS].isTransformer
+                        ),
+                        linearizer=self.linearizer[winMS],
+                        behaviorData=self.data_helper[winMS].fullBehavior,
+                        alpha=self.parameters[winMS].denseweightAlpha,
+                        # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask
                         **kwargs,
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
@@ -994,7 +1004,7 @@ class Mouse_Results(Params, PaperFigures):
                     )
 
     def load_results(
-        self, winMS=None, redo=False, force=False, phase=None, **kwargs
+        self, winMS=None, redo=False, force=False, phase=None, which="both", **kwargs
     ) -> pd.DataFrame:
         """
         Load results for the specified window size.
@@ -1003,6 +1013,7 @@ class Mouse_Results(Params, PaperFigures):
             winMS (int): Window size in milliseconds. If None, loads results for all windows.
             redo (bool): If True, forces reloading results even if they already exist.
             force (bool): If True, it will train the model if it wasnt trained before.
+            which (str): Type of trainer to use ('ann', 'bayes', or 'both').
         kwargs: Additional keyword arguments for result loading.
             such as:
                 show (bool): Whether to print results.
@@ -1013,31 +1024,13 @@ class Mouse_Results(Params, PaperFigures):
         Returns:
             pd.DataFrame: append to the DataFrame containing the results.
         """
-        from resultAnalysis import print_results
 
         if phase is None:
             phase = self.phase
 
-        onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
-
-        if not hasattr(self, "bayes_matrices"):
-            try:
-                with open(
-                    os.path.join(
-                        self.folderResult,
-                        "bayesMatrices.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    self.bayes_matrices = pickle.load(f)
-            except (FileNotFoundError, AttributeError):
-                if not force:
-                    raise ValueError(
-                        "Bayes matrices not found, please run the bayes trainer first or force the training with `force = True`."
-                    )
-                else:
-                    self.load_trainers(which="bayes", **kwargs)
-                    self.retrain(which="bayes", **kwargs)
+        if which.lower() in ["bayes", "both"]:
+            if not hasattr(self, "bayes_matrices"):
+                try:
                     with open(
                         os.path.join(
                             self.folderResult,
@@ -1046,126 +1039,209 @@ class Mouse_Results(Params, PaperFigures):
                         "rb",
                     ) as f:
                         self.bayes_matrices = pickle.load(f)
+                except (FileNotFoundError, AttributeError):
+                    if not force:
+                        raise ValueError(
+                            "Bayes matrices not found, please run the bayes trainer first or force the training with `force = True`."
+                        )
+                    else:
+                        self.load_trainers(which="bayes", **kwargs)
+                        self.retrain(which="bayes", **kwargs)
+                        with open(
+                            os.path.join(
+                                self.folderResult,
+                                "bayesMatrices.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            self.bayes_matrices = pickle.load(f)
 
         windows, winValues = self._select_window(winMS)
         # Load results for all windows
         for win, win_value in zip(windows, winValues):
-            if not redo:
-                try:
-                    suffix = f"_{phase}" if phase is not None else ""
-                    pos = pd.read_csv(
-                        os.path.expanduser(
-                            os.path.join(
-                                self.folderResult,
-                                win,
-                                f"featureTrue{suffix}.csv",
+            if which.lower() in ["ann", "both"]:
+                if not redo:
+                    try:
+                        suffix = f"_{phase}" if phase is not None else ""
+                        pos = pd.read_csv(
+                            os.path.expanduser(
+                                os.path.join(
+                                    self.folderResult,
+                                    win,
+                                    f"featureTrue{suffix}.csv",
+                                )
                             )
+                        ).values[:, 1:]
+                    except FileNotFoundError:
+                        self.load_trainers(which="ann", **kwargs)
+                        self.ann[win].test(
+                            self.data_helper[win].fullBehavior,
+                            windowSizeMS=win_value,
+                            phase=phase,
+                            l_function=self.l_function,
+                            **kwargs,
                         )
-                    ).values[:, 1:]
-                except FileNotFoundError:
+                else:
+                    print(f"Force loading results for window {win}.")
                     self.load_trainers(which="ann", **kwargs)
-                    self.ann[win].test(
-                        self.data_helper[win].fullBehavior,
-                        windowSizeMS=win_value,
-                        phase=phase,
-                        l_function=self.l_function,
-                        **kwargs,
-                    )
-            else:
-                print(f"Force loading results for window {win}.")
-                self.load_trainers(which="ann", **kwargs)
-                try:
-                    self.ann[win].test(
-                        self.data_helper[win].fullBehavior,
-                        windowSizeMS=win_value,
-                        phase=phase,
-                        l_function=self.l_function,
-                        **kwargs,
-                    )
-                except Exception:
-                    if not force:
-                        raise ValueError(
-                            f"Results for window {win} not found. Please run the ANN trainer first or force the training with `force = True`."
+                    try:
+                        self.ann[win].test(
+                            self.data_helper[win].fullBehavior,
+                            windowSizeMS=win_value,
+                            phase=phase,
+                            l_function=self.l_function,
+                            **kwargs,
                         )
-                    else:
-                        print(f"Results for window {win} not found, forcing training.")
-                        self.retrain(which="ann", window=win, phase=phase, **kwargs)
+                    except Exception:
+                        if not force:
+                            raise ValueError(
+                                f"Results for window {win} not found. Please run the ANN trainer first or force the training with `force = True`."
+                            )
+                        else:
+                            print(
+                                f"Results for window {win} not found, forcing training."
+                            )
+                            self.retrain(which="ann", window=win, phase=phase, **kwargs)
 
-            (mean_ann, select_ann, mean_lin_ann, select_lin_ann) = (
-                print_results.print_results(
-                    self.folderResult,
-                    windowSizeMS=win,
-                    target=self.target,
-                    phase=phase,
-                    typeDec="NN",
-                    **kwargs,
+                (mean_ann, select_ann, mean_lin_ann, select_lin_ann) = (
+                    print_results.print_results(
+                        self.folderResult,
+                        windowSizeMS=win_value,
+                        target=self.target,
+                        phase=phase,
+                        typeDec="NN",
+                        training_data=self.ann[win].training_data,
+                        l_function=self.l_function,
+                        **kwargs,
+                    )
                 )
-            )
-            self.load_trainers(which="bayes", **kwargs)
-            timeStepPred = self.data_helper[win].fullBehavior["positionTime"][
-                inEpochs(
+
+            if which.lower() in ["bayes", "both"]:
+                self.load_trainers(which="bayes", **kwargs)
+                mask = inEpochsMask(
                     self.data_helper[win].fullBehavior["positionTime"][:, 0],
                     self.data_helper[win].fullBehavior["Times"]["testEpochs"],
                 )
-            ]
-            outputs = self.bayes.test_as_NN(
-                self.data_helper[win].fullBehavior,
-                self.bayes_matrices,
-                timeStepPred,
-                windowSizeMS=win_value,
-                l_function=self.l_function,
-                **kwargs,
-            )
-            (mean_eucl_bayes, select_lin_bayes, mean_lin_bayes, select_lin_bayes) = (
-                print_results.print_results(
-                    self.folderResult,
-                    windowSizeMS=win,
-                    results=outputs,
-                    target=self.target,
-                    phase=phase,
-                    typeDec="bayes",
+                if phase == "training":
+                    mask += inEpochsMask(
+                        self.data_helper[win].fullBehavior["positionTime"][:, 0],
+                        self.data_helper[win].fullBehavior["Times"]["trainEpochs"],
+                    )
+                timeStepPred = self.data_helper[win].fullBehavior["positionTime"][mask]
+                outputs = self.bayes.test_as_NN(
+                    self.data_helper[win].fullBehavior,
+                    self.bayes_matrices,
+                    timeStepPred,
+                    windowSizeMS=win_value,
+                    l_function=self.l_function,
+                    useTrain=phase == "training",
                     **kwargs,
                 )
-            )
+                (
+                    mean_eucl_bayes,
+                    select_lin_bayes,
+                    mean_lin_bayes,
+                    select_lin_bayes,
+                ) = print_results.print_results(
+                    self.folderResult,
+                    typeDec="bayes",
+                    results=outputs,
+                    windowSizeMS=win_value,
+                    target=self.target,
+                    phase=phase,
+                    **kwargs,
+                )
 
             # append those results to the results DataFrame
-
-            if self.results.empty:
-                self.results = pd.DataFrame(
+            results_dict = {"phase": [phase], "windowSizeMS": [win_value]}
+            if which.lower() in ["ann", "both"]:
+                results_dict.update(
                     {
-                        "phase": [phase],
-                        "windowSizeMS": [win_value],
                         "mean_ann": [mean_ann],
                         "select_ann": [select_ann],
                         "mean_lin_ann": [mean_lin_ann],
                         "select_lin_ann": [select_lin_ann],
+                    }
+                )
+
+            if which.lower() in ["bayes", "both"]:
+                results_dict.update(
+                    {
                         "mean_eucl_bayes": [mean_eucl_bayes],
                         "select_lin_bayes": [select_lin_bayes],
                         "mean_lin_bayes": [mean_lin_bayes],
                     }
                 )
+            if self.results.empty:
+                self.results = pd.DataFrame(results_dict)
+
             else:
                 self.results = pd.concat(
                     [
                         self.results,
-                        pd.DataFrame(
-                            {
-                                "phase": [phase],
-                                "windowSizeMS": [win_value],
-                                "mean_ann": [mean_ann],
-                                "select_ann": [select_ann],
-                                "mean_lin_ann": [mean_lin_ann],
-                                "select_lin_ann": [select_lin_ann],
-                                "mean_eucl_bayes": [mean_eucl_bayes],
-                                "select_lin_bayes": [select_lin_bayes],
-                                "mean_lin_bayes": [mean_lin_bayes],
-                            }
-                        ),
+                        pd.DataFrame(results_dict),
                     ],
                     ignore_index=True,
                 )
 
         return self.results
+
+    def show_results(self, winMS=None, phase=None, **kwargs):
+        if winMS is None:
+            win = self.windows[-1]
+            winMS = self.windows_values[-1]
+
+        print_results.print_results(
+            self.folderResult,
+            windowSizeMS=winMS,
+            target=self.target,
+            phase=phase,
+            typeDec="NN",
+            training_data=self.ann[win].training_data,
+            l_function=self.l_function,
+            **kwargs,
+        )
+
+    def show_movie(self, winMS=None, **kwargs):
+        if winMS is None:
+            win = self.windows[-1]
+            winMS = self.windows_values[-1]
+
+        idWindow = self.timeWindows.index(winMS)
+
+        from importData.gui_elements import AnimatedPositionPlotter
+
+        if kwargs.get("data_helper", None) is None:
+            data_helper = self.data_helper[win]
+
+        if kwargs.get("truepos", None) is None:
+            truepos = self.resultsNN["truePos"][idWindow]
+
+        if kwargs.get("predicted", None) is None:
+            predicted = self.resultsNN["fullPred"][idWindow]
+
+        if kwargs.get("speedMaskArray", None) is None:
+            speedMaskArray = self.resultsNN["speedMask"][idWindow]
+
+        plotter = AnimatedPositionPlotter(
+            data_helper=data_helper,
+            positions=truepos,
+            predicted=predicted,
+            speedMaskArray=speedMaskArray,
+            **kwargs,
+        )
+        interval = kwargs.pop("interval", 10)
+        repeat = kwargs.pop("repeat", True)
+        block = kwargs.pop("block", True)
+        with_ref_bg = kwargs.pop("with_ref_bg", True)
+        anim = plotter.show(
+            interval=interval,
+            repeat=repeat,
+            block=block,
+            with_ref_bg=with_ref_bg,
+            show=True,
+            **kwargs,
+        )
 
     def retrain(self, window=None, which="both", **kwargs):
         """
@@ -1194,9 +1270,6 @@ class Mouse_Results(Params, PaperFigures):
         windows, winValues = self._select_window(window)
         for win, win_val in zip(windows, winValues):
             if which.lower() in ["ann", "both"]:
-                self.ann[win].fix_linearizer(
-                    self.linearizer[win].mazePoints, self.linearizer[win].tsProj
-                )
                 self.ann[win].train(
                     self.data_helper[win].fullBehavior,
                     windowSizeMS=win_val,

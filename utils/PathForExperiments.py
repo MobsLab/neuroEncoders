@@ -82,7 +82,7 @@ def path_for_experiments(
         "m1199_mfb",
     ]
     UMazePAG_keys = [
-        "m1186",
+        "m1186_mfb",
         "m1199_pag",
         "m1182",
         "m994_PAG",
@@ -98,8 +98,8 @@ def path_for_experiments(
 
     # Define the first dictionary (python_dict equivalent)
     python_dict = {
-        "m1168MFB": f"neuroencoders_1021/_work/M1168/{training_name}",
-        "m1186": f"neuroencoders_1021/_work/M1186/{training_name}",
+        "m1168MFB": f"neuroencoders_1021/_work/M1168_MFB/{training_name}",
+        "m1186_mfb": f"neuroencoders_1021/_work/M1186_MFB/{training_name}",
         "m1336_mfb": f"neuroencoders_1021/_work/M1336_MFB/{training_name}",
         "m1336_known": f"neuroencoders_1021/_work/M1336_known/{training_name}",
         "m1199_pag": f"neuroencoders_1021/_work/M1199_PAG/{training_name}",
@@ -121,7 +121,7 @@ def path_for_experiments(
     subpython_REAL = {
         "m1336_mfb": "/media/nas7/ProjetERC1/StimMFBWake/M1336/",
         "m1336_known": "/media/nas7/ProjetERC1/Known/M1336/",
-        "m1186": "/media/nas6/ProjetERC2/Mouse-K186/20210409/_Concatenated/",
+        "m1186_mfb": "/media/nas6/ProjetERC2/Mouse-K186/20210409/_Concatenated/",
         "m1199_pag": "/media/nas6/ProjetERC2/Mouse-K199/20210408/_Concatenated/",
         "m1199_reversal": "/media/nas6/ProjetERC3/M1199/Reversal/",
         "m1117": "/media/nas5/ProjetERC1/StimMFBWake/M1117/",
