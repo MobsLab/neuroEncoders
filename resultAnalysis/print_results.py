@@ -898,11 +898,7 @@ def fig_interror(
             s.set_offsets(np.c_[np.where(selection)[0], pos[selection]])
             s.set_array(Error[selection])
             sel2 = selection[selNoNans]
-            scatt.set_array(
-                np.position_WeirdLoss_RMS_newUncertainty_LSTMarray(
-                    [1 if sel2[n] else 0.2 for n in range(len(sel2))]
-                )
-            )
+            scatt.set_array(np.array([1 if sel2[n] else 0.2 for n in range(len(sel2))]))
         error = np.mean(Error[selection])
         sys.stdout.write("threshold value: " + str(val) + "\r")
         sys.stdout.flush()
