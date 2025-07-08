@@ -125,7 +125,7 @@ def run_rsync():
     Main function to handle command line arguments and orchestrate the sync
     """
     # Configuration
-    CUTOFF_DATE = datetime(2025, 7, 1, 0, 0, 0)  # July 1st, 2025 00:00:00
+    CUTOFF_DATE = datetime(2025, 7, 5, 0, 0, 0)  # July 1st, 2025 00:00:00
 
     # Parse command line arguments
     if len(sys.argv) < 3:
