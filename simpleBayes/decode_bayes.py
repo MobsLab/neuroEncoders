@@ -16,7 +16,7 @@ from pykeops.numpy import LazyTensor as LazyTensor_np
 from tqdm import tqdm
 
 from importData import import_clusters
-from importData.epochs_management import inEpochs
+from importData.epochs_management import inEpochs, inEpochsMask
 
 # Load custom code
 from simpleBayes import butils
@@ -187,10 +187,12 @@ class Trainer:
                 ),
             )
         ]  # Get speed-filtered coordinates from train epoch
+
         if (
             onTheFlyCorrection
         ):  # setting the position to be between 0 and 1 if necessary
             selPositions = selPositions / maxPos
+
         selPositions = selPositions[
             np.logical_not(np.isnan(np.sum(selPositions, axis=1))), :
         ]  # Remove NaN positions
@@ -556,14 +558,14 @@ class Trainer:
 
         if useTrain:
             epochsTrain = [
-                inEpochs(
+                inEpochsMask(
                     self.clusterData["Spike_times"][tetrode][:, 0],
                     behaviorData["Times"]["trainEpochs"],
                 )
                 for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
             epochsTest = [
-                inEpochs(
+                inEpochsMask(
                     self.clusterData["Spike_times"][tetrode][:, 0],
                     behaviorData["Times"]["testEpochs"],
                 )
@@ -571,23 +573,13 @@ class Trainer:
             ]
             clustersTime = [
                 self.clusterData["Spike_times"][tetrode][
-                    np.sort(
-                        np.concatenate(
-                            [epochsTrain[tetrode][0], epochsTest[tetrode][0]],
-                            axis=0,
-                        )
-                    )
+                    epochsTrain[tetrode] + epochsTest[tetrode]
                 ]
                 for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
             clusters = [
                 self.clusterData["Spike_labels"][tetrode][
-                    np.sort(
-                        np.concatenate(
-                            [epochsTrain[tetrode][0], epochsTest[tetrode][0]],
-                            axis=0,
-                        )
-                    )
+                    epochsTrain[tetrode] + epochsTest[tetrode]
                 ]
                 for tetrode in range(len(self.clusterData["Spike_times"]))
             ]
@@ -680,7 +672,8 @@ class Trainer:
             ]
         )
         # probability moved back to linear scale
-        inferredProba = np.exp(outputPOps[0]) / np.sum(np.exp(outputPOps[0]), axis=0)
+        # inferredProba = np.exp(outputPOps[0]) / np.sum(np.exp(outputPOps[0]), axis=0)
+        inferredProba = outputPOps[0]
         inferResults = np.concatenate(
             [np.transpose(inferredPos), inferredProba], axis=-1
         )
@@ -727,9 +720,14 @@ class Trainer:
             inferResults[np.isnan(inferResults[:, 2]), 2] = 0  # to correct for overflow
 
         # Get the true position
-        idTestEpoch = inEpochs(
+        idTestEpoch = inEpochsMask(
             behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
         )
+        if useTrain:
+            idTrainEpoch = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+            )
+            idTestEpoch = idTrainEpoch + idTestEpoch
         realPos = behaviorData["Positions"][idTestEpoch]
         realTimes = behaviorData["positionTime"][idTestEpoch]
         idsNN = []
@@ -1013,7 +1011,7 @@ def parallel_pred_as_NN(
     binStopTime = binStartTime + windowSize
 
     # we will progressively add each tetrode contribution
-    tetrodeContribs = 1
+    tetrodeContribs = 0
     for tetrode in range(len(clusters)):
         gctLazy = LazyTensor_np(clustersTime[tetrode][:, None])
         binStartTimeLazy = LazyTensor_np(binStartTime[None, :])
@@ -1056,7 +1054,16 @@ def parallel_pred_as_NN(
 
     # If we had only one electrode:
     # ... but we need to sum over the different electrodes.
-    outputPos = tetrodeContribs.max_argmax_reduction(axis=1)
+    # first, we need to normalize the contributions
+    tetrodeContribs_stable = tetrodeContribs - pykeops.numpy.Vi(
+        tetrodeContribs.max(axis=1)
+    )
+    tetrodeContribs_linear = tetrodeContribs_stable.exp()
+    posterior = tetrodeContribs_linear / pykeops.numpy.Vi(
+        tetrodeContribs_linear.sum(axis=1)
+    )
+
+    outputPos = posterior.max_argmax_reduction(axis=1)
     outputPos = (outputPos[0], outputPos[1])
 
     return outputPos
