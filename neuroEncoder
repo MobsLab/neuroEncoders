@@ -104,11 +104,10 @@ def main(args):
             )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            overWrite=(True if (args.redo or args.phase is not None) else False),
+            overWrite=(True if (args.redo and args.phase is not None) else False),
             phase=args.phase,
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
-            isPredLoss=isPL,
         )
     # Create parameters
     DataHelper = DataHelperClass(
@@ -119,12 +118,13 @@ def main(args):
         nameExp=args.name,
         windowSize=args.window,
         force_ref=False,
+        isPredLoss=isPL,
     )
     helpers = [DataHelper]
     if args.phase != "cond":
         rawdata_parser.speed_filter(
             ProjectPath.folder,
-            overWrite=(True if args.redo else True),
+            overWrite=(True if args.redo else False),
             phase="cond",
             template=args.phase,
             window_range=2000,
@@ -134,11 +134,10 @@ def main(args):
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            overWrite=(True if (args.redo or args.phase is not None) else False),
+            overWrite=(True if (args.redo and args.phase is not None) else False),
             phase="cond",
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
-            isPredLoss=isPL,
         )
         DataHelper_cond = DataHelperClass(
             ProjectPath.xml,
@@ -148,6 +147,7 @@ def main(args):
             nameExp=args.name,
             windowSize=args.window,
             force_ref=False,
+            isPredLoss=isPL,
         )
         helpers = [DataHelper_cond, DataHelper]
     for helper in helpers:
@@ -210,8 +210,6 @@ def main(args):
         bayesMatrices = TrainerBayes.train_order_by_pos(
             DataHelper.fullBehavior, l_function=l_function
         )
-        # WARNING: Why does this function not exist in the class?
-        # TODO: Fix this if Bayes is still of actuality
         try:
             import numpy as np
             import pandas as pd

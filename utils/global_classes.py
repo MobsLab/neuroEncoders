@@ -236,6 +236,7 @@ class DataHelper(Project):
         self.target = target
         self.phase = kwargs.get("phase", None)  # remove from the kwargs
         self.force_ref = kwargs.get("force_ref", False)
+        self.isPredLoss = kwargs.get("isPredLoss", False)
 
         # LEGACY: old called directly called Project object in the init
         if isinstance(xmlPath, Project):
@@ -268,11 +269,27 @@ class DataHelper(Project):
             -1
         ]  # max(self.epochs["train"] + self.epochs["test"])
         self.startTime = self.positionTime[0]
+
+        if (
+            not self.isPredLoss
+            and len(self.fullBehavior["Times"]["lossPredSetEpochs"]) > 0
+        ):
+            self.fullBehavior["Times"]["trainEpochs"] = np.sort(
+                np.hstack(
+                    [
+                        self.fullBehavior["Times"]["trainEpochs"],
+                        self.fullBehavior["Times"]["lossPredSetEpochs"],
+                    ]
+                )
+            )
+            print(
+                "extending trainEpochs with lossPredSetEpochs as you're not using predLoss"
+            )
+
         self.lower_x = 0.35
         self.upper_x = 0.65
         self.ylim = 0.75
         self._define_maze_zones()
-
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
 
     def nGroups(self):
