@@ -15,9 +15,9 @@ import dill as pickle
 import numpy as np
 import pandas as pd
 
+from importData.epochs_management import inEpochsMask
 from resultAnalysis import print_results
 from resultAnalysis.paper_figures import PaperFigures
-from importData.epochs_management import inEpochs, inEpochsMask
 
 sys.path.append(".")
 
@@ -32,7 +32,6 @@ from utils.global_classes import Params, Project
 def Info_LFP(LFP_directory, Info_name="InfoLFP"):
     from os.path import join
 
-    import numpy as np
     import pandas as pd
     from scipy.io import loadmat
 
@@ -75,7 +74,6 @@ def Info_LFP(LFP_directory, Info_name="InfoLFP"):
 
 
 def Load_LFP(LFP_path, time_unit="us", frequency=1250.0):
-    import numpy as np
     from pynapple import Tsd, TsdFrame
     from scipy.io import loadmat
 
@@ -140,7 +138,6 @@ def Make_Epoch(struc, dic, key, time_unit="us", word="start"):
 
 
 def Load_Behav(Behav_path: str, time_unit="us"):
-    import numpy as np
     import pandas as pd
     from pynapple import IntervalSet, Ts, Tsd, TsdFrame
     from scipy.io import loadmat
@@ -972,7 +969,10 @@ class Mouse_Results(Params, PaperFigures):
         if deviceName.lower() == "gpu" or deviceName.lower() == "cpu":
             from utils.management import manage_devices
 
-            self.deviceName = manage_devices(deviceName.upper())
+            self.deviceName = manage_devices(
+                deviceName.upper(),
+                set_memory_growth=kwargs.get("set_memory_growth", True),
+            )
         else:
             self.deviceName = deviceName
 

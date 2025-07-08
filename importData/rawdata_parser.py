@@ -363,10 +363,11 @@ def speed_filter(
             try:
                 # check the value is a numeric value
                 speedThresholdOG = (
-                    pd.read_csv(os.path.join(folder, "speedFilterValue.csv"))
+                    pd.read_csv(os.path.join(folder, f"speedFilterValue_{phase}.csv"))
                     .values[:, 1:]
                     .flatten()[-1]
                 )
+                print("with value:", speedThresholdOG)
                 try:
                     speedOG = speedThresholdOG.astype(float)
                 except:
@@ -566,7 +567,6 @@ def speed_filter(
             linewidth=0.7,
             alpha=0.5,
         )
-        ax2d.set_xlabel(f"raw speed ({np.exp(speedThreshold):.2f} cm/s)")
         sc = ax2d.scatter(
             behToShow[newfilter, 0],
             behToShow[newfilter, 1],
@@ -594,7 +594,7 @@ def speed_filter(
             [min(0, np.min(behToShow[:, 1])), max(1, np.max(behToShow[:, 1]))]
         )
         fig2d.suptitle(
-            f"Environmental variable depending on speed for phase {phase}",
+            f"Environmental variable depending on speed  ({np.exp(speedThreshold):.2f} cm/s) for phase {phase}",
             fontsize=18,
             fontweight="bold",
         )
@@ -630,7 +630,12 @@ def speed_filter(
             l5.set_xdata(slider.val)
             l6.set_xdata(np.exp(slider.val))
             ax3.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
-            ax2d.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
+
+            fig2d.suptitle(
+                f"Environmental variable depending on speed  ({np.exp(speedThreshold):.2f} cm/s) for phase {phase}",
+                fontsize=18,
+                fontweight="bold",
+            )
 
             # 2D call
             to_show = (
@@ -714,7 +719,9 @@ def speed_filter(
         f.close()
         # Change the way you save
         df = pd.DataFrame([speedThreshold])
-        df.to_csv(folder + "speedFilterValue.csv")  # save the speed filter value
+        df.to_csv(
+            folder + f"speedFilterValue_{phase}.csv"
+        )  # save the speed filter value
 
 
 def select_epochs(
@@ -723,7 +730,7 @@ def select_epochs(
     phase=None,
     force: bool = False,
     find_best_sets: bool = False,
-    isPredLoss: bool = False,
+    isPredLoss: bool = True,
 ):
     """
     Find test set with most uniform covering of speed and environment variable.
@@ -737,6 +744,7 @@ def select_epochs(
     phase: str, whether to pre-select only some specific sessions (pre, hab, cond, or post for now)
     force: bool, whether to force the function to run without figure preview
     find_best_sets: bool, whether to find the best test set based on the entropy of the speed and environment variable
+    isPredLoss: bool, whether to add the loss set epochs or not (default is True and should NOT be changed)
 
     returns
     -------
@@ -744,6 +752,11 @@ def select_epochs(
     """
 
     # create globals variables
+
+    if not isPredLoss:
+        raise ValueError(
+            "isPredLoss must be True, as this function is used to select the train and test epochs for the prediction of the loss"
+        )
     global SetData, IsMultiSessions
     global timeToShow, keptSession, sessionStart, sessionStop, ep
     from importData import epochs_management as ep
@@ -772,8 +785,9 @@ def select_epochs(
             not overWrite
             and "trainEpochs" in children
             and "testEpochs"
-            and "lossPredSetEpochs" in children
+            and ("lossPredSetEpochs" in children if isPredLoss else True)
         ):
+            print("epochs already created")
             return
 
         # Get info from the file
