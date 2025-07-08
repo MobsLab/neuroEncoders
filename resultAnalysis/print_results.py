@@ -873,14 +873,15 @@ def fig_interror(
     cbar = plt.colorbar(cax=cax)
     cbar.set_label("decoding error", rotation=270)
     ax.set_title(f"decoding error depending of mouse position, {suffix=}")
+    fig.suptitle(
+        f"decoding error, {suffix=}, threshold: {thresh:.2f} (selected error: {np.nanmean(Error):.2f})"
+    )
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
 
     def update(val):
         nonlocal new_thresh, selection
         new_thresh = val
-        sys.stdout.write("threshold value: " + str(val) + "\r")
-        sys.stdout.flush()
         thresh_line.set_xdata([val, val])  # Changed from set_ydata to set_xdata
         if typeDec == "NN":
             selection = np.squeeze(q_control <= val)
@@ -897,7 +898,17 @@ def fig_interror(
             s.set_offsets(np.c_[np.where(selection)[0], pos[selection]])
             s.set_array(Error[selection])
             sel2 = selection[selNoNans]
-            scatt.set_array(np.array([1 if sel2[n] else 0.2 for n in range(len(sel2))]))
+            scatt.set_array(
+                np.position_WeirdLoss_RMS_newUncertainty_LSTMarray(
+                    [1 if sel2[n] else 0.2 for n in range(len(sel2))]
+                )
+            )
+        error = np.mean(Error[selection])
+        sys.stdout.write("threshold value: " + str(val) + "\r")
+        sys.stdout.flush()
+        fig.suptitle(
+            f"decoding error, {suffix=}, threshold: {val:.2f} (selected error: {error:.2f})"
+        )
         fig.canvas.draw_idle()
 
     axcolor = "lightgoldenrodyellow"
@@ -946,6 +957,16 @@ def fig_interror(
             if q_control[n] <= edges[bin + 1] and q_control[n] > edges[bin]:
                 temp.append(n)
         histIdx.append(temp)
+
+    # plot the mean error based on filtering values
+    mean_error = []
+    for bin in range(nBins):
+        selection = np.squeeze(q_control <= edges[bin + 1])
+        if phase == "training":
+            selection = np.logical_and(selection, speedMask)
+        error_values = np.nanmean(Error[selection])
+        mean_error.append(np.mean(error_values))
+
     err = np.array(
         [
             [
