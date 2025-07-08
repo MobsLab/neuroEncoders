@@ -1190,6 +1190,9 @@ class Mouse_Results(Params, PaperFigures):
         if winMS is None:
             win = self.windows[-1]
             winMS = self.windows_values[-1]
+        else:
+            idx = self.windows_values.index(winMS)
+            win = self.windows[idx]
 
         print_results.print_results(
             self.folderResult,

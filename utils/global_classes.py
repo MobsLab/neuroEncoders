@@ -1210,7 +1210,7 @@ class Params:
         self.denseweight = kwargs.pop(
             "denseweight", True
         )  # dense weight loss for dataset imbalance
-        self.denseweightAlpha = 1
+        self.denseweightAlpha = 0.8
 
         # self.transform = "log"  # "log" or "sqrt" or None
         self.transform_w_log = kwargs.pop(

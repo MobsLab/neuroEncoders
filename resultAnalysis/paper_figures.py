@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.stats import sem
+from cmcrameri import cm
 
 from importData.epochs_management import inEpochsMask
 from importData.rawdata_parser import get_params
@@ -58,8 +59,9 @@ class PaperFigures:
         if not os.path.exists(self.folderFigures):
             os.mkdir(self.folderFigures)
         self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
+        self.resultsNN_phase = dict()
 
-    def load_data(self, suffix=None):
+    def load_data(self, suffixes=None):
         """
         Method to load the results of the neural network prediction.
         It loads the results from the csv files saved in the results folder of the experiment path.
@@ -75,117 +77,130 @@ class PaperFigures:
         None
         """
         ### Load the NN prediction without using noise:
-        if suffix is None:
-            suffix = self.suffix
-        lPredPos = []
-        fPredPos = []
-        truePos = []
-        time = []
-        lossPred = []
-        speedMask = []
-        if suffix is None:
-            suffix = self.suffix
-        for ws in self.timeWindows:
-            lPredPos.append(
-                np.squeeze(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"linearPred{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
-                    )
-                )
-            )
-            fPredPos.append(
-                np.array(
-                    pd.read_csv(
-                        os.path.join(
-                            self.projectPath.experimentPath,
-                            "results",
-                            str(ws),
-                            f"featurePred{suffix}.csv",
+        if suffixes is None:
+            self.suffixes = [self.suffix]
+        else:
+            self.suffixes = suffixes
+        if not isinstance(self.suffixes, list):
+            self.suffixes = [suffixes]
+        for suffix in self.suffixes:
+            lPredPos = []
+            fPredPos = []
+            truePos = []
+            time = []
+            lossPred = []
+            speedMask = []
+            for ws in self.timeWindows:
+                lPredPos.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"linearPred{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
                         )
-                    ).values[:, 1:],
-                    dtype=np.float32,
+                    )
                 )
-            )
-            truePos.append(
-                np.array(
-                    pd.read_csv(
-                        os.path.join(
-                            self.projectPath.experimentPath,
-                            "results",
-                            str(ws),
-                            f"featureTrue{suffix}.csv",
+                fPredPos.append(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(ws),
+                                f"featurePred{suffix}.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float32,
+                    )
+                )
+                truePos.append(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(ws),
+                                f"featureTrue{suffix}.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float32,
+                    )
+                )
+                time.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"timeStepsPred{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
                         )
-                    ).values[:, 1:],
-                    dtype=np.float32,
-                )
-            )
-            time.append(
-                np.squeeze(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"timeStepsPred{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
                     )
                 )
-            )
-            lossPred.append(
-                np.squeeze(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"lossPred{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
+                lossPred.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"lossPred{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
                     )
                 )
-            )
-            speedMask.append(
-                np.squeeze(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"speedMask{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
+                speedMask.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"speedMask{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
                     )
                 )
-            )
 
-        speedMask = [ws.astype(np.bool) for ws in speedMask]
-        lTruePos = [self.l_function(f)[1] for f in truePos]
+            speedMask = [ws.astype(np.bool) for ws in speedMask]
+            lTruePos = [self.l_function(f)[1] for f in truePos]
 
-        # Output
-        self.resultsNN = {
-            "time": time,
-            "speedMask": speedMask,
-            "linPred": lPredPos,
-            "fullPred": fPredPos,
-            "truePos": truePos,
-            "linTruePos": lTruePos,
-            "predLoss": lossPred,
-        }
+            # Output
+            if suffix == self.suffix or len(self.suffixes) == 1:
+                self.resultsNN = {
+                    "time": time,
+                    "speedMask": speedMask,
+                    "linPred": lPredPos,
+                    "fullPred": fPredPos,
+                    "truePos": truePos,
+                    "linTruePos": lTruePos,
+                    "predLoss": lossPred,
+                }
+            self.resultsNN_phase[suffix] = {
+                "time": time,
+                "speedMask": speedMask,
+                "linPred": lPredPos,
+                "fullPred": fPredPos,
+                "truePos": truePos,
+                "linTruePos": lTruePos,
+                "predLoss": lossPred,
+            }
 
     def test_bayes(self):
         """
@@ -598,6 +613,122 @@ class PaperFigures:
                 (f"cumulativeHist_{str(speed)}{self.suffix}.svg"),
             )
         )
+
+    def error_matrix_linerrors_by_speed(self, suffixes=None, nbins=40, normalized=True):
+        if suffixes is None:
+            suffixes = self.suffixes
+
+        nrows = len(suffixes)
+        ncols = 2 * len(self.timeWindows)
+
+        fig, axes = plt.subplots(ncols=ncols, nrows=nrows, figsize=(20, 8))
+
+        # Handle single row/column cases
+        if nrows == 1 and ncols == 1:
+            axes = np.array([[axes]])
+        elif nrows == 1:
+            axes = axes.reshape(1, -1)
+        elif ncols == 1:
+            axes = axes.reshape(-1, 1)
+
+        for i, suffix in enumerate(suffixes):
+            for iw, winms in enumerate(self.timeWindows):
+                # All speed subplot
+                H, xedges, yedges = np.histogram2d(
+                    self.resultsNN_phase[suffix]["linPred"][iw],
+                    self.resultsNN_phase[suffix]["linTruePos"][iw],
+                    bins=(nbins, nbins),
+                    density=True,
+                )
+                if normalized:
+                    H = H / H.max(axis=1)  # the max value of the histogram is 1
+                extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+                ax_all = axes[i, 2 * iw]
+                im = ax_all.imshow(
+                    H,
+                    extent=extent,
+                    cmap=white_viridis,
+                    interpolation="none",
+                    origin="lower",
+                )
+                fig.colorbar(im, ax=ax_all)
+
+                # Fast speed subplot
+                H, xedges, yedges = np.histogram2d(
+                    self.resultsNN_phase[suffix]["linPred"][iw][
+                        self.resultsNN_phase[suffix]["speedMask"][iw]
+                    ],
+                    self.resultsNN_phase[suffix]["linTruePos"][iw][
+                        self.resultsNN_phase[suffix]["speedMask"][iw]
+                    ],
+                    bins=(nbins, nbins),
+                    density=True,
+                )
+                if normalized:
+                    H = H / H.max(axis=1)  # the max value of the histogram is 1
+                extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+                ax_fast = axes[i, 2 * iw + 1]
+                im = ax_fast.imshow(
+                    H,
+                    extent=extent,
+                    cmap=white_viridis,
+                    interpolation="none",
+                    origin="lower",
+                )
+                fig.colorbar(im, ax=ax_fast)
+
+        # Add multi-level column labels (Option 1)
+        for iw, winms in enumerate(self.timeWindows):
+            # Top level: winms labels
+            x_center = (2 * iw + 0.5) / ncols
+            fig.text(
+                x_center,
+                0.95,
+                f"{winms}ms",
+                ha="center",
+                va="bottom",
+                fontsize=12,
+                fontweight="bold",
+            )
+
+            # Bottom level: all/fast labels
+            x_all = (2 * iw) / ncols + 0.5 / ncols
+            x_fast = (2 * iw + 1) / ncols + 0.5 / ncols
+            fig.text(x_all, 0.92, "all", ha="center", va="bottom", fontsize=10)
+            fig.text(x_fast, 0.92, "fast", ha="center", va="bottom", fontsize=10)
+
+        # Add row labels (minimal suffix labels)
+        for i, suffix in enumerate(suffixes):
+            y_center = (nrows - i - 0.5) / nrows
+            fig.text(
+                0.02,
+                y_center,
+                f"{suffix}",
+                ha="center",
+                va="center",
+                fontsize=12,
+                fontweight="bold",
+                rotation=90,
+            )
+
+        # Adjust layout to make room for labels
+        fig.subplots_adjust(left=0.08, top=0.88, right=0.98, bottom=0.1)
+
+        fig.savefig(
+            os.path.join(
+                self.folderFigures,
+                (f"errorMatrix_{suffix}.png"),
+            )
+        )
+        fig.savefig(
+            os.path.join(
+                self.folderFigures,
+                (f"errorMatrix_{suffix}.svg"),
+            )
+        )
+        return fig
 
     def mean_linerrors(self, speed="all", filtProp=None, errorType="sem"):
         ### Prepare the data
@@ -1782,10 +1913,10 @@ class PaperFigures:
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"""File {loadName} not found. Please run the spike alignment first in the WaveFormComparator class.
-                If you're using Mouse_Results, you can run the following command: 
-                
+                If you're using Mouse_Results, you can run the following command:
+
                 Mouse_Results.run_spike_alignment()
-                
+
                 """
             )
         spikePopAligned = spikePopAligned[
