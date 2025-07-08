@@ -655,6 +655,12 @@ wheels = [
 ]
 
 [[package]]
+name = "ffmpeg"
+version = "1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/cc/3b7408b8ecf7c1d20ad480c3eaed7619857bf1054b690226e906fdf14258/ffmpeg-1.4.tar.gz", hash = "sha256:6931692c890ff21d39938433c2189747815dca0c60ddc7f9bb97f199dba0b5b9", size = 5055 }
+
+[[package]]
 name = "filelock"
 version = "3.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2085,6 +2091,7 @@ dependencies = [
     { name = "cmcrameri" },
     { name = "denseweight" },
     { name = "dill" },
+    { name = "ffmpeg" },
     { name = "graphviz" },
     { name = "h5py" },
     { name = "ipykernel" },
@@ -2137,6 +2144,7 @@ requires-dist = [
     { name = "cmcrameri", specifier = ">=1.9" },
     { name = "denseweight", specifier = ">=0.1.2" },
     { name = "dill", specifier = ">=0.3.9" },
+    { name = "ffmpeg", specifier = ">=1.4" },
     { name = "graphviz", specifier = ">=0.20.3" },
     { name = "h5py", specifier = ">=3.13.0" },
     { name = "ipykernel", specifier = ">=6.29.5" },
