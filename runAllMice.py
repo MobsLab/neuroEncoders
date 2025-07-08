@@ -22,14 +22,10 @@ win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
 # Mice name
 mice_nb = []
-mice_nb = ["M1199_PAG", "M1239_MFB", "M1230_Known", "M1230_Novel"]
-nameExpBayes = "Pos_pre_Retracked"
-nameExp = "LinAndThigmo"
-nameExp = "LinAndDirection_SpecificLoss"
-nameExp = "position_NormalLoss_RMS_newUncertainty_DENSE"
-nbEpochs = str(400)
-run_bayes = False
-targetBayes = "pos"
+mice_nb = ["M1199_PAG", "M994_PAG", "M1239_MFB", "M1230_Known", "M1230_Novel"]
+nameExp = "current_LogLoss_Transformer_Dense"
+nbEpochs = str(200)
+run_bayes = True
 target = "pos"
 phase = "pre"
 
@@ -153,49 +149,30 @@ def process_directory(dir, win, force, lstmAndTransfo=False):
         return None, None
 
     if xml_file:
+        cmd_ann = [
+            "/usr/bin/env",
+            "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
+            "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
+            "ann",
+            xml_file,
+            "--window",
+            str(win),
+            "--striding",
+            str(win),
+            "-e",
+            nbEpochs,
+            "--gpu",
+            "--target",
+            target,
+            "--predicted_loss",
+            "--early_stop",
+            "--transform_w_log",
+        ]
         if lstmAndTransfo:
-            cmd_ann = [
-                "/usr/bin/env",
-                "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
-                "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
-                "ann",
-                xml_file,
-                "--window",
-                str(win),
-                "--striding",
-                str(win),
-                "-e",
-                nbEpochs,
-                "--gpu",
-                "--name",
-                nameExp + "_LSTM",
-                "--lstm",
-                "--target",
-                target,
-                # "--predicted_loss",
-                "--early_stop",
-            ]
+            cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
         else:
-            cmd_ann = [
-                "/usr/bin/env",
-                "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
-                "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
-                "ann",
-                xml_file,
-                "--window",
-                str(win),
-                "--striding",
-                str(win),
-                "-e",
-                nbEpochs,
-                "--gpu",
-                "--name",
-                nameExp + "_Transformer",
-                "--target",
-                target,
-                # "--predicted_loss",
-                "--early_stop",
-            ]
+            cmd_ann += ["--name", nameExp + "_Transformer"]
+
         cmd_bayes = [
             "/usr/bin/env",
             "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
