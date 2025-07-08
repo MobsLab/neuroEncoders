@@ -158,32 +158,34 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     """Global Average Pooling that respects masking"""
 
     def __init__(self, **kwargs):
+        self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
 
     def call(self, inputs, mask=None):
-        if mask is not None:
-            # Convert mask to float and add dimension for broadcasting
-            mask = tf.cast(mask, tf.float32)
-            mask = tf.expand_dims(mask, axis=-1)
+        with tf.device(self.device):
+            if mask is not None:
+                # Convert mask to float and add dimension for broadcasting
+                mask = tf.cast(mask, tf.float32)
+                mask = tf.expand_dims(mask, axis=-1)
 
-            # Apply mask to inputs
-            masked_inputs = inputs * mask
+                # Apply mask to inputs
+                masked_inputs = inputs * mask
 
-            # Calculate sum and count of non-masked elements
-            sum_inputs = tf.reduce_sum(masked_inputs, axis=1)
-            count_inputs = tf.reduce_sum(mask, axis=1)
+                # Calculate sum and count of non-masked elements
+                sum_inputs = tf.reduce_sum(masked_inputs, axis=1)
+                count_inputs = tf.reduce_sum(mask, axis=1)
 
-            # Avoid division by zero
-            count_inputs = tf.maximum(count_inputs, 1.0)
+                # Avoid division by zero
+                count_inputs = tf.maximum(count_inputs, 1.0)
 
-            # Calculate average
-            return sum_inputs / count_inputs
-        else:
-            return tf.reduce_mean(inputs, axis=1)
+                # Calculate average
+                return sum_inputs / count_inputs
+            else:
+                return tf.reduce_mean(inputs, axis=1)
 
     def get_config(self):
         base_config = super().get_config()
-        return {**base_config, "name": self.__class__.__name__}
+        return {**base_config, "name": self.__class__.__name__, "device": self.device}
 
     @classmethod
     def from_config(cls, config):
@@ -221,8 +223,9 @@ def create_attention_mask_from_padding_mask(padding_mask):
 
 
 class PositionalEncoding(tf.keras.layers.Layer):
-    def __init__(self, max_len=10000, d_model=128):
-        super(PositionalEncoding, self).__init__()
+    def __init__(self, max_len=10000, d_model=128, **kwargs):
+        self.device = kwargs.pop("device", "/cpu:0")
+        super().__init__(**kwargs)
         self.d_model = d_model
         self.max_len = max_len
 
@@ -240,12 +243,18 @@ class PositionalEncoding(tf.keras.layers.Layer):
         self.pe = tf.constant(pe, dtype=tf.float32)
 
     def call(self, x):
-        seq_len = tf.shape(x)[1]
+        with tf.device(self.device):
+            seq_len = tf.shape(x)[1]
         return x + self.pe[:seq_len, :]
 
     def get_config(self):
         base_config = super().get_config()
-        return {**base_config, "max_len": self.max_len, "d_model": self.d_model}
+        return {
+            **base_config,
+            "max_len": self.max_len,
+            "d_model": self.d_model,
+            "device": self.device,
+        }
 
     @classmethod
     def from_config(cls, config):
@@ -255,12 +264,20 @@ class PositionalEncoding(tf.keras.layers.Layer):
         """
         d_model = config.pop("d_model", 128)
         max_len = config.pop("max_len", 10000)
-        return cls(d_model=d_model, max_len=max_len)
+        return cls(
+            d_model=d_model, max_len=max_len, device=config.get("device", "/cpu:0")
+        )
 
 
 class TransformerEncoderBlock(tf.keras.layers.Layer):
     def __init__(
-        self, d_model=64, num_heads=8, ff_dim1=256, ff_dim2=64, dropout_rate=0.5
+        self,
+        d_model=64,
+        num_heads=8,
+        ff_dim1=256,
+        ff_dim2=64,
+        dropout_rate=0.5,
+        device="/cpu:0",
     ):
         super(TransformerEncoderBlock, self).__init__()
         self.d_model = d_model
@@ -268,47 +285,50 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.ff_dim1 = ff_dim1
         self.ff_dim2 = ff_dim2
         self.dropout_rate = dropout_rate
+        self.device = device
 
-        # Layer normalization at the beginning
-        self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        with tf.device(self.device):
+            # Layer normalization at the beginning
+            self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
-        # Multi-head attention
-        self.mha = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=d_model // num_heads
-        )
+            # Multi-head attention
+            self.mha = tf.keras.layers.MultiHeadAttention(
+                num_heads=num_heads, key_dim=d_model // num_heads
+            )
 
-        # Dropout after attention
-        self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
+            # Dropout after attention
+            self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
 
-        # Feedforward network
-        self.ff_layer1 = tf.keras.layers.Dense(ff_dim1, activation="relu")
-        self.ff_layer2 = tf.keras.layers.Dense(ff_dim2, activation="relu")
+            # Feedforward network
+            self.ff_layer1 = tf.keras.layers.Dense(ff_dim1, activation="relu")
+            self.ff_layer2 = tf.keras.layers.Dense(ff_dim2, activation="relu")
 
-        # Final layer normalization
-        self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+            # Final layer normalization
+            self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     def call(self, x, mask=None, training=False):
-        # Layer norm at the beginning
-        x_norm = self.norm1(x)
+        with tf.device(self.device):
+            # Layer norm at the beginning
+            x_norm = self.norm1(x)
 
-        # create attention mask if needed
-        attention_mask = None
-        if mask is not None:
-            attention_mask = create_attention_mask_from_padding_mask(mask)
+            # create attention mask if needed
+            attention_mask = None
+            if mask is not None:
+                attention_mask = create_attention_mask_from_padding_mask(mask)
 
-        # Multi-head attention with residual connection
-        attn_output = self.mha(
-            x_norm, x_norm, attention_mask=attention_mask, training=training
-        )
-        attn_output = self.dropout1(attn_output, training=training)
-        x = x + attn_output  # Residual connection
+            # Multi-head attention with residual connection
+            attn_output = self.mha(
+                x_norm, x_norm, attention_mask=attention_mask, training=training
+            )
+            attn_output = self.dropout1(attn_output, training=training)
+            x = x + attn_output  # Residual connection
 
-        # Feedforward network
-        ff_output = self.ff_layer1(x)
-        ff_output = self.ff_layer2(ff_output)
+            # Feedforward network
+            ff_output = self.ff_layer1(x)
+            ff_output = self.ff_layer2(ff_output)
 
-        # Final layer norm and residual connection
-        x = self.norm2(x + ff_output)
+            # Final layer norm and residual connection
+            x = self.norm2(x + ff_output)
 
         return x
 
@@ -326,6 +346,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
             "ff_dim1": self.ff_dim1,
             "ff_dim2": self.ff_dim2,
             "dropout_rate": self.dropout_rate,
+            "device": self.device,
         }
         return {**base_config, **config}
 
@@ -342,6 +363,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
             ff_dim1=config.get("ff_dim1", 256),
             ff_dim2=config.get("d_model", 64),
             dropout_rate=config.get("dropout_rate", 0.5),
+            device=config.get("device", "/cpu:0"),
         )
 
 
@@ -556,6 +578,7 @@ class NeuralDataAugmentation:
         offset_scale_factor: float = 0.67,
         cumulative_noise_std: float = 0.02,
         spike_band_channels: Optional[list] = None,
+        device: str = "/cpu:0",
     ):
         """
         Initialize augmentation parameters.
@@ -574,6 +597,7 @@ class NeuralDataAugmentation:
         self.offset_scale_factor = offset_scale_factor
         self.cumulative_noise_std = cumulative_noise_std
         self.spike_band_channels = spike_band_channels
+        self.device = device
 
     def add_white_noise(self, neural_data: tf.Tensor) -> tf.Tensor:
         """
@@ -585,12 +609,13 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with white noise
         """
-        noise = tf.random.normal(
-            shape=tf.shape(neural_data),
-            mean=0.0,
-            stddev=self.white_noise_std,
-            dtype=neural_data.dtype,
-        )
+        with tf.device(self.device):
+            noise = tf.random.normal(
+                shape=tf.shape(neural_data),
+                mean=0.0,
+                stddev=self.white_noise_std,
+                dtype=neural_data.dtype,
+            )
         return neural_data + noise
 
     def add_constant_offset(self, neural_data: tf.Tensor) -> tf.Tensor:
@@ -605,24 +630,25 @@ class NeuralDataAugmentation:
             Augmented neural data with constant offset
         """
         # Generate constant offset for each channel
-        if len(neural_data.shape) == 3:  # Batched data
-            batch_size = tf.shape(neural_data)[0]
-            num_channels = tf.shape(neural_data)[2]
-            offset_shape = [batch_size, 1, num_channels]
-        else:  # Single sample
-            num_channels = tf.shape(neural_data)[1]
-            offset_shape = [1, num_channels]
+        with tf.device(self.device):
+            if len(neural_data.shape) == 3:  # Batched data
+                batch_size = tf.shape(neural_data)[0]
+                num_channels = tf.shape(neural_data)[2]
+                offset_shape = [batch_size, 1, num_channels]
+            else:  # Single sample
+                num_channels = tf.shape(neural_data)[1]
+                offset_shape = [1, num_channels]
 
-        # Generate offset noise
-        offset = tf.random.normal(
-            shape=offset_shape,
-            mean=0.0,
-            stddev=self.offset_noise_std,
-            dtype=neural_data.dtype,
-        )
+            # Generate offset noise
+            offset = tf.random.normal(
+                shape=offset_shape,
+                mean=0.0,
+                stddev=self.offset_noise_std,
+                dtype=neural_data.dtype,
+            )
 
-        # Apply offset to neural data
-        augmented_data = neural_data + offset
+            # Apply offset to neural data
+            augmented_data = neural_data + offset
 
         return augmented_data
 
@@ -636,27 +662,28 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with cumulative noise
         """
-        if len(neural_data.shape) == 3:  # Batched data
-            batch_size = tf.shape(neural_data)[0]
-            time_steps = tf.shape(neural_data)[1]
-            num_channels = tf.shape(neural_data)[2]
-            noise_shape = [batch_size, time_steps, num_channels]
-        else:  # Single sample
-            time_steps = tf.shape(neural_data)[0]
-            num_channels = tf.shape(neural_data)[1]
-            noise_shape = [time_steps, num_channels]
+        with tf.device(self.device):
+            if len(neural_data.shape) == 3:  # Batched data
+                batch_size = tf.shape(neural_data)[0]
+                time_steps = tf.shape(neural_data)[1]
+                num_channels = tf.shape(neural_data)[2]
+                noise_shape = [batch_size, time_steps, num_channels]
+            else:  # Single sample
+                time_steps = tf.shape(neural_data)[0]
+                num_channels = tf.shape(neural_data)[1]
+                noise_shape = [time_steps, num_channels]
 
-        # Generate random noise for each time step
-        noise_increments = tf.random.normal(
-            shape=noise_shape,
-            mean=0.0,
-            stddev=self.cumulative_noise_std,
-            dtype=neural_data.dtype,
-        )
+            # Generate random noise for each time step
+            noise_increments = tf.random.normal(
+                shape=noise_shape,
+                mean=0.0,
+                stddev=self.cumulative_noise_std,
+                dtype=neural_data.dtype,
+            )
 
-        # Compute cumulative sum along time axis to create random walk
-        axis = 1 if len(neural_data.shape) == 3 else 0
-        cumulative_noise = tf.cumsum(noise_increments, axis=axis)
+            # Compute cumulative sum along time axis to create random walk
+            axis = 1 if len(neural_data.shape) == 3 else 0
+            cumulative_noise = tf.cumsum(noise_increments, axis=axis)
 
         return neural_data + cumulative_noise
 
@@ -1005,32 +1032,34 @@ class LinearizationLayer(tf.keras.layers.Layer):
     """
 
     def __init__(self, maze_points, ts_proj, **kwargs):
+        self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         # Convert to TensorFlow constants
         self.maze_points = tf.constant(maze_points, dtype=tf.float32)
         self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
 
     def call(self, euclidean_data):
-        # Ensure consistent dtype
-        euclidean_data = tf.cast(euclidean_data, self.maze_points.dtype)
+        with tf.device(self.device):
+            # Ensure consistent dtype
+            euclidean_data = tf.cast(euclidean_data, self.maze_points.dtype)
 
-        # Expand dimensions for broadcasting
-        # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
-        # maze_points: [num_points, features] -> [1, num_points, features]
-        euclidean_expanded = tf.expand_dims(euclidean_data, axis=1)
-        maze_expanded = tf.expand_dims(self.maze_points, axis=0)
+            # Expand dimensions for broadcasting
+            # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
+            # maze_points: [num_points, features] -> [1, num_points, features]
+            euclidean_expanded = tf.expand_dims(euclidean_data, axis=1)
+            maze_expanded = tf.expand_dims(self.maze_points, axis=0)
 
-        # Calculate squared distances
-        distance_matrix = tf.reduce_sum(
-            tf.square(maze_expanded - euclidean_expanded), axis=-1
-        )
+            # Calculate squared distances
+            distance_matrix = tf.reduce_sum(
+                tf.square(maze_expanded - euclidean_expanded), axis=-1
+            )
 
-        # Find argmin
-        best_points = tf.argmin(distance_matrix, axis=1)
+            # Find argmin
+            best_points = tf.argmin(distance_matrix, axis=1)
 
-        # Gather results
-        projected_pos = tf.gather(self.maze_points, best_points)
-        linear_pos = tf.gather(self.ts_proj, best_points)
+            # Gather results
+            projected_pos = tf.gather(self.maze_points, best_points)
+            linear_pos = tf.gather(self.ts_proj, best_points)
 
         return projected_pos, linear_pos
 
@@ -1040,6 +1069,7 @@ class LinearizationLayer(tf.keras.layers.Layer):
             **base_config,
             "maze_points": self.maze_points.numpy().tolist(),
             "ts_proj": self.ts_proj.numpy().tolist(),
+            "device": self.device,
         }
 
     @classmethod
@@ -1050,7 +1080,11 @@ class LinearizationLayer(tf.keras.layers.Layer):
         """
         maze_points = tf.constant(config.pop("maze_points"), dtype=tf.float32)
         ts_proj = tf.constant(config.pop("ts_proj"), dtype=tf.float32)
-        return cls(maze_points=maze_points, ts_proj=ts_proj)
+        return cls(
+            maze_points=maze_points,
+            ts_proj=ts_proj,
+            device=config.pop("device", "/cpu:0"),
+        )
 
 
 from denseweight import DenseWeight
@@ -1065,20 +1099,22 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
     def __init__(self, fitted_denseweight, **kwargs):
         self.training_data = kwargs.pop("training_data", None)
         self.alpha = kwargs.pop("fitted_dw_alpha", 1.0)
+        self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.fitted_dw = fitted_denseweight  # Pre-fitted DenseWeight object
 
     def _compute_batch_weights(self, linearized_pos):
         """Compute weights for a batch using fitted DenseWeight"""
         # Convert tensor to numpy for DenseWeight
-        if hasattr(linearized_pos, "numpy"):
-            linearized_np = linearized_pos.numpy()
-        else:
-            linearized_np = np.array(linearized_pos)
+        with tf.device(self.device):
+            if hasattr(linearized_pos, "numpy"):
+                linearized_np = linearized_pos.numpy()
+            else:
+                linearized_np = np.array(linearized_pos)
 
-        # Call the fitted DenseWeight to get weights for this batch
-        # This uses the fitted model but computes weights for current samples
-        batch_weights = self.fitted_dw.eval(linearized_np)
+            # Call the fitted DenseWeight to get weights for this batch
+            # This uses the fitted model but computes weights for current samples
+            batch_weights = self.fitted_dw.eval(linearized_np)
 
         return batch_weights.astype(np.float32)
 
@@ -1086,14 +1122,15 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         """
         Dynamically compute weights for current batch using fitted DenseWeight
         """
-        # Use tf.py_function to call the fitted DenseWeight
-        weights = tf.py_function(
-            func=self._compute_batch_weights, inp=[linearized_pos], Tout=tf.float32
-        )
+        with tf.device(self.device):
+            # Use tf.py_function to call the fitted DenseWeight
+            weights = tf.py_function(
+                func=self._compute_batch_weights, inp=[linearized_pos], Tout=tf.float32
+            )
 
-        # Set shape (tf.py_function loses shape info)
-        batch_size = tf.shape(linearized_pos)[0]
-        weights.set_shape([None])
+            # Set shape (tf.py_function loses shape info)
+            batch_size = tf.shape(linearized_pos)[0]
+            weights.set_shape([None])
 
         return weights
 
@@ -1103,6 +1140,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
             **base_config,
             "fitted_dw_alpha": self.alpha,
             "training_data": self.training_data,
+            "device": self.device,
         }
 
     @classmethod
@@ -1116,20 +1154,23 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         fitted_dw = DenseWeight(fitted_dw_config)
         if training_data is not None:
             fitted_dw.fit(training_data)
-        return cls(fitted_denseweight=fitted_dw)
+        return cls(fitted_denseweight=fitted_dw, device=config.pop("device", "/cpu:0"))
 
 
 class DenseLossProcessor:
     """Processor for Dense Loss with dynamic weight computation"""
 
-    def __init__(self, maze_points, ts_proj, alpha=1.0, verbose=False):
+    def __init__(self, maze_points, ts_proj, alpha=1.0, verbose=False, device="/cpu:0"):
         self.maze_points = maze_points
         self.ts_proj = ts_proj
         self.alpha = alpha
-        self.linearization_layer = LinearizationLayer(maze_points, ts_proj)
+        self.linearization_layer = LinearizationLayer(
+            maze_points, ts_proj, device=device
+        )
         self.fitted_dw = None
         self.weights_layer = None
         self.verbose = verbose
+        self.device = device
 
     def fit_dense_weight_model(self, full_training_positions):
         """
@@ -1139,35 +1180,39 @@ class DenseLossProcessor:
         if self.verbose:
             print("Fitting DenseWeight model on full dataset for imbalance analysis...")
 
-        # Convert to numpy if needed
-        if hasattr(full_training_positions, "numpy"):
-            training_pos_np = full_training_positions.numpy()
-        else:
-            training_pos_np = np.array(full_training_positions)
+        with tf.device(self.device):
+            # Convert to numpy if needed
+            if hasattr(full_training_positions, "numpy"):
+                training_pos_np = full_training_positions.numpy()
+            else:
+                training_pos_np = np.array(full_training_positions)
 
-        # Create temporary model for linearization
-        temp_input = tf.keras.Input(shape=training_pos_np.shape[1:])
-        _, self.linearized_output = self.linearization_layer(temp_input)
-        temp_model = tf.keras.Model(inputs=temp_input, outputs=self.linearized_output)
+            # Create temporary model for linearization
+            temp_input = tf.keras.Input(shape=training_pos_np.shape[1:])
+            _, self.linearized_output = self.linearization_layer(temp_input)
+            temp_model = tf.keras.Model(
+                inputs=temp_input, outputs=self.linearized_output
+            )
 
-        # Get linearized positions for full training dataset
-        linearized_training = temp_model.predict(training_pos_np, verbose=0)
-        self.linearized_training = linearized_training
+            # Get linearized positions for full training dataset
+            linearized_training = temp_model.predict(training_pos_np, verbose=0)
+            self.linearized_training = linearized_training
 
-        # Fit DenseWeight model on full dataset
-        self.fitted_dw = DenseWeight(alpha=self.alpha)
-        self.training_weights = self.fitted_dw.fit(linearized_training)
+            # Fit DenseWeight model on full dataset
+            self.fitted_dw = DenseWeight(alpha=self.alpha)
+            self.training_weights = self.fitted_dw.fit(linearized_training)
 
-        # Create dynamic weights layer that uses the fitted model
-        self.weights_layer = DynamicDenseWeightLayer(
-            self.fitted_dw,
-            training_data=linearized_training,
-            fitted_dw_alpha=self.alpha,
-        )
+            # Create dynamic weights layer that uses the fitted model
+            self.weights_layer = DynamicDenseWeightLayer(
+                self.fitted_dw,
+                training_data=linearized_training,
+                fitted_dw_alpha=self.alpha,
+                device=self.device,
+            )
 
-        if self.verbose:
-            print(f"✓ DenseWeight model fitted on {len(training_pos_np)} samples")
-            print(f"✓ Ready for dynamic weight computation during training")
+            if self.verbose:
+                print(f"✓ DenseWeight model fitted on {len(training_pos_np)} samples")
+                print(f"✓ Ready for dynamic weight computation during training")
 
         return self.fitted_dw
 
@@ -1187,6 +1232,8 @@ class DenseLossProcessor:
             "ts_proj": self.ts_proj,
             "alpha": self.alpha,
             "fitted_dw": self.fitted_dw if self.fitted_dw else None,
+            "verbose": self.verbose,
+            "device": self.device,
         }
 
     @classmethod
@@ -1204,4 +1251,6 @@ class DenseLossProcessor:
 
         processor = cls(maze_points=maze_points, ts_proj=ts_proj, alpha=alpha)
         processor.fitted_dw = fitted_dw
+        processor.verbose = config.pop("verbose", False)
+        processor.device = config.pop("device", "/cpu:0")
         return processor

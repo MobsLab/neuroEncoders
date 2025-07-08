@@ -204,7 +204,11 @@ class LSTMandSpikeNetwork:
                 )
 
                 self.lstmsNets = (
-                    [PositionalEncoding(d_model=self.params.nFeatures)]
+                    [
+                        PositionalEncoding(
+                            d_model=self.params.nFeatures, device=self.deviceName
+                        )
+                    ]
                     + [
                         TransformerEncoderBlock(
                             d_model=self.params.nFeatures,
@@ -212,11 +216,12 @@ class LSTMandSpikeNetwork:
                             ff_dim1=self.params.ff_dim1,
                             ff_dim2=self.params.ff_dim2,
                             dropout_rate=self.params.dropoutLSTM,
+                            device=self.deviceName,
                         )
                         for _ in range(self.params.lstmLayers)
                     ]
                     + [
-                        MaskedGlobalAveragePooling1D(),
+                        MaskedGlobalAveragePooling1D(device=self.deviceName),
                         tf.keras.layers.Dense(
                             self.params.TransformerDenseSize1,
                             activation=tf.nn.relu,
@@ -892,7 +897,7 @@ class LSTMandSpikeNetwork:
             create_flatten_augmented_groups_fn,
         )
 
-        augmentation_config = NeuralDataAugmentation()
+        augmentation_config = NeuralDataAugmentation(device=self.deviceName)
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence_with_augmentation(*vals):
@@ -1971,6 +1976,7 @@ class LSTMandSpikeNetwork:
             ts_proj=self.ts_proj,
             alpha=alpha,
             verbose=verbose,
+            device=self.deviceName,
         )
 
         speedMask = behaviorData["Times"]["speedFilter"]

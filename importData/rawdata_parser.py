@@ -976,7 +976,7 @@ def select_epochs(
             totEntropy = (
                 np.array(entropiesSpeeds)
                 + np.array(entropiesPositions)
-                - np.exp(-1 / 40 * np.array(nb_points))
+                - np.exp(-1 / 80 * np.array(nb_points))
             )  # penalize small sets
             bestTestSet = np.argmax(totEntropy)
             testSetId = bestTestSet * sizeTest + idx_cut

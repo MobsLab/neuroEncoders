@@ -5,7 +5,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 from tensorflow import config
 
 
-def manage_devices(usedDevice: str = "GPU") -> str:
+def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     """
     Manage the devices used by TensorFlow.
 
@@ -22,7 +22,12 @@ def manage_devices(usedDevice: str = "GPU") -> str:
     # if gpu set memory growth
     if usedDevice == "GPU":
         device_phys = config.list_physical_devices(usedDevice)
-        config.experimental.set_memory_growth(device_phys[0], True)
+        if set_memory_growth:
+            if not device_phys:
+                raise ValueError("No GPU devices found.")
+            # set memory growth to True
+            for device in device_phys:
+                config.experimental.set_memory_growth(device, True)
     # get the name of the device
     device = config.list_logical_devices(usedDevice)
     if device:

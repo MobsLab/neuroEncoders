@@ -218,6 +218,16 @@ class AnimatedPositionPlotter:
             except IndexError:
                 self.dim = self.dim[totMask][indices]
 
+        if kwargs.get("predLossMask", None) is None:
+            predLossMask = np.ones(len(self.positions), dtype=bool)
+        else:
+            predLossMask = np.array(kwargs["predLossMask"])
+
+        if self.predicted is not None:
+            predLossMask = predLossMask[totMask][indices]
+            self.predicted[~predLossMask] = (
+                np.nan
+            )  # Set positions with predLossMask to NaN
         # Validate data
         self._validate_data()
 
