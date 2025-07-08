@@ -325,7 +325,7 @@ def main(args):
                 l_function=l_function,
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
-                useSpeedFilter=True,
+                useSpeedFilter=False,
                 phase="training",
                 useTrain=True,
                 template=args.phase,
@@ -373,7 +373,7 @@ def main(args):
             euclidean=False,
             target=args.target,
             phase="training",
-            useSpeedMask=False,
+            useSpeedMask=True,
             training_data=NNTrainer.training_data,
             l_function=l_function,
         )
