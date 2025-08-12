@@ -22,10 +22,19 @@ win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
 # Mice name
 mice_nb = []
-mice_nb = ["M1199_PAG", "M994_PAG", "M1239_MFB", "M1230_Known", "M1230_Novel"]
+mice_nb = ["M1199_PAG"]
+mice_nb = [
+    "M1199_PAG",
+    "M994_PAG",
+    "M1239_MFB",
+    "M1230_Novel",
+    "M1230_Known",
+    "M1162_MFB",
+]
 nameExp = "current_LogLoss_Transformer_Dense"
 nbEpochs = str(200)
 run_bayes = True
+run_ann = True
 target = "pos"
 phase = "pre"
 
@@ -46,7 +55,7 @@ def cleanup_memory():
     print(f"Memory usage after cleanup: {memory.percent:.1f}%")
 
 
-def process_directory(dir, win, force, lstmAndTransfo=False):
+def process_directory(dir, win, force, redo, lstmAndTransfo=False):
     xml_file = None
     for pattern in [
         "*SpikeRef*.xml",
@@ -90,59 +99,77 @@ def process_directory(dir, win, force, lstmAndTransfo=False):
                 "featurePred_training.csv",
             )
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_LSTM",
-                "results",
-                str(int(win * 1000)),
-                "featurePred.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_LSTM",
+                    "results",
+                    str(int(win * 1000)),
+                    "featurePred.csv",
+                )
             )
+            and lstmAndTransfo
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_LSTM",
-                "results",
-                str(int(win * 1000)),
-                f"featurePred_{phase}.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_LSTM",
+                    "results",
+                    str(int(win * 1000)),
+                    f"featurePred_{phase}.csv",
+                )
             )
+            and lstmAndTransfo
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_LSTM",
-                "results",
-                str(int(win * 1000)),
-                "featurePred_training.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_LSTM",
+                    "results",
+                    str(int(win * 1000)),
+                    "featurePred_training.csv",
+                )
             )
+            and lstmAndTransfo
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_Transformer",
-                "results",
-                str(int(win * 1000)),
-                "featurePred_training.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_Transformer",
+                    "results",
+                    str(int(win * 1000)),
+                    "featurePred_training.csv",
+                )
             )
+            and not lstmAndTransfo
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_Transformer",
-                "results",
-                str(int(win * 1000)),
-                "featurePred.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_Transformer",
+                    "results",
+                    str(int(win * 1000)),
+                    "featurePred.csv",
+                )
             )
+            and not lstmAndTransfo
         )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp + "_Transformer",
-                "results",
-                str(int(win * 1000)),
-                f"featurePred_{phase}.csv",
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_Transformer",
+                    "results",
+                    str(int(win * 1000)),
+                    f"featurePred_{phase}.csv",
+                )
             )
+            and not lstmAndTransfo
         )
     ) and (not force):
         print(f"featurePred+-{phase}.csv already exists in {dir}. Skipping...")
@@ -164,7 +191,7 @@ def process_directory(dir, win, force, lstmAndTransfo=False):
             "--gpu",
             "--target",
             target,
-            "--predicted_loss",
+            # "--predicted_loss",
             "--early_stop",
             "--transform_w_log",
         ]
@@ -172,6 +199,8 @@ def process_directory(dir, win, force, lstmAndTransfo=False):
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
         else:
             cmd_ann += ["--name", nameExp + "_Transformer"]
+        if sleep:
+            cmd_ann += ["--test_sleep"]
 
         cmd_bayes = [
             "/usr/bin/env",
@@ -183,19 +212,23 @@ def process_directory(dir, win, force, lstmAndTransfo=False):
             str(win),
             "-e",
             nbEpochs,
-            "--name",
-            nameExp,
             "--target",
             target,
         ]
+        if lstmAndTransfo:
+            cmd_bayes += ["--name", nameExp + "_LSTM"]
+        else:
+            cmd_bayes += ["--name", nameExp + "_Transformer"]
+        if sleep:
+            cmd_bayes += ["--test_sleep"]
 
         if "_test" not in xml_file:
             cmd_bayes += ["--phase", phase]
-        if force:
+        if redo:
             cmd_ann += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
-        if win == 0.108 and run_bayes:
+        if win == 0.108 and run_bayes and lstmAndTransfo == "to_debug":
             return cmd_ann, cmd_bayes
         else:
             return cmd_ann, None
@@ -248,7 +281,11 @@ if __name__ == "__main__":
     mode = "sequential"
     force = False
     lstm = False
+    redo = "--redo" in sys.argv
     rsync = "--rsync" in sys.argv
+    sleep = "--sleep" in sys.argv
+    force = "--force" in sys.argv
+    lstm = "--lstm" in sys.argv
 
     if len(sys.argv) > 1 and sys.argv[1].lower() == "sequential":
         mode = "sequential"
@@ -288,7 +325,7 @@ if __name__ == "__main__":
                 mouse_commands[dir] = []
                 for win in win_values:
                     if lstm:
-                        for lstmAndTransfo in [True, False]:
+                        for lstmAndTransfo in [False, True]:
                             # print(
                             #     f"Processing {dir} with window {win} and lstmAndTransfo {lstmAndTransfo}"
                             # )
@@ -296,6 +333,7 @@ if __name__ == "__main__":
                                 dir=dir,
                                 win=win,
                                 force=force,
+                                redo=redo,
                                 lstmAndTransfo=lstmAndTransfo,
                             )
                             if cmd_ann:
@@ -303,7 +341,7 @@ if __name__ == "__main__":
                             if cmd_bayes:
                                 mouse_commands[dir].append(cmd_bayes)
                     else:
-                        cmd_ann, cmd_bayes = process_directory(dir, win, force)
+                        cmd_ann, cmd_bayes = process_directory(dir, win, force, redo)
                         if cmd_ann:
                             mouse_commands[dir].append(cmd_ann)
                         if cmd_bayes:
@@ -314,7 +352,7 @@ if __name__ == "__main__":
                     mouse_commands[os.path.join(dir, dirmfb)] = []
                     for win in win_values:
                         cmd_ann, cmd_bayes = process_directory(
-                            os.path.join(dir, dirmfb), win, force
+                            os.path.join(dir, dirmfb), win, force, redo
                         )
                         if cmd_ann:
                             mouse_commands[os.path.join(dir, dirmfb)].append(cmd_ann)
