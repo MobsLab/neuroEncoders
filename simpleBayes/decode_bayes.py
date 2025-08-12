@@ -59,10 +59,14 @@ class Trainer:
         # Folders
         try:
             self.folderResult = os.path.join(self.projectPath.folderResult)
+            self.folderResultSleep = os.path.join(self.projectPath.folderResultSleep)
         except AttributeError:
             self.folderResult = os.path.join(self.projectPath.experimentPath, "results")
-        if not os.path.isdir(self.folderResult):
-            os.makedirs(self.folderResult)
+            self.folderResultSleep = os.path.join(
+                self.projectPath.experimentPath, "results_Sleep"
+            )
+        os.makedirs(self.folderResult, exist_ok=True)
+        os.makedirs(self.folderResultSleep, exist_ok=True)
 
     def train_order_by_pos(self, behaviorData, *args, **kwargs):  # bandwidth=0.05
         # l_function, onTheFlyCorrection=False
@@ -752,9 +756,13 @@ class Trainer:
             outputResults["linearPred"] = linearPred
             outputResults["linearTrue"] = linearTrue
 
+        self.saveResults(outputResults, folderName=windowSizeMS, phase=phase)
+
         return outputResults
 
-    def sleep_decoding(self, behaviorData, bayesMatrices, windowSizeMS=36):
+    def sleep_decoding(
+        self, behaviorData, bayesMatrices, windowSizeMS=36, l_function=None
+    ):
         windowSize = windowSizeMS / 1000
 
         clustersTime = {}
@@ -841,9 +849,11 @@ class Trainer:
                 ]
             )
             # probability moved back to linear scale
-            inferredProba = np.exp(outputPOps[0]) / np.sum(
-                np.exp(outputPOps[0]), axis=0
-            )
+            # No need to normalize the prob here as it's now done in the parallel_pred_as_NN
+            # inferredProba = np.exp(outputPOps[0]) / np.sum(
+            #     np.exp(outputPOps[0]), axis=0
+            # )
+            inferredProba = outputPOps[0]
             inferResults = np.concatenate(
                 [np.transpose(inferredPos), inferredProba], axis=-1
             )
@@ -904,6 +914,16 @@ class Trainer:
                 "speed_mask": behaviorData["Times"]["speedFilter"],
             }
 
+            if l_function:
+                projPredPos, linearPred = l_function(inferResults[:, :2])
+                inferResultsDic[sleepName]["projPred"] = projPredPos
+                inferResultsDic[sleepName]["linearPred"] = linearPred
+
+        # Save the results
+        for key in inferResultsDic.keys():
+            self.saveResults(
+                inferResultsDic[key], folderName=windowSizeMS, sleep=True, sleepName=key
+            )
         return inferResultsDic
 
     def calculate_linear_tuning_curve(self, linearization_function, behaviorData):
@@ -961,6 +981,68 @@ class Trainer:
                     linearPlaceFields.append(np.zeros(len(linSpace) - 1))
 
         return linearPlaceFields, binEdges
+
+    def saveResults(
+        self, test_output, folderName=36, sleep=False, sleepName="Sleep", phase=None
+    ):
+        import pandas as pd
+
+        # Manage folders to save
+        if sleep:
+            folderToSave = os.path.join(
+                self.folderResultSleep, str(folderName), sleepName
+            )
+            if not os.path.isdir(folderToSave):
+                os.makedirs(folderToSave)
+        else:
+            folderToSave = os.path.join(self.folderResult, str(folderName))
+
+        if phase is not None:
+            suffix = f"_{phase}"
+        else:
+            suffix = self.suffix
+
+        # predicted coordinates
+        df = pd.DataFrame(test_output["featurePred"])
+        df.to_csv(os.path.join(folderToSave, f"bayes_featurePred{suffix}.csv"))
+        df = pd.DataFrame(test_output["proba"])
+        df.to_csv(os.path.join(folderToSave, f"bayes_proba{suffix}.csv"))
+
+        # True coordinates
+        if not sleep:
+            df = pd.DataFrame(test_output["featureTrue"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_featureTrue{suffix}.csv"))
+            # Position loss
+            df = pd.DataFrame(test_output["posLoss"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_posLoss{suffix}.csv"))
+
+        # Times of prediction
+        df = pd.DataFrame(test_output["times"])
+        df.to_csv(os.path.join(folderToSave, f"bayes_timeStepsPred{suffix}.csv"))
+        # Speed mask
+        if not sleep:
+            df = pd.DataFrame(test_output["speed_mask"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_speedMask{suffix}.csv"))
+
+        if "indexInDat" in test_output:
+            df = pd.DataFrame(test_output["indexInDat"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_indexInDat{suffix}.csv"))
+        if "projPred" in test_output:
+            df = pd.DataFrame(test_output["projPred"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_projPredFeature{suffix}.csv"))
+        if "linearPred" in test_output:
+            df = pd.DataFrame(test_output["linearPred"])
+            df.to_csv(os.path.join(folderToSave, f"bayes_linearPred{suffix}.csv"))
+
+        if not sleep:
+            if "projTruePos" in test_output:
+                df = pd.DataFrame(test_output["projTruePos"])
+                df.to_csv(
+                    os.path.join(folderToSave, f"bayes_projTrueFeature{suffix}.csv")
+                )
+            if "linearTrue" in test_output:
+                df = pd.DataFrame(test_output["linearTrue"])
+                df.to_csv(os.path.join(folderToSave, f"bayes_linearTrue{suffix}.csv"))
 
 
 ############## Utils ##############
