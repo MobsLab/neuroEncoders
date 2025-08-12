@@ -214,3 +214,83 @@ def inEpochsMask(t, epochs):
         axis=0,
     )
     return mask >= 1
+
+
+def align_timestamps(A, B, tolerance=None):
+    """
+    Aligns each timestamp in A to the closest timestamp in B.
+
+    Parameters:
+        A (array-like): Reference timestamps.
+        B (array-like): Timestamps to be aligned to A.
+        tolerance (float, optional): Maximum allowed difference for matching (in the same unit as A/B).
+
+    Returns:
+        aligned_indices: Indices in B corresponding to closest timestamps to A.
+        aligned_B: Aligned timestamps from B (same shape as A).
+        diffs: Differences between A and matched B.
+    """
+    A = np.asarray(A)
+    B = np.asarray(B)
+
+    # Ensure B is sorted (required for searchsorted)
+    B_sorted = np.sort(B)
+
+    # Find index in B where each A[i] would be inserted to keep order
+    idx = np.searchsorted(B_sorted, A)
+
+    # Clip indices to stay in bounds
+    idx = np.clip(idx, 1, len(B_sorted) - 1)
+
+    # Compare which neighbor (left or right) is closer
+    left = B_sorted[idx - 1]
+    right = B_sorted[idx]
+    idx_closest = idx - (np.abs(A - left) < np.abs(A - right))
+
+    aligned_B = B_sorted[idx_closest]
+    diffs = np.abs(A - aligned_B)
+
+    if tolerance is not None:
+        idx_closest[diffs > tolerance] = -1  # mark unmatched
+
+    return idx_closest, aligned_B, diffs
+
+
+def find_closest_index(arr, value, tolerance=None):
+    """
+    Find the index of the closest value in an array.
+
+    :param arr: 1D numpy array of values.
+    :param value: The value to find the closest index for.
+    :param tolerance: Optional tolerance value. If provided, checks if the closest value is within this tolerance.
+                      If True, uses half the average sampling rate as tolerance.
+                      If False or None, no tolerance check is performed.
+    :return: Index of the closest value in arr.
+    """
+    arr = np.asarray(arr)
+    idx = (np.abs(arr - value)).argmin()
+
+    if tolerance is not None:
+        # check if tolerance is a number:
+        if isinstance(tolerance, (int, float)) and not isinstance(tolerance, bool):
+            if np.abs(arr[idx] - value) > tolerance:
+                raise ValueError(
+                    f"No value in the array is within the tolerance of {tolerance} for the value {value}."
+                )
+        elif isinstance(tolerance, bool) and tolerance:
+            from warnings import warn
+
+            warn(
+                "Tolerance is set to True, will compare against apparent sampling rate."
+            )
+            tolerance = np.nanmean(
+                np.diff(arr)
+            )  # should be half the average sampling rate
+            if np.abs(arr[idx] - value) > tolerance:
+                warn(
+                    f"No value in the array is within the tolerance of {tolerance} for the value {value}: found {arr[idx]} which gives a difference of {np.abs(arr[idx] - value)}."
+                )
+                return -1
+        else:
+            raise ValueError("Tolerance must be a number or boolean.")
+    return idx

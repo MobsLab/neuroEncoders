@@ -1,3 +1,9 @@
+"""
+This module contains the Project, DataHelper and Params classes, which are used to manage the data and behavior of the experiment.
+The Project class is used to store the paths of the project, while the DataHelper class is used to detect and describe the main properties of the signal and behavior. The Params class is used to store the parameters of the experiment, such as the number of channels, the sampling rate, and the list of channels.
+It also provides methods to compute the true target of interest, the distance to the wall, and the reference and xy coordinates.
+"""
+
 # Load libs
 import json
 import os.path
@@ -274,12 +280,13 @@ class DataHelper(Project):
             not self.isPredLoss
             and len(self.fullBehavior["Times"]["lossPredSetEpochs"]) > 0
         ):
-            self.fullBehavior["Times"]["trainEpochs"] = np.sort(
-                np.hstack(
-                    [
-                        self.fullBehavior["Times"]["trainEpochs"],
-                        self.fullBehavior["Times"]["lossPredSetEpochs"],
-                    ]
+            self.fullBehavior["Times"]["old_trainEpochs"] = self.fullBehavior["Times"][
+                "trainEpochs"
+            ].copy()
+            self.fullBehavior["Times"]["trainEpochs"] = np.concatenate(
+                (
+                    self.fullBehavior["Times"]["trainEpochs"],
+                    self.fullBehavior["Times"]["lossPredSetEpochs"],
                 )
             )
             print(
@@ -346,7 +353,7 @@ class DataHelper(Project):
         - in_place: whether to modify the positions array in place
         - show: whether to show the distance to the wall
         - **kwargs: additional keyword arguments to pass to the l_function
-            - speedMask : whether to use a speed mask to filter the positions based on speed, defaults to False
+            - speedMask : whether to use a speed mask to filter the positions based on speed (for AnimatedPositionPlotter only), defaults to False
 
         Returns:
         - the modified positions array
@@ -367,17 +374,29 @@ class DataHelper(Project):
             positions = self.positions
 
         elif self.target == "lin" or self.target == "linear":
+            assert l_function is not None, (
+                "l_function must be provided for linearization"
+            )
+            assert self.positions.shape[1] == 2, "positions must have 2 dimensions"
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
             self.linearized = positions
 
         elif self.target.lower() == "linandthigmo":
+            assert l_function is not None, (
+                "l_function must be provided for linearization"
+            )
+            assert self.positions.shape[1] == 2, "positions must have 2 dimensions"
             _, positions = l_function(self.positions)
             thigmo = self.dist2wall(self.positions, show=show)
             positions = np.concatenate(
                 (positions.reshape(-1, 1), thigmo.reshape(-1, 1)), axis=1
             )
         elif self.target.lower() == "linanddirection":
+            assert l_function is not None, (
+                "l_function must be provided for linearization"
+            )
+            assert self.positions.shape[1] == 2, "positions must have 2 dimensions"
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
             self.direction = self._get_traveling_direction(positions)
@@ -390,6 +409,53 @@ class DataHelper(Project):
             positions = positions.reshape(-1)
             self.direction = self._get_traveling_direction(positions)
             positions = self.direction.reshape(-1, 1)
+        elif self.target.lower() == "linandheaddirection":
+            _, positions = l_function(self.positions)
+            positions = positions.reshape(-1)
+            self.head_direction = self._get_head_direction(self.positions)
+            positions = np.concatenate(
+                (positions.reshape(-1, 1), self.head_direction.reshape(-1, 1)),
+                axis=1,
+            )
+        elif self.target.lower() == "linandspeed":
+            _, positions = l_function(self.positions)
+            positions = positions.reshape(-1)
+            self.speed = self._get_speed(
+                self.positions, interval=1 / (15 // self.windowSizeMS)
+            )
+            positions = np.concatenate(
+                (positions.reshape(-1, 1), self.speed.reshape(-1, 1)), axis=1
+            )
+        elif self.target.lower() == "posanddirection":
+            positions = self.positions
+            self.direction = self._get_traveling_direction(self.positions)
+            positions = np.concatenate(
+                (positions.reshape(-1, 2), self.direction.reshape(-1, 1)), axis=1
+            )
+        elif self.target.lower() == "posandheaddirection":
+            positions = self.positions
+            self.head_direction = self._get_head_direction(self.positions)
+            positions = np.concatenate(
+                (positions.reshape(-1, 2), self.head_direction.reshape(-1, 1)), axis=1
+            )
+        elif self.target.lower() == "posandspeed":
+            positions = self.positions
+            self.speed = self._get_speed(self.positions, interval=1 / (15))
+            positions = np.concatenate(
+                (positions.reshape(-1, 2), self.speed.reshape(-1, 1)), axis=1
+            )
+        elif self.target.lower() == "posandheaddirectionandspeed":
+            positions = self.positions
+            self.head_direction = self._get_head_direction(self.positions)
+            self.speed = self._get_speed(self.positions, interval=1 / (15))
+            positions = np.concatenate(
+                (
+                    positions.reshape(-1, 2),
+                    self.head_direction.reshape(-1, 1),
+                    self.speed.reshape(-1, 1),
+                ),
+                axis=1,
+            )
         else:
             raise ValueError(
                 f"target {self.target} not recognized. Please use 'pos', 'lin', 'linear', 'LinAndThigmo' or 'linAndThigmo'"
@@ -398,8 +464,14 @@ class DataHelper(Project):
         if show:
             from importData.gui_elements import AnimatedPositionPlotter
 
-            plotter = AnimatedPositionPlotter(self, trail_length=40, **kwargs)
-            anim = plotter.show(interval=10, repeat=True, block=True)
+            plotter = AnimatedPositionPlotter(
+                data_helper=self,
+                trail_length=40,
+                l_function=l_function,
+                linear_position_mode=True,
+                **kwargs,
+            )
+            anim = plotter.show(interval=1, repeat=True, block=True)
 
         if in_place:
             if not hasattr(self, "old_positions"):
@@ -481,6 +553,7 @@ class DataHelper(Project):
         """
         self.xlims = [self.lower_x, self.upper_x]
         self.ylim = self.ylim
+        self.zone_height = 0.43
 
         self.maze_coords = [
             [0, 0],
@@ -496,25 +569,25 @@ class DataHelper(Project):
         self.shock_zone = [
             [0, 0],
             [0, 0.43],
-            [self.lower_x, 0.43],
+            [self.lower_x, self.zone_height],
             [self.lower_x, 0],
             [0, 0],
         ]
 
         self.safe_zone = [
             [self.upper_x, 0],
-            [self.upper_x, 0.43],
-            [1, 0.43],
+            [self.upper_x, self.zone_height],
+            [1, self.zone_height],
             [1, 0],
             [0, 0],
         ]
 
         self.ZoneDef = [
-            [[0, self.lower_x], [0, 0.43]],  # shock
-            [[self.upper_x, 1], [0, 0.43]],  # safe
+            [[0, self.lower_x], [0, self.zone_height]],  # shock
+            [[self.upper_x, 1], [0, self.zone_height]],  # safe
             [[self.lower_x, self.upper_x], [self.ylim, 1]],  # center
-            [[0, self.lower_x], [0.43, 1]],  # shock center
-            [[self.upper_x, 1], [0.43, 1]],  # safe center
+            [[0, self.lower_x], [self.zone_height, 1]],  # shock center
+            [[self.upper_x, 1], [self.zone_height, 1]],  # safe center
         ]
         self.ZoneLabels = ["Shock", "Safe", "Center", "ShockCenter", "SafeCenter"]
 
@@ -573,6 +646,11 @@ class DataHelper(Project):
                 self._plot_coordinates_and_ref(normalized_positions=positions)
         else:
             self._get_ref_and_xy_from_behavResources(phase=phase, save=save, plot=plot)
+        # try to recover for plotting videos later
+        if "M" in self.fullBehavior:
+            self.TransformMatrix = self.fullBehavior["M"]
+        if "outputSize" in self.fullBehavior:
+            self.output_size = self.fullBehavior["outputSize"]
 
     def _get_ref_and_xy_from_behavResources(self, phase="Cond1", save=True, plot=False):
         """
@@ -671,6 +749,8 @@ class DataHelper(Project):
             self.fullBehavior["ratioIMAonREAL"] = self.ratioIMAonREAL
             self.fullBehavior["shock_zone_mask"] = self.shock_zone_mask
             self.fullBehavior["aligned_ref"] = self.aligned_ref
+            self.fullBehavior["M"] = self.TransformMatrix
+            self.fullBehavior["outputSize"] = self.output_size
 
             # save theses infos in the nnBehavior file.
             file = os.path.join(self.folder, f"nnBehavior{self.suffix}.mat")
@@ -697,6 +777,12 @@ class DataHelper(Project):
                 nnBehavior.create_array(
                     "/behavior", "ratioIMAonREAL", self.ratioIMAonREAL
                 )
+                if "M" in children:
+                    nnBehavior.remove_node("/behavior", "M")
+                nnBehavior.create_array("/behavior", "M", self.TransformMatrix)
+                if "outputSize" in children:
+                    nnBehavior.remove_node("/behavior", "outputSize")
+                nnBehavior.create_array("/behavior", "outputSize", self.output_size)
                 nnBehavior.flush()
                 nnBehavior.close()
 
@@ -831,6 +917,8 @@ class DataHelper(Project):
         else:
             reference_image_for_cv = reference_image.astype(np.uint8)
 
+        self.reference_image_for_cv = reference_image_for_cv
+
         # Get source image dimensions
         h, w = reference_image.shape[:2]
 
@@ -864,6 +952,7 @@ class DataHelper(Project):
 
         # Define output size with a margin
         output_size = (avg_width, avg_height)
+        self.output_size = output_size
 
         # Define destination points scaled to output size
         dst_pts = np.float32(
@@ -877,6 +966,7 @@ class DataHelper(Project):
 
         # Calculate perspective transform matrix
         M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        self.TransformMatrix = M
 
         # Apply perspective transformation to the image with appropriate flags
         transformed_image_cv = cv2.warpPerspective(
@@ -1020,8 +1110,13 @@ class DataHelper(Project):
             method: 'difference' or 'regression' (default: 'difference')
 
         Returns:
-            Binary direction array (1 = forward, 0 = backward)
+            Binary direction array (1 = forward, 0 = backward) of shape (n_points,).
         """
+        if linearized_positions.ndim != 1:
+            raise ValueError(
+                f"Input must be a 1D array. Received shape: {linearized_positions.shape}"
+            )
+
         n_points = len(linearized_positions)
         direction = np.zeros(n_points)
 
@@ -1063,6 +1158,113 @@ class DataHelper(Project):
                     direction[i] = direction[i - 1] if i > 0 else 0
 
         return direction.astype(int)
+
+    def _get_head_direction(self, positions, smoothing=True, return_as_deg=False):
+        """
+        Calculates heading direction based on X and Y coordinates. With one measurement we can only calculate heading direction
+
+        Parameters
+        ----------
+        positions : (N, 2) array_like
+            N samples of observations, containing X and Y coordinates
+        smoothing : bool or int, optional
+            If speeds should be smoothed, by default False/0
+        return_as_deg : bool
+            Return heading in radians or degree
+
+        Returns
+        -------
+        heading_direction : (N, 1) array_like
+            Heading direction of the animal
+        """
+        X, Y = positions[:, 0], positions[:, 1]
+        # Smooth diffs instead of speeds directly
+        Xdiff = np.diff(X)
+        Ydiff = np.diff(Y)
+        if smoothing:
+            Xdiff = smooth_signal(Xdiff, smoothing)
+            Ydiff = smooth_signal(Ydiff, smoothing)
+        # Calculate heading direction
+        heading_direction = np.arctan2(Ydiff, Xdiff)
+        heading_direction = np.append(heading_direction, heading_direction[-1])
+        if return_as_deg:
+            heading_direction = heading_direction * (180 / np.pi)
+
+        return heading_direction
+
+    def _get_speed(self, positions, interval, smoothing=True):
+        """
+        Calculate speed from X,Y coordinates
+
+        Parameters
+        ----------
+        positions : (N, 2) array_like
+            N samples of observations, containing X and Y coordinates
+        interval : int
+            Duration between observations (in s, equal to 1 / sr)
+        smoothing : bool or int, optional
+            If speeds should be smoothed, by default False/0
+
+        Returns
+        -------
+        speed : (N, 1) array_like
+            Instantenous speed of the animal
+        """
+        X, Y = positions[:, 0], positions[:, 1]
+        # Smooth diffs instead of speeds directly
+        Xdiff = np.diff(X)
+        Ydiff = np.diff(Y)
+        if smoothing:
+            Xdiff = smooth_signal(Xdiff, smoothing)
+            Ydiff = smooth_signal(Ydiff, smoothing)
+        speed = np.sqrt(Xdiff**2 + Ydiff**2) / interval
+        speed = np.append(speed, speed[-1])
+
+        return speed
+
+    def get_training_imbalance(self, by_arm=True, positions=None):
+        """
+        Returns a simple ratio of left arm/shock zone vs right arm/safe zone training samples
+
+        parameters
+        ----------
+        by_arm : bool, optional
+            If True, returns the ratio of left arm to right arm training samples, else returns the ratio by zones. by default True
+
+        positions : np.ndarray, optional
+
+        returns
+        -------
+        ratio : float
+            Ratio of left arm to right arm training samples or shock zone to safe zone training samples
+        """
+        if positions is None:
+            training_mask = ep.inEpochsMask(
+                self.fullBehavior["positionTime"],
+                self.fullBehavior["Times"]["trainEpochs"],
+            ).flatten()
+
+            in_left_mask = (
+                self.fullBehavior["Positions"][training_mask, 0] <= self.lower_x
+            )
+            in_right_mask = (
+                self.fullBehavior["Positions"][training_mask, 0] >= self.upper_x
+            )
+            if not by_arm:
+                in_left_mask = in_left_mask & (
+                    self.fullBehavior["Positions"][training_mask, 1] <= self.zone_height
+                )
+                in_right_mask = in_right_mask & (
+                    self.fullBehavior["Positions"][training_mask, 1] <= self.zone_height
+                )
+        else:
+            in_left_mask = positions[:, 0] <= self.lower_x
+            in_right_mask = positions[:, 0] >= self.upper_x
+            if not by_arm:
+                in_left_mask = in_left_mask & (positions[:, 1] <= self.zone_height)
+                in_right_mask = in_right_mask & (positions[:, 1] <= self.zone_height)
+
+        return np.sum(in_left_mask) / np.sum(in_right_mask)
 
 
 class Params:
@@ -1162,6 +1364,9 @@ class Params:
         )  # target to predict, e.g. "pos", "lin", "direction", etc.
         self.resultsPath = helper.resultsPath  # path to save results
 
+        # regarding data augmentation
+        self.dataAugmentation = kwargs.pop("dataAugmentation", True)
+
         # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???
         self.nSteps = int(10000 * 0.036 / self.windowSize)  # used in the encoder
@@ -1220,10 +1425,29 @@ class Params:
         if self.target.lower() == "direction":
             self.loss = "binary_crossentropy"
 
-        self.column_losses = {"0": self.loss, "1": "binary_crossentropy"}
+        self.column_losses = {
+            "0": self.loss,
+            "1": "binary_crossentropy"
+            if "direction" in self.target.lower()
+            else "cyclic_mae",
+        }
         self.column_weights = (
             {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
         )
+
+        if self.target.lower() == "posandheaddirectionandspeed":
+            self.column_losses = {
+                "0": "mse",
+                "1": "mse",
+                "2": "cyclic_mae",
+                "3": "mae",
+            }
+            self.column_weights = {
+                "0": 0.6,
+                "1": 0.6,
+                "2": 0.3,
+                "3": 0.3,
+            }
         self.denseweight = kwargs.pop(
             "denseweight", True
         )  # dense weight loss for dataset imbalance
@@ -1235,6 +1459,8 @@ class Params:
         )  # "log" or "sqrt" or None
         self.delta = 0.4  # for the huber loss - roughly the random prediction threshold
         self.alpha = 5
+
+        self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
         self.usingMixedPrecision = False
         # enforcing float16 computations whenever possible
@@ -1328,3 +1554,31 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, pd.DataFrame) or isinstance(obj, pd.Series):
             return obj.to_dict()
         return super().default(obj)
+
+
+def smooth_signal(signal, N):
+    """
+    Simple smoothing by convolving a filter with 1/N.
+
+    Parameters
+    ----------
+    signal : array_like
+        Signal to be smoothed
+    N : int
+        smoothing_factor
+
+    Returns
+    -------
+    signal : array_like
+            Smoothed signal
+    """
+    if N is True:
+        N = 10
+    # Preprocess edges
+    signal = np.concatenate([signal[0:N], signal, signal[-N:]])
+    # Convolve
+    signal = np.convolve(signal, np.ones((N,)) / N, mode="same")
+    # Postprocess edges
+    signal = signal[N:-N]
+
+    return signal
