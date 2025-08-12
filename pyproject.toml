@@ -57,7 +57,12 @@ members = ["neuroencoders"]
 
 [dependency-groups]
 dev = [
+    "dash>=3.1.1",
     "imageio[ffmpeg,pyav]>=2.37.0",
+    "memory-profiler>=0.61.0",
+    "plotly>=6.2.0",
+    "psutil>=7.0.0",
+    "pympler>=1.1",
     "ruff>=0.11.8",
 ]
 

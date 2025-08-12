@@ -34,3 +34,8 @@ test_emergency.py
 utils/global_classes_ht.py
 fullEncoder/an_network_ht.py
 notebooks/debug.ipynb
+/runAllMice_log.py
+/runAllMice_noDense.py
+/notebooks/hyper_paper.ipynb
+/notebooks/get_gifs.py
+/notebooks/this is gold.ipynb

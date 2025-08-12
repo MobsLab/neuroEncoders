@@ -138,6 +138,38 @@ def get_behavior(
     filename = os.path.join(folder, "nnBehavior.mat")
     if not os.path.exists(filename):
         raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
+
+    optional_filename = os.path.join(folder, "optional_nnBehavior.mat")
+    if not os.path.exists(optional_filename):
+        raise ValueError(
+            "this file does not exist :" + folder + "optional_nnBehavior.mat"
+        )
+    with tables.open_file(optional_filename) as f:
+        if "start_freeze" in f.root.optional:
+            start_freeze = f.root.optional.start_freeze[:].flatten().reshape(-1, 1)
+            stop_freeze = f.root.optional.stop_freeze[:].flatten().reshape(-1, 1)
+            FreezeEpoch = np.hstack([start_freeze, stop_freeze])
+        else:
+            start_freeze = None
+            stop_freeze = None
+            FreezeEpoch = None
+        if "start_stim" in f.root.optional:
+            start_stim = f.root.optional.start_stim[:].flatten().reshape(-1, 1)
+            stop_stim = f.root.optional.stop_stim[:].flatten().reshape(-1, 1)
+            StimEpoch = np.hstack([start_stim, stop_stim])
+        else:
+            start_stim = None
+            stop_stim = None
+            StimEpoch = None
+        if "PosMat" in f.root.optional:
+            PosMat = f.root.optional.PosMat[:].T.reshape(-1, 4)
+        else:
+            PosMat = None
+        if "tRipples" in f.root.optional:
+            tRipples = f.root.optional.tRipples[:].flatten().reshape(-1, 1)
+        else:
+            tRipples = None
+
     if phase is not None:
         filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
         if not os.path.exists(filename):
@@ -262,7 +294,17 @@ def get_behavior(
             "positionTime": positionTime,
             "Speed": speed,
             "Bandwidth": bandwidth,
-            "Times": {"learning": learningTime},
+            "Times": {
+                "learning": learningTime,
+                "start_freeze": start_freeze,
+                "stop_freeze": stop_freeze,
+                "FreezeEpoch": FreezeEpoch,
+                "start_stim": start_stim,
+                "stop_stim": stop_stim,
+                "StimEpoch": StimEpoch,
+                "PosMat": PosMat,
+                "tRipples": tRipples,
+            },
         }
         if not decode:
             behavior_data["Times"]["trainEpochs"] = trainEpochs
@@ -292,6 +334,11 @@ def get_behavior(
             )
         if "shock_zone_mask" in f.root.behavior:
             behavior_data["shock_zone_mask"] = f.root.behavior.shock_zone_mask[:]
+
+        if "outputSize" in f.root.behavior:
+            behavior_data["outputSize"] = f.root.behavior.outputSize[:]
+        if "M" in f.root.behavior:
+            behavior_data["M"] = f.root.behavior.M[:]
 
         f.close()
 
@@ -359,7 +406,7 @@ def speed_filter(
     with tables.open_file(filename, "a") as f:
         children = [c.name for c in f.list_nodes("/behavior")]
         if "speedMask" in children:
-            print("speedMask already created")
+            print(f"speedMask already created for {phase} phase")
             try:
                 # check the value is a numeric value
                 speedThresholdOG = (
@@ -367,7 +414,7 @@ def speed_filter(
                     .values[:, 1:]
                     .flatten()[-1]
                 )
-                print("with value:", speedThresholdOG)
+                print(f"with value: {np.exp(speedThresholdOG):.2f} cm/s")
                 try:
                     speedOG = speedThresholdOG.astype(float)
                 except:
@@ -414,12 +461,14 @@ def speed_filter(
                 re.search("hab", sessionNames[x], re.IGNORECASE)
                 for x in range(len(sessionNames))
             ]
-            id_hab = [x for x in range(len(hab_list)) if hab_list[x] != None]
+            id_hab = [x for x in range(len(hab_list)) if hab_list[x] is not None]
             sleep_list = [
                 re.search("sleep", sessionNames[x], re.IGNORECASE)
                 for x in range(len(sessionNames))
             ]
-            id_sleep = [x for x in range(len(sleep_list)) if sleep_list[x] != None]
+            id_sleep = [x for x in range(len(sleep_list)) if sleep_list[x] is not None]
+            if id_sleep:
+                print("Found sleep")
             if id_hab:
                 for id in id_hab:
                     epochToShow.extend([sessionStart[id], sessionStop[id]])
@@ -757,6 +806,7 @@ def select_epochs(
         raise ValueError(
             "isPredLoss must be True, as this function is used to select the train and test epochs for the prediction of the loss"
         )
+
     global SetData, IsMultiSessions
     global timeToShow, keptSession, sessionStart, sessionStop, ep
     from importData import epochs_management as ep
@@ -848,11 +898,19 @@ def select_epochs(
                         pattern = "post"
                     elif phase == "extinction":
                         pattern = "(extinction|extinct|ext)"
+                    # add sleep phases
+                    elif phase.lower() == "presleep":
+                        pattern = "presleep"
+                    elif phase.lower() == "postsleep":
+                        pattern = "postsleep"
                     else:
                         raise ValueError(
-                            "phase must be one of pre, hab, cond, extinction, or post"
+                            "phase must be one of pre, hab, cond, extinction, post or (pre|post)sleep"
                         )
 
+                    if "sleep" in phase.lower():
+                        # if we want to select sleep epochs, we need to add them to the id_toshow
+                        id_toshow.extend(id_sleep)
                     # create preselection list
                     pre_list = [
                         re.search(pattern, sessionNames[x], re.IGNORECASE)
