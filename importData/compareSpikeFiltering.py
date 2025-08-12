@@ -80,7 +80,7 @@ class WaveFormComparator:
 
         # Manage epochs
         if self.useTrain:
-            epochMask = inEpochsMask(
+            epochMask = ep.inEpochsMask(
                 behavior_data["positionTime"][:, 0],
                 behavior_data["Times"]["trainEpochs"],
             )
@@ -92,7 +92,7 @@ class WaveFormComparator:
                     0
                 ]
             else:
-                epochMask = inEpochsMask(
+                epochMask = ep.inEpochsMask(
                     behavior_data["positionTime"][:, 0],
                     behavior_data["Times"]["testEpochs"],
                 )

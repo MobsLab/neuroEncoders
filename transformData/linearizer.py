@@ -11,6 +11,7 @@ import tables
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pykeops import set_verbose as pykeopsset_verbose
 from pykeops.numpy import LazyTensor as LazyTensor_np
+from utils.global_classes import MAZE_COORDS
 
 pykeopsset_verbose(False)  # Disable verbose output from PyKeOps
 
@@ -24,8 +25,10 @@ class UMazeLinearizer:
     args:
     folder: str, the folder where the linearization points are saved
     nb_bins: int, the number of bins to use for the linearization, defaults to 100
+    n_path_points: int, the number of points to use for the interpolated path, defaults to 25
     phase: str, the phase of the experiment, defaults to None
     data_helper: object, a helper object to provide custom lines (like maze walls, boundaries, etc.), defaults to None
+    redo: bool, if True, regenerate the linearization points, defaults to False
     """
 
     def __init__(self, *args, **kwargs):
@@ -58,6 +61,7 @@ class UMazeLinearizer:
         # Initialize attributes
         self.folder = folder
         self.nb_bins = nb_bins
+        self.n_path_points = kwargs.pop("n_path_points", 25)
         self.phase = phase
 
         # Initialize linearization points
@@ -77,53 +81,160 @@ class UMazeLinearizer:
                     folder + "nnBehavior_" + phase + ".mat",
                     follow_symlinks=True,
                 )
+        self.filename = filename
         # Extract basic behavior
         with tables.open_file(filename, "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
-            if "linearizationPoints" in children:
+            if (
+                "linearizationPoints" in children
+                and "targetLinearValues" in children
+                and kwargs.get("nnPoints", None) is None
+                and kwargs.get("redo", False) is False
+            ):
                 self.nnPoints = f.root.behavior.linearizationPoints[:]
+                self.target_linear_values = f.root.behavior.targetLinearValues[:]
+            elif (
+                kwargs.get("nnPoints", None) is not None
+                and kwargs.get("redo", False) is False
+            ):
+                self.nnPoints = kwargs["nnPoints"]
             else:
-                self.nnPoints = [
-                    [0.15, 0.1],
-                    [0.15, 0.5],
-                    [0.15, 0.9],
-                    [0.5, 0.9],
-                    [0.9, 0.9],
-                    [0.85, 0.5],
-                    [0.85, 0.1],
-                ]
-
-            ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            # equally spaced linear points. As many as the number of points
-            # pu in the verify_linearization function (by default 7 anchor points)
-            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
-            # itpObject is the interpolating object that finds a fit between
-            # the anchor points and the equally spaced 2D points
-            self.nb_bins = nb_bins
-            self.tsProj = np.arange(0, stop=1, step=1 / self.nb_bins)
-            self.mazePoints = self.itpObject(self.tsProj)  # from 1D to 2D
+                self._generate_canonical_path()
 
             if "aligned_ref" in children:
                 self.aligned_ref = f.root.behavior.aligned_ref[:]
             else:
                 self.aligned_ref = None
 
-            self.data_helper = kwargs.pop("data_helper", None)
-            custom_lines = kwargs.pop("custom_lines", None)
-            if self.data_helper is not None:
-                print("found data_helper, using its custom lines")
-                self.custom_lines = custom_lines or [
-                    self.data_helper.maze_coords,
-                    self.data_helper.shock_zone,
-                    self.data_helper.safe_zone,
-                ]
-            else:
-                self.custom_lines = None
-            self.custom_line_colors = ["black", "hotpink", "cornflowerblue"]
-            self.custom_line_styles = ["-", "-", "-"]
-            self.custom_line_widths = [4, 2, 2]
+        self._create_interpolation()
+
+        self.data_helper = kwargs.pop("data_helper", None)
+        custom_lines = kwargs.pop("custom_lines", None)
+        if self.data_helper is not None:
+            print("found data_helper, using its custom lines")
+            self.custom_lines = custom_lines or [
+                self.data_helper.maze_coords,
+                self.data_helper.shock_zone,
+                self.data_helper.safe_zone,
+            ]
+        else:
+            self.custom_lines = None
+        self.custom_line_colors = ["black", "hotpink", "cornflowerblue"]
+        self.custom_line_styles = ["-", "-", "-"]
+        self.custom_line_widths = [4, 2, 2]
+
+    def _generate_canonical_path(self):
+        """Generate the canonical U-shaped path through the maze center."""
+        # old waypoints looked like this:
+        # [     [0.15, 0],     [0.15, 0.1],     [0.15, 0.2],     [0.15, 0.3],     [0.15, 0.4],     [0.15, 0.5],     [0.15, 0.6],     [0.15, 0.7],     [0.15, 0.8],     [0.15, 0.9],     [0.25, 0.9],     [0.35, 0.9],     [0.5, 0.9],     [0.65, 0.9],     [0.75, 0.9],     [0.85, 0.9],     [0.85, 0.8],     [0.85, 0.7],     [0.85, 0.6],     [0.85, 0.5],     [0.85, 0.4],     [0.85, 0.3],     [0.85, 0.2],     [0.85, 0.1],     [0.85, 0], ]
+
+        # Outer boundaries
+        # TODO: change with custom maze coordinates ?
+        # WARNING: for now i don't use it as the data_helper.maze_coords are not super trustworthy # Theotime 31.07.2025
+        self.x_min = MAZE_COORDS[:, 0].min()
+        self.x_max = MAZE_COORDS[:, 0].max()
+        self.y_min = MAZE_COORDS[:, 1].min()
+        self.y_max = MAZE_COORDS[:, 1].max()
+
+        # Inner corridor boundaries (assuming indices 4-7 are inner boundaries)
+        inner_coords = MAZE_COORDS[4:8]
+        self.inner_x_min = inner_coords[:, 0].min()
+        self.inner_x_max = inner_coords[:, 0].max()
+        self.inner_y_max = inner_coords[:, 1].max()
+
+        # Calculate corridor width
+        self.arm_width = self.inner_x_min - self.x_min
+        self.top_width = self.y_max - self.inner_y_max
+
+        # Path goes through the center of the arms
+        left_center_x = self.x_min + self.arm_width / 2
+        right_center_x = self.x_max - self.arm_width / 2
+        top_center_y = self.inner_y_max + self.top_width / 2
+        center_x = 0.5
+
+        # Define key waypoints with their target linearization values
+        waypoints = [
+            # Left arm (bottom to top): 0.0 to 0.3
+            (left_center_x, self.y_min, 0.0),  # Bottom left
+            (left_center_x, top_center_y, 0.3),  # Top left corner
+            # Center point
+            (center_x, top_center_y, 0.5),  # Center between arms
+            # Top connection: 0.3 to 0.7
+            (right_center_x, top_center_y, 0.7),  # Top right corner
+            # Right arm (top to bottom): 0.7 to 1.0
+            (right_center_x, self.y_min, 1.0),  # Bottom right
+        ]
+
+        # Generate intermediate points between waypoints
+        nnPoints = []
+        target_values = []
+
+        for i in range(len(waypoints) - 1):
+            start_point = waypoints[i]
+            end_point = waypoints[i + 1]
+
+            # Number of points for this segment (proportional to linearization distance)
+            segment_length = end_point[2] - start_point[2]
+            n_segment_points = max(2, int(segment_length * self.n_path_points))
+
+            # Generate points along this segment
+            for j in range(n_segment_points):
+                if i < len(waypoints) - 2 and j == n_segment_points - 1:
+                    continue  # Skip last point to avoid duplication
+
+                t = j / (n_segment_points - 1)
+                x = start_point[0] + t * (end_point[0] - start_point[0])
+                y = start_point[1] + t * (end_point[1] - start_point[1])
+                linear_val = start_point[2] + t * (end_point[2] - start_point[2])
+
+                nnPoints.append([x, y])
+                target_values.append(linear_val)
+
+        self.og_nnPoints = np.array(nnPoints)
+        self.nnPoints = np.array(nnPoints)
+        self.og_target_linear_values = np.array(target_values)
+        self.target_linear_values = np.array(target_values)
+
+    def _create_interpolation(self, clip=True):
+        """Create interpolation objects for the path."""
+        # Create parameter values for spline interpolation
+        self.n_points = len(self.nnPoints)
+        ts = np.linspace(0, 1, self.n_points)
+        # equally spaced linear points. As many as the number of points
+        # pu in the verify_linearization function (by default 25 anchor points)
+
+        # Create spline interpolation for the 2D path
+        self.path_spline = itp.make_interp_spline(ts, self.nnPoints, k=2)
+        # path_spline is the interpolating object that finds a fit between
+        # the anchor points and the equally spaced 2D points
+
+        # Create spline interpolation for the linearization values
+        self.linear_spline = itp.make_interp_spline(ts, self.target_linear_values, k=2)
+        # linear_spline is the interpolating object that finds a fit between
+        # the anchor points and the equally spaced linear values
+
+        # Generate final discretized path
+        self.tsProj = np.linspace(0, 1, self.nb_bins)
+        self.mazePoints = self.path_spline(self.tsProj)
+        self.linear_values = self.linear_spline(self.tsProj)
+
+        # Ensure linear values are exactly 0 and 1 at endpoints
+        if clip:
+            self.linear_values[0] = 0.0
+            self.linear_values[-1] = 1.0
 
     def apply_linearization(self, euclideanData, keops=True):
+        """
+        Project 2D points onto the linearized maze path.
+
+        Args:
+            euclideanData: np.array of shape (N, 2) with 2D coordinates
+            keops: bool, if True, use PyKeOps for efficient computation, defaults to True
+
+        Returns:
+            projectedPos: np.array of shape (N, 2) with projected coordinates
+            linearPos: np.array of shape (N,) with linearized positions
+        """
         if keops:
             return self.pykeops_linearization(euclideanData)
         else:
@@ -143,11 +254,21 @@ class UMazeLinearizer:
                     axis=0,
                 )
                 projectedPos[idp, :] = self.mazePoints[bestPoint, :]
-                linearFeature[idp] = self.tsProj[bestPoint]
+                linearFeature[idp] = self.linear_values[bestPoint]
 
             return projectedPos, linearFeature
 
     def pykeops_linearization(self, euclideanData):
+        """
+        Project 2D points onto the linearized maze path.
+
+        Args:
+            euclideanData: np.array of shape (N, 2) with 2D coordinates
+
+        Returns:
+            projectedPos: np.array of shape (N, 2) with projected coordinates
+            linearPos: np.array of shape (N,) with linearized positions
+        """
         if euclideanData.dtype != self.mazePoints.dtype:
             euclideanData = euclideanData.astype(self.mazePoints.dtype)
 
@@ -158,12 +279,17 @@ class UMazeLinearizer:
         # find the argmin
         bestPoints = distance_matrix_lazy.argmin_reduction(axis=0)
         projectedPos = self.mazePoints[bestPoints[:, 0], :]
-        linearPos = self.tsProj[bestPoints[:, 0]]
+        linearPos = self.linear_values[bestPoints[:, 0]]
 
         return projectedPos, linearPos
 
     def verify_linearization(
-        self, ExampleEuclideanData, folder, overwrite=False, training=False
+        self,
+        ExampleEuclideanData,
+        folder,
+        overwrite=False,
+        training=False,
+        nnPoints=None,
     ):
         """
         A function to verify and possibly change the linearization.
@@ -174,6 +300,9 @@ class UMazeLinearizer:
         folder: str, the folder where the linearization points are saved
         overwrite: bool, if True, the linearization points will be overwritten, defaults to False
         """
+
+        if nnPoints is not None:
+            self.nnPoints = nnPoints
 
         def try_linearization(ax, l0s):
             _, linearTrue = self.apply_linearization(euclidData)
@@ -196,20 +325,25 @@ class UMazeLinearizer:
             return l0s
 
         def b1update(n):
-            self.nnPoints = [
-                [0.15, 0.1],
-                [0.15, 0.5],
-                [0.15, 0.9],
-                [0.5, 0.9],
-                [0.9, 0.9],
-                [0.85, 0.5],
-                [0.85, 0.1],
-            ]
+            """
+            Reset the linearization points to the original ones.
+            """
+            self.nnPoints = self.og_nnPoints.tolist()
+            self.target_linear_values = self.og_target_linear_values.tolist()
             # create the interpolating object
-            ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
-            self.tsProj = np.arange(0, stop=1, step=1 / 100)
-            self.mazePoints = self.itpObject(self.tsProj)
+            self.n_points = len(self.nnPoints)
+            ts = np.linspace(0, 1, self.n_points)
+            self.path_spline = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            self.linear_spline = itp.make_interp_spline(
+                ts, np.array(self.target_linear_values), k=2
+            )
+            # generate final discretized path
+            self.tsProj = np.linspace(0, 1, self.nb_bins)
+            self.mazePoints = self.path_spline(self.tsProj)
+            self.linear_values = self.linear_spline(self.tsProj)
+            self.linear_values[0] = 0.0
+            self.linear_values[-1] = 1.0
+
             try:
                 self.lPoints.remove()
                 fig.canvas.draw()
@@ -222,15 +356,27 @@ class UMazeLinearizer:
             fig.canvas.draw()
 
         def b2update(n):
+            """
+            Remove the last linearization point.
+            """
             if len(self.nnPoints) > 0:
                 self.nnPoints = self.nnPoints[0 : len(self.nnPoints) - 1]
+                self.target_linear_values = self.target_linear_values[
+                    0 : len(self.target_linear_values) - 1
+                ]
                 # create the interpolating object
-                ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-                self.itpObject = itp.make_interp_spline(
+                self.n_points = len(self.nnPoints)
+                ts = np.linspace(0, 1, self.n_points)
+                self.path_spline = itp.make_interp_spline(
                     ts, np.array(self.nnPoints), k=2
                 )
-                self.tsProj = np.arange(0, stop=1, step=1 / 100)
-                self.mazePoints = self.itpObject(self.tsProj)
+                self.linear_spline = itp.make_interp_spline(
+                    ts, np.array(self.target_linear_values), k=2
+                )
+                self.tsProj = np.linspace(0, 1, self.nb_bins)
+                self.mazePoints = self.path_spline(self.tsProj)
+                self.linear_values = self.linear_spline(self.tsProj)
+
                 self.lPoints.remove()
                 fig.canvas.draw()
                 if len(self.nnPoints) > 2:
@@ -247,8 +393,12 @@ class UMazeLinearizer:
                 fig.canvas.draw()
 
         def b3update(n):
+            """
+            Empty the linearization points.
+            """
             if len(self.nnPoints) > 0:
                 self.nnPoints = []
+                self.target_linear_values = []
                 self.lPoints.remove()
                 self.l0s[1] = ax[0].scatter(
                     euclidData[:, 0], euclidData[:, 1], c="blue"
@@ -256,21 +406,40 @@ class UMazeLinearizer:
                 fig.canvas.draw()
 
         def onclick(event):
+            """
+            Handle mouse click events to add new linearization points.
+            """
             if event.inaxes == self.l0s[1].axes:
-                self.nnPoints += [[event.xdata, event.ydata]]
+                new_point = np.array([event.xdata, event.ydata])
+                insertion_index, interpolated_value = _find_insertion_point(new_point)
+                self.nnPoints = np.insert(
+                    self.nnPoints, insertion_index, new_point, axis=0
+                )
+                self.target_linear_values = np.insert(
+                    self.target_linear_values, insertion_index, interpolated_value
+                )
+                self._create_interpolation(clip=False)
+
                 try:
                     self.lPoints.remove()
                     fig.canvas.draw()
                 except:
                     pass
                 if len(self.nnPoints) > 2:
+                    self.n_points = len(self.nnPoints)
                     # create the interpolating object
-                    ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-                    self.itpObject = itp.make_interp_spline(
+                    ts = np.linspace(0, 1, self.n_points)
+                    self.path_spline = itp.make_interp_spline(
                         ts, np.array(self.nnPoints), k=2
                     )
-                    self.tsProj = np.arange(0, stop=1, step=1 / 100)
-                    self.mazePoints = self.itpObject(self.tsProj)
+                    self.linear_spline = itp.make_interp_spline(
+                        ts, np.array(self.target_linear_values), k=2
+                    )
+                    self.tsProj = np.linspace(0, 1, self.nb_bins)
+                    self.mazePoints = self.path_spline(self.tsProj)
+                    self.linear_values = self.linear_spline(self.tsProj)
+                    self.linear_values[0] = 0.0
+                    self.linear_values[-1] = 1.0
 
                     self.l0s = try_linearization(ax, self.l0s)
                 else:
@@ -283,6 +452,121 @@ class UMazeLinearizer:
                     c="black",
                 )
                 fig.canvas.draw()
+
+        def _find_insertion_point(new_point):
+            """
+            Find where to insert the new point along the path and what its linear value should be.
+
+            Args:
+                new_point: np.array of shape (2,) with [x, y] coordinates
+
+            Returns:
+                insertion_index: Index where to insert the point
+                interpolated_value: Linear value for the new point
+            """
+            # Calculate distances from new point to all existing path points
+            distances = np.linalg.norm(self.nnPoints - new_point, axis=1)
+            closest_idx = np.argmin(distances)
+            n_points = len(self.nnPoints)
+
+            if closest_idx == 0:
+                # Near the start
+                if n_points > 1:
+                    dist_to_next = np.linalg.norm(self.nnPoints[1] - new_point)
+                    if distances[0] < dist_to_next:
+                        insertion_index = 0
+                        interpolated_value = max(
+                            0.0, self.target_linear_values[0] - 0.01
+                        )
+                    else:
+                        insertion_index = 1
+                        interpolated_value = (
+                            self.target_linear_values[0] + self.target_linear_values[1]
+                        ) / 2
+                else:
+                    insertion_index = 0
+                    interpolated_value = 0.0
+
+            elif closest_idx == n_points - 1:
+                # Near the end
+                dist_to_prev = np.linalg.norm(self.nnPoints[-2] - new_point)
+                if distances[-1] < dist_to_prev:
+                    insertion_index = n_points
+                    interpolated_value = min(1.0, self.target_linear_values[-1] + 0.01)
+                else:
+                    insertion_index = n_points - 1
+                    interpolated_value = (
+                        self.target_linear_values[-2] + self.target_linear_values[-1]
+                    ) / 2
+
+            else:
+                # In the middle - find the best segment
+                prev_idx = closest_idx - 1
+                next_idx = closest_idx + 1
+
+                # Project onto both possible segments
+                proj_to_prev = _project_point_on_segment(
+                    new_point, self.nnPoints[prev_idx], self.nnPoints[closest_idx]
+                )
+                proj_to_next = _project_point_on_segment(
+                    new_point, self.nnPoints[closest_idx], self.nnPoints[next_idx]
+                )
+
+                dist_to_prev_seg = np.linalg.norm(new_point - proj_to_prev)
+                dist_to_next_seg = np.linalg.norm(new_point - proj_to_next)
+
+                if dist_to_prev_seg < dist_to_next_seg:
+                    # Insert between prev_idx and closest_idx
+                    insertion_index = closest_idx
+                    t = _get_interpolation_parameter(
+                        new_point,
+                        self.nnPoints[prev_idx],
+                        self.nnPoints[closest_idx],
+                    )
+                    interpolated_value = (1 - t) * self.target_linear_values[
+                        prev_idx
+                    ] + t * self.target_linear_values[closest_idx]
+                else:
+                    # Insert between closest_idx and next_idx
+                    insertion_index = next_idx
+                    t = _get_interpolation_parameter(
+                        new_point,
+                        self.nnPoints[closest_idx],
+                        self.nnPoints[next_idx],
+                    )
+                    interpolated_value = (1 - t) * self.target_linear_values[
+                        closest_idx
+                    ] + t * self.target_linear_values[next_idx]
+
+            # Ensure the value stays within bounds
+            interpolated_value = np.clip(interpolated_value, 0.0, 1.0)
+            return insertion_index, interpolated_value
+
+        def _project_point_on_segment(point, seg_start, seg_end):
+            """Project a point onto a line segment."""
+            seg_vec = seg_end - seg_start
+            point_vec = point - seg_start
+
+            # Handle degenerate case
+            seg_length_sq = np.dot(seg_vec, seg_vec)
+            if seg_length_sq < 1e-10:
+                return seg_start
+
+            # Project onto the line and clamp to segment
+            t = np.clip(np.dot(point_vec, seg_vec) / seg_length_sq, 0.0, 1.0)
+            return seg_start + t * seg_vec
+
+        def _get_interpolation_parameter(point, seg_start, seg_end):
+            """Get the interpolation parameter t for a point projected onto a segment."""
+            seg_vec = seg_end - seg_start
+            point_vec = point - seg_start
+
+            seg_length_sq = np.dot(seg_vec, seg_vec)
+            if seg_length_sq < 1e-10:
+                return 0.0
+
+            t = np.dot(point_vec, seg_vec) / seg_length_sq
+            return np.clip(t, 0.0, 1.0)
 
         # Check existence of linearized data
 
@@ -305,10 +589,11 @@ class UMazeLinearizer:
         # Extract basic behavior
         with tables.open_file(filename, "a") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
-            if "linearizationPoints" in children:
+            if "linearizationPoints" in children and "targetLinearValues" in children:
                 print("Linearization points have been created before")
                 if overwrite:
                     f.remove_node("/behavior", "linearizationPoints")
+                    f.remove_node("/behavior", "targetLinearValues")
                     print("Overwriting linearization")
                 else:
                     return
@@ -346,16 +631,28 @@ class UMazeLinearizer:
             plt.show(block=True)
 
             # create the interpolating object
-            ts = np.arange(0, stop=1, step=1 / np.array(self.nnPoints).shape[0])
-            self.itpObject = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
-            self.tsProj = np.arange(0, stop=1, step=1 / 100)
-            self.mazePoints = self.itpObject(self.tsProj)
+            self.n_points = len(self.nnPoints)
+            ts = np.linspace(0, 1, self.n_points)
+            self.path_spline = itp.make_interp_spline(ts, np.array(self.nnPoints), k=2)
+            self.linear_spline = itp.make_interp_spline(
+                ts, np.array(self.target_linear_values), k=2
+            )
+            self.tsProj = np.linspace(0, 1, self.nb_bins)
+            self.mazePoints = self.path_spline(self.tsProj)
+            self.linear_values = self.linear_spline(self.tsProj)
+            self.linear_values[0] = 0.0
+            self.linear_values[-1] = 1.0
             # plot the exact linearization variable:
             _, linearTrue = self.apply_linearization(euclidData)
 
             self.plot_linearization_variable(euclidData, linearTrue, training, folder)
             # Save
+            if "linearizationPoints" in children:
+                f.remove_node("/behavior", "linearizationPoints")
+            if "targetLinearValues" in children:
+                f.remove_node("/behavior", "targetLinearValues")
             f.create_array("/behavior", "linearizationPoints", self.nnPoints)
+            f.create_array("/behavior", "targetLinearValues", self.target_linear_values)
             f.flush()
             f.close()
 
@@ -375,7 +672,7 @@ class UMazeLinearizer:
             print("No linearization variable provided, computing it.")
             _, linearTrue = self.apply_linearization(euclidData)
         cm = plt.get_cmap("Spectral")
-        norm = mcolors.Normalize(vmin=linearTrue.min(), vmax=linearTrue.max())
+        norm = mcolors.Normalize(vmin=0, vmax=1)
         fig, self.axScatter = plt.subplots()
         self._add_custom_lines(
             colors=self.custom_line_colors,
@@ -386,9 +683,31 @@ class UMazeLinearizer:
         scatter_plot = self.axScatter.scatter(
             euclidData[:, 0], euclidData[:, 1], c=linearTrue, cmap=cm, norm=norm
         )
+        corners = np.array([[0, 1], [1, 1], [0.5, 0.875]])
+        _, linearCorner = self.apply_linearization(corners)
+        self.axScatter.scatter(
+            corners[:, 0],
+            corners[:, 1],
+            c=linearCorner,
+            cmap=cm,
+            norm=norm,
+            marker="x",
+            s=100,
+            label="Corners & center",
+        )
+        # annotate the corners
+        for i, corner in enumerate(corners):
+            self.axScatter.annotate(
+                f"Value: {linearCorner[i]:.2f}",
+                (corner[0], corner[1]),
+                textcoords="offset points",
+                xytext=(0, 10),
+                ha="center",
+                fontsize=8,
+            )
         plt.colorbar(scatter_plot, ax=self.axScatter, norm=norm)
         fig.suptitle(
-            f"Linearization variable, Spectral colormap for mask {training} and phase {self.phase}"
+            f"Linearization variable, Spectral colormap for mask {training} and phase {self.phase}. min={linearTrue.min():.2f}, max={linearTrue.max():.2f}",
         )
         # Create new axes on the right and on the top of the current axes
         divider = make_axes_locatable(self.axScatter)
@@ -413,6 +732,7 @@ class UMazeLinearizer:
         )
         if show:
             plt.show(block=True)
+        plt.close(fig)
 
     def _add_custom_lines(self, colors, styles, widths, alpha):
         """Add custom line segments (like maze walls, boundaries, etc.)."""

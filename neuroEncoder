@@ -32,7 +32,7 @@ def main(args):
         if args.gpu:
             from utils import management
 
-            deviceName = management.manage_devices("GPU")
+            deviceName = management.manage_devices("GPU", set_memory_growth=True)
         else:
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -153,9 +153,14 @@ def main(args):
     for helper in helpers:
         # Create linearization function
         Linearizer = UMazeLinearizer(
-            ProjectPath.folder, phase=helper.phase, data_helper=helper
+            ProjectPath.folder,
+            phase=helper.phase,
+            data_helper=helper,
+            redo=(True if args.redo else False),
         )
         Linearizer.verify_linearization(
+            # WARNING: should we use the helper.maxPos() here?
+            # as positions are already Aligned/Normalized --> only for viz
             helper.positions / helper.maxPos(),
             ProjectPath.folder,
             overwrite=(True if args.redo else False),
@@ -188,7 +193,7 @@ def main(args):
         windowSize=args.window,
         nEpochs=args.epochs,
         phase=args.phase,
-        batchSize=256 if args.window < 0.252 else 128,
+        batchSize=128 if args.window < 0.252 else 64,
         save_json=True,
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
@@ -243,6 +248,14 @@ def main(args):
             useTrain=False,
             l_function=l_function,
         )
+
+        if args.test_sleep:
+            outputs_sleep = TrainerBayes.sleep_decoding(
+                DataHelper.fullBehavior,
+                bayesMatrices,
+                windowSizeMS=windowSizeMS,
+                l_function=l_function,
+            )
         print_results.print_results(
             TrainerBayes.folderResult,
             typeDec="bayes",
@@ -309,98 +322,142 @@ def main(args):
                 load_model=True,
                 denseweight=True,
                 l_function=l_function,
+                num_augmentations=11 if args.window < 0.252 else 3,
             )
 
-        if not os.path.exists(
-            os.path.join(
-                NNTrainer.folderResult,
-                str(windowSizeMS),
-                "errorFig_2d_NN_training_inferring",
+        # if the folderResult exists, rename it to "copy_folderResult"
+        if os.path.exists(NNTrainer.folderResult):
+            copy_folderResult = os.path.join(
+                NNTrainer.folderResult, "..", "Big_copy_folderResult"
             )
+            if os.path.exists(copy_folderResult):
+                # If the copy already exists, we do nothing
+                pass
+            else:
+                os.rename(NNTrainer.folderResult, copy_folderResult)
+                print(f"Renamed {NNTrainer.folderResult} to {copy_folderResult}")
+
+        # now run the fancy inference
+        if (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    "errorFig_2d_NN_training_inferring.png",
+                )
+            )
+            or args.redo
         ):
+            print("Testing training set")
             NNTrainer.test(
                 DataHelper.fullBehavior,
-                l_function=l_function,
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
+                l_function=l_function,
                 useSpeedFilter=False,
                 phase="training",
                 useTrain=True,
                 template=args.phase,
             )
-        if not os.path.exists(
-            os.path.join(
+            print_results.print_results(
                 NNTrainer.folderResult,
-                str(windowSizeMS),
-                f"errorFig_2d_NN_{args.phase}_inferring",
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.1,
+                euclidean=False,
+                target=args.target,
+                phase="training",
+                useSpeedMask=True,
+                training_data=NNTrainer.training_data,
+                l_function=l_function,
             )
+
+        if (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    f"errorFig_2d_NN_{args.phase}_inferring.png",
+                )
+            )
+            or args.redo
         ):
+            print("Testing inference set")
             NNTrainer.test(
                 DataHelper.fullBehavior,
-                l_function=l_function,
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
+                l_function=l_function,
                 useSpeedFilter=False,
                 phase=args.phase,
                 useTrain=False,
                 template=args.phase,
             )
-
-        if not os.path.exists(
-            os.path.join(
+            print_results.print_results(
                 NNTrainer.folderResult,
-                str(windowSizeMS),
-                "featurePred_cond.csv",
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.1,
+                euclidean=False,
+                target=args.target,
+                phase=args.phase,
+                training_data=NNTrainer.training_data,
+                useSpeedMask=False,
+                l_function=l_function,
             )
+
+        if (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    "featurePred_cond.csv",
+                )
+            )
+            or args.redo
         ):
+            print("Testing conditioning set")
             NNTrainer.test(
                 DataHelper_cond.fullBehavior,
-                l_function=l_function,
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
+                l_function=l_function,
                 useSpeedFilter=False,
                 phase="cond",
                 useTrain=True,
             )
 
-        print_results.print_results(
-            NNTrainer.folderResult,
-            windowSizeMS=windowSizeMS,
-            show=show_figures,
-            lossSelection=0.1,
-            euclidean=False,
-            target=args.target,
-            phase="training",
-            useSpeedMask=True,
-            training_data=NNTrainer.training_data,
-            l_function=l_function,
-        )
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.1,
+                euclidean=False,
+                target=args.target,
+                phase="cond",
+                training_data=NNTrainer.training_data,
+                useSpeedMask=False,
+                l_function=l_function,
+            )
 
-        print_results.print_results(
-            NNTrainer.folderResult,
-            windowSizeMS=windowSizeMS,
-            show=show_figures,
-            lossSelection=0.1,
-            euclidean=False,
-            target=args.target,
-            phase=args.phase,
-            training_data=NNTrainer.training_data,
-            useSpeedMask=False,
-            l_function=l_function,
-        )
-
-        print_results.print_results(
-            NNTrainer.folderResult,
-            windowSizeMS=windowSizeMS,
-            show=show_figures,
-            lossSelection=0.1,
-            euclidean=False,
-            target=args.target,
-            phase="cond",
-            training_data=NNTrainer.training_data,
-            useSpeedMask=False,
-            l_function=l_function,
-        )
+        if args.test_sleep and (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResultSleep,
+                    str(windowSizeMS),
+                    "PostSleep",
+                    "featurePred.csv",
+                )
+            )
+            or args.redo
+        ):
+            NNTrainer.testSleep(
+                behaviorData=DataHelper.fullBehavior,
+                l_function=l_function,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                # TODO: add windowSizeDecoder
+            )
 
         NNTrainer.clear_session()
         # Create json
@@ -644,7 +701,38 @@ if __name__ == "__main__":
                 "LinAndDirection",
                 "Direction",
                 "direction",
+                "linandheaddirection",
+                "linandspeed",
+                "PosAndDirection",
+                "Posandheaddirection",
+                "Posandspeed",
+                "Posandheaddirectionandspeed",
             ],
+        )
+        p.add_argument(
+            "-lstm",
+            "--lstm",
+            action="store_true",
+            help="defines whether to use a lstm network instead of transformer",
+        )
+        p.add_argument(
+            "-log",
+            "--transform_w_log",
+            action="store_true",
+            help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
+        )
+        p.add_argument(
+            "-nod",
+            "--no-dense",
+            action="store_true",
+            help="defines whether the dense weight loss should be used or not",
+        )
+
+        p.add_argument(
+            "-sleep",
+            "--test_sleep",
+            action="store_true",
+            help="defines whether to test the decoder on the Pre and Post sleep phases",
         )
 
         if cmd != "bayes":
@@ -673,24 +761,6 @@ if __name__ == "__main__":
                 "--early_stop",
                 action="store_true",
                 help="defines whether to use early stopping during training",
-            )
-            p.add_argument(
-                "-lstm",
-                "--lstm",
-                action="store_true",
-                help="defines whether to use a lstm network instead of transformer",
-            )
-            p.add_argument(
-                "-log",
-                "--transform_w_log",
-                action="store_true",
-                help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
-            )
-            p.add_argument(
-                "-nod",
-                "--no-dense",
-                action="store_true",
-                help="defines whether the dense weight loss should be used or not",
             )
 
     args = Parser.parse_args()
@@ -727,6 +797,26 @@ if __name__ == "__main__":
         subprocess.run(
             [
                 os.path.join(os.path.dirname(__file__), "getTsdFeature.sh"),
+                os.path.abspath(os.path.expanduser(args.path.strip("'"))),
+                "'" + args.target + "'",
+            ]
+        )
+    if not (
+        os.path.isfile(
+            os.path.abspath(
+                os.path.expanduser(
+                    os.path.split(args.path)[0]
+                    + os.path.sep
+                    + "optional_nnBehavior.mat"
+                )
+            )
+        )
+    ):
+        # Get the tsd feature, i.e. a nnBehavior.mat file from the tsd feature.
+        # The target is the name of the feature to be decoded, will default to the position.
+        subprocess.run(
+            [
+                os.path.join(os.path.dirname(__file__), "addTsdFeature.sh"),
                 os.path.abspath(os.path.expanduser(args.path.strip("'"))),
                 "'" + args.target + "'",
             ]
