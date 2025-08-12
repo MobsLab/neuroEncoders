@@ -12,18 +12,26 @@ import warnings
 from utils.global_classes import DataHelper
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
+import gc
+
 import matplotlib.pyplot as plt
 
 # Get common libraries
 import numpy as np
 import pandas as pd
+import psutil
 import tensorflow as tf
 from tensorflow import keras
 from tqdm import tqdm
 
+import wandb
+
 # Get utility functions
 from fullEncoder import nnUtils
 from importData.epochs_management import inEpochsMask
+from wandb import keras as wandbkeras
+
+WandbMetricsLogger = wandbkeras.WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -58,6 +66,7 @@ class LSTMandSpikeNetwork:
         **kwargs,
     ):
         super(LSTMandSpikeNetwork, self).__init__()
+        self.clear_session()
         ### Main parameters here
         self.projectPath = projectPath  # Project object containing the path to the project, the xml file, the dat file, the positions...
         self.params = params  # Params object containing the parameters of the network (nb of Groups, nb of channels per group, nb of features...)
@@ -293,7 +302,9 @@ class LSTMandSpikeNetwork:
             # Build two models
             # One just described, with two objective functions corresponding
             # to both position and predicted losses
-            self.model = self.compile_model(outputs, **kwargs)
+            self.model = self.compile_model(
+                outputs, modelName="FullModel.png", **kwargs
+            )
             # In theory, the predicted loss could be not learning enough in the first network (optional)
             # Second only with loss corresponding to predicted loss
             self.predLossModel = self.compile_model(
@@ -524,7 +535,11 @@ class LSTMandSpikeNetwork:
             if len(column_weights) > 1 or any(
                 "," in spec for spec in column_losses.keys()
             ):
-                loss_function = combined_loss(self.params)
+                loss_function = MultiColumnLossLayer(
+                    column_losses=column_losses,
+                    column_weights=column_weights,
+                    alpha=self.params.alpha,
+                )  # actually it's more of a layer than a function
 
             else:
                 # Single loss case
@@ -629,10 +644,8 @@ class LSTMandSpikeNetwork:
             return y
 
         # Compile the model
+        # TODO: use params.optimizer instead of hardcoding RMSprop
         self.optimizer = tf.keras.optimizers.RMSprop(
-            learning_rate=kwargs.get("lr", self.params.learningRates[0])
-        )
-        self.optimizerPredLoss = tf.keras.optimizers.RMSprop(
             learning_rate=kwargs.get("lr", self.params.learningRates[0])
         )
         if not predLossOnly:
@@ -676,7 +689,7 @@ class LSTMandSpikeNetwork:
             # Only used to create the self.predLossModel
             model.compile(
                 # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]),
-                optimizer=self.optimizerPredLoss,
+                optimizer=self.optimizer,
                 loss={
                     outputs[3].name.split("/Identity")[0]: uncertainty_loss
                 },  # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss) },
@@ -844,6 +857,26 @@ class LSTMandSpikeNetwork:
                 self.folderModels, str(windowSizeMS), key + "/cp.ckpt"
             )
 
+        # memory garbage collection class class
+        class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
+            """Monitor memory usage during training, collect garbage."""
+
+            def on_epoch_begin(self, epoch, logs=None):
+                print("**Epoch {}**".format(epoch))
+                print(
+                    "Memory usage on epoch begin: {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+
+            def on_epoch_end(self, epoch, logs=None):
+                print(
+                    "Memory usage on epoch end:   {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+                gc.collect()
+
         ## Get speed filter:
         speedMask = behaviorData["Times"]["speedFilter"]
 
@@ -897,7 +930,7 @@ class LSTMandSpikeNetwork:
             create_flatten_augmented_groups_fn,
         )
 
-        augmentation_config = NeuralDataAugmentation(device=self.deviceName)
+        augmentation_config = NeuralDataAugmentation(device=self.deviceName, **kwargs)
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence_with_augmentation(*vals):
@@ -947,10 +980,16 @@ class LSTMandSpikeNetwork:
                 posFeature = behaviorData["Positions"]
             datasets[key] = datasets[key].map(nnUtils.import_true_pos(posFeature))
             datasets[key] = datasets[key].filter(filter_nan_pos)
-            datasets[key] = datasets[key].batch(
-                self.params.batchSize, drop_remainder=True
+            datasets[key] = (
+                datasets[key].batch(self.params.batchSize, drop_remainder=True).cache()
             )
-            if key != "test":
+
+            if not self.params.dataAugmentation or key == "test":
+                print("No data augmentation for", key, "dataset")
+                datasets[key] = datasets[key].map(
+                    map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
+                )  # self.featDesc, *
+            else:
                 print("Applying data augmentation to", key, "dataset")
                 datasets[key] = datasets[key].map(
                     map_parse_serialized_sequence_with_augmentation,
@@ -959,11 +998,6 @@ class LSTMandSpikeNetwork:
                 datasets[key] = datasets[key].flat_map(
                     flatten_fn
                 )  # Flatten the augmented groups
-            else:
-                print("No data augmentation for", key, "dataset")
-                datasets[key] = datasets[key].map(
-                    map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
-                )  # self.featDesc, *
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
             # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
@@ -974,7 +1008,6 @@ class LSTMandSpikeNetwork:
                 datasets[key]
                 .map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
                 .cache()
-                # .shuffle(buffer_size=self.params.nSteps, reshuffle_each_iteration=True)
             )
             # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
             # and each mini-batch contains a representative sample of the training set.
@@ -983,9 +1016,9 @@ class LSTMandSpikeNetwork:
             # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
             # At each epoch, the shuffle order is different.
             datasets[key] = datasets[key].shuffle(
-                buffer_size=4,
+                buffer_size=1000,
                 reshuffle_each_iteration=True,
-            )  # were talking in number of batches here, not time
+            )  # were talking in number of batches here, not time (so it does not make sense to use params.nSteps)
             datasets[key] = datasets[key].prefetch(
                 tf.data.AUTOTUNE
             )  # prefetch entire batches
@@ -999,19 +1032,6 @@ class LSTMandSpikeNetwork:
             nb_epochs_already_trained = 10
             loaded = False
             if load_model and os.path.exists(os.path.dirname(checkpointPath[key])):
-                # self.custom_objects = {
-                #     "spikeNet": self.spikeNets,
-                #     "MaskedGlobalAveragePooling1D": self.lstmsNets[-3],
-                #     "PositionalEncoding": self.lstmsNets[0],
-                #     "TransformerEncoderBlock": self.lstmsNets[1],
-                #     "LinearizationLayer": self.linearization_layer,
-                #     "DynamicDenseWeightLayer": self.weights_layer,
-                #     "d_model": self.params.nFeatures,
-                #     "num_heads": self.params.nHeads,
-                #     "ff_dim1": self.params.ff_dim1,
-                #     "ff_dim2": self.params.ff_dim2,
-                #     "dropout_rate": self.params.dropoutLSTM,
-                # }
                 if key != "predLoss":
                     print(
                         "Loading the weights of the loss training model from",
@@ -1040,14 +1060,29 @@ class LSTMandSpikeNetwork:
                             e,
                         )
 
+            if loaded:
+                if kwargs.get("fine_tune", False) and nb_epochs_already_trained >= 35:
+                    return
+                elif not kwargs.get("fine_tune", False):
+                    return
+
             # Create a callback that saves the model's weights
             cp_callback = tf.keras.callbacks.ModelCheckpoint(
                 filepath=checkpointPath[key], save_weights_only=True, verbose=1
             )
             # Manage learning rates schedule
-            if loaded:
+            if loaded and kwargs.get("fine_tune", False):
+                print("Fine-tuning the model with a lower learning rate, set to 0.0001")
                 self.optimizer.learning_rate.assign(0.0001)
-                self.optimizerPredLoss.learning_rate.assign(0.0001)
+                self.model.optimizer.learning_rate.assign(0.0001)
+                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+            elif loaded:
+                print("Loading the model with the initial learning rate")
+                self.optimizer.learning_rate.assign(self.params.learningRates[0])
+                self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
+                tf.keras.backend.set_value(
+                    self.model.optimizer.learning_rate, self.params.learningRates[0]
+                )
             LRScheduler = self.LRScheduler(self.params.learningRates)
             if scheduler == "fixed":
                 schedule = tf.keras.callbacks.LearningRateScheduler(
@@ -1065,38 +1100,7 @@ class LSTMandSpikeNetwork:
             if self.debug:
                 print("Debugging mode is ON, enabling TensorBoard callback")
                 is_tbcallback = True
-                # log_dir = os.path.join(
-                #     "logs",
-                #     os.path.basename(self.projectPath.experimentPath),
-                #     str(windowSizeMS),
-                #     os.path.basename(os.path.dirname(self.projectPath.xml)),
-                #     key,
-                # )
-                # tb_callbacks = tf.keras.callbacks.TensorBoard(
-                #     log_dir=log_dir,
-                #     histogram_freq=1,
-                # )
-
-                # tf.debugging.experimental.enable_dump_debug_info(
-                #     self.folderResult,
-                #     tensor_debug_mode="FULL_HEALTH",
-                #     circular_buffer_size=-1,
-                # )               )
-
                 if key != "predLoss":
-                    from wandb import keras as wandbkeras
-
-                    WandbMetricsLogger = wandbkeras.WandbMetricsLogger
-
-                    import wandb
-
-                    # wandb.tensorboard.patch(
-                    #     root_logdir=os.path.join(
-                    #         "logs",
-                    #         os.path.basename(self.projectPath.experimentPath),
-                    #     )
-                    # )
-                    # ann config
                     ann_config = {
                         k: v
                         for k, v in self.params.__dict__.items()
@@ -1157,18 +1161,26 @@ class LSTMandSpikeNetwork:
                     fullModel=False,
                     valLosses=valLosses,
                 )
-                # Save model for C++ decoder
-                # print("saving full model in savedmodel format, for c++")
-                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels,
-                #                     str(windowSizeMS), "savedModels","predLossModel"))
-                self.predLossModel.save(
+                self.predLossModel.save_weights(
                     os.path.join(
                         self.folderModels,
                         str(windowSizeMS),
                         "savedModels",
-                        "predLossModel.keras",
-                    )
+                        "predLoss",
+                    ),
                 )
+                # Save model for C++ decoder
+                # print("saving full model in savedmodel format, for c++")
+                # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels,
+                #                     str(windowSizeMS), "savedModels","predLossModel"))
+                # self.predLossModel.save(
+                #     os.path.join(
+                #         self.folderModels,
+                #         str(windowSizeMS),
+                #         "savedModels",
+                #         "predLossModel.keras",
+                #     )
+                # )
             else:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
@@ -1177,11 +1189,21 @@ class LSTMandSpikeNetwork:
                         min_delta=0.05,
                         verbose=1,
                         restore_best_weights=True,
-                        start_from_epoch=80,
+                        start_from_epoch=50 - nb_epochs_already_trained,
                     )
                     callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
                 else:
                     callbacks = [csvLogger[key], cp_callback, schedule]
+
+                if self.params.reduce_lr_on_plateau:
+                    reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
+                        monitor="val_tf.identity_1_loss",
+                        factor=0.8,
+                        patience=10,
+                        verbose=1,
+                        start_from_epoch=40 - nb_epochs_already_trained,
+                    )
+                    callbacks.append(reduce_lr_callback)
 
                 if is_tbcallback:
                     # callbacks.append(tb_callbacks)
@@ -1189,9 +1211,7 @@ class LSTMandSpikeNetwork:
 
                 hist = self.model.fit(
                     datasets["train"],
-                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10
-                    if not loaded
-                    else 15,
+                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                 )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
@@ -1220,18 +1240,23 @@ class LSTMandSpikeNetwork:
                     os.path.join(self.folderModels, str(windowSizeMS)),
                     valLosses=valLosses,
                 )
+                self.model.save_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeMS), "savedModels", "full"
+                    ),
+                )
                 # Save model for C++ decoder
                 # self.cplusplusModel.predict(datasets['train'])
                 # print("saving full model in savedmodel format, for c++")
                 # tf.saved_model.save(self.cplusplusModel, os.path.join(self.folderModels, str(windowSizeMS), "savedModels","fullModel"))
-                self.model.save(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeMS),
-                        "savedModels",
-                        "fullModel.keras",
-                    )
-                )
+                # self.model.save(
+                #     os.path.join(
+                #         self.folderModels,
+                #         str(windowSizeMS),
+                #         "savedModels",
+                #         "fullModel.keras",
+                #     )
+                # )
                 if self.debug:
                     # wandb.tensorboard.unpatch()
                     wandb.finish()
@@ -1292,40 +1317,24 @@ class LSTMandSpikeNetwork:
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
-            try:
-                with tf.keras.saving.custom_object_scope(self.custom_objects):
-                    self.model = tf.keras.models.load_model(
-                        os.path.join(
-                            self.folderModels,
-                            str(windowSizeMS),
-                            "savedModels",
-                            "predLossModel.keras",
-                        )
-                    )
-                print("found predLossModel.keras, loaded it")
-            except:
-                self.model.load_weights(
-                    os.path.join(
-                        self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
-                    )
-                )
+            self.model.load_weights(
+                os.path.join(
+                    self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
+                ),
+            )
         else:
             try:
-                with tf.keras.saving.custom_object_scope(self.custom_objects):
-                    self.model = tf.keras.models.load_model(
-                        os.path.join(
-                            self.folderModels,
-                            str(windowSizeMS),
-                            "savedModels",
-                            "fullModel.keras",
-                        )
-                    )
-                print("found fullModel.keras, loaded it")
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeMS), "savedModels", "full"
+                    ),
+                )
             except:
+                print("loading from savedModels failed, trying full checkpoint ")
                 self.model.load_weights(
                     os.path.join(
                         self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
-                    )
+                    ),
                 )
 
         # Manage the behavior
@@ -1443,26 +1452,41 @@ class LSTMandSpikeNetwork:
 
         ### Post-inferring management
         print("gathering true feature")
-        datasetPos = dataset.map(
-            lambda x, y: x["pos"], num_parallel_calls=tf.data.AUTOTUNE
-        )
+
+        @tf.autograph.experimental.do_not_convert
+        def map_true_feature(x, y):
+            return x["pos"]
+
+        datasetPos = dataset.map(map_true_feature, num_parallel_calls=tf.data.AUTOTUNE)
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
         featureTrue = np.reshape(
             fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]]
         )
         print("gathering times of the centre in the time window")
-        datasetTimes = dataset.map(
-            lambda x, y: x["time"], num_parallel_calls=tf.data.AUTOTUNE
-        )
+
+        @tf.autograph.experimental.do_not_convert
+        def map_time(x, y):
+            return x["time"]
+
+        datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
         times = np.reshape(times, [outputTest[0].shape[0]])
         print("gathering indices of spikes relative to coordinates")
+
+        @tf.autograph.experimental.do_not_convert
+        def map_pos_index(x, y):
+            return x["pos_index"]
+
+        @tf.autograph.experimental.do_not_convert
+        def map_index_in_dat(x, y):
+            return x["indexInDat"]
+
         datasetPos_index = dataset.map(
-            lambda x, y: x["pos_index"], num_parallel_calls=tf.data.AUTOTUNE
+            map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
         )
         datasetIndexInDat = dataset.map(
-            lambda x, y: x["indexInDat"], num_parallel_calls=tf.data.AUTOTUNE
+            map_index_in_dat, num_parallel_calls=tf.data.AUTOTUNE
         )
         IDdat = list(datasetIndexInDat.as_numpy_iterator())
         posIndex = list(datasetPos_index.as_numpy_iterator())
@@ -1488,7 +1512,7 @@ class LSTMandSpikeNetwork:
 
         if l_function:
             projPredPos, linearPred = l_function(outputTest[0][:, :2])
-            projTruePos, linearTrue = l_function(featureTrue)
+            projTruePos, linearTrue = l_function(featureTrue[:, :2])
             testOutput["projPred"] = projPredPos
             testOutput["projTruePos"] = projTruePos
             testOutput["linearPred"] = linearPred
@@ -1499,14 +1523,11 @@ class LSTMandSpikeNetwork:
 
         return testOutput
 
-    def testSleep(
-        self,
-        behaviorData,
-        l_function=[],
-        windowSizeDecoder=None,
-        windowSizeMS=36,
-        isPredLoss=False,
-    ):
+    def testSleep(self, behaviorData, **kwargs):
+        # l_function = ([],)
+        # windowSizeDecoder = (None,)
+        # windowSizeMS = (36,)
+        # isPredLoss = (False,)
         """
         Test the network on sleep epochs.
 
@@ -1520,6 +1541,12 @@ class LSTMandSpikeNetwork:
         windowSizeMS : int
         isPredLoss : bool
         """
+        # Unpack kwargs
+        l_function = kwargs.get("l_function", [])
+        windowSizeDecoder = kwargs.get("windowSizeDecoder", None)
+        windowSizeMS = kwargs.get("windowSizeMS", 36)
+        isPredLoss = kwargs.get("isPredLoss", False)
+
         # Create the folder
         if windowSizeDecoder is None:
             folderName = str(windowSizeMS)
@@ -1536,17 +1563,42 @@ class LSTMandSpikeNetwork:
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
-            self.model.load_weights(
-                os.path.join(
-                    self.folderModels, str(windowSizeDecoder), "predLoss" + "/cp.ckpt"
+            try:
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeDecoder),
+                        "savedModels",
+                        "predLoss",
+                    )
                 )
-            )
+            except:
+                print(
+                    "loading from predLoss savedModels failed, trying checkpoint for sleep epochs"
+                )
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeDecoder),
+                        "predLoss" + "/cp.ckpt",
+                    )
+                )
         else:
-            self.model.load_weights(
-                os.path.join(
-                    self.folderModels, str(windowSizeDecoder), "full" + "/cp.ckpt"
+            try:
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeDecoder), "savedModels", "full"
+                    )
                 )
-            )
+            except:
+                print(
+                    "loading from full savedModels failed, trying checkpoint for sleep epochs"
+                )
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels, str(windowSizeDecoder), "full" + "/cp.ckpt"
+                    )
+                )
 
         print("decoding sleep epochs")
         predictions = {}
@@ -1573,11 +1625,13 @@ class LSTMandSpikeNetwork:
                     tf.squeeze(tf.math.greater_equal(x["time"], timeSleepStart)),
                 )
 
+            @tf.autograph.experimental.do_not_convert
             def map_parse_serialized_sequence(*vals):
                 return nnUtils.parse_serialized_sequence(
                     self.params, *vals, batched=True
                 )
 
+            @tf.autograph.experimental.do_not_convert
             def map_outputs(vals):
                 return (
                     vals,
@@ -1603,26 +1657,41 @@ class LSTMandSpikeNetwork:
             print(f"Inferring {sleepName} values")
             output = self.model.predict(dataset, verbose=1)
 
+            if self.target.lower() == "direction":
+                output = (tf.cast(output[0] > 0.5, tf.int32),)
+
             # Post-infer management
             print(f"gathering times of the centre in the time window for {sleepName}")
-            datasetTimes = dataset.map(
-                lambda x, y: x["time"], num_parallel_calls=tf.data.AUTOTUNE
-            )
+
+            @tf.autograph.experimental.do_not_convert
+            def map_time(x, y):
+                return x["time"]
+
+            datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
             times = list(datasetTimes.as_numpy_iterator())
             times = np.ravel(times)
             print(
                 f"gathering indices of spikes relative to coordinates for {sleepName}"
             )
+
+            @tf.autograph.experimental.do_not_convert
+            def map_pos_index(x, y):
+                return x["pos_index"]
+
+            @tf.autograph.experimental.do_not_convert
+            def map_index_in_dat(x, y):
+                return x["indexInDat"]
+
             datasetPosIndex = dataset.map(
-                lambda x, y: x["pos_index"], num_parallel_calls=tf.data.AUTOTUNE
+                map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
             )
             posIndex = list(datasetPosIndex.as_numpy_iterator())
             posIndex = np.ravel(np.array(posIndex))
             #
-            IDdat = dataset.map(
-                lambda vals, y: vals["indexInDat"], num_parallel_calls=tf.data.AUTOTUNE
+            datasetIndexInDat = dataset.map(
+                map_index_in_dat, num_parallel_calls=tf.data.AUTOTUNE
             )
-            IDdat = list(IDdat.as_numpy_iterator())
+            IDdat = list(datasetIndexInDat.as_numpy_iterator())
             outLoss = np.expand_dims(output[2], axis=1)
 
             predictions[sleepName] = {
@@ -1941,15 +2010,16 @@ class LSTMandSpikeNetwork:
         if "projPred" in test_output:
             df = pd.DataFrame(test_output["projPred"])
             df.to_csv(os.path.join(folderToSave, f"projPredFeature{suffix}.csv"))
-        if "projTruePos" in test_output:
-            df = pd.DataFrame(test_output["projTruePos"])
-            df.to_csv(os.path.join(folderToSave, f"projTrueFeature{suffix}.csv"))
         if "linearPred" in test_output:
             df = pd.DataFrame(test_output["linearPred"])
             df.to_csv(os.path.join(folderToSave, f"linearPred{suffix}.csv"))
-        if "linearTrue" in test_output:
-            df = pd.DataFrame(test_output["linearTrue"])
-            df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
+        if not sleep:
+            if "projTruePos" in test_output:
+                df = pd.DataFrame(test_output["projTruePos"])
+                df.to_csv(os.path.join(folderToSave, f"projTrueFeature{suffix}.csv"))
+            if "linearTrue" in test_output:
+                df = pd.DataFrame(test_output["linearTrue"])
+                df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
 
     def setup_dynamic_dense_loss(self, **kwargs):
         """
@@ -1984,7 +2054,7 @@ class LSTMandSpikeNetwork:
             behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
         )
         totMask = speedMask * epochMask
-        full_training_true_positions = behaviorData["Positions"][totMask]
+        full_training_true_positions = behaviorData["Positions"][totMask, :2]
         # Fit DenseWeight model on full training dataset
         self.dense_loss_processor.fit_dense_weight_model(full_training_true_positions)
         self.training_data = full_training_true_positions
@@ -2019,7 +2089,7 @@ class LSTMandSpikeNetwork:
             print("Applying Dynamic Dense Loss reweighting...")
 
             # Get linearized position for current batch
-            _, linearized_pos = self.linearization_layer(true_pos)
+            _, linearized_pos = self.linearization_layer(true_pos[:, :2])
             if self.dynamicdense_verbose:
                 print(f"Loss shape: {temp_pos_loss.shape}")
                 print(f"Linearized pos shape: {linearized_pos.shape}")
@@ -2309,10 +2379,12 @@ class LSTMandSpikeNetwork:
         tf.keras.backend.clear_session()
 
 
-def _get_loss_function(loss_name: str, alpha: int) -> tf.keras.losses.Loss:
+def _get_loss_function(loss_name: str, alpha: float) -> tf.keras.losses.Loss:
     """Helper function to get loss function by name with reduction='none'"""
     if loss_name == "mse":
         return tf.keras.losses.MeanSquaredError(reduction="none")
+    elif loss_name == "mae":
+        return tf.keras.losses.MeanAbsoluteError(reduction="none")
     elif loss_name == "huber":
         return tf.keras.losses.Huber(delta=alpha, reduction="none")
     elif loss_name == "msle":
@@ -2322,7 +2394,6 @@ def _get_loss_function(loss_name: str, alpha: int) -> tf.keras.losses.Loss:
     elif loss_name == "binary_crossentropy":
         return tf.keras.losses.BinaryCrossentropy(reduction="none")
     elif loss_name == "categorical_crossentropy":
-        # TODO
         return tf.keras.losses.SparseCategoricalCrossentropy(reduction="none")
     elif loss_name == "mse_plus_msle":
 
@@ -2334,6 +2405,18 @@ def _get_loss_function(loss_name: str, alpha: int) -> tf.keras.losses.Loss:
             return mse + alpha * msle
 
         return combined_loss_mse
+    elif loss_name == "cyclic_mae":
+
+        def cyclical_mae_rad(y_true, y_pred):
+            return tf.keras.backend.minimum(
+                tf.keras.backend.abs(y_pred - y_true),
+                tf.keras.backend.minimum(
+                    tf.keras.backend.abs(y_pred - y_true + 2 * np.pi),
+                    tf.keras.backend.abs(y_pred - y_true - 2 * np.pi),
+                ),
+            )
+
+        return cyclical_mae_rad
     else:
         raise ValueError(f"Loss function {loss_name} not recognized")
 
@@ -2341,72 +2424,80 @@ def _get_loss_function(loss_name: str, alpha: int) -> tf.keras.losses.Loss:
 ########### END OF HELPING LSTMandSpikeNetwork FUNCTIONS#####################
 
 
-def combined_loss(params):
-    """
-    Creates a custom loss function combining MSE (default) for position and
-    categorical crossentropy (also default) for classification.
-
-    Args:
-        params: Parameters object containing model configuration and loss names
-        position_weight: Weight for the position (MSE) loss component
-        non_position_weight: Weight for the non position loss component
-
-    Returns:
-        Custom loss function
-    """
-
-    column_losses = params.column_losses
-    pos_loss_func = _get_loss_function(column_losses["0"], params.alpha)
-    class_loss_func = _get_loss_function(column_losses["1"], params.alpha)
-    column_weights = params.column_weights
-    position_weight = column_weights["0"]
-    non_position_weight = column_weights["1"]
-    print(f"Using position loss: {column_losses['0']} with weight {position_weight}")
-    print(
-        f"Using classification loss: {column_losses['1']} with weight {non_position_weight}"
-    )
-
-    def loss_function(y_true, y_pred):
-        # Split the true and predicted values
-        # Assuming y_true and y_pred have shape (batch_size, 2)
-        # where [:, 0] is position and [:, 1] is class label
-
-        # Position component (continuous) - MSE loss
-        position_true = y_true[:, 0:1]  # Keep dimension for broadcasting
-        position_pred = y_pred[:, 0:1]
-        position_loss = pos_loss_func(position_true, position_pred)
-
-        # Classification component - categorical crossentropy
-        # If using integer labels (sparse), use sparse_categorical_crossentropy
-        class_true = tf.cast(y_true[:, 1], tf.int32)
-        class_pred = y_pred[:, 1:]  # Remaining dimensions are class probabilities
-
-        # Use sparse categorical crossentropy if you have integer labels
-        classification_loss = class_loss_func(class_true, class_pred)
-
-        # Combine losses with weights
-        total_loss = (
-            position_weight * position_loss + non_position_weight * classification_loss
-        )
-
-        return total_loss
-
-    return loss_function
-
-
-class MultiColumnLoss(tf.keras.losses.Loss):
+class MultiColumnLossLayer(tf.keras.layers.Layer):
     def __init__(
         self,
         column_losses=None,
         column_weights=None,
         alpha=1.0,
-        name="multi_column_loss",
+        name="multi_output_loss_layer",
         **kwargs,
     ):
+        """
+        Args:
+            column_losses (dict): Dictionary mapping column specifications to loss names.
+                Example: {"0": "mse", "1,2": "huber"} means column 0 uses MSE and columns 1 and 2 use Huber loss.
+            column_weights (dict): Dictionary mapping column specifications to weights.
+                Example: {"0": 1.0, "1,2": 0.5} means column 0 has weight 1.0 and columns 1 and 2 have weight 0.5.
+            alpha (float): Hyperparameter for losses like Huber or MSLE.
+            name (str): Name of the layer.
+            **kwargs: Additional keyword arguments for the Layer constructor.
+
+        """
         super().__init__(name=name, **kwargs)
         self.column_losses = column_losses or {}
         self.column_weights = column_weights or {}
         self.alpha = alpha
+
+        self.loss1 = _get_loss_function(self.column_losses.get("0", "mse"), self.alpha)
+        self.loss2 = _get_loss_function(self.column_losses.get("1", "mse"), self.alpha)
+        if "2" in self.column_losses:
+            self.loss3 = _get_loss_function(self.column_losses.get("2"), self.alpha)
+        if "3" in self.column_losses:
+            self.loss4 = _get_loss_function(self.column_losses.get("3"), self.alpha)
+        self.weight1 = self.column_weights.get("0", 1.0)
+        self.weight2 = self.column_weights.get("1", 1.0)
+        if "2" in self.column_weights:
+            self.weight3 = self.column_weights.get("2", 1.0)
+        if "3" in self.column_weights:
+            self.weight4 = self.column_weights.get("3", 1.0)
+
+    def call(self, y_true, y_pred):
+        """
+        Compute the combined loss.
+
+        Args:
+            inputs: List [y_true, y_pred] where both have shape (batch_size, 2)
+
+        Returns:
+            Combined loss tensor with shape (batch_size,)
+        """
+        # Extract columns
+        y_true_col1 = y_true[:, 0]  # First column for MSE
+        y_true_col2 = y_true[:, 1]  # Second column for BCE
+
+        y_pred_col1 = y_pred[:, 0]  # First column for MSE
+        y_pred_col2 = y_pred[:, 1]  # Second column for BCE
+
+        # Calculate individual losses (per sample)
+        mse_loss_val = self.loss1(y_true_col1, y_pred_col1)
+        bce_loss_val = self.loss2(y_true_col2, y_pred_col2)
+
+        # Combine losses with weights
+        total_loss = (self.weight1 * mse_loss_val) + (self.weight2 * bce_loss_val)
+
+        if "2" in self.column_losses:
+            y_true_col3 = y_true[:, 2]
+            y_pred_col3 = y_pred[:, 2]
+            loss3_val = self.loss3(y_true_col3, y_pred_col3)
+            total_loss += self.weight3 * loss3_val
+        if "3" in self.column_losses:
+            y_true_col4 = y_true[:, 3]
+            y_pred_col4 = y_pred[:, 3]
+            loss4_val = self.loss4(y_true_col4, y_pred_col4)
+            total_loss += self.weight4 * loss4_val
+
+        return total_loss
 
     def get_config(self):
         config = super().get_config()
@@ -2423,42 +2514,5 @@ class MultiColumnLoss(tf.keras.losses.Loss):
     def from_config(cls, config):
         return cls(**config)
 
-    def call(self, y_true, y_pred):
-        """Custom loss function for model.compile() with proper batch handling"""
-        total_loss = 0.0
 
-        for column_spec, loss_name in self.column_losses.items():
-            # Parse column specification
-            if "," in column_spec:
-                columns = [int(c.strip()) for c in column_spec.split(",")]
-            else:
-                columns = [int(column_spec)]
-
-            # Extract the specified columns
-            if len(columns) == 1:
-                y_true_cols = y_true[:, columns[0] : columns[0] + 1]
-                y_pred_cols = y_pred[:, columns[0] : columns[0] + 1]
-            else:
-                y_true_cols = tf.gather(y_true, columns, axis=1)
-                y_pred_cols = tf.gather(y_pred, columns, axis=1)
-
-            # Get the loss function and compute per-sample loss
-            loss_fn = _get_loss_function(loss_name, alpha=self.alpha)
-            column_loss = loss_fn(y_true_cols, y_pred_cols)
-
-            # Reduce to per-sample scalar if needed
-            if len(column_loss.shape) > 1:
-                column_loss = tf.reduce_mean(column_loss, axis=-1)
-
-            # Apply weight
-            weight = self.column_weights.get(column_spec, 1.0)
-            total_loss += weight * column_loss
-
-        return total_loss
-
-    def result(self):
-        return self.total / self.count
-
-    def reset_state(self):
-        self.total.assign(0.0)
-        self.count.assign(0.0)
+tf.keras.utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer

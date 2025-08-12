@@ -38,6 +38,7 @@ class PaperFigures:
         bayesMatrices={},
         timeWindows=[36],
         phase=None,
+        sleep=False,
     ):
         self.phase = phase
         suffix = f"_{phase}" if phase is not None else ""
@@ -60,6 +61,18 @@ class PaperFigures:
             os.mkdir(self.folderFigures)
         self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
         self.resultsNN_phase = dict()
+        self.resultsBayes_phase = dict()
+        if sleep:
+            from resultAnalysis.paper_figures_sleep import PaperFiguresSleep
+
+            self.sleepFigures = PaperFiguresSleep(
+                projectPath,
+                behaviorData,
+                trainerBayes,
+                l_function,
+                bayesMatrices=bayesMatrices,
+                timeWindows=timeWindows,
+            )
 
     def load_data(self, suffixes=None):
         """
@@ -87,9 +100,11 @@ class PaperFigures:
             lPredPos = []
             fPredPos = []
             truePos = []
+            lTruePos = []
             time = []
             lossPred = []
             speedMask = []
+            posIndex = []
             for ws in self.timeWindows:
                 lPredPos.append(
                     np.squeeze(
@@ -130,6 +145,21 @@ class PaperFigures:
                             )
                         ).values[:, 1:],
                         dtype=np.float32,
+                    )
+                )
+                lTruePos.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"linearTrue{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
                     )
                 )
                 time.append(
@@ -177,9 +207,23 @@ class PaperFigures:
                         )
                     )
                 )
+                posIndex.append(
+                    np.squeeze(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"posIndex{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.int32,
+                        )
+                    )
+                )
 
             speedMask = [ws.astype(np.bool) for ws in speedMask]
-            lTruePos = [self.l_function(f)[1] for f in truePos]
 
             # Output
             if suffix == self.suffix or len(self.suffixes) == 1:
@@ -191,6 +235,7 @@ class PaperFigures:
                     "truePos": truePos,
                     "linTruePos": lTruePos,
                     "predLoss": lossPred,
+                    "posIndex": posIndex,
                 }
             self.resultsNN_phase[suffix] = {
                 "time": time,
@@ -200,9 +245,10 @@ class PaperFigures:
                 "truePos": truePos,
                 "linTruePos": lTruePos,
                 "predLoss": lossPred,
+                "posIndex": posIndex,
             }
 
-    def test_bayes(self):
+    def test_bayes(self, suffixes=None):
         """
         Quickly test the bayesian decoding on the data, using the trainerBayes.
         If the bayesMatrices are not provided, it will train them using the
@@ -227,26 +273,93 @@ class PaperFigures:
             )
 
         # quickly obtain bayesian decoding:
-        lPredPosBayes = []
-        probaBayes = []
-        fPredBayes = []
-        for i, ws in enumerate(self.timeWindows):
-            timesToPredict = self.resultsNN["time"][i][:, np.newaxis].astype(np.float64)
-            outputsBayes = self.trainerBayes.test_as_NN(
-                self.behaviorData, self.bayesMatrices, timesToPredict, windowSizeMS=ws
-            )
-            infPos = outputsBayes["featurePred"][:, 0:2]
-            _, linearBayesPos = self.l_function(infPos)
+        if suffixes is None:
+            self.suffixes = [self.suffix]
+        else:
+            self.suffixes = suffixes
+        if not isinstance(self.suffixes, list):
+            self.suffixes = [suffixes]
 
-            lPredPosBayes.append(linearBayesPos)
-            fPredBayes.append(infPos)
-            probaBayes.append(outputsBayes["proba"])
-        self.resultsBayes = {
-            "linPred": lPredPosBayes,
-            "fullPred": fPredBayes,
-            "probaBayes": probaBayes,
-            "time": self.resultsNN["time"],
-        }
+        for suffix in self.suffixes:
+            lPredPosBayes = []
+            probaBayes = []
+            fPredBayes = []
+            for i, ws in enumerate(self.timeWindows):
+                try:
+                    lPredPosBayes.append(
+                        np.squeeze(
+                            np.array(
+                                pd.read_csv(
+                                    os.path.join(
+                                        self.projectPath.experimentPath,
+                                        "results",
+                                        str(ws),
+                                        f"bayes_linearPred{suffix}.csv",
+                                    )
+                                ).values[:, 1:],
+                                dtype=np.float32,
+                            )
+                        )
+                    )
+                    probaBayes.append(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"bayes_proba{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+                    fPredBayes.append(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"bayes_featurePred{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+                except:
+                    print("Did not find results in folder, will test now")
+
+                    timesToPredict = self.resultsNN_phase[suffix]["time"][i][
+                        :, np.newaxis
+                    ].astype(np.float64)
+                    outputsBayes = self.trainerBayes.test_as_NN(
+                        self.behaviorData,
+                        self.bayesMatrices,
+                        timesToPredict,
+                        windowSizeMS=ws,
+                    )
+                    infPos = outputsBayes["featurePred"][:, 0:2]
+                    _, linearBayesPos = self.l_function(infPos)
+
+                    lPredPosBayes.append(linearBayesPos)
+                    fPredBayes.append(infPos)
+                    probaBayes.append(outputsBayes["proba"])
+
+            # Output
+            if suffix == self.suffix or len(self.suffixes) == 1:
+                self.resultsBayes = {
+                    "linPred": lPredPosBayes,
+                    "fullPred": fPredBayes,
+                    "probaBayes": probaBayes,
+                    "time": self.resultsNN_phase[suffix]["time"],
+                }
+            self.resultsBayes_phase[suffix] = {
+                "linPred": lPredPosBayes,
+                "fullPred": fPredBayes,
+                "probaBayes": probaBayes,
+                "time": self.resultsNN_phase[suffix]["time"],
+            }
 
         return self.resultsBayes
 
@@ -489,7 +602,7 @@ class PaperFigures:
         ### Prepare the data
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -621,7 +734,9 @@ class PaperFigures:
         nrows = len(suffixes)
         ncols = 2 * len(self.timeWindows)
 
-        fig, axes = plt.subplots(ncols=ncols, nrows=nrows, figsize=(20, 8))
+        fig, axes = plt.subplots(
+            ncols=ncols, nrows=nrows, figsize=(20, 8), sharex=True, sharey=True
+        )
 
         # Handle single row/column cases
         if nrows == 1 and ncols == 1:
@@ -635,8 +750,8 @@ class PaperFigures:
             for iw, winms in enumerate(self.timeWindows):
                 # All speed subplot
                 H, xedges, yedges = np.histogram2d(
-                    self.resultsNN_phase[suffix]["linPred"][iw],
-                    self.resultsNN_phase[suffix]["linTruePos"][iw],
+                    self.resultsNN_phase[suffix]["linPred"][iw].reshape(-1),
+                    self.resultsNN_phase[suffix]["linTruePos"][iw].reshape(-1),
                     bins=(nbins, nbins),
                     density=True,
                 )
@@ -645,6 +760,8 @@ class PaperFigures:
                 extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
                 ax_all = axes[i, 2 * iw]
+                ax_all.set_xlim(0, 1)
+                ax_all.set_ylim(0, 1)
                 im = ax_all.imshow(
                     H,
                     extent=extent,
@@ -658,10 +775,10 @@ class PaperFigures:
                 H, xedges, yedges = np.histogram2d(
                     self.resultsNN_phase[suffix]["linPred"][iw][
                         self.resultsNN_phase[suffix]["speedMask"][iw]
-                    ],
+                    ].reshape(-1),
                     self.resultsNN_phase[suffix]["linTruePos"][iw][
                         self.resultsNN_phase[suffix]["speedMask"][iw]
-                    ],
+                    ].reshape(-1),
                     bins=(nbins, nbins),
                     density=True,
                 )
@@ -670,6 +787,8 @@ class PaperFigures:
                 extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
                 ax_fast = axes[i, 2 * iw + 1]
+                ax_fast.set_xlim(0, 1)
+                ax_fast.set_ylim(0, 1)
                 im = ax_fast.imshow(
                     H,
                     extent=extent,
@@ -679,7 +798,7 @@ class PaperFigures:
                 )
                 fig.colorbar(im, ax=ax_fast)
 
-        # Add multi-level column labels (Option 1)
+        # Add multi-level column labels
         for iw, winms in enumerate(self.timeWindows):
             # Top level: winms labels
             x_center = (2 * iw + 0.5) / ncols
@@ -713,8 +832,15 @@ class PaperFigures:
                 rotation=90,
             )
 
+        fig.text(0.5, 0.04, "predicted linPos", ha="center")
+        fig.text(0.04, 0.5, "true linPos", va="center", rotation="vertical")
+
         # Adjust layout to make room for labels
         fig.subplots_adjust(left=0.08, top=0.88, right=0.98, bottom=0.1)
+        fig.suptitle(
+            "Error matrix of linear position prediction by speed and time window",
+            y=1,
+        )
 
         fig.savefig(
             os.path.join(
@@ -734,7 +860,7 @@ class PaperFigures:
         ### Prepare the data
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -975,7 +1101,7 @@ class PaperFigures:
         ### Prepare the data
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -1240,7 +1366,7 @@ class PaperFigures:
     def nnVSbayes(self, speed="all"):
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -1350,7 +1476,7 @@ class PaperFigures:
 
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -1420,7 +1546,7 @@ class PaperFigures:
     def fig_example_2d(self, speed="all"):
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -1497,7 +1623,7 @@ class PaperFigures:
     def predLoss_linError(self, speed="all", step=0.1):
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -1614,7 +1740,7 @@ class PaperFigures:
             predLoss_scaled = predLoss
         # Masks
         habMask = [
-            inEpochsMask(
+            ep.inEpochsMask(
                 self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
             )
             for i in range(len(self.timeWindows))
@@ -2021,6 +2147,107 @@ class PaperFigures:
                 )
                 # fig.savefig(os.path.join(dirSave, (f'{ws}_tc_pred_cluster{pcId}.svg')))
                 plt.close()
+
+    def boxplot_linError(self, timeWindows, dirSave=None, phase=None):
+        """
+        Boxplot of linear errors for NN and Bayes
+        :param timeWindows: time windows used for decoding
+        :param dirSave: directory to save the figure
+        :param suffix: suffix to add to the figure name
+
+        Will compute:
+        :param lErrorNN_mean: mean linear error for NN
+        :param lErrorBayes_mean: mean linear error for Bayes
+        """
+        from resultAnalysis.hyper_paper_figures import boxplot_linError
+
+        if dirSave is None:
+            dirSave = self.folderFigures
+        if phase is None:
+            phase = self.phase
+        suffix = f"_{phase}" if phase else ""
+        lErrorNN_mean = [
+            np.mean(
+                np.abs(
+                    self.resultsNN_phase[suffix]["linTruePos"][
+                        self.timeWindows.index(ws)
+                    ]
+                    - self.resultsNN_phase[suffix]["linPred"][
+                        self.timeWindows.index(ws)
+                    ]
+                )
+            )
+            for ws in timeWindows
+        ]
+        lErrorBayes_mean = [
+            np.mean(
+                np.abs(
+                    self.resultsNN_phase[suffix]["linTruePos"][
+                        self.timeWindows.index(ws)
+                    ]
+                    - self.resultsBayes_phase[suffix]["linPred"][
+                        self.timeWindows.index(ws)
+                    ]
+                )
+            )
+            for ws in timeWindows
+        ]
+        return boxplot_linError(
+            lErrorNN_mean,
+            lErrorBayes_mean,
+            timeWindows,
+            dirSave=dirSave,
+            suffix=suffix,
+        )
+
+    def boxplot_euclError(self, timeWindows, dirSave=None, phase=None):
+        """
+        Boxplot of linear errors for NN and Bayes
+        :param timeWindows: time windows used for decoding
+        :param dirSave: directory to save the figure
+        :param suffix: suffix to add to the figure name
+
+        Will compute:
+        :param lErrorNN_mean: mean linear error for NN
+        :param lErrorBayes_mean: mean linear error for Bayes
+        """
+        from resultAnalysis.hyper_paper_figures import boxplot_euclError
+
+        if dirSave is None:
+            dirSave = self.folderFigures
+        if phase is None:
+            phase = self.phase
+        suffix = f"_{phase}" if phase else ""
+        euclErrorNN_mean = [
+            np.mean(
+                np.abs(
+                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)]
+                    - self.resultsNN_phase[suffix]["fullPred"][
+                        self.timeWindows.index(ws)
+                    ]
+                )
+            )
+            for ws in timeWindows
+        ]
+        euclErrorBayes_mean = [
+            np.mean(
+                np.linalg.norm(
+                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)]
+                    - self.resultsBayes_phase[suffix]["fullPred"][
+                        self.timeWindows.index(ws)
+                    ],
+                    axis=1,
+                )
+            )
+            for ws in timeWindows
+        ]
+        return boxplot_euclError(
+            euclErrorNN_mean,
+            euclErrorBayes_mean,
+            timeWindows,
+            dirSave=dirSave,
+            suffix=suffix,
+        )
 
     # def fft_pc():
     #     #Compute Fourier transform of predicted positions:
