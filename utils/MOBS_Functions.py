@@ -15,6 +15,7 @@ import dill as pickle
 import numpy as np
 import pandas as pd
 
+import importData.epochs_management as ep
 from importData.epochs_management import inEpochsMask
 from resultAnalysis import print_results
 from resultAnalysis.paper_figures import PaperFigures
@@ -23,6 +24,7 @@ sys.path.append(".")
 
 from transformData.linearizer import UMazeLinearizer
 from utils.PathForExperiments import path_for_experiments
+from utils.func_wrappers import timing
 from utils.global_classes import DataHelper as DataHelperClass
 from utils.global_classes import Params, Project
 
@@ -711,14 +713,16 @@ class Mouse_Results(Params, PaperFigures):
             - phase: str, phase of the experiment (default is "pre")
             - full_path: str, full path to the experiment directory (optional, if not provided it will be found automatically)
         """
-        # Dir: pd.DataFrame,
-        # mouse_name: str,
-        # manipe: str,
-        # target: str,
-        # nameExp: str,
-        # phase: str = "pre",
-        # full_path: str = "",
         # Extract Mouse_Results specific parameters
+
+        # FOR DEV ONLY: update inner dict with kwargs
+        # skip args and kwargs that already exist in the class or are methods of the class
+        for key, value in kwargs.items():
+            if hasattr(self, key) or callable(getattr(self, key, None)):
+                continue
+            setattr(self, key, value)
+
+        # Start parsing args
         if len(args) >= 1:
             Dir = args[0]
             args = args[1:]
@@ -742,6 +746,8 @@ class Mouse_Results(Params, PaperFigures):
         phase = kwargs.get("phase", "pre")
         nameExp = kwargs.get("nameExp", "Network")
         target = kwargs.get("target", "pos")
+        if kwargs.get("deviceName", None) is not None:
+            self.deviceName = kwargs["deviceName"]
 
         # Validate required parameters
         if (
@@ -762,6 +768,7 @@ class Mouse_Results(Params, PaperFigures):
         self.nameExp = nameExp
         self.target = target
         self.phase = phase
+        self.which = kwargs.get("which", "all")
         if full_path == "":
             self.find_path()
         else:
@@ -799,7 +806,11 @@ class Mouse_Results(Params, PaperFigures):
                 assert os.path.realpath(self.projects[winMS].xml) == os.path.realpath(
                     self.xml
                 )
-            except (FileNotFoundError, AttributeError):
+            except (FileNotFoundError, AttributeError) as e:
+                warn(
+                    f"Failed to load project for window {winMS} with error: {e}. "
+                    "Creating new Project and DataHelper."
+                )
                 # if something went wrong, create a new Project and DataHelper
                 self.projects[winMS] = Project(
                     self.xml,
@@ -820,13 +831,24 @@ class Mouse_Results(Params, PaperFigures):
                 )
 
             self.linearizer[winMS] = UMazeLinearizer(
-                self.projects[winMS].folder, **kwargs
+                self.projects[winMS].folder,
+                data_helper=self.data_helper[winMS],
+                **kwargs,
             )
             self.linearizer[winMS].verify_linearization(
                 self.data_helper[winMS].positions / self.data_helper[winMS].maxPos(),
                 self.projects[winMS].folder,
             )
-            self.l_function = self.linearizer[winMS].pykeops_linearization
+
+            if kwargs.get("keops_linearization", False):
+                self.l_function = self.linearizer[winMS].pykeops_linearization
+            else:
+
+                def cpu_linearization(x):
+                    return self.linearizer[winMS].apply_linearization(x, keops=False)
+
+                self.l_function = cpu_linearization
+
             self.data_helper[winMS].get_true_target(
                 self.l_function, in_place=True, show=kwargs.get("show", False)
             )
@@ -847,7 +869,8 @@ class Mouse_Results(Params, PaperFigures):
                 self.find_session_epochs()
 
         # Initialize PaperFigures
-        self.load_trainers(**kwargs)
+        if kwargs.get("load_trainers_at_init", True):
+            self.load_trainers(**kwargs)
         PaperFigures.__init__(
             self,
             self.Project,
@@ -858,6 +881,88 @@ class Mouse_Results(Params, PaperFigures):
             phase=self.phase,
         )
         print(self)
+
+    def __getstate__(self):
+        """
+        Custom getstate method to avoid pickling issues with certain attributes.
+        This is necessary for compatibility with multiprocessing and other serialization methods.
+        """
+        state = self.__dict__.copy()
+        # Remove attributes that cannot be pickled
+        state.pop("ann", None)
+        return state
+
+    def __setstate__(self, state):
+        """
+        Custom setstate method to restore the object state.
+        This is necessary for compatibility with multiprocessing and other serialization methods.
+        """
+        self.__dict__.update(state)
+
+    def to_pickle(cls, path: str):
+        """
+        Save Mouse_Results object to a pickle file.
+
+        Args:
+            obj: Mouse_Results object to save
+
+        """
+        import dill as pickle
+
+        with open(path, "wb") as f:
+            pickle.dump(cls, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Mouse_Results object saved to {path}")
+
+    @classmethod
+    def from_pickle(cls, path: str, load_trainers: bool = True):
+        """
+        Load Mouse_Results object from a pickle file.
+
+        Args:
+            path: Path to the pickle file
+            load_trainers: Whether to load trainers after loading the object
+
+        Returns:
+            Mouse_Results object
+        """
+        import dill as pickle
+
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+
+        if load_trainers:
+            cls._load_trainers_after_load(obj)
+
+        print(f"Mouse_Results object loaded from {path}")
+        return obj
+
+    def _load_trainers_after_load(self):
+        """
+        Static method to load trainers after loading the Mouse_Results selfect.
+        This is necessary because the trainers are not pickled.
+        """
+        state = self.__getstate__()
+        # If the selfect has a load_trainers method, call it
+        if hasattr(self, "load_trainers"):
+            self.which = state.pop("which", "all")
+            keys_to_pop = [
+                "deviceName",
+                "phase",
+                "isTransformer",
+                "linearizer",
+                "behaviorData",
+                "alpha",
+                "transform_w_log",
+                "denseweight",
+                "projectPath",
+            ]
+            for key in keys_to_pop:
+                # Remove keys that may not exist in the state
+                state.pop(key, None)
+            # Reinitialize attributes that were removed in getstate
+            self.load_trainers(which=self.which, **state)
+
+            print("Trainers loaded after pickle load.")
 
     def find_path(self):
         self.path = (
@@ -947,15 +1052,14 @@ class Mouse_Results(Params, PaperFigures):
             f"\n{'=' * 50}"
         )
 
-    def load_trainers(
-        self, deviceName: str = "gpu", which="both", **kwargs
-    ) -> Dict[int, Any]:
+    def load_trainers(self, which="both", **kwargs) -> Dict[int, Any]:
         """
         Load trainers for each window size.
 
         Parameters:
-            deviceName (str): Device to use for training ('gpu' or 'cpu').
+            which (str): Type of trainer to load ('ann', 'bayes', or 'both').
             **kwargs: Additional keyword arguments for trainer initialization such as:
+                deviceName (str): Device to use for training ('gpu' or 'cpu').
                 debug (bool): Whether to run in debug mode.
                 bandwidth (int): Bandwidth for the bayes trainer.
                 kernel (str): Kernel type for the bayes trainer.
@@ -965,6 +1069,11 @@ class Mouse_Results(Params, PaperFigures):
         """
         from fullEncoder.an_network import LSTMandSpikeNetwork as NNTrainer
         from simpleBayes.decode_bayes import Trainer as BayesTrainer
+
+        if hasattr(self, "deviceName"):
+            deviceName = kwargs.pop("deviceName", self.deviceName)
+        else:
+            deviceName = kwargs.pop("deviceName", "gpu")
 
         if deviceName.lower() == "gpu" or deviceName.lower() == "cpu":
             from utils.management import manage_devices
@@ -977,9 +1086,12 @@ class Mouse_Results(Params, PaperFigures):
             self.deviceName = deviceName
 
         phase = kwargs.pop("phase", self.phase)
-        deviceName = kwargs.pop("deviceName", self.deviceName)
         if not hasattr(self, "ann"):
             self.ann = {}
+        isTransformer = kwargs.pop("isTransformer", self.Params.isTransformer)
+        transform_w_log = kwargs.pop("transform_w_log", self.Params.transform_w_log)
+        denseweight = kwargs.pop("denseweight", self.Params.denseweight)
+
         for i, winMS in enumerate(self.windows):
             if which.lower() in ["ann", "both"]:
                 if not self.ann.get(winMS):
@@ -988,13 +1100,13 @@ class Mouse_Results(Params, PaperFigures):
                         self.parameters[winMS],
                         deviceName=deviceName,
                         phase=phase,
-                        isTransformer=kwargs.pop(
-                            "isTransformer", self.parameters[winMS].isTransformer
-                        ),
+                        isTransformer=isTransformer,
                         linearizer=self.linearizer[winMS],
                         behaviorData=self.data_helper[winMS].fullBehavior,
                         alpha=self.parameters[winMS].denseweightAlpha,
-                        # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask
+                        # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask,
+                        transform_w_log=transform_w_log,
+                        denseweight=denseweight,
                         **kwargs,
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
@@ -1199,52 +1311,256 @@ class Mouse_Results(Params, PaperFigures):
             windowSizeMS=winMS,
             target=self.target,
             phase=phase,
-            typeDec="NN",
             training_data=self.ann[win].training_data,
             l_function=self.l_function,
             **kwargs,
         )
 
-    def show_movie(self, winMS=None, **kwargs):
+    def init_plotter(self, winMS=None, **kwargs):
+        """
+        Initialize the plotter for the specified window size.
+        """
         if winMS is None:
             win = self.windows[-1]
             winMS = self.windows_values[-1]
 
         idWindow = self.timeWindows.index(winMS)
+        win = self.windows[idWindow]
+
+        phase = kwargs.get("phase", self.phase)
+        phase = (
+            "_" + phase if phase is not None and not phase.startswith("_") else phase
+        )
 
         from importData.gui_elements import AnimatedPositionPlotter
 
-        if kwargs.get("data_helper", None) is None:
+        data_helper = kwargs.pop("data_helper", None)
+        if data_helper is None:
             data_helper = self.data_helper[win]
 
-        if kwargs.get("truepos", None) is None:
-            truepos = self.resultsNN["truePos"][idWindow]
+        positions_from_NN = kwargs.pop("positions_from_NN", None)
+        if positions_from_NN is None:
+            positions_from_NN = self.resultsNN_phase[phase]["truePos"][idWindow]
 
-        if kwargs.get("predicted", None) is None:
-            predicted = self.resultsNN["fullPred"][idWindow]
+        predicted = kwargs.pop("predicted", None)
+        if predicted is None:
+            predicted = self.resultsNN_phase[phase]["fullPred"][idWindow]
 
-        if kwargs.get("speedMaskArray", None) is None:
-            speedMaskArray = self.resultsNN["speedMask"][idWindow]
+        speedMaskArray = kwargs.pop("speedMaskArray", None)
+        if speedMaskArray is None and kwargs.get("useSpeedMask", False):
+            speedMaskArray = self.resultsNN_phase[phase]["speedMask"][idWindow]
+
+        prediction_time = kwargs.pop("prediction_time", None)
+        if prediction_time is None:
+            prediction_time = self.resultsNN_phase[phase]["time"][idWindow]
+
+        posIndex = kwargs.pop("posIndex", None)
+        if posIndex is None:
+            posIndex = self.resultsNN_phase[phase]["posIndex"][idWindow]
+
+        blit = kwargs.pop("blit", True)
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
-            positions=truepos,
+            positions_from_NN=positions_from_NN,
             predicted=predicted,
             speedMaskArray=speedMaskArray,
+            prediction_time=prediction_time,
+            posIndex=posIndex,
+            blit=blit,
             **kwargs,
         )
-        interval = kwargs.pop("interval", 10)
-        repeat = kwargs.pop("repeat", True)
+        return plotter
+
+    def show_movie(self, winMS=None, **kwargs):
+        """
+        Show the animated position plotter for the specified window size.
+        Available kwargs are for figsaving, and FuncAnimation parameters such as:
+            colormap: Colormap for direction coding (default: 'hsv')
+            alpha_trail_line: Transparency for trail lines (default: 0.6)
+            alpha_trail_points: Transparency for trail points (default: 0.95)
+            alpha_delta_line: Transparency for delta line (default: 0.6)
+            pair_points: Whether to pair predicted and true points (default: False)
+            binary_colors: Use binary coloring (auto-detected if None)
+            shock_color: Color for shock zone direction (1 values, default: 'hotpink')
+            safe_color: Color for safe zone direction (0 values, default: 'cornflowerblue')
+            hlines: List of y-values for horizontal lines (default: None)
+            vlines: List of x-values for vertical lines (default: None)
+            line_colors: Color(s) for reference lines (default: 'black')
+            line_styles: Style(s) for reference lines (default: '--')
+            line_widths: Width(s) for reference lines (default: 1.0)
+            line_alpha: Transparency for reference lines (default: 0.7)
+            custom_lines: List of line segments as [(x1,y1), (x2,y2), ...] or numpy array (default: None)
+            custom_line_colors: Color(s) for custom lines (default: 'black')
+            custom_line_styles: Style(s) for custom lines (default: '-')
+            custom_line_widths: Width(s) for custom lines (default: 2.0)
+            custom_line_alpha: Transparency for custom lines (default: 0.8)
+            with_ref_bg: Whether to use a reference background image (default: True)
+        """
         block = kwargs.pop("block", True)
-        with_ref_bg = kwargs.pop("with_ref_bg", True)
+        plotter = self.init_plotter(winMS, **kwargs)
         anim = plotter.show(
-            interval=interval,
-            repeat=repeat,
             block=block,
-            with_ref_bg=with_ref_bg,
             show=True,
             **kwargs,
         )
+
+    def render_frame_static(self, frame: int, winMS=None, **kwargs):
+        """
+        Render a single frame for the animated position plotter.
+
+        Args:
+            frame_idx (int): Index of the frame to render.
+            **kwargs: Additional keyword arguments for rendering.
+
+        Returns:
+            None
+        """
+        setup_plot = kwargs.pop("setup_plot", True)
+        # as we never call the show method, we need to setup the plot here with the correct kwargs
+        plotter = self.init_plotter(winMS, setup_plot=setup_plot, **kwargs)
+        # we need to initialize one plotter per frame to avoid issues with joblib/multiprocessing in the future.
+        plotter.animate_frame(frame=frame, **kwargs)
+
+    @timing
+    def save_video_frame_linearly(self, winMS=None, output_dir=None, **kwargs):
+        """
+        Save video frames for the specified window size using a simple loop.
+        """
+
+        from tqdm import tqdm
+
+        if winMS is None:
+            winMS = self.windows_values[-1]
+
+        if output_dir is None:
+            output_dir = os.path.join(self.folderResult, winMS, "video_frames")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        kwargs["output_dir"] = output_dir
+        kwargs["setup_plot"] = (
+            True  # Ensure setup_plot is True for worker initialization
+        )
+        kwargs["init_animation"] = True  # Ensure animation is initialized
+
+        init_plotter = self.init_plotter(winMS, **kwargs)
+        total_frames = init_plotter.total_frames
+
+        print("🚀 Using linear loop for rendering")
+
+        for i in tqdm(range(total_frames), desc="Rendering frames", unit="frame"):
+            save_path = os.path.join(init_plotter.output_dir, f"frame_{i:04d}.png")
+            init_plotter.animate_frame(i, **kwargs, save_path=save_path)
+
+        if kwargs.get("auto_encode", False):
+            print("🎬 Encoding video with ffmpeg...")
+
+            input_pattern = os.path.join(output_dir, "frame_%04d.png")
+            video_name = kwargs.get(
+                "video_name",
+                f"mouse_{self.mouse_name}_win_{winMS}_phase_{self.phase}.mp4",
+            )
+            ffmpeg_path = kwargs.get("ffmpeg_path", "ffmpeg")  # Default to 'ffmpeg'
+            output_video_path = (
+                os.path.join(output_dir, video_name)
+                if kwargs.get("video_path", None) is None
+                else kwargs.get("video_path")
+            )
+
+            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 20 -i "{input_pattern}" -c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
+
+            import subprocess
+
+            try:
+                subprocess.run(ffmpeg_cmd, shell=True, check=True)
+                print(f"✅ Video saved to {output_video_path}")
+            except subprocess.CalledProcessError as e:
+                print("❌ ffmpeg encoding failed:", e)
+
+            if kwargs.get("remove_frames", True):
+                print("🗑️ Removing temporary frame files...")
+                for i in range(total_frames):
+                    frame_path = os.path.join(output_dir, f"frame_{i:04d}.png")
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                print("✅ Temporary frames removed.")
+
+    @timing
+    def save_video_frame_with_pool(self, winMS=None, output_dir=None, **kwargs):
+        """
+        Save video frames for the specified window size using multiprocessing.Pool for parallel processing.
+        """
+
+        from multiprocessing import Pool, get_context
+
+        from tqdm import tqdm
+
+        if winMS is None:
+            winMS = self.windows_values[-1]
+
+        if output_dir is None:
+            output_dir = os.path.join(self.folderResult, winMS, "video_frames")
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        if not kwargs.get("skip_frame_rendering", True):
+            # We prepare a dummy to get frame count
+            init_plotter = self.init_plotter(winMS, output_dir=output_dir, **kwargs)
+            total_frames = init_plotter.total_frames
+
+            kwargs["output_dir"] = output_dir
+            kwargs["setup_plot"] = (
+                True  # Ensure setup_plot is True for worker initialization
+            )
+            kwargs["init_animation"] = True  # Ensure animation is initialized
+
+            print("🚀 Using multiprocessing.Pool for rendering")
+
+            # with get_context("spawn").Pool(
+            with Pool(
+                initializer=_init_worker_plotter, initargs=(self, winMS, kwargs)
+            ) as pool:
+                list(
+                    tqdm(
+                        pool.imap(_render_frame_worker, range(total_frames)),
+                        total=total_frames,
+                        desc="Rendering frames",
+                    )
+                )
+
+        if kwargs.get("auto_encode", False):
+            print("🎬 Encoding video with ffmpeg...")
+
+            input_pattern = os.path.join(output_dir, "frame_%04d.png")
+            video_name = kwargs.get(
+                "video_name",
+                f"mouse_{self.mouse_name}_win_{winMS}_phase_{self.phase}.mp4",
+            )
+            ffmpeg_path = kwargs.get("ffmpeg_path", "ffmpeg")  # Default to 'ffmpeg'
+            output_video_path = (
+                os.path.join(output_dir, video_name)
+                if kwargs.get("video_path", None) is None
+                else kwargs.get("video_path")
+            )
+
+            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 20 -i "{input_pattern}" -c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
+
+            import subprocess
+
+            try:
+                subprocess.run(ffmpeg_cmd, shell=True, check=True)
+                print(f"✅ Video saved to {output_video_path}")
+            except subprocess.CalledProcessError as e:
+                print("❌ ffmpeg encoding failed:", e)
+
+            if kwargs.get("remove_frames", True):
+                print("🗑️ Removing temporary frame files...")
+                for i in range(total_frames):
+                    frame_path = os.path.join(output_dir, f"frame_{i:04d}.png")
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                print("✅ Temporary frames removed.")
 
     def retrain(self, window=None, which="both", **kwargs):
         """
@@ -1373,6 +1689,735 @@ class Mouse_Results(Params, PaperFigures):
                 self.waveform_comparators[win].save_alignment_tools(
                     self.bayes, self.l_function, winValue
                 )
+
+
+class Results_Loader:
+    """
+    Class to load results from several Mouse_Results object.
+    Will create a dict and a pandas DataFrame with the results.
+    """
+
+    @classmethod
+    def from_pickle(cls, path: str) -> "Results_Loader":
+        """
+        Load Results_Loader object from a pickle file.
+
+        Args:
+            path: Path to the pickle file
+        Returns:
+            Results_Loader object
+        """
+        import dill as pickle
+
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+
+        print(f"Results_Loader object loaded from {path}")
+        return obj
+
+    def __init__(
+        self,
+        dir: pd.DataFrame,
+        mice_nb: List[int] = None,
+        mice_manipes: List[str] = None,
+        timeWindows: List[int] = None,
+        phases=None,
+        **kwargs,
+    ):
+        """
+        Initialize Results_Loader with a DataFrame containing mouse results paths.
+
+        Args:
+            dir (pd.DataFrame): PathForExperiments DataFrame with columns for folder Results, mouse names, manipes, network paths, etc.
+            mice_nb (List[int]): List of mouse numbers to filter results.
+            mice_manipes (List[str]): List of manipes to filter results.
+            timeWindows (List[int]): List of time windows in milliseconds to filter results. If None, uses all available windows.
+            phase (str or List[str]): Phase of the experiment to filter results. If None, uses 'all' as default.
+
+        keyword Args for Mouse_Results and ANN init:
+            dict (dict): Dictionary to store results, default is empty.
+            df (pd.DataFrame): DataFrame to store results, default is empty.
+            If both of these are provided, the dict will be used to initialize the Mouse_Results objects.
+            target (str): Target for the results, default is 'pos'. This can be 'pos', 'LinAndDirection', or any other target you want to analyze.
+            load_trainers_at_init (bool): Whether to load trainers at initialization. Default is True.
+            which (str): Type of trainer to load ('ann', 'bayes', or 'both'). Default is 'both'.
+            deviceName (str): Device to use for training ('gpu' or 'cpu'). Default is 'gpu'.
+            nEpochs (int): Number of epochs to consider for the ANN.
+            isTransformer (bool): Whether to use a transformer model for the ANN. Default is False.
+            batchSize (int): Batch size for training the ANN. Default is 64.
+            transform_w_log (bool): Whether to apply a logarithmic transformation to the ann loss. Default is False.
+
+
+        """
+        if mice_nb is None:
+            mice_nb = dir.name.str.extract(r"(\d+)").astype(int)
+        if mice_manipes is None:
+            mice_manipes = dir.manipe.str.extract(r"(\w+)").astype(str)
+        if timeWindows is None:
+            warn("No timeWindows provided, using all windowSizeMS available in Dir.")
+            self.timeWindows = "all"
+        else:
+            self.timeWindows = timeWindows
+        if phases is None:
+            warn("No phase provided, using 'all' as default.")
+            self.phases = None
+        else:
+            self.phases = phases
+        if not isinstance(self.phases, List):
+            self.phases = [self.phases]
+        if not isinstance(self.timeWindows, List):
+            if isinstance(self.timeWindows, int):
+                self.timeWindows = [self.timeWindows]
+            elif self.timeWindows == "all":
+                self.timeWindows = ["all"]
+            else:
+                raise TypeError(
+                    f"timeWindows must be a list of integers or an integer, got {type(self.timeWindows)}"
+                )
+        self.suffixes = [f"_{p}" for p in self.phases] if self.phases else [""]
+
+        self.Dir = dir
+        self.mice_nb = mice_nb
+        self.mice_manipes = mice_manipes
+        self.mice_names = [
+            f"M{nb}{manipe}" for nb, manipe in zip(mice_nb, mice_manipes)
+        ]
+        if kwargs.get("dict", None) is None:
+            self.results_dict = {}
+        else:
+            self.results_dict = kwargs["dict"]
+        if kwargs.get("df", None) is None:
+            self.results_df = pd.DataFrame()
+        else:
+            self.results_df = kwargs["df"]
+
+        if kwargs.get("nameExp", None) is not None:
+            self.nameExp = kwargs["nameExp"]
+
+        isTransformer = kwargs.pop("isTransformer", None)
+        transform_w_log = kwargs.pop("transform_w_log", None)
+        denseweight = kwargs.pop("denseweight", True)
+        found_training = False
+
+        if kwargs.get("dict", None) is None:
+            for mouse_nb, manipe, mouse_full_name in zip(
+                self.mice_nb, self.mice_manipes, self.mice_names
+            ):
+                if not any(
+                    (self.Dir.name.str.contains(mouse_nb))
+                    & (self.Dir.manipe.str.contains(manipe))
+                ):
+                    raise ValueError(
+                        f"Mouse {mouse_nb} with manipe {manipe} not found in the directory."
+                    )
+                window_tmp = []
+                path = (
+                    dir[
+                        dir.name.str.contains(mouse_nb)
+                        & dir.manipe.str.contains(manipe)
+                    ]
+                    .iloc[0]
+                    .path
+                )
+                nameExp = os.path.basename(
+                    dir[
+                        dir.name.str.contains(mouse_nb)
+                        & dir.manipe.str.contains(manipe)
+                    ]
+                    .iloc[0]
+                    .results
+                )
+                if nameExp not in self.results_dict:
+                    self.results_dict[nameExp] = {}
+                if not hasattr(self, "nameExp"):
+                    self.nameExp = [nameExp]
+                if nameExp not in self.nameExp:
+                    self.nameExp.append(nameExp)
+                if mouse_full_name not in self.results_dict[nameExp]:
+                    self.results_dict[nameExp][mouse_full_name] = {}
+
+                folderResult = os.path.join(path, nameExp, "results")
+                if not os.path.exists(folderResult):
+                    print(
+                        f"Folder {folderResult} does not exist. Skipping mouse {mouse_nb} with manipulation {manipe}."
+                    )
+                    continue
+                if self.timeWindows == "all":
+                    windowSizeMS = [
+                        int(d) for d in os.listdir(folderResult) if d.isdigit()
+                    ]
+                else:
+                    windowSizeMS = self.timeWindows
+
+                for win in windowSizeMS:
+                    if os.path.exists(
+                        os.path.join(
+                            folderResult,
+                            str(win),
+                            f"errorFig_2d_NN{self.suffixes[0]}_pos.png",
+                        )
+                    ):
+                        window_tmp.append(win)
+
+                if window_tmp != windowSizeMS:
+                    warn(
+                        f"Warning: Not all windows found for mouse {mouse_nb} with manipulation {manipe}. Found: {window_tmp}, expected: {windowSizeMS}"
+                    )
+
+                for suffix, phase in zip(self.suffixes, self.phases):
+                    self.results_dict[nameExp][mouse_full_name][phase] = Mouse_Results(
+                        dir,
+                        mouse_name=mouse_nb,
+                        manipe=manipe,
+                        nameExp=nameExp,
+                        phase=suffix.strip("_"),
+                        isTransformer=isTransformer
+                        if isTransformer is not None
+                        else "transformer" in nameExp.lower(),
+                        windows=window_tmp,
+                        transform_w_log=transform_w_log
+                        if transform_w_log is not None
+                        else "log" in nameExp.lower(),
+                        denseweight=denseweight,
+                        **kwargs,
+                    )
+                    if phase == kwargs.get("template", "pre"):
+                        self.results_dict[nameExp][mouse_full_name]["training"] = (
+                            self.results_dict[nameExp][mouse_full_name][phase]
+                        )
+                        self.results_dict[nameExp][mouse_full_name][
+                            "training"
+                        ].load_data(
+                            suffixes=["_training", "_" + kwargs.get("template", "pre")]
+                        )
+
+                    try:
+                        self.results_dict[nameExp][mouse_full_name][phase].load_data(
+                            suffixes=["_training", suffix]
+                        )
+                        found_training = True
+                    except FileNotFoundError:
+                        self.results_dict[nameExp][mouse_full_name][phase].load_data(
+                            suffixes=[suffix]
+                        )
+
+        if found_training:
+            self.phases.append("training")
+            self.suffixes.append("_training")
+
+        if kwargs.get("df", None) is None:
+            self.convert_to_df()
+
+    def convert_to_df(self):
+        """
+        Convert the results_dict to a pandas DataFrame.
+        This method will create a DataFrame with the mouse names, manipes, phases, and results.
+        """
+        data = []
+        for nameExp, mice in self.results_dict.items():
+            for mouse_name, phases in mice.items():
+                for phase, results in phases.items():
+                    if isinstance(results, Mouse_Results):
+                        for id, win in enumerate(results.windows_values):
+                            prefix = "_" + phase
+
+                            id = results.windows_values.index(win)
+                            posIndex = (
+                                results.resultsNN_phase[prefix]["posIndex"][
+                                    id
+                                ].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None
+                            )
+                            if posIndex is None:
+                                raise ValueError(
+                                    f"posIndex not found in resultss for {mouse_manipe} in {ann_mode} for phase {phase} and window {win}."
+                                )
+                            time_behavior = results.data_helper[str(win)].fullBehavior[
+                                "positionTime"
+                            ][posIndex]
+
+                            speed = (
+                                results.data_helper[str(win)]
+                                .fullBehavior["Speed"]
+                                .flatten()
+                            )
+                            aligned_speed = (
+                                speed[posIndex] if posIndex is not None else None
+                            )
+
+                            asymmetry_index = results.data_helper[
+                                str(win)
+                            ].get_training_imbalance()
+
+                            full_truePos_from_behavior = results.data_helper[
+                                str(win)
+                            ].fullBehavior["Positions"]
+                            aligned_truePos_fromBehavior = (
+                                full_truePos_from_behavior[posIndex]
+                                if posIndex is not None
+                                else None
+                            )
+                            direction_fromBehavior = (
+                                results.data_helper[str(win)]._get_traveling_direction(
+                                    full_truePos_from_behavior
+                                )[posIndex]
+                                if posIndex is not None
+                                else None
+                            )
+                            direction_fromNN = results.data_helper[
+                                str(win)
+                            ]._get_traveling_direction(
+                                results.resultsNN_phase[prefix]["truePos"][id]
+                            )
+                            row = {
+                                "nameExp": nameExp,
+                                "mouse": mouse_name,  # if you need to split again
+                                "manipe": results.manipe,
+                                "phase": phase,
+                                "results": results,
+                                "winMS": win,
+                                "asymmetry_index": asymmetry_index,
+                                "fullTruePos_fromBehavior": full_truePos_from_behavior,
+                                "alignedTruePos_fromBehavior": aligned_truePos_fromBehavior,
+                                "fullTimeBehavior": results.data_helper[str(win)]
+                                .fullBehavior["positionTime"]
+                                .flatten(),
+                                "alignedTimeBehavior": time_behavior,
+                                "timeNN": results.resultsNN_phase[prefix]["time"][
+                                    id
+                                ].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "fullSpeed": speed,
+                                "alignedSpeed": aligned_speed,
+                                "posIndex_NN": results.resultsNN_phase[prefix][
+                                    "posIndex"
+                                ][id].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "speedMask": results.resultsNN_phase[prefix][
+                                    "speedMask"
+                                ][id].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "linPred": results.resultsNN_phase[prefix]["linPred"][
+                                    id
+                                ].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "fullPred": results.resultsNN_phase[prefix]["fullPred"][
+                                    id
+                                ]
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "truePos": results.resultsNN_phase[prefix]["truePos"][
+                                    id
+                                ]
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "linTruePos": results.resultsNN_phase[prefix][
+                                    "linTruePos"
+                                ][id].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "predLoss": results.resultsNN_phase[prefix]["predLoss"][
+                                    id
+                                ].flatten()
+                                if hasattr(results, "resultsNN_phase")
+                                else None,
+                                "resultsNN": results.resultsNN
+                                if hasattr(results, "resultsNN")
+                                else None,
+                                "direction_fromBehavior": direction_fromBehavior,
+                                "direction_fromNN": direction_fromNN,
+                            }
+                            data.append(row)
+                    else:
+                        raise TypeError(
+                            f"Expected Mouse_Results object, got {type(results)} for mouse {mouse_name} and phase {phase}."
+                        )
+        self.results_df = (
+            pd.DataFrame(data).sort_values(by=["mouse", "phase"]).reset_index(drop=True)
+        )
+
+        return self.results_df
+
+    def __getitem__(self, key):
+        """
+        Get the results for a specific mouse name and phase.
+
+        Args:
+            key (str): Mouse name and phase in the format 'mouse_name_phase'.
+
+        Returns:
+            Mouse_Results: The Mouse_Results object for the specified mouse and phase.
+        """
+        mouse_name, phase = key.split("_")
+        if mouse_name in self.results_dict and phase in self.results_dict[mouse_name]:
+            return self.results_dict[mouse_name][phase]
+        else:
+            raise KeyError(f"Results for {key} not found.")
+
+    def __repr__(self):
+        """
+        String representation of the Results_Loader object.
+        Returns a table summary of the object, including the nameExp, mice names, phases, time windows, and a preview of the results DataFrame.
+        """
+        # Create the header
+        result = f"\n{self.__class__.__name__} Object\n"
+        result += "=" * 50 + "\n\n"
+
+        # Create table headers
+        headers = ["NameExp", "Names", "Phases", "TimeWindows"]
+
+        # Calculate column widths based on content
+        col_widths = []
+        data_columns = [self.nameExp, self.mice_names, self.phases, self.timeWindows]
+
+        for i, (header, column) in enumerate(zip(headers, data_columns)):
+            # Convert all items to strings to calculate max width
+            str_items = [str(item) for item in column] + [header]
+            col_widths.append(max(len(item) for item in str_items))
+
+        # Create format string for rows
+        row_format = " | ".join([f"{{:<{width}}}" for width in col_widths])
+
+        # Add table header
+        result += row_format.format(*headers) + "\n"
+        result += "-" * (sum(col_widths) + 3 * (len(headers) - 1)) + "\n"
+
+        # Add data rows
+        max_rows = max(len(col) for col in data_columns)
+        for i in range(max_rows):
+            row_data = []
+            for column in data_columns:
+                if i < len(column):
+                    row_data.append(str(column[i]))
+                else:
+                    row_data.append("")  # Empty cell if column is shorter
+            result += row_format.format(*row_data) + "\n"
+
+        # Add dataframe section
+        result += "\n" + "=" * 50 + "\n"
+        result += "DataFrame Head:\n"
+        result += "-" * 20 + "\n"
+
+        if hasattr(self, "results_df") and self.results_df is not None:
+            # Convert dataframe head to string with nice formatting
+            df_str = str(self.results_df.head())
+            result += df_str
+        else:
+            result += "No dataframe available"
+
+        return result
+
+    def __str__(self):
+        """
+        String representation of the Results_Loader object.
+        """
+        return str(self.results_df.head())
+
+    def save(self, path: str = None):
+        """
+        Save the Results_Loader object to a pickle file.
+
+        Args:
+            path (str): Path to save the pickle file.
+        """
+        import dill as pickle
+
+        if path is None:
+            path = "results_loader.pkl"
+
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    def __add__(self, other):
+        """
+        Add two Results_Loader objects together.
+        This will concatenate the results DataFrames of both objects, as well as their results_dict.
+
+        Args:
+            other (Results_Loader): Another Results_Loader object to add.
+
+        Returns:
+            Results_Loader: A new Results_Loader object with combined results.
+        """
+
+        combined_results_dict = self.results_dict.copy()
+        for nameExp, mice in other.results_dict.items():
+            if nameExp not in combined_results_dict:
+                combined_results_dict[nameExp] = {}
+            for mouse_name, phases in mice.items():
+                if mouse_name not in combined_results_dict[nameExp]:
+                    combined_results_dict[nameExp][mouse_name] = {}
+                for phase, results in phases.items():
+                    combined_results_dict[nameExp][mouse_name][phase] = results
+
+        combined_results_df = pd.concat(
+            [self.results_df, other.results_df], ignore_index=True
+        )
+        nameExp = combined_results_dict.keys()
+        timeWindows = (
+            self.timeWindows.copy() + other.timeWindows.copy()
+            if self.timeWindows != "all"
+            else "all"
+        )
+        phases = self.phases + other.phases if self.phases is not None else other.phases
+        # get only unique timeWindows
+        if isinstance(timeWindows, list):
+            timeWindows = list(set(timeWindows))
+        if isinstance(phases, list):
+            phases = list(set(phases))
+
+        return Results_Loader.from_dict_and_df(
+            dir=self.Dir,
+            mice_nb=self.mice_nb + other.mice_nb,
+            mice_manipes=self.mice_manipes + other.mice_manipes,
+            dict=combined_results_dict,
+            df=combined_results_df,
+            nameExp=nameExp,
+            timeWindows=timeWindows,
+            phases=phases,
+        )
+
+    def __iadd__(self, other):
+        """
+        In-place addition of two Results_Loader objects.
+        This will concatenate the results DataFrames of both objects, as well as their results_dict.
+
+        Args:
+            other (Results_Loader): Another Results_Loader object to add.
+
+        Returns:
+            Results_Loader: The current Results_Loader object with combined results.
+        """
+        self.results_dict.update(other.results_dict)
+        self.results_df = pd.concat(
+            [self.results_df, other.results_df], ignore_index=True
+        )
+        nameExp = self.results_dict.keys()
+        timeWindows = (
+            self.timeWindows.copy() + other.timeWindows.copy()
+            if self.timeWindows != "all"
+            else "all"
+        )
+        phases = self.phases + other.phases if self.phases is not None else other.phases
+        # get only unique timeWindows
+        if isinstance(timeWindows, list):
+            timeWindows = list(set(timeWindows))
+        if isinstance(phases, list):
+            phases = list(set(phases))
+
+        return Results_Loader.from_dict_and_df(
+            dir=self.Dir,
+            mice_nb=self.mice_nb + other.mice_nb,
+            mice_manipes=self.mice_manipes + other.mice_manipes,
+            dict=self.results_dict,
+            df=self.results_df,
+            nameExp=nameExp,
+            timeWindows=timeWindows,
+            phases=phases,
+        )
+
+    def apply_analysis(self):
+        """
+        Apply some usual ML operations on the results df.
+        """
+        self.results_df["mean_speed"] = self.results_df.apply(
+            lambda row: np.nanmean(row["alignedSpeed"])
+            if row["alignedSpeed"] is not None
+            else np.nan,
+            axis=1,
+        )
+        self.results_df["mean_error"] = self.results_df.apply(
+            lambda row: np.nanmean(
+                np.linalg.norm(row["fullPred"] - row["truePos"], axis=1)
+            )
+            if row["fullPred"] is not None and row["truePos"] is not None
+            else None,
+            axis=1,
+        )
+        self.results_df["lin_error"] = self.results_df.apply(
+            lambda row: np.nanmean(np.abs(row["linPred"] - row["linTruePos"]))
+            if row["linPred"] is not None and row["linTruePos"] is not None
+            else None,
+            axis=1,
+        )
+
+        # add the selected mean error and lin error to the dataframe
+        # we defined the selected prediction as the prediction with the predLoss being amongs the lowest 20% for this row.
+        self.results_df["predLossThreshold"] = self.results_df.apply(
+            lambda row: np.quantile(row["predLoss"], 0.2)
+            if row["predLoss"] is not None
+            else None,
+            axis=1,
+        )
+        # we use the predLossThreshold to select the mean_error and lin_error
+        self.results_df["mean_error_selected"] = self.results_df.apply(
+            lambda row: np.nanmean(
+                np.linalg.norm(
+                    row["fullPred"][row["predLoss"] <= row["predLossThreshold"]]
+                    - row["truePos"][row["predLoss"] <= row["predLossThreshold"]],
+                    axis=1,
+                )
+            )
+            if row["fullPred"] is not None and row["truePos"] is not None
+            else None,
+            axis=1,
+        )
+
+        self.results_df["lin_error_selected"] = self.results_df.apply(
+            lambda row: np.nanmean(
+                np.abs(
+                    row["linPred"][row["predLoss"] <= row["predLossThreshold"]]
+                    - row["linTruePos"][row["predLoss"] <= row["predLossThreshold"]]
+                )
+            )
+            if row["linPred"] is not None and row["linTruePos"] is not None
+            else None,
+            axis=1,
+        )
+
+        self.results_df["asymmetry_index_on_predicted"] = self.results_df.apply(
+            lambda row: row["results"].get_training_imbalance(positions=row["fullPred"])
+            if row["fullPred"] is not None
+            else None,
+            axis=1,
+        )
+
+        self.results_df["asymmetry_index_on_selected_predicted"] = (
+            self.results_df.apply(
+                lambda row: row["results"].get_training_imbalance(
+                    positions=row["fullPred"][
+                        row["predLoss"] <= row["predLossThreshold"]
+                    ]
+                )
+                if row["fullPred"] is not None
+                else None,
+                axis=1,
+            )
+        )
+
+        training_values = (
+            self.results_df[self.results_df["phase"] == "training"].groupby(
+                ["nameExp", "mouse", "winMS"]
+            )[
+                "asymmetry_index"
+            ]  # or .mean(), depending on what you want if multiple rows exist
+        ).first()
+
+        self.results_df["training_asymmetry_index"] = self.results_df.set_index(
+            ["nameExp", "mouse", "winMS"]
+        ).index.map(training_values)
+
+        self.results_df["real_asymmetry_ratio"] = (
+            self.results_df["asymmetry_index"]
+            / self.results_df["training_asymmetry_index"]
+        )
+        self.results_df["predicted_asymmetry_ratio"] = self.results_df.apply(
+            lambda row: row["asymmetry_index_on_predicted"]
+            / row["training_asymmetry_index"]
+            if row["training_asymmetry_index"] != 0
+            else None,
+            axis=1,
+        )
+        self.results_df["predicted_asymmetry_ratio_on_selected"] = (
+            self.results_df.apply(
+                lambda row: row["asymmetry_index_on_selected_predicted"]
+                / row["training_asymmetry_index"]
+                if row["training_asymmetry_index"] != 0
+                else None,
+                axis=1,
+            )
+        )
+        self.results_df["predicted_asymmetry_ratio_normalized"] = (
+            self.results_df["asymmetry_index_on_predicted"]
+            / self.results_df["real_asymmetry_ratio"]
+        )
+        self.results_df["selected_predicted_asymmetry_ratio_normalized"] = (
+            self.results_df["asymmetry_index_on_selected_predicted"]
+            / self.results_df["real_asymmetry_ratio"]
+        )
+
+        self.results_df["true_binary_direction"] = self.results_df.apply(
+            lambda row: row["results"]
+            .data_helper[str(row["winMS"])]
+            ._get_traveling_direction(row["linTruePos"])
+            if row["linTruePos"] is not None
+            else None,
+            axis=1,
+        )
+        self.results_df["predicted_binary_direction"] = self.results_df.apply(
+            lambda row: row["results"]
+            .data_helper[str(row["winMS"])]
+            ._get_traveling_direction(row["linPred"])
+            if row["linPred"] is not None
+            else None,
+            axis=1,
+        )
+
+    @classmethod
+    def from_dict_and_df(
+        cls,
+        dir: pd.DataFrame,
+        mice_nb: List[int],
+        mice_manipes: List[str],
+        dict: dict,
+        df: pd.DataFrame,
+        nameExp: List[str] = None,
+        timeWindows: List[int] = None,
+        phases: List[str] = None,
+        **kwargs,
+    ):
+        """
+        Create a Results_Loader object from a dictionary and a DataFrame.
+
+        Args:
+            dir (pd.DataFrame): PathForExperiments DataFrame with columns for folder Results, mouse names, manipes, network paths, etc.
+            mice_nb (List[int]): List of mouse numbers to filter results.
+            dict (dict): Dictionary containing the results.
+            df (pd.DataFrame): DataFrame containing the results.
+            timeWindows (List[int]): List of time windows in milliseconds to filter results. If None, uses all available windows.
+
+        Returns:
+            Results_Loader: A new Results_Loader object.
+        """
+        return cls(
+            dir=dir,
+            mice_nb=mice_nb,
+            mice_manipes=mice_manipes,
+            dict=dict,
+            df=df,
+            timeWindows=timeWindows,
+            nameExp=nameExp,
+            phases=phases,
+            **kwargs,
+        )
+
+
+def _init_worker_plotter(cls_ref, winMS, kwargs_dict):
+    """
+    Initialize the worker plotter for rendering frames.
+    This is used to set up the plotter in a multiprocessing context.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")  # Use a non-interactive backend for rendering
+    global _plotter_instance
+    _plotter_instance = cls_ref.init_plotter(winMS, **kwargs_dict)
+    return _plotter_instance
+
+
+def _render_frame_worker(i, **kwargs):
+    """
+    Worker function to render a single frame in parallel.
+    This is used by joblib to render frames in parallel.
+    """
+    global _plotter_instance
+    save_path = os.path.join(_plotter_instance.output_dir, f"frame_{i:04d}.png")
+    _plotter_instance.animate_frame(i, save_path=save_path, **kwargs)
 
 
 # Example usage:

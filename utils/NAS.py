@@ -57,8 +57,9 @@ def find_files_after_date(source_dir, cutoff_date):
                 and not (
                     file_path.endswith(".dat")
                     or file_path.endswith(".mat")
-                    and not "dataset" in file_path
+                    and "dataset" not in file_path
                     and not file_path.endswith(".tfrec")
+                    and "models" not in file_path
                 )
             ):
                 # Get relative path from source directory
