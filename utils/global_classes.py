@@ -497,6 +497,7 @@ class DataHelper(Project):
         dist_to_wall : np.ndarray
             Array of distances to the wall with shape (n_samples,).
         """
+        assert positions.shape[1] == 2, "positions must have 2 dimensions"
 
         self.get_maze_limits(show=show)
         self.create_polygon()
@@ -521,6 +522,8 @@ class DataHelper(Project):
             positions = self.old_positions
         except AttributeError:
             positions = self.positions
+
+        assert positions.shape[1] == 2, "positions must have 2 dimensions"
         lower_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] < 0.5))
         upper_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] > 0.5))
         self.lower_x = positions[lower_mask, 0].max()
@@ -1177,6 +1180,7 @@ class DataHelper(Project):
         heading_direction : (N, 1) array_like
             Heading direction of the animal
         """
+        assert positions.shape[1] == 2, "positions must have 2 dimensions"
         X, Y = positions[:, 0], positions[:, 1]
         # Smooth diffs instead of speeds directly
         Xdiff = np.diff(X)
@@ -1210,6 +1214,7 @@ class DataHelper(Project):
         speed : (N, 1) array_like
             Instantenous speed of the animal
         """
+        assert positions.shape[1] == 2, "positions must have 2 dimensions"
         X, Y = positions[:, 0], positions[:, 1]
         # Smooth diffs instead of speeds directly
         Xdiff = np.diff(X)
