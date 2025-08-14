@@ -1953,14 +1953,22 @@ class Results_Loader:
                             full_truePos_from_behavior = results.data_helper[
                                 str(win)
                             ].fullBehavior["Positions"]
-                            aligned_truePos_fromBehavior = (
+                            aligned_truePos_from_behavior = (
                                 full_truePos_from_behavior[posIndex]
                                 if posIndex is not None
                                 else None
                             )
-                            direction_fromBehavior = (
+                            full_trueLinPos_from_behavior = results.l_function(
+                                results.data_helper[str(win)].fullBehavior["Positions"]
+                            )[1]
+                            aligned_trueLinPos_from_behavior = (
+                                full_trueLinPos_from_behavior[posIndex]
+                                if posIndex is not None
+                                else None
+                            )
+                            direction_from_behavior = (
                                 results.data_helper[str(win)]._get_traveling_direction(
-                                    full_truePos_from_behavior
+                                    full_trueLinPos_from_behavior
                                 )[posIndex]
                                 if posIndex is not None
                                 else None
@@ -1968,7 +1976,7 @@ class Results_Loader:
                             direction_fromNN = results.data_helper[
                                 str(win)
                             ]._get_traveling_direction(
-                                results.resultsNN_phase[prefix]["truePos"][id]
+                                results.resultsNN_phase[prefix]["linTruePos"][id]
                             )
                             row = {
                                 "nameExp": nameExp,
@@ -1979,7 +1987,9 @@ class Results_Loader:
                                 "winMS": win,
                                 "asymmetry_index": asymmetry_index,
                                 "fullTruePos_fromBehavior": full_truePos_from_behavior,
-                                "alignedTruePos_fromBehavior": aligned_truePos_fromBehavior,
+                                "alignedTruePos_fromBehavior": aligned_truePos_from_behavior,
+                                "fullTrueLinPos_from_behavior": full_trueLinPos_from_behavior,
+                                "alignedTrueLinPos_from_behavior": aligned_trueLinPos_from_behavior,
                                 "fullTimeBehavior": results.data_helper[str(win)]
                                 .fullBehavior["positionTime"]
                                 .flatten(),
@@ -2029,7 +2039,7 @@ class Results_Loader:
                                 "resultsNN": results.resultsNN
                                 if hasattr(results, "resultsNN")
                                 else None,
-                                "direction_fromBehavior": direction_fromBehavior,
+                                "direction_fromBehavior": direction_from_behavior,
                                 "direction_fromNN": direction_fromNN,
                             }
                             data.append(row)
