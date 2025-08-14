@@ -52,18 +52,17 @@ dependencies = [
     "wandb>=0.20.1",
 ]
 
-[tool.uv.workspace]
-members = ["neuroencoders"]
-
 [dependency-groups]
 dev = [
     "dash>=3.1.1",
+    "ephyviewer>=1.7.0",
     "imageio[ffmpeg,pyav]>=2.37.0",
     "memory-profiler>=0.61.0",
     "plotly>=6.2.0",
     "psutil>=7.0.0",
     "pympler>=1.1",
     "ruff>=0.11.8",
+    "spikeinterface[full]>=0.102.0",
 ]
 
 [tool.ruff]
@@ -129,14 +128,4 @@ case-sensitive = true
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = [
-    "decoder",
-    "importData",
-    "simpleBayes",
-    "fullEncoder",
-    "transformData",
-    "resultAnalysis",
-    "openEphysExport",
-    "simpleBayes",
-    "utils"
-]
+include = ["neuroencoders"]

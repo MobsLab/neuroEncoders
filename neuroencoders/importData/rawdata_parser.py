@@ -1,0 +1,1860 @@
+# Load libs
+import os
+import re
+import sys
+import xml.etree.ElementTree as ET
+from tkinter import Button, Entry, Label, Toplevel
+from typing import Literal, Optional
+
+import matplotlib as mplt
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import tables
+
+# Custom codes
+from neuroencoders.importData import epochs_management as ep
+from neuroencoders.simpleBayes.butils import kdenD
+
+
+def get_params(pathToXml):
+    """
+    This function parses the xml file - as neuroscope would.
+
+    Parameters
+    ----------
+    pathToXml : str, path to the xml file
+
+    Returns
+    -------
+    listChannels : list, list of channels
+    samplingRate : float, sampling rate
+    nChannels : int, number of channels
+    """
+    listChannels = []
+    samplingRate = None
+    nChannels = None
+    try:
+        tree = ET.parse(pathToXml)
+    except:
+        print("impossible to open xml file:", pathToXml)
+        sys.exit(1)
+    root = tree.getroot()
+    for br1Elem in root:
+        if br1Elem.tag != "spikeDetection":
+            continue
+        for br2Elem in br1Elem:
+            if br2Elem.tag != "channelGroups":
+                continue
+            for br3Elem in br2Elem:
+                if br3Elem.tag != "group":
+                    continue
+                group = []
+                # by filtering for channels, we only get the `Spike Groups` from neuroscope, i.e. the selected channels from each
+                # anatomical group (HPC, PFC, etc.) that seem to have spiking neurons
+                for br4Elem in br3Elem:
+                    if br4Elem.tag != "channels":
+                        continue
+                    for br5Elem in br4Elem:
+                        if br5Elem.tag != "channel":
+                            continue
+                        group.append(int(br5Elem.text))
+                # each channel is a group of spike channels
+                listChannels.append(group)
+    for br1Elem in root:
+        if br1Elem.tag != "acquisitionSystem":
+            continue
+        for br2Elem in br1Elem:
+            if br2Elem.tag == "samplingRate":
+                samplingRate = float(br2Elem.text)
+            if br2Elem.tag == "nChannels":
+                nChannels = int(br2Elem.text)
+
+    if samplingRate is None or nChannels is None or not listChannels:
+        raise ValueError(
+            f"""The xml file does not contain the required information
+            samplingRate, nChannels, or listChannels.
+            Did you select the right xml file?
+            Please check the xml file: {pathToXml}
+            """
+        )
+    return listChannels, samplingRate, nChannels
+
+
+def findTime(positionTime, lastBestTime, time):
+    for i in range(len(positionTime) - lastBestTime - 1):
+        if np.abs(positionTime[lastBestTime + i] - time) < np.abs(
+            positionTime[lastBestTime + i + 1] - time
+        ):
+            return lastBestTime + i
+    return len(positionTime) - 1
+
+
+############################
+
+
+# Load the positions
+def get_behavior(
+    folder: str,
+    bandwidth: Optional[int] = None,
+    getfilterSpeed: bool = True,
+    decode: bool = False,
+    phase: Literal[
+        "all",
+        "pre",
+        "preNoHab",
+        "hab",
+        "cond",
+        "post",
+        "postNoExtinction",
+        "extinction",
+        None,
+    ] = None,
+) -> dict[str, np.ndarray]:
+    """
+    Load the behavior data from the nnBehavior.mat file
+
+    Parameters
+    ----------
+    folder : str, where the mat `nnBehavior.mat` file is located
+    bandwidth : int, optional (default=None)
+    getfilterSpeed : bool, optional, whether to the speed filter on train/test data. Should be True for training (ann|bayes), false otherwise.
+    decode : bool, optional, wether to train-test split the data or not.
+
+    Returns
+    -------
+    dict[str, np.ndarray] with the following
+    keys:
+    Positions, positionTime, Speed, Bandwidth, Times
+
+    """
+
+    # check if the file exists
+    filename = os.path.join(folder, "nnBehavior.mat")
+    if not os.path.exists(filename):
+        raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
+
+    optional_filename = os.path.join(folder, "optional_nnBehavior.mat")
+    if not os.path.exists(optional_filename):
+        raise ValueError(
+            "this file does not exist :" + folder + "optional_nnBehavior.mat"
+        )
+    with tables.open_file(optional_filename) as f:
+        if "start_freeze" in f.root.optional:
+            start_freeze = f.root.optional.start_freeze[:].flatten().reshape(-1, 1)
+            stop_freeze = f.root.optional.stop_freeze[:].flatten().reshape(-1, 1)
+            FreezeEpoch = np.hstack([start_freeze, stop_freeze])
+        else:
+            start_freeze = None
+            stop_freeze = None
+            FreezeEpoch = None
+        if "start_stim" in f.root.optional:
+            start_stim = f.root.optional.start_stim[:].flatten().reshape(-1, 1)
+            stop_stim = f.root.optional.stop_stim[:].flatten().reshape(-1, 1)
+            StimEpoch = np.hstack([start_stim, stop_stim])
+        else:
+            start_stim = None
+            stop_stim = None
+            StimEpoch = None
+        if "PosMat" in f.root.optional:
+            PosMat = f.root.optional.PosMat[:].T.reshape(-1, 4)
+        else:
+            PosMat = None
+        if "tRipples" in f.root.optional:
+            tRipples = f.root.optional.tRipples[:].flatten().reshape(-1, 1)
+        else:
+            tRipples = None
+
+    if phase is not None:
+        filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+        if not os.path.exists(filename):
+            assert tables.is_hdf5_file(folder + "nnBehavior.mat")
+            import shutil
+
+            print("weird to copy that file now")
+
+            shutil.copyfile(
+                folder + "nnBehavior.mat",
+                folder + "nnBehavior_" + phase + ".mat",
+                follow_symlinks=True,
+            )
+    # Extract basic behavior
+    with tables.open_file(filename) as f:
+        positions = f.root.behavior.positions
+        positions = np.swapaxes(positions[:, :], 1, 0)
+        positionTime = f.root.behavior.position_time
+        positionTime = np.swapaxes(positionTime[:, :], 1, 0)
+        speed = f.root.behavior.speed
+        speed = np.swapaxes(speed[:, :], 1, 0)
+        if bandwidth is None:
+            goodRecordingTimeStep = np.logical_not(np.isnan(np.sum(positions, axis=1)))
+            bandwidth = (
+                np.max(positions[goodRecordingTimeStep, :])
+                - np.min(positions[goodRecordingTimeStep, :])
+            ) / 15
+        # Check for sleep sessions
+        sleepPeriods = f.root.behavior.sleepPeriods[:]
+        if np.sum(sleepPeriods) > 0:  # If sleepPeriods exist
+            sleepNames = [
+                "".join([chr(c) for c in l[0][:, 0]])
+                for l in f.root.behavior.sessionSleepNames[:, 0]
+            ]
+            sessionNames = [
+                "".join([chr(c) for c in l[0][:, 0]])
+                for l in f.root.behavior.SessionNames[:, 0]
+            ]
+            if sessionNames[0] != "Recording":
+                sessionStart = f.root.behavior.SessionStart[:, :][:, 0]
+                sessionStop = f.root.behavior.SessionStop[:, :][:, 0]
+                import re
+
+                SessionEpochs = dict()
+                for phase in ["pre", "hab", "cond", "post", "extinction"]:
+                    if phase == "pre":
+                        # Look for Pre sessions or Hab sessions
+                        pattern = "(pre|hab)"
+                    elif phase == "hab":
+                        pattern = "hab"
+                    elif phase == "cond":
+                        pattern = "cond"
+                    elif phase == "post":
+                        pattern = "(post|extinction|extinct|ext)"
+                    elif phase == "extinction":
+                        pattern = "(extinction|extinct|ext)"
+
+                    list_sessions = [
+                        re.search(pattern, name, re.IGNORECASE) for name in sessionNames
+                    ]
+                    id_sessions = [
+                        i
+                        for i, session in enumerate(list_sessions)
+                        if session is not None
+                    ]
+                    # create epochs from the session start and stop times
+                    SessionEpochs[phase] = []
+                    for id in id_sessions:
+                        SessionEpochs[phase].extend([sessionStart[id], sessionStop[id]])
+
+        # Train and test epochs
+        if (
+            not decode
+        ):  # Not applicable for decode mode where all dataset is to be decoded
+            if len(f.root.behavior.trainEpochs.shape) == 2:
+                trainEpochs = np.concatenate(f.root.behavior.trainEpochs)
+                testEpochs = np.concatenate(f.root.behavior.testEpochs)
+                try:
+                    lossPredSetEpochs = np.concatenate(
+                        f.root.behavior.lossPredSetEpochs
+                    )
+                except ValueError:
+                    # for some reason the old code doesnt load empty arrays anymore
+                    lossPredSetEpochs = f.root.behavior.lossPredSetEpochs[:]
+            elif len(f.root.behavior.trainEpochs.shape) == 1:
+                trainEpochs = f.root.behavior.trainEpochs[:]
+                testEpochs = f.root.behavior.testEpochs[:]
+                lossPredSetEpochs = f.root.behavior.lossPredSetEpochs[:]
+            else:
+                raise Exception("bad train and test epochs format")
+        # Get learning time and if needed speedFilter
+        samplingWindowPosition = (positionTime[1:] - positionTime[0:-1])[:, 0]
+        samplingWindowPosition[np.isnan(np.sum(positions[0:-1], axis=1))] = 0
+        if not decode:
+            if getfilterSpeed:
+                speedFilter = f.root.behavior.speedMask[:]
+            else:
+                speedFilter = np.ones_like(f.root.behavior.speedMask[:])
+            lEpochIndex = [
+                [
+                    np.argmin(np.abs(positionTime - trainEpochs[2 * i + 1])),
+                    np.argmin(np.abs(positionTime - trainEpochs[2 * i])),
+                ]
+                for i in range(len(trainEpochs) // 2)
+            ]
+            learningTime = [
+                np.sum(
+                    np.multiply(
+                        speedFilter[lEpochIndex[i][1] : lEpochIndex[i][0]],
+                        samplingWindowPosition[lEpochIndex[i][1] : lEpochIndex[i][0]],
+                    )
+                )
+                for i in range(len(lEpochIndex))
+            ]
+            learningTime = np.sum(learningTime)
+        else:
+            learningTime = np.sum(samplingWindowPosition)
+
+        # Organize output
+        behavior_data = {
+            "Positions": positions,
+            "positionTime": positionTime,
+            "Speed": speed,
+            "Bandwidth": bandwidth,
+            "Times": {
+                "learning": learningTime,
+                "start_freeze": start_freeze,
+                "stop_freeze": stop_freeze,
+                "FreezeEpoch": FreezeEpoch,
+                "start_stim": start_stim,
+                "stop_stim": stop_stim,
+                "StimEpoch": StimEpoch,
+                "PosMat": PosMat,
+                "tRipples": tRipples,
+            },
+        }
+        if not decode:
+            behavior_data["Times"]["trainEpochs"] = trainEpochs
+            behavior_data["Times"]["testEpochs"] = testEpochs
+            behavior_data["Times"]["lossPredSetEpochs"] = lossPredSetEpochs
+        if getfilterSpeed:
+            behavior_data["Times"]["speedFilter"] = speedFilter
+        if np.sum(sleepPeriods) > 0:
+            behavior_data["Times"]["sleepEpochs"] = sleepPeriods
+            behavior_data["Times"]["sleepNames"] = sleepNames
+            behavior_data["Times"]["sessionNames"] = sessionNames
+            if sessionNames[0] != "Recording":
+                behavior_data["Times"]["sessionStart"] = sessionStart
+                behavior_data["Times"]["sessionStop"] = sessionStop
+                if "SessionEpochs" in locals():
+                    behavior_data["Times"]["SessionEpochs"] = SessionEpochs
+
+        if "ref" in f.root.behavior:  # NEW: try to load the images if they exist.
+            behavior_data["ref"] = f.root.behavior.ref[:]
+        if "aligned_ref" in f.root.behavior:
+            behavior_data["aligned_ref"] = f.root.behavior.aligned_ref[:]
+        if "xyOutput" in f.root.behavior:
+            behavior_data["xyOutput"] = f.root.behavior.xyOutput[:]
+        if "ratioIMAonREAL" in f.root.behavior:
+            behavior_data["ratioIMAonREAL"] = float(
+                f.root.behavior.ratioIMAonREAL.read()
+            )
+        if "shock_zone_mask" in f.root.behavior:
+            behavior_data["shock_zone_mask"] = f.root.behavior.shock_zone_mask[:]
+
+        if "outputSize" in f.root.behavior:
+            behavior_data["outputSize"] = f.root.behavior.outputSize[:]
+        if "M" in f.root.behavior:
+            behavior_data["M"] = f.root.behavior.M[:]
+
+        f.close()
+
+    return behavior_data
+
+
+def speed_filter(
+    folder: str,
+    overWrite: bool = True,
+    phase=None,
+    template=None,
+    force: bool = False,
+    window_range=-1,  # -1 means no window range
+    get_rid_of_sleep: bool = True,
+) -> None:
+    """
+    A simple tool to set up a threshold on the speed value
+    The speed threshold is then implemented through a speed_mask:
+    a boolean array indicating for each index (i.e measured feature time step)
+    if it is above threshold or not.
+
+    Parameters
+    ----------
+    folder : str
+        path to the folder containing the nnBehavior.mat file
+    overWrite : bool, optional
+        whether to overwrite the existing speedMask or not (default is True)
+    phase : str, optional
+        whether to pre-select only some specific sessions (pre, hab, cond, or post for now) (default is None)
+    template : str, optional
+        if phase is not None, the template to use for the nnBehavior file (default is None)
+    force : bool, optional
+        whether to force the function to run without figure preview (default is False)
+    window_range : int, optional
+        the range of the window to show (default is -1, which means no window range)
+    get_rid_of_sleep : bool, optional
+        whether to get rid of sleep epochs in the nnBehavior and replace by NaN. Otherwise it messes with the next functions (default is True)
+
+    """
+    # TODO: change the order of the epochs AND be able to select the training set in the middle of the dataset
+    # Parameters
+    window_len = 14  # changed following Dima's advice
+    window_idx = 0  # index of the window to show
+    from utils.global_classes import MAZE_COORDS
+
+    filename = os.path.join(folder, "nnBehavior.mat")
+    # as this if the first function, it should create the appropriate nnbehavior. Next functions will check for file existence
+    if phase is not None:
+        filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+        if not os.path.exists(filename):
+            if template is not None:
+                templ_file = f"nnBehavior_{template}.mat"
+            else:
+                templ_file = "nnBehavior.mat"
+            assert tables.is_hdf5_file(folder + templ_file)
+            import shutil
+
+            shutil.copyfile(
+                folder + templ_file,
+                folder + "nnBehavior_" + phase + ".mat",
+                follow_symlinks=True,
+            )
+    # Extract basic behavior
+    speedOG = None
+    with tables.open_file(filename, "a") as f:
+        children = [c.name for c in f.list_nodes("/behavior")]
+        if "speedMask" in children:
+            print(f"speedMask already created for {phase} phase")
+            try:
+                # check the value is a numeric value
+                speedThresholdOG = (
+                    pd.read_csv(os.path.join(folder, f"speedFilterValue_{phase}.csv"))
+                    .values[:, 1:]
+                    .flatten()[-1]
+                )
+                print(f"with value: {np.exp(speedThresholdOG):.2f} cm/s")
+                try:
+                    speedOG = speedThresholdOG.astype(float)
+                except:
+                    speedOG = None
+
+            except FileNotFoundError:
+                speedOG = None
+            if overWrite:
+                f.remove_node("/behavior", "speedMask")
+            else:
+                return
+
+        # Prepare data
+        positions = f.root.behavior.positions
+        speed = f.root.behavior.speed
+        positionTime = f.root.behavior.position_time
+        sessionNames = [
+            "".join([chr(c) for c in l[0][:, 0]])
+            for l in f.root.behavior.SessionNames[:, 0]
+        ]
+        if sessionNames[0] != "Recording":
+            IsMultiSessions = True
+            sessionStart = f.root.behavior.SessionStart[:, :][:, 0]
+            sessionStop = f.root.behavior.SessionStop[:, :][:, 0]
+        else:
+            IsMultiSessions = False
+
+        positions = np.swapaxes(positions[:, :], 1, 0)
+        speed = np.swapaxes(speed[:, :], 1, 0)
+        posTime = np.swapaxes(positionTime[:, :], 1, 0)
+        if speed.shape[0] == posTime.shape[0] - 1:
+            speed = np.append(speed, speed[-1])
+        speed = np.reshape(speed, [speed.shape[0], 1])
+        # Make sure all variables stay in the time limits
+        tmin = 0
+        tmax = posTime[-1]
+        myposTime = posTime[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+        myspeed = speed[((posTime >= tmin) * (posTime <= tmax))[:, 0]]
+
+        # Select the representative behavior to show
+        epochToShow = []
+        if IsMultiSessions:
+            hab_list = [
+                re.search("hab", sessionNames[x], re.IGNORECASE)
+                for x in range(len(sessionNames))
+            ]
+            id_hab = [x for x in range(len(hab_list)) if hab_list[x] is not None]
+            sleep_list = [
+                re.search("sleep", sessionNames[x], re.IGNORECASE)
+                for x in range(len(sessionNames))
+            ]
+            id_sleep = [x for x in range(len(sleep_list)) if sleep_list[x] is not None]
+            if id_sleep:
+                print("Found sleep")
+            if id_hab:
+                for id in id_hab:
+                    epochToShow.extend([sessionStart[id], sessionStop[id]])
+            elif id_sleep:
+                id_toshow = list(
+                    range(id_sleep[0] + 1, id_sleep[1])
+                )  # in between two sleeps
+                for id in id_toshow:
+                    epochToShow.extend([sessionStart[id], sessionStop[id]])
+        else:
+            epochToShow.extend(
+                [myposTime[0, 0], myposTime[-1, 0]]
+            )  # if no sleeps, or session names, or hab take everything
+        maskToShow = ep.inEpochsMask(myposTime[:, 0], epochToShow)
+        behToShow = positions[maskToShow, :]
+        timeToShow = myposTime[maskToShow, 0]
+
+        # Smooth speed
+        s = np.r_[
+            myspeed[window_len - 1 : 0 : -1],
+            myspeed,
+            myspeed[-2 : -window_len - 1 : -1],
+        ]
+        w = eval("np." + "hamming" + "(window_len)")
+        myspeed2 = np.convolve(w / w.sum(), s[:, 0], mode="valid")[
+            (window_len // 2 - 1) : -(window_len // 2)
+        ]
+
+        speedToshowSm = myspeed2[maskToShow]
+        if speedOG is None:
+            speedThreshold = max(
+                np.log(
+                    np.percentile(speedToshowSm[speedToshowSm >= 0], 70) + 10 ** (-8)
+                ),  # take 30% highest
+                np.log(4),  # default minimal threshold
+            )
+        else:
+            speedThreshold = speedOG
+            if phase != "pre":
+                speedThreshold = min(
+                    speedOG, np.log(1.5)
+                )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
+        if phase != "pre":
+            speedThreshold = min(
+                speedThreshold, np.log(1.5)
+            )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
+        speedFilter = speedToshowSm > np.exp(speedThreshold)
+
+        # Figure
+        fig = plt.figure(figsize=(7, 15))
+        fig.suptitle(
+            f"Speed threshold selection for {phase}", fontsize=18, fontweight="bold"
+        )
+        # Coordinates over time
+        ax0 = fig.add_subplot(6, 2, (1, 2))
+        (l1,) = ax0.plot(
+            timeToShow[speedFilter],
+            behToShow[speedFilter, 0],
+            "--.",
+            markersize=5,
+            c="red",
+        )
+        (l2,) = ax0.plot(
+            timeToShow[speedFilter],
+            behToShow[speedFilter, 1],
+            "--.",
+            markersize=5,
+            c="orange",
+        )
+        l3 = ax0.scatter(
+            timeToShow[speedFilter],
+            np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
+            c="black",
+            s=0.2,
+        )
+        ax0.set_ylabel("environmental \n variable")
+        # Speed over time
+        ax1 = fig.add_subplot(6, 2, (3, 4), sharex=ax0)
+        (l4,) = ax1.plot(
+            timeToShow[speedFilter], speedToshowSm[speedFilter], c="purple"
+        )  # smoothed
+        ax1.set_ylabel("speed")
+        ax1.set_xlabel("Time (s)")
+
+        # override default matplotlib rc ticks
+        plt.setp(ax0.get_xticklabels(), visible=False)
+        ax0.tick_params(which="both", labelsize=15, labelbottom=False)
+        ax1.tick_params(which="both", labelsize=15)
+
+        # Speed histogram
+        ax2 = fig.add_subplot(6, 2, 7)
+        speed_log = np.log(speedToshowSm[np.not_equal(speedToshowSm, 0)] + 10 ** (-8))
+        ax2.hist(speed_log, histtype="step", bins=200, color="blue")
+        plt.setp(ax2.get_yticklabels(), visible=False)
+        l5 = ax2.axvline(speedThreshold, color="black")
+        ax2.set_xlabel("log speed")
+        ax2.set_xlim(
+            np.percentile(speed_log[~np.isnan(speed_log)], 0.3),
+            np.max(speed_log[~np.isnan(speed_log)]),
+        )
+        ax3 = fig.add_subplot(6, 2, 8)
+        speed_plot = speedToshowSm[np.not_equal(speedToshowSm, 0)]
+        ax3.hist(speed_plot, histtype="step", bins=200, color="blue")
+        plt.setp(ax3.get_yticklabels(), visible=False)
+        l6 = ax3.axvline(np.exp(speedThreshold), color="black")
+        ax3.set_xlabel(f"raw speed ({np.exp(speedThreshold):.2f} cm/s)")
+        ax3.set_xlim(0, np.percentile(speed_plot[~np.isnan(speed_plot)], 98))
+        ax4 = fig.add_subplot(7, 2, (11, 12))
+        ax5 = fig.add_subplot(7, 2, (13, 14))
+        slider = plt.Slider(
+            ax4,
+            " ",
+            np.min(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
+            np.max(np.log(speedToshowSm[speedToshowSm >= 0] + 10 ** (-8))),
+            valinit=speedThreshold,
+            valstep=0.01,
+        )
+        slider_range = plt.Slider(
+            ax5,
+            " ",
+            -1,
+            behToShow.shape[0],
+            valinit=window_range,
+            valstep=1,
+        )
+        ax4.set_ylabel("speed Threshold")
+        ax5.set_ylabel("window range")
+        ax = [ax0, ax1, ax2, ax3, ax4, ax5]
+
+        # create scatter plot of environmental variable depending on speed
+        fig2d, ax2d = plt.subplots(figsize=(7, 7))
+        idxs = np.arange(0, behToShow.shape[0])
+        to_show = (
+            (window_idx * window_range < idxs)
+            & (idxs < window_range * (window_idx + 1))
+            if window_range > 0
+            else np.ones_like(idxs, dtype=bool)
+        )
+        newfilter = speedFilter & to_show
+        (pos2d,) = ax2d.plot(
+            behToShow[newfilter, 0],
+            behToShow[newfilter, 1],
+            "--.",
+            zorder=2,
+            linewidth=0.7,
+            alpha=0.5,
+        )
+        sc = ax2d.scatter(
+            behToShow[newfilter, 0],
+            behToShow[newfilter, 1],
+            c=speedToshowSm[newfilter],
+            s=36,
+            alpha=1,
+            zorder=3,
+        )
+
+        ax2d.plot(
+            MAZE_COORDS[:, 0],
+            MAZE_COORDS[:, 1],
+            color="black",
+            linewidth=1,
+            zorder=10,
+        )
+        cbar = plt.colorbar(sc)
+        cbar.set_label("speed (cm/s)")
+        ax2d.set_xlabel("X")
+        ax2d.set_ylabel("Y")
+        ax2d.set_xlim(
+            [min(0, np.min(behToShow[:, 0])), max(1, np.max(behToShow[:, 0]))]
+        )
+        ax2d.set_ylim(
+            [min(0, np.min(behToShow[:, 1])), max(1, np.max(behToShow[:, 1]))]
+        )
+        fig2d.suptitle(
+            f"Environmental variable depending on speed  ({np.exp(speedThreshold):.2f} cm/s) for phase {phase}",
+            fontsize=18,
+            fontweight="bold",
+        )
+        button_ax = fig2d.add_axes([0.4, 0.2, 0.1, 0.09])
+        button_ax_prev = fig2d.add_axes([0.4, 0.3, 0.1, 0.1])
+        button_next = plt.Button(button_ax, "Show next positions")
+        button_prev = plt.Button(button_ax_prev, "Show previous positions")
+        [
+            button.label.set_fontsize(10) for button in [button_next, button_prev]
+        ]  # Reduce font size (adjust as needed)
+
+        def update(val):
+            nonlocal speedThreshold, window_idx, window_range
+            speedThreshold = slider.val
+            window_range = slider_range.val
+            speedFilter = speedToshowSm > np.exp(speedThreshold)
+            l1.set_ydata(behToShow[speedFilter, 0])
+            l2.set_ydata(behToShow[speedFilter, 1])
+            l1.set_xdata(timeToShow[speedFilter])
+            l2.set_xdata(timeToShow[speedFilter])
+            l3.set_offsets(
+                np.transpose(
+                    np.stack(
+                        [
+                            timeToShow[speedFilter],
+                            np.zeros(timeToShow[speedFilter].shape[0]) - 0.5,
+                        ]
+                    )
+                )
+            )
+            l4.set_ydata(speedToshowSm[speedFilter])
+            l4.set_xdata(timeToShow[speedFilter])
+            l5.set_xdata(slider.val)
+            l6.set_xdata(np.exp(slider.val))
+            ax3.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
+
+            fig2d.suptitle(
+                f"Environmental variable depending on speed  ({np.exp(speedThreshold):.2f} cm/s) for phase {phase}",
+                fontsize=18,
+                fontweight="bold",
+            )
+
+            # 2D call
+            to_show = (
+                (window_idx * window_range < idxs)
+                & (idxs < window_range * (window_idx + 1))
+                if window_range > 0
+                else np.ones_like(idxs, dtype=bool)
+            )
+
+            newfilter = speedFilter & to_show
+            pos2d.set_xdata(behToShow[newfilter, 0])
+            pos2d.set_ydata(behToShow[newfilter, 1])
+            sc.set_offsets(
+                np.transpose(
+                    np.stack(
+                        [
+                            behToShow[newfilter, 0],
+                            behToShow[newfilter, 1],
+                        ]
+                    )
+                )
+            )
+            sc.set_array(speedToshowSm[newfilter])
+
+            fig.canvas.draw_idle()
+            fig2d.canvas.draw_idle()
+
+        def on_click_next(event):
+            nonlocal window_idx
+            window_idx += 1
+            update(0)
+
+        def on_click_prev(event):
+            nonlocal window_idx
+            window_idx -= 1
+            update(0)
+
+        if not force:
+            slider.on_changed(update)
+            slider_range.on_changed(update)
+            button_next.on_clicked(on_click_next)
+            button_prev.on_clicked(on_click_prev)
+
+            mngr1 = fig.canvas.manager
+            mngr2 = fig2d.canvas.manager
+            if mplt.get_backend() == "QtAgg":
+                mngr1.window.move(0, 0)  # Position at left monitor
+                mngr1.window.showMaximized()
+                mngr2.window.move(2560, 0)  # Position at right monitor
+                mngr2.window.showMaximized()
+            elif mplt.get_backend() == "TkAgg":
+                mngr1.window.wm_geometry("+0+0")
+                mngr1.resize(*mngr1.window.maxsize())
+                mngr2.window.wm_geometry("+2560+0")
+                mngr2.resize(*mngr2.window.maxsize())
+            plt.show(block=not force)
+            speedThreshold = slider.val
+        fig2d.savefig(
+            os.path.join(folder, f"speed_filter_2d_{phase}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        # Final value
+        speedFilter = myspeed2 > np.exp(
+            speedThreshold
+        )  # Apply the value to the whole dataset
+
+        f.create_array("/behavior", "speedMask", speedFilter)
+        if get_rid_of_sleep and id_sleep:
+            # replace the sleep epochs by NaN
+            epochSleep = []
+            for id in id_sleep:
+                epochSleep.extend([sessionStart[id], sessionStop[id]])
+            maskSleep = ep.inEpochsMask(posTime[:, 0], epochSleep)
+            positions[maskSleep, :] = np.nan
+            if "positions" in children:
+                f.remove_node("/behavior", "positions")
+            f.create_array("/behavior", "positions", np.swapaxes(positions, 1, 0))
+
+        f.flush()
+        f.close()
+        # Change the way you save
+        df = pd.DataFrame([speedThreshold])
+        df.to_csv(
+            folder + f"speedFilterValue_{phase}.csv"
+        )  # save the speed filter value
+
+
+def select_epochs(
+    folder: str,
+    overWrite: bool = True,
+    phase=None,
+    force: bool = False,
+    find_best_sets: bool = False,
+    isPredLoss: bool = True,
+):
+    """
+    Find test set with most uniform covering of speed and environment variable.
+    provides then a little manual tool to change the size of the window
+    and its position.
+
+    args:
+    -------
+    folder: str, path to the folder containing the nnBehavior.mat file
+    overWrite: bool, whether to overwrite the existing train and test epochs
+    phase: str, whether to pre-select only some specific sessions (pre, hab, cond, or post for now)
+    force: bool, whether to force the function to run without figure preview
+    find_best_sets: bool, whether to find the best test set based on the entropy of the speed and environment variable
+    isPredLoss: bool, whether to add the loss set epochs or not (default is True and should NOT be changed)
+
+    returns
+    -------
+    None, but creates a nnBehavior_{phase}.mat file with the trainEpochs, testEpochs, and lossPredSetEpochs
+    """
+
+    # create globals variables
+
+    if not isPredLoss:
+        raise ValueError(
+            "isPredLoss must be True, as this function is used to select the train and test epochs for the prediction of the loss"
+        )
+
+    global SetData, IsMultiSessions
+    global timeToShow, keptSession, sessionStart, sessionStop, ep
+    from importData import epochs_management as ep
+
+    # TODO: add a way to select training set in the middle of the dataset
+    filename = os.path.join(folder, "nnBehavior.mat")
+    if not os.path.exists(filename):
+        raise ValueError("this file does not exist :" + folder + "nnBehavior.mat")
+    # As we will be selecting specific epochs for training and testing different phases
+    # we will need to copy the behavior data to a new file called nnBehavior_{phase}.mat
+    if phase is not None:
+        filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
+        if not os.path.exists(filename):
+            print("weird to copy that file now")
+            assert tables.is_hdf5_file(folder + "nnBehavior.mat")
+            import shutil
+
+            shutil.copyfile(
+                folder + "nnBehavior.mat",
+                folder + "nnBehavior_" + phase + ".mat",
+                follow_symlinks=True,
+            )
+    with tables.open_file(filename, "a") as f:
+        children = [c.name for c in f.list_nodes("/behavior")]
+        if (
+            not overWrite
+            and "trainEpochs" in children
+            and "testEpochs"
+            and ("lossPredSetEpochs" in children if isPredLoss else True)
+        ):
+            print("epochs already created")
+            return
+
+        # Get info from the file
+        speedMask = f.root.behavior.speedMask[:]
+        positions = f.root.behavior.positions
+        positions = np.swapaxes(positions[:, :], 1, 0)
+        speeds = f.root.behavior.speed
+        positionTime = f.root.behavior.position_time
+        positionTime = np.swapaxes(positionTime[:, :], 1, 0)
+        speeds = np.swapaxes(speeds[:, :], 1, 0)
+        if speeds.shape[0] == positionTime.shape[0] - 1:
+            speeds = np.append(speeds, speeds[-1]).reshape(
+                positionTime.shape[0], speeds.shape[1]
+            )
+        # We extract session names:
+        sessionNames = [
+            "".join([chr(c) for c in l[0][:, 0]])
+            for l in f.root.behavior.SessionNames[:, 0]
+        ]
+        if sessionNames[0] != "Recording":
+            IsMultiSessions = True
+            sessionStart = f.root.behavior.SessionStart[:, :][:, 0]
+            sessionStop = f.root.behavior.SessionStop[:, :][:, 0]
+        else:
+            IsMultiSessions = False
+
+        sessionValue = np.zeros(speedMask.shape[0])
+        if IsMultiSessions:
+            for k in range(len(sessionNames)):
+                sessionValue[
+                    ep.inEpochs(positionTime[:, 0], [sessionStart[k], sessionStop[k]])
+                ] = k
+
+        # Select the representative behavior without sleeps to show
+        epochToShow = []
+        if IsMultiSessions:
+            sleep_list = [
+                re.search("sleep", sessionNames[x], re.IGNORECASE)
+                for x in range(len(sessionNames))
+            ]
+            id_sleep = [x for x in range(len(sleep_list)) if sleep_list[x] is not None]
+            if id_sleep:
+                all_id = set(range(len(sessionNames)))
+                id_toshow = list(all_id.difference(id_sleep))  # all except sleeps
+                if phase is not None:
+                    if phase == "pre":
+                        # Look for Pre sessions or Hab sessions
+                        pattern = "(pre|hab)"
+                    elif phase == "preNoHab":
+                        pattern = "pre"
+                    elif phase == "hab":
+                        pattern = "hab"
+                    elif phase == "cond":
+                        pattern = "cond"
+                    elif phase == "post":
+                        pattern = "(post|extinction|extinct|ext)"
+                    elif phase == "postNoExtinction":
+                        pattern = "post"
+                    elif phase == "extinction":
+                        pattern = "(extinction|extinct|ext)"
+                    # add sleep phases
+                    elif phase.lower() == "presleep":
+                        pattern = "presleep"
+                    elif phase.lower() == "postsleep":
+                        pattern = "postsleep"
+                    else:
+                        raise ValueError(
+                            "phase must be one of pre, hab, cond, extinction, post or (pre|post)sleep"
+                        )
+
+                    if "sleep" in phase.lower():
+                        # if we want to select sleep epochs, we need to add them to the id_toshow
+                        id_toshow.extend(id_sleep)
+                    # create preselection list
+                    pre_list = [
+                        re.search(pattern, sessionNames[x], re.IGNORECASE)
+                        for x in range(len(sessionNames))
+                    ]
+                    id_pre = [
+                        x for x in range(len(pre_list)) if pre_list[x] is not None
+                    ]
+                    id_toselectPRE = list(
+                        set(id_toshow) & set(id_pre)
+                    )  # all preselected conditions (except sleep)
+
+                for id in id_toshow:
+                    epochToShow.extend([sessionStart[id], sessionStop[id]])
+                if phase is not None:
+                    epochToSelectPRE = []
+                    for id in id_toselectPRE:
+                        epochToSelectPRE.extend(
+                            [sessionStart[id], sessionStop[id]]
+                        )  # the only epochs we want to select by default
+        else:
+            epochToShow.extend(
+                [positionTime[0, 0], positionTime[-1, 0]]
+            )  # if no sleeps, or session names, or hab take everything
+
+        maskToShow = ep.inEpochsMask(positionTime[:, 0], epochToShow)
+        maskToShowPRE = maskToShow.copy()  # copy the mask to show for pre selection
+        behToShow = positions[maskToShow, :]
+        timeToShow = positionTime[maskToShow, 0]
+        speedsToShow = speeds[maskToShow, :]
+        speedMaskToShow = speedMask[maskToShow]
+        speedMaskToShowPRE = speedMaskToShow
+        timeToShowPRE = timeToShow
+        speedsToShowPRE = speedsToShow
+        xmin, xmax = timeToShow[0], timeToShow[-1]
+        sessionValue_toshow = sessionValue[maskToShow]
+
+        if phase is not None:
+            maskToShowPRE = ep.inEpochsMask(positionTime[:, 0], epochToSelectPRE)
+            timeToShowPRE = positionTime[maskToShowPRE, 0]
+            speedsToShowPRE = speeds[maskToShowPRE]
+            speedMaskToShowPRE = speedMask[maskToShowPRE]
+            xmin, xmax = timeToShowPRE[0], timeToShowPRE[-1]
+
+        try:
+            idx_cut = np.where(timeToShow == timeToShowPRE[0])[0][0]
+        except IndexError:
+            session_pretty = "\n".join(f"• {item}" for item in sessionNames)
+            raise IndexError(
+                f"""{phase} is not available for mouse in {folder}.
+                Please check the phase name/session epochs.
+                Available Sessions are:
+                {session_pretty}
+                """
+            )
+
+        ### Get times of show
+        if IsMultiSessions:
+            if id_sleep[0] == 0:  # if sleep goes first get the end of it
+                ids = np.where(sessionValue == id_sleep[0])[0]
+                st = positionTime[ids[-1] + 1]
+                for i in id_sleep[1:]:
+                    ids = np.where(sessionValue == i)[0]
+                    st = np.append(st, (positionTime[ids[0]], positionTime[ids[-1]]))
+                if st[-1] != positionTime[-1]:
+                    st = np.append(st, positionTime[-1])
+                else:
+                    st = st[:-1]
+            else:  # if it starts with maze
+                st = positionTime[0]
+                for i in id_sleep:
+                    ids = np.where(sessionValue == i)[0]
+                    st = np.append(st, (positionTime[ids[0]], positionTime[ids[-1]]))
+                if st[-1] != positionTime[-1]:
+                    st = np.append(st, positionTime[-1])
+                else:
+                    st = st[:-1]
+            assert st.shape[0] % 2 == 0
+            showtimes = tuple(zip(st[::2], st[1::2]))
+
+        # Default train and test sets
+        sizeTest = (
+            timeToShow.shape[0] // 10
+            if phase == "all"
+            else timeToShowPRE.shape[0] // 10
+        )
+        testSetId = (
+            timeToShow.shape[0] - timeToShow.shape[0] // 10
+            if phase == "all"
+            else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 10
+        )
+
+        useLossPredTrainSet = False  # whether to use a loss prediction training set
+        lossPredSetId = 0  # the loss prediction set id
+        sizelossPredSet = (
+            timeToShow.shape[0] // 10
+            if phase == "all"
+            else timeToShowPRE.shape[0] // 10
+        )
+
+        if find_best_sets:
+            from tqdm import tqdm
+
+            print("Evaluating the entropy of each possible test set")
+            entropiesPositions = []
+            entropiesSpeeds = []
+            nb_points = []
+            epsilon = 10 ** (-9)
+            # TODO: This iterates over the full behavior, which is not ideal (we would prefere to iterate over speedMasked behavior)
+            for idx_testSet in tqdm(
+                np.arange(
+                    0,
+                    stop=timeToShowPRE.shape[0] - sizeTest,
+                    step=sizeTest,
+                )
+            ):
+                # we want to select only the idx that are in the speedMask
+                idx = np.arange(idx_testSet, idx_testSet + sizeTest)
+                idx_valid = np.where(speedMaskToShowPRE[idx])[0]
+                # The environmental variable are discretized by equally space bins
+                # such that there is 45*...*45 bins per dimension
+                # we then fit over the test set a kernel estimation of the probability distribution
+                # and evaluate it over the bins
+                _, probaFeatures = kdenD(behToShow[idx_valid, :], bandwidth=1.0)
+                # We then compute the entropy of the obtained distribution:
+                entropiesPositions += [
+                    -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                ]
+                _, probaFeatures = kdenD(speedsToShow[idx_valid, :], bandwidth=1.0)
+                # We then compute the entropy of the obtained distribution:
+                entropiesSpeeds += [
+                    -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                ]
+                nb_points += [idx_valid.shape[0]]
+            totEntropy = (
+                np.array(entropiesSpeeds)
+                + np.array(entropiesPositions)
+                - np.exp(-1 / 80 * np.array(nb_points))
+            )  # penalize small sets
+            bestTestSet = np.argmax(totEntropy)
+            testSetId = bestTestSet * sizeTest + idx_cut
+            print(
+                "Found best test set at index",
+                bestTestSet,
+                "with real (speedMasked) size",
+                nb_points[bestTestSet],
+            )
+            if isPredLoss:
+                useLossPredTrainSet = True
+                bestPLSet = np.argsort(totEntropy)[-2]
+                print(
+                    "Found best loss pred set at index",
+                    bestPLSet,
+                    "with real (speedMasked) size",
+                    nb_points[bestPLSet],
+                )
+                lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
+            else:
+                bestPLSet = 0
+                lossPredSetId = (
+                    0 if testSetId != 0 else 3 * bestTestSet * sizeTest + idx_cut
+                )
+        else:
+            bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
+            bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
+            lossPredSetId = 0
+
+        # TODO: implement this best test set.
+        SetData = {
+            "sizeTestSet": sizeTest,
+            "testSetId": testSetId,
+            "bestTestSet": bestTestSet,
+            "useLossPredTrainSet": useLossPredTrainSet,
+            "lossPredSetId": lossPredSetId,
+            "sizeLossPredSet": sizelossPredSet,
+            "bestPLSet": bestPLSet,
+        }
+        keptSession = np.ones(len(sessionNames))  # a mask for the session
+        if IsMultiSessions:
+            keptSession[id_sleep] = 0
+            if phase is not None:
+                keptSession = np.zeros(len(sessionNames))
+                keptSession[id_toselectPRE] = 1
+
+        if force:
+            if IsMultiSessions:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow,
+                    SetData,
+                    keptSession,
+                    starts=sessionStart,
+                    stops=sessionStop,
+                )
+            else:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow, SetData, keptSession
+                )
+        else:
+            # Display the figure
+            #### Next we provide a tool to manually change the bestTest set position
+            # as well as its size:
+
+            # Cut the cmap to avoid black colors
+            min_val, max_val = 0.3, 1.0
+            n = 20
+            cmap = plt.get_cmap("nipy_spectral")
+            colors = cmap(np.linspace(min_val, max_val, n))
+            cmSessValue = mplt.colors.LinearSegmentedColormap.from_list(
+                "mycmap", colors
+            )
+            colorSess = cmSessValue(np.arange(len(sessionNames)) / (len(sessionNames)))
+            fig = plt.figure()
+            gs = plt.GridSpec(
+                positions.shape[1] + 5, max(len(colorSess), 2), figure=fig
+            )
+
+            if IsMultiSessions:
+                ax = [
+                    fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
+                ]  # ax for feature display
+                ax[0].get_shared_x_axes().join(ax[0], ax[1])
+                # ax = [brokenaxes(xlims=showtimes, subplot_spec=gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
+            else:
+                ax = [
+                    fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
+                ]  # ax for feature display
+                ax[0].get_shared_x_axes().join(ax[0], ax[1])
+
+            ax += [
+                fig.add_subplot(gs[-5, id]) for id in range(len(sessionNames))
+            ]  # ax for session names
+            ax += [
+                fig.add_subplot(
+                    gs[-4, max(len(colorSess) - 3, 1) : max(len(colorSess), 2)]
+                )
+            ]  # loss pred ON/OFF button
+            ax += [
+                fig.add_subplot(
+                    gs[-4, 0 : max(len(colorSess) - 4, 1)]
+                ),  # starting index of losspred
+                fig.add_subplot(
+                    gs[-3, 0 : max(len(colorSess) - 4, 1)]
+                ),  # size of losspred
+            ]  # loss pred training set slider
+            ax += [
+                fig.add_subplot(gs[-2, :]),  # test set starting index
+                fig.add_subplot(gs[-1, : max(len(colorSess) - 4, 1)]),  # test set size
+            ]  # test set.
+            ax += [
+                fig.add_subplot(
+                    gs[-3, max(len(colorSess) - 3, 1) : max(len(colorSess), 2)]
+                )
+            ]  # buttons for manual range selection (LossPred)
+            ax += [
+                fig.add_subplot(
+                    gs[-1, max(len(colorSess) - 3, 1) : max(len(colorSess), 2)]
+                )
+            ]  # buttons for manual range selection (Test set)
+
+            if IsMultiSessions:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow,
+                    SetData,
+                    keptSession,
+                    starts=sessionStart,
+                    stops=sessionStop,
+                )
+            else:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow, SetData, keptSession
+                )
+
+            ls = []
+            for dim in range(positions.shape[1]):
+                l1 = ax[dim].scatter(
+                    timeToShow[
+                        ep.inEpochs(timeToShow, trainEpoch)[0]
+                    ],  # inEpochs returns a tuple
+                    behToShow[ep.inEpochs(timeToShow, trainEpoch)[0], dim],
+                    c="black",
+                    s=0.5,
+                )
+                l2 = ax[dim].scatter(
+                    timeToShow[ep.inEpochs(timeToShow, testEpochs)[0]],
+                    behToShow[ep.inEpochs(timeToShow, testEpochs)[0], dim],
+                    c="red",
+                    s=0.5,
+                )
+                if SetData["useLossPredTrainSet"]:
+                    l3 = ax[dim].scatter(
+                        timeToShow[ep.inEpochs(timeToShow, lossPredSetEpochs)[0]],
+                        behToShow[ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim],
+                        c="orange",
+                        s=0.5,
+                    )
+                else:
+                    l3 = ax[dim].scatter(
+                        timeToShow[0], behToShow[0, dim], c="orange", s=0.5
+                    )
+                ax[dim].set_xlim(xmin, xmax)
+                ax[dim].get_yaxis().set_visible(False)
+                # change xlabel font size
+                ax[dim].tick_params(axis="both", which="both", labelsize=10)
+                if dim == 0:
+                    ax[dim].get_xaxis().set_visible(False)
+                ls.append([l1, l2, l3])
+
+                # display the sessions positions at the bottom:
+                if IsMultiSessions:
+                    for idk, k in enumerate(id_toshow):
+                        if len(np.where(np.equal(sessionValue_toshow, k))[0]) > 0:
+                            ax[dim].hlines(
+                                np.min(
+                                    behToShow[
+                                        np.logical_not(np.isnan(behToShow[:, dim])), dim
+                                    ]
+                                )
+                                - 0.5
+                                * np.std(
+                                    behToShow[
+                                        np.logical_not(np.isnan(behToShow[:, dim])), dim
+                                    ]
+                                ),
+                                xmin=timeToShow[
+                                    np.min(np.where(np.equal(sessionValue_toshow, k)))
+                                ],
+                                xmax=timeToShow[
+                                    np.max(np.where(np.equal(sessionValue_toshow, k)))
+                                ],
+                                color=colorSess[idk],
+                                linewidth=3.0,
+                            )
+
+            # TODO: add histograms here...
+            sliderTest = plt.Slider(
+                ax[-4],
+                "test starting index",
+                0,
+                behToShow.shape[0],
+                # - SetData["sizeTestSet"],
+                valinit=SetData["testSetId"],
+                valstep=1,
+            )
+
+            sliderTest.label.set_size(10)
+            sliderTest.valtext.set_fontsize(13)
+            sliderTest.valtext.set_position((0.5, -0.1))
+
+            sliderTestSize = plt.Slider(
+                ax[-3],
+                "test size",
+                0,
+                behToShow.shape[0],
+                valinit=SetData["sizeTestSet"],
+                valstep=1,
+            )
+            sliderTestSize.label.set_size(10)
+            sliderTestSize.valtext.set_fontsize(13)
+            sliderTestSize.valtext.set_position((0.5, -0.1))
+            if SetData["useLossPredTrainSet"]:
+                buttLossPred = plt.Button(ax[-7], "lossPred", color="orange")
+            else:
+                buttLossPred = plt.Button(ax[-7], "lossPred", color="white")
+            buttLossPred.label.set_size(11)
+
+            sliderLossPredTrain = plt.Slider(
+                ax[-6],
+                "loss network training\nset starting index",
+                0,
+                behToShow.shape[0],
+                valinit=SetData["lossPredSetId"],
+                valstep=1,
+            )
+            sliderLossPredTrain.label.set_size(10)
+            sliderLossPredTrain.valtext.set_fontsize(13)
+            sliderLossPredTrain.valtext.set_position((0.5, -0.1))
+            sliderLossPredTrainSize = plt.Slider(
+                ax[-5],
+                "loss network\ntraining set size",
+                0,
+                behToShow.shape[0],
+                valinit=SetData["sizeTestSet"],
+                valstep=1,
+            )
+            sliderLossPredTrainSize.label.set_size(10)
+            sliderLossPredTrainSize.valtext.set_fontsize(13)
+            sliderLossPredTrainSize.valtext.set_position((0.5, -0.1))
+
+            ButtlPManual = mplt.widgets.Button(
+                ax[-2],
+                "Choose lossPred\nset manually",
+                color="sandybrown",
+                hovercolor="peachpuff",
+            )
+            ButtlPManual.label.set_size(11)
+            ButtTestManual = mplt.widgets.Button(
+                ax[-1],
+                "Choose test\nset manually",
+                color="lightcoral",
+                hovercolor="mistyrose",
+            )
+            ButtTestManual.label.set_size(11)
+            axesInst = fig.add_axes([0.45, 0.89, 0.1, 0.05])
+            buttInstructions = mplt.widgets.Button(
+                axesInst, "Instructions", color="lightgrey", hovercolor="lightyellow"
+            )
+
+            # Next we add buttons to select the sessions we would like to keep:
+            butts = [
+                plt.Button(
+                    ax[positions.shape[1] + k],
+                    sessionNames[k],
+                    color=colorSess[k]
+                    if keptSession[k] == 1
+                    else [0, 0, 0, 0],  # we color only the pre-selected sessions
+                )
+                for k in range(len(colorSess))
+            ]
+            # Modify the text properties of each button
+            for butt in butts:
+                butt.label.set_fontsize(10)  # Reduce font size (adjust as needed)
+                butt.label.set_rotation(-90)  # Rotate 90 degrees
+                butt.label.set_verticalalignment("center")  # Center the rotated text
+                butt.label.set_horizontalalignment("center")  # Center the rotated text
+
+            if IsMultiSessions:
+                for id in id_sleep:
+                    ax[positions.shape[1] + id].set_axis_off()
+
+            def get_current_test_train_epochs():
+                return globals().get("testEpochs", None), globals().get(
+                    "trainEpoch", None
+                )
+
+            def can_click_button(id):
+                """
+                Allow to click on the button only if the session doesn't contain all the test set or all the train set or all the lossPred set.
+                """
+                # Get fresh testEpochs from current slider state
+                try:
+                    testEpochs, trainEpoch = get_current_test_train_epochs()
+                    if testEpochs is None or trainEpoch is None:
+                        return True
+
+                except Exception as e:
+                    print(f"Error getting testEpochs: {e}")
+                    return True
+
+                episodes = [testEpochs, trainEpoch]
+                session_names = ["test", "train"]
+
+                if SetData["useLossPredTrainSet"]:
+                    episodes.append(lossPredSetEpochs)
+                    session_names.append("lossPred")
+                if IsMultiSessions:
+                    if np.sum(keptSession) == 1 and keptSession[id] == 1:
+                        # If only one session is kept, allow clicking
+                        return False
+                    for i, epi in enumerate(episodes):
+                        # Check if the session contains all the test set or all the train set or all the lossPred set
+                        if (
+                            (
+                                keptSession[id] == 1
+                                and ep.intersect_with_session(
+                                    epi,
+                                    [keptSession[id]],
+                                    starts=[sessionStart[id]],
+                                    stops=[sessionStop[id]],
+                                ).sum()
+                                > 0
+                                and ep.intersect_with_session(
+                                    epi,
+                                    [keptSession[id]],
+                                    starts=[sessionStart[id]],
+                                    stops=[sessionStop[id]],
+                                ).sum()
+                                == ep.intersect_with_session(
+                                    epi,
+                                    keptSession,
+                                    starts=sessionStart,
+                                    stops=sessionStop,
+                                ).sum()
+                            )  # if the session is kept and intersects with the epochs
+                            and (
+                                (
+                                    sessionStart[id]
+                                    <= np.min(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and sessionStop[id]
+                                    >= np.max(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and keptSession[id + 1] == 0
+                                    and keptSession[id - 1] == 1
+                                )
+                                or (
+                                    sessionStart[id]
+                                    <= np.min(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and sessionStop[id]
+                                    >= np.max(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and keptSession[id + 1] == 0
+                                    and keptSession[id - 1] == 0
+                                )
+                                or (
+                                    sessionStart[id]
+                                    <= np.min(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and sessionStop[id]
+                                    >= np.max(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                    and keptSession[id + 1] == 1
+                                    and keptSession[id - 1] == 0
+                                )
+                                or (
+                                    np.min(timeToShow[ep.inEpochs(timeToShow, epi)[0]])
+                                    <= xmin
+                                    and sessionStop[id]
+                                    >= np.max(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                )
+                                or (
+                                    np.max(timeToShow[ep.inEpochs(timeToShow, epi)[0]])
+                                    >= xmax
+                                    and sessionStart[id]
+                                    <= np.min(
+                                        timeToShow[ep.inEpochs(timeToShow, epi)[0]]
+                                    )
+                                )
+                            )
+                        ):
+                            return False
+
+                return True
+
+            def update_button_states():
+                """Check all buttons and update their appearance based on current conditions"""
+                if not IsMultiSessions:
+                    return
+
+                for button_id in range(len(butts)):
+                    if button_id < len(keptSession) and keptSession[button_id] == 1:
+                        if not can_click_button(button_id):
+                            # Make button appear disabled/grayed out
+                            butts[button_id].color = [0.5, 0.5, 0.5, 0.5]  # Gray
+                        else:
+                            # Restore normal appearance
+                            butts[button_id].color = colorSess[button_id]
+                    else:
+                        # If the session is not kept, make it transparent
+                        butts[button_id].color = [0, 0, 0, 0]
+
+            def update(val):
+                global trainEpoch, testEpochs, lossPredSetEpochs
+                global xmin, xmax
+                SetData["testSetId"] = sliderTest.val
+                SetData["sizeTestSet"] = sliderTestSize.val
+                SetData["lossPredSetId"] = sliderLossPredTrain.val
+                SetData["sizeLossPredSet"] = sliderLossPredTrainSize.val
+
+                if IsMultiSessions:
+                    trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                        timeToShow,
+                        SetData,
+                        keptSession,
+                        starts=sessionStart,
+                        stops=sessionStop,
+                    )
+                else:
+                    trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                        timeToShow, SetData, keptSession
+                    )
+
+                for dim in range(len(ls)):
+                    l1, l2, l3 = ls[dim]
+                    if isinstance(l1, list):
+                        for iaxis in range(len(l1)):
+                            l1[iaxis].set_offsets(
+                                np.transpose(
+                                    np.stack(
+                                        [
+                                            timeToShow[
+                                                ep.inEpochs(timeToShow, trainEpoch)[0]
+                                            ],
+                                            behToShow[
+                                                ep.inEpochs(timeToShow, trainEpoch)[0],
+                                                dim,
+                                            ],
+                                        ]
+                                    )
+                                )
+                            )
+                            l2[iaxis].set_offsets(
+                                np.transpose(
+                                    np.stack(
+                                        [
+                                            timeToShow[
+                                                ep.inEpochs(timeToShow, testEpochs)[0]
+                                            ],
+                                            behToShow[
+                                                ep.inEpochs(timeToShow, testEpochs)[0],
+                                                dim,
+                                            ],
+                                        ]
+                                    )
+                                )
+                            )
+                            if SetData["useLossPredTrainSet"]:
+                                try:
+                                    ls[dim][2][iaxis].remove()
+                                except:
+                                    pass
+                            else:
+                                try:
+                                    ls[dim][2][iaxis].remove()
+                                except:
+                                    pass
+                        if SetData["useLossPredTrainSet"]:
+                            ls[dim][2] = ax[dim].scatter(
+                                timeToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0]
+                                ],
+                                behToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim
+                                ],
+                                c="orange",
+                                s=0.5,
+                            )
+                    else:
+                        l1.set_offsets(
+                            np.transpose(
+                                np.stack(
+                                    [
+                                        timeToShow[
+                                            ep.inEpochs(timeToShow, trainEpoch)[0]
+                                        ],
+                                        behToShow[
+                                            ep.inEpochs(timeToShow, trainEpoch)[0], dim
+                                        ],
+                                    ]
+                                )
+                            )
+                        )
+                        l2.set_offsets(
+                            np.transpose(
+                                np.stack(
+                                    [
+                                        timeToShow[
+                                            ep.inEpochs(timeToShow, testEpochs)[0]
+                                        ],
+                                        behToShow[
+                                            ep.inEpochs(timeToShow, testEpochs)[0], dim
+                                        ],
+                                    ]
+                                )
+                            )
+                        )
+                        if SetData["useLossPredTrainSet"]:
+                            try:
+                                ls[dim][2].remove()
+                            except:
+                                pass
+                            ls[dim][2] = ax[dim].scatter(
+                                timeToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0]
+                                ],
+                                behToShow[
+                                    ep.inEpochs(timeToShow, lossPredSetEpochs)[0], dim
+                                ],
+                                c="orange",
+                                s=0.5,
+                            )
+                        else:
+                            try:
+                                l3.remove()
+                            except:
+                                pass
+
+                    # modify the xlim of the axes according to the changed epochs
+                    xmin, xmax = (
+                        min(
+                            np.min(timeToShow[ep.inEpochs(timeToShow, trainEpoch)[0]]),
+                            np.min(timeToShow[ep.inEpochs(timeToShow, testEpochs)[0]]),
+                        ),
+                        max(
+                            np.max(timeToShow[ep.inEpochs(timeToShow, trainEpoch)[0]]),
+                            np.max(timeToShow[ep.inEpochs(timeToShow, testEpochs)[0]]),
+                        ),
+                    )
+                    ax[dim].set_xlim(xmin, xmax)
+                fig.canvas.draw_idle()
+
+            def buttUpdate(id):
+                """
+                Create a function to update the button state when clicked.
+                """
+
+                def buttUpdate_inner(val):
+                    if not can_click_button(id):
+                        return
+                    if keptSession[id]:
+                        butts[id].color = [0, 0, 0, 0]
+                        keptSession[id] = 0
+                    else:
+                        keptSession[id] = 1
+                        butts[id].color = colorSess[id]
+
+                    update_with_buttons(0)
+
+                return buttUpdate_inner
+
+            def update_with_buttons(val):
+                """
+                Update the button states and the figure when a button is clicked.
+                """
+                update(val)
+                update_button_states()
+
+            # Finally, Connect the sliders and buttons to the update function
+
+            sliderTest.on_changed(update_with_buttons)
+            sliderTestSize.on_changed(update_with_buttons)
+            sliderLossPredTrain.on_changed(update_with_buttons)
+            sliderLossPredTrainSize.on_changed(update_with_buttons)
+
+            [b.on_clicked(buttUpdate(id)) for id, b in enumerate(butts)]
+
+            update_button_states()
+
+            def buttUpdateLossPred(val):
+                if SetData["useLossPredTrainSet"]:
+                    buttLossPred.color = [0, 0, 0, 0]
+                    SetData["useLossPredTrainSet"] = False
+                else:
+                    SetData["useLossPredTrainSet"] = True
+                    buttLossPred.color = "orange"
+                update(0)
+                return SetData["useLossPredTrainSet"]
+
+            buttLossPred.on_clicked(buttUpdateLossPred)
+
+            class rangeButton:
+                nameDict = {"test": "test", "lossPred": "predicted loss"}
+
+                def __init__(self, typeButt="test", relevantSliders=None):
+                    if typeButt == "test" or typeButt == "lossPred":
+                        self.typeButt = typeButt
+                    if relevantSliders is None:
+                        raise ValueError("relevantSliders must be a list of 2 sliders")
+                    else:
+                        self.relevantSliders = relevantSliders
+
+                def __call__(self, val):
+                    self.win = Toplevel()
+                    self.win.title(
+                        f"Manual setting of the {self.nameDict[self.typeButt]} set"
+                    )
+                    self.win.geometry("400x200")
+
+                    textLabel = self.construct_label()
+                    self.rangeLabel = Label(self.win, text=textLabel)
+                    self.rangeLabel.place(relx=0.5, y=30, anchor="center")
+
+                    self.rangeEntry = Entry(self.win, width=18, bd=5)
+                    defaultValues = self.update_def_values(SetData)
+                    self.rangeEntry.insert(0, f"{defaultValues[0]}-{defaultValues[1]}")
+                    self.rangeEntry.place(relx=0.5, y=90, anchor="center")
+
+                    self.okButton = Button(self.win, width=5, height=1, text="Ok")
+                    self.okButton.bind(
+                        "<Button-1>", lambda event: self.set_sliders_and_close()
+                    )
+                    self.okButton.place(relx=0.5, y=175, anchor="center")
+
+                    self.win.mainloop()
+
+                def construct_label(self):
+                    text = f"Enter the range of the {self.nameDict[self.typeButt]} set in sec (e.g. 0-1000)"
+                    return text
+
+                def update_def_values(self, SetData):
+                    nameId = f"{self.typeButt}SetId"
+                    nameSize = f"size{self.typeButt[0].upper()}{self.typeButt[1:]}Set"
+                    firstTS = round(timeToShow[SetData[nameId]], 2)
+                    lastId = round(
+                        timeToShow[SetData[nameId] + SetData[nameSize] - 1], 2
+                    )
+                    return [firstTS, lastId]
+
+                def convert_entry_to_id(self):
+                    strEntry = self.rangeEntry.get()
+                    if len(strEntry) > 0:
+                        try:
+                            parsedRange = [
+                                float(num) for num in list(strEntry.split("-"))
+                            ]
+                            convertedRange = [
+                                self.closestId(timeToShow, num) for num in parsedRange
+                            ]
+                            startId = convertedRange[0]
+                            sizeSetinId = convertedRange[1] - convertedRange[0]
+
+                            return startId, sizeSetinId
+                        except ValueError:
+                            self.okButton.configure(bg="red")
+                            raise ValueError(
+                                "Please enter a valid range in the format 'start-end'"
+                            )
+
+                def set_sliders_and_close(self):
+                    valuesForSlider = self.convert_entry_to_id()
+                    for ivalue, slider in enumerate(self.relevantSliders):
+                        slider.set_val(valuesForSlider[ivalue])
+                    self.win.destroy()
+
+                def closestId(self, arr, valToFind):
+                    return (np.abs(arr - valToFind)).argmin()
+
+            ButtlPManual.on_clicked(
+                rangeButton(
+                    typeButt="lossPred",
+                    relevantSliders=[sliderLossPredTrain, sliderLossPredTrainSize],
+                )
+            )
+            ButtTestManual.on_clicked(
+                rangeButton(
+                    typeButt="test", relevantSliders=[sliderTest, sliderTestSize]
+                )
+            )
+
+            def buttInstructionsShow(val):
+                intructions_str = (
+                    "Black will become train dataset, red will become test dataset, "
+                    + "and orange (if lossPred button is pressed) will become a set "
+                    + "to fine-tune predicted loss.\n \n By pressing button with session names "
+                    + "you can choose which sessions to include in the analysis. "
+                    + "Either use sliders to regulate size and position of test and fine-tuning sets.\n \n"
+                    + "Or click on manual setter for test or fine-tuning sets \n \n"
+                    + "USE ZOOM TOOL OF THE FIGURE WINDOW TO AVOID GAPS IF YOU HAVE ANY \n \n"
+                    + "Simply close the window when you are satisfied with your choice."
+                )
+
+                win = Toplevel()
+                win.title("Instructions")
+                instLabel = Label(win, text=intructions_str, font=("Helvetica", 16))
+                instLabel.pack()
+                win.mainloop()
+
+            buttInstructions.on_clicked(buttInstructionsShow)
+
+            suptitle_str = (
+                "Please choose train (black) and test (red) sets. You can add a set (orange) to "
+                "fine-tune predicted loss (by pressing lossPred button)"
+            )
+            plt.suptitle(suptitle_str, fontsize=22)
+            plt.text(
+                x=0.93,
+                y=0.82,
+                s="X",
+                fontsize=36,
+                ha="center",
+                transform=fig.transFigure,
+            )
+            plt.text(
+                x=0.93,
+                y=0.71,
+                s="Y",
+                fontsize=36,
+                ha="center",
+                transform=fig.transFigure,
+            )
+
+            if mplt.get_backend() == "QtAgg":
+                plt.get_current_fig_manager().window.showMaximized()
+            elif mplt.get_backend() == "TkAgg":
+                plt.get_current_fig_manager().resize(
+                    *plt.get_current_fig_manager().window.maxsize()
+                )
+                # plt.get_current_fig_manager().window.state('zoomed') # on windows
+            plt.show(block=not force)
+            fig.savefig(os.path.join(folder, f"epochs_{phase}.png"))
+
+            if IsMultiSessions:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow,
+                    SetData,
+                    keptSession,
+                    starts=sessionStart,
+                    stops=sessionStop,
+                )
+            else:
+                trainEpoch, testEpochs, lossPredSetEpochs = ep.get_epochs(
+                    timeToShow, SetData, keptSession
+                )
+
+        if "testEpochs" in children:
+            f.remove_node("/behavior", "testEpochs")
+        f.create_array("/behavior", "testEpochs", testEpochs)
+        if "trainEpochs" in children:
+            f.remove_node("/behavior", "trainEpochs")
+        f.create_array("/behavior", "trainEpochs", trainEpoch)
+
+        if "keptSession" in children:
+            f.remove_node("/behavior", "keptSession")
+        f.create_array("/behavior", "keptSession", keptSession)
+
+        if "lossPredSetEpochs" in children:
+            f.remove_node("/behavior", "lossPredSetEpochs")
+        if SetData["useLossPredTrainSet"]:
+            f.create_array("/behavior", "lossPredSetEpochs", lossPredSetEpochs)
+        else:
+            f.create_array("/behavior", "lossPredSetEpochs", [])
+
+        f.flush()  # effectively write down the modification we just made
+        f.close()
+
+        if not force:
+            fig, ax = plt.subplots()
+            trainMask = ep.inEpochsMask(positionTime, trainEpoch)[:, 0]
+            testMask = ep.inEpochsMask(positionTime, testEpochs)[:, 0]
+            ax.plot(
+                positionTime[trainMask],
+                positions[trainMask, 0],
+                "--.",
+                c="black",
+                markersize=6,
+            )
+            ax.plot(
+                positionTime[testMask],
+                positions[testMask, 0],
+                "--.",
+                c="red",
+                markersize=6,
+            )
+            ax.set_title("Linearized coordinate of the animal (1st dimension plotted)")
+            if SetData["useLossPredTrainSet"]:
+                lossPredMask = ep.inEpochsMask(positionTime, lossPredSetEpochs)[:, 0]
+                ax.plot(
+                    positionTime[lossPredMask],
+                    positions[lossPredMask, 0],
+                    "--.",
+                    markersize=6,
+                    c="orange",
+                )
+            plt.show(block=True)
