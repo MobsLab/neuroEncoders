@@ -14,9 +14,9 @@ from warnings import warn
 from numpy import max as np_max
 
 from importData.epochs_management import inEpochsMask
-from utils.global_classes import DataHelper as DataHelperClass
 
 # Load custom code
+from utils.global_classes import DataHelper as DataHelperClass
 from utils.global_classes import Params, Project, save_project_to_pickle
 
 # Meta parameters
