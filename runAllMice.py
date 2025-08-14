@@ -9,7 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 import psutil
 
-from utils.MOBS_Functions import path_for_experiments_df
+from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [2.16]
 win_values = [0.036, 0.108, 0.18, 0.252, 0.504, 1.08, 2.16]
