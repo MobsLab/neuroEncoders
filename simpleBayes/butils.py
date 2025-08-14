@@ -44,8 +44,15 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
     """Build nD kernel density estimate (KDE).
     feature should be an array of shape (N,n) where n is the dimension of
     the env variable N number of elements.
+
+    Args:
+        feature (np.ndarray): The input data of shape (N, n).
+        bandwidth (float): The bandwidth for the kernel density estimate.
+        nbins (list, optional): Number of bins for each dimension. Defaults to None.
+        **kwargs: Additional keyword arguments, such as 'kernel' and 'edges'.
+        kernel : {'gaussian', 'tophat', 'epanechnikov', 'exponential', 'linear',                  'cosine'}, default='gaussian'. The kernel to use.
     """
-    if nbins == None:
+    if nbins is None:
         nbins = [45 for j in range(feature.shape[1])]
     feature = feature.reshape(
         [feature.shape[0], -1]
