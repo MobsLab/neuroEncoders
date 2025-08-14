@@ -123,3 +123,20 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.isort]
 case-sensitive = true
+
+# Update: Treat current project as a python package.
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = [
+    "decoder",
+    "importData",
+    "simpleBayes",
+    "fullEncoder",
+    "transformData",
+    "resultAnalysis",
+    "openEphysExport",
+    "simpleBayes",
+    "utils"
+]
