@@ -11,12 +11,13 @@ from typing import Dict, List, Literal, Optional, Tuple
 import dill as pickle
 import numpy as np
 import pykeops as pykeops
-from importData import import_clusters
-from importData.epochs_management import inEpochs, inEpochsMask
 
 # Pykeops
 from pykeops.numpy import LazyTensor as LazyTensor_np
 from tqdm import tqdm
+
+from neuroencoders.importData import import_clusters
+from neuroencoders.importData.epochs_management import inEpochs, inEpochsMask
 
 # Load custom code
 from neuroencoders.simpleBayes import butils

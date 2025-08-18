@@ -1062,8 +1062,10 @@ class Mouse_Results(Params, PaperFigures):
 
 
         """
-        from fullEncoder.an_network import LSTMandSpikeNetwork as NNTrainer
-        from simpleBayes.decode_bayes import Trainer as BayesTrainer
+        from neuroencoders.fullEncoder.an_network import (
+            LSTMandSpikeNetwork as NNTrainer,
+        )
+        from neuroencoders.simpleBayes.decode_bayes import Trainer as BayesTrainer
 
         if hasattr(self, "deviceName"):
             deviceName = kwargs.pop("deviceName", self.deviceName)
@@ -1071,7 +1073,7 @@ class Mouse_Results(Params, PaperFigures):
             deviceName = kwargs.pop("deviceName", "gpu")
 
         if deviceName.lower() == "gpu" or deviceName.lower() == "cpu":
-            from utils.management import manage_devices
+            from neuroencoders.utils.management import manage_devices
 
             self.deviceName = manage_devices(
                 deviceName.upper(),
@@ -1327,7 +1329,7 @@ class Mouse_Results(Params, PaperFigures):
             "_" + phase if phase is not None and not phase.startswith("_") else phase
         )
 
-        from importData.gui_elements import AnimatedPositionPlotter
+        from neuroencoders.importData.gui_elements import AnimatedPositionPlotter
 
         data_helper = kwargs.pop("data_helper", None)
         if data_helper is None:
@@ -1664,7 +1666,7 @@ class Mouse_Results(Params, PaperFigures):
                 useTraining (bool): Whether to use training data for alignment.
                 sleepName (List[str]): List of sleep names to consider for alignment.
         """
-        from importData.compareSpikeFiltering import WaveFormComparator
+        from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
         force = kwargs.get("force", False)
         useTrain = kwargs.pop("useTrain", False)
