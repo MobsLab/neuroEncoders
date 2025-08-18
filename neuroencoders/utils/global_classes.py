@@ -105,6 +105,7 @@ class Project:
             self.folder, nameExp
         )  # replaces self.resultsPath
         self.folderResult = os.path.join(self.experimentPath, "results")
+        self.folderResultSleep = os.path.join(self.experimentPath, "results_Sleep")
         self.windowSize = windowSize
         self.windowSizeMS = int(windowSize * 1000)  # in ms
         # Create dirs if don't exist

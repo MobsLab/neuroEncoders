@@ -21,6 +21,7 @@ from neuroencoders.importData.epochs_management import inEpochs, inEpochsMask
 
 # Load custom code
 from neuroencoders.simpleBayes import butils
+from neuroencoders.utils.global_classes import Project
 
 # !!!! TODO: all train-test in one function, too much repetition
 # TODO: option to remove zero cluster from training and testing
@@ -44,8 +45,10 @@ class DecoderConfig:
     kernel: str = "gaussian"
     masking_factor: float = 20.0
     min_spikes_threshold: int = 5
-    regularization_factor: float = 1e-6
+    regularization_factor: float = 1e-8  # for numerical stability.
+    empty_unit_value: float = 1e-5  # value for empty units in rate functions
     maxPos: Optional[Tuple[float, float]] = None
+    fullBehaviorBandwidth: Optional[float] = None
 
     # Store unexpected kwargs here if needed
     extra_kwargs: dict = field(default_factory=dict, init=False, repr=False)
@@ -69,7 +72,7 @@ class DecoderConfig:
 class Trainer:
     def __init__(
         self,
-        projectPath,
+        projectPath: Project,
         config: DecoderConfig = None,
         phase: Literal[
             "all",
@@ -89,7 +92,7 @@ class Trainer:
         Initialize the Trainer with project path and configuration.
         For config, you can pass a DecodDonfig object or keyword arguments that will be used to create a DecoderConfig object.
         Args:
-            projectPath: str, path to the project directory.
+            projectPath: Project object, with proper params and directories.
             config: DecoderConfig, optional, configuration for the decoder.
             phase: str, optional, phase of the experiment (default is None).
             **kwargs: additional keyword arguments for DecoderConfig.
@@ -134,6 +137,9 @@ class Trainer:
         """
         self.logger.info("Starting Bayesian training process...")
 
+        # look for bandwidth in behaviorData. If it is found compare it with the one in config
+        if "Bandwidth" in behaviorData:
+            self.config.fullBehaviorBandwidth = behaviorData["Bandwidth"]
         # Work with position coordinates
         speed_filtered_positions = behaviorData["Positions"][
             reduce(
@@ -156,11 +162,11 @@ class Trainer:
         if (
             onTheFlyCorrection
         ):  # setting the position to be between 0 and 1 if necessary
-            positions = speed_filtered_positions / maxPos
-        else:
-            positions = speed_filtered_positions[
-                ~np.isnan(speed_filtered_positions).any(axis=1)
-            ]
+            speed_filtered_positions = speed_filtered_positions / maxPos
+
+        positions = speed_filtered_positions[
+            ~np.isnan(speed_filtered_positions).any(axis=1)
+        ]
 
         ### Build global occupation map
         final_occupation, occupation, gridFeature = self._build_occupation_map(
@@ -242,10 +248,10 @@ class Trainer:
         """
         self.logger.info("Training and ordering neurons by position preference...")
 
-        # Get normalization setting from kwargs (matching original API)
+        # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
 
-        # Train the model
+        ### Perform training (build marginal and local rate functions)
         bayesMatrices = self.train(behaviorData, onTheFlyCorrection=onTheFlyCorrection)
 
         if use_linear_tuning and l_function is not None:
@@ -347,23 +353,32 @@ class Trainer:
                 - gridFeature: List, grid features used for KDE.
         """
         # Use provided bandwidth or compute adaptive bandwidth
-        # Previously, default was 20
+        # Previously, default was fullBehaviorData["Bandwidth"]
         if self.config.bandwidth is None:
             # Scott's rule with some adjustment for 2D
             n_samples = len(positions)
             bandwidth = n_samples ** (-1 / (2 + 4)) * np.std(positions, axis=0)
             self.config.bandwidth = np.mean(bandwidth)
+            self.logger.info(
+                f"Using adaptive bandwidth: {self.config.bandwidth:.4f} (based on {n_samples} samples). To be compared with fullBehaviorData['Bandwidth']: {self.config.fullBehaviorBandwidth:.4f}"
+            )
 
         gridFeature, occupation = butils.kdenD(
             positions, self.config.bandwidth, kernel=self.config.kernel
         )
 
-        # Improved masking strategy
+        # Improved masking strategy - logistic thresholding
         occupation_threshold = np.max(occupation) / self.config.masking_factor
-        mask = occupation > occupation_threshold
+        sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
+        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
 
         # Add regularization instead of just replacing zeros
-        occupation_reg = occupation + self.config.regularization_factor
+        self.logger.info(
+            f"Occupation map regularization factor: {self.config.regularization_factor / occupation.size:.4e}. before would have been changed by {np.min(occupation[occupation != 0])}"
+        )
+        eps = self.config.regularization_factor / occupation.size
+        occupation_reg = occupation + eps
+        occupation_reg /= np.sum(occupation_reg)  # renormalize to sum to 1
         occupation_inverse = 1 / occupation_reg
         occupation_inverse = np.multiply(occupation_inverse, mask)
 
@@ -371,7 +386,7 @@ class Trainer:
             self.logger.info(
                 f"Occupation map: max={np.max(occupation):.4f}, "
                 f"threshold={occupation_threshold:.4f}, "
-                f"masked_fraction={np.mean(~mask):.3f}"
+                f"effective masking of {100 * (1 - np.mean(mask)):.2f}%"
             )
 
         return occupation_inverse, occupation, gridFeature
@@ -387,9 +402,18 @@ class Trainer:
         """
         Compute rate function with better numerical stability
         """
-        if len(spike_positions) < self.config.min_spikes_threshold:
-            warnings.warn(f"Only {len(spike_positions)} spikes, using uniform rate")
-            return np.ones_like(final_occupation) * self.config.regularization_factor
+        if n_spikes < self.config.min_spikes_threshold:
+            if n_spikes == 0:
+                warnings.warn("No spikes found, using uniform rate")
+                rate_map = np.zeros_like(final_occupation)
+                eps = self.config.regularization_factor / final_occupation.size
+                rate_map += eps  # almost zero
+                rate_map /= np.sum(rate_map)
+                return rate_map
+            else:
+                warnings.warn(f"Only {len(spike_positions)} spikes, using uniform rate")
+                # stronger uniform rate than above
+                return np.ones_like(final_occupation) * self.config.empty_unit_value
 
         _, rate_map = butils.kdenD(
             spike_positions,
@@ -399,7 +423,8 @@ class Trainer:
         )
 
         # Normalize and apply occupation correction
-        rate_map = rate_map + self.config.regularization_factor
+        eps = self.config.empty_unit_value / rate_map.size
+        rate_map = rate_map + eps
         rate_map = rate_map / np.sum(rate_map)
         rate_map = (n_spikes * np.multiply(rate_map, final_occupation)) / learning_time
 
@@ -425,11 +450,9 @@ class Trainer:
             matching_pos_indices = (
                 (pos_times - spike_times).abs().argmin_reduction(axis=1)
             )
-            matching_pos_indices = np.asarray(matching_pos_indices)
-
             # get corresponding speed filter values
             speed_mask = behaviorData["Times"]["speedFilter"][matching_pos_indices]
-            speed_filters.append(speed_mask)
+            speed_filters += [speed_mask]
 
         self.logger.info("Speed filters aligned successfully")
 
@@ -448,7 +471,7 @@ class Trainer:
         valid_indices = reduce(
             np.intersect1d,
             (
-                speed_filter,
+                np.where(speed_filter),
                 inEpochs(
                     self.clusterData["Spike_times"][tetrode_idx][:, 0],
                     behaviorData["Times"]["trainEpochs"],
@@ -503,7 +526,7 @@ class Trainer:
         valid_indices = reduce(
             np.intersect1d,
             (
-                speed_filter,
+                np.where(speed_filter),
                 np.where(cluster_spikes),
                 inEpochs(
                     self.clusterData["Spike_times"][tetrode_idx][:, 0],
@@ -534,9 +557,15 @@ class Trainer:
             self.logger.warning(
                 f"Cluster {cluster_idx} in tetrode {tetrode_idx} has only {len(cluster_positions)} spikes, using uniform rate."
             )
-            rate_function = (
-                np.ones(final_occupation.shape) * self.config.regularization_factor
-            )
+            if len(cluster_positions) != 0:
+                rate_function = (
+                    np.ones_like(final_occupation) * self.config.empty_unit_value
+                )
+            else:
+                rate_function = np.zeros_like(final_occupation)
+                eps = self.config.regularization_factor / final_occupation.size
+                rate_function += eps
+                rate_function /= np.sum(rate_function)
 
         # Compute mutual information
         mutual_info = self._compute_mutual_info(rate_function, raw_occupation)
@@ -548,14 +577,18 @@ class Trainer:
         }
 
     def _compute_mutual_info(
-        self, rate_function: np.ndarray, occupation: np.ndarray
+        self,
+        rate_function: np.ndarray,
+        occupation: np.ndarray,
+        method: str = "Skaggs",
+        n_rate_bins=5,
     ) -> float:
         """
         Compute mutual information between rate and position
 
         Args:
             rate_function: np.ndarray, local rate function for the cluster.
-            occupation: np.ndarray, occupation map.
+            occupation: np.ndarray, occupation map NOT inverse occupation map.
 
         Returns:
             float, mutual information value.
@@ -571,12 +604,49 @@ class Trainer:
         if mean_rate <= 0:
             return 0.0
 
-        mi = np.sum(
-            occupation[valid_mask]
-            * rate_function[valid_mask]
-            / mean_rate
-            * np.log2(rate_function[valid_mask] / mean_rate)
-        )
+        if method.lower() == "skaggs" or method.lower() == "i_spike":  # bits/spike
+            mi = np.sum(
+                occupation[valid_mask]
+                * rate_function[valid_mask]
+                / mean_rate
+                * np.log2(rate_function[valid_mask] / mean_rate)
+            )
+        elif method.lower == "i_sec":  # bits/sec
+            mi = np.sum(
+                occupation[valid_mask]
+                * rate_function[valid_mask]
+                * np.log2(rate_function[valid_mask] / mean_rate)
+            )
+        elif method == "shannon":  # raw-sample Shannon MI
+            rate_flat = rate_function.flatten()
+            occ_flat = occupation.flatten()
+            valid_mask = (rate_flat > 0) & (occ_flat > 0)
+            if not np.any(valid_mask):
+                return 0.0
+            rate_flat = rate_flat[valid_mask]
+            # Bin firing rates into discrete categories
+            rate_bins = np.linspace(
+                np.min(rate_flat), np.max(rate_flat), n_rate_bins + 1
+            )
+            rate_digitized = np.digitize(rate_flat, rate_bins) - 1  # 0..n_rate_bins-1
+
+            # Compute joint distribution p(position_bin, rate_bin)
+            # Here each spatial bin contributes equally (raw sample, not weighted by occupation)
+            joint_hist, _, _ = np.histogram2d(
+                np.arange(len(rate_flat)),  # each bin index = position sample
+                rate_digitized,
+                bins=[len(rate_flat), n_rate_bins],
+            )
+
+            p_ij = joint_hist / np.sum(joint_hist)
+            p_i = np.sum(p_ij, axis=1, keepdims=True)  # marginal over rate
+            p_j = np.sum(p_ij, axis=0, keepdims=True)  # marginal over position
+
+            mask = p_ij > 0
+            mi = np.sum(p_ij[mask] * np.log2(p_ij[mask] / (p_i @ p_j)[mask]))
+        else:
+            raise ValueError(f"Unknown method {method}")
+
         return mi
 
     def _process_tetrode(

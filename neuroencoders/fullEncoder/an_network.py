@@ -102,10 +102,8 @@ class LSTMandSpikeNetwork:
         #     )
 
     def _setup_folders(self):
-        self.folderResult = os.path.join(self.projectPath.experimentPath, "results")
-        self.folderResultSleep = os.path.join(
-            self.projectPath.experimentPath, "results_Sleep"
-        )
+        self.folderResult = self.projectPath.folderResult
+        self.folderResultSleep = self.projectPath.folderResultSleep
         self.folderModels = os.path.join(self.projectPath.experimentPath, "models")
         os.makedirs(self.folderResult, exist_ok=True)
         os.makedirs(self.folderResultSleep, exist_ok=True)
