@@ -30,7 +30,7 @@ def main(args):
     # Manage inputs
     if not args.mode == "bayes":
         if args.gpu:
-            from utils import management
+            from neuroencoders.utils import management
 
             deviceName = management.manage_devices("GPU", set_memory_growth=True)
         else:
@@ -44,9 +44,9 @@ def main(args):
     else:
         jsonPath = None
 
-    from importData import rawdata_parser
-    from resultAnalysis import print_results
-    from transformData.linearizer import UMazeLinearizer
+    from neuroencoders.importData import rawdata_parser
+    from neuroencoders.resultAnalysis import print_results
+    from neuroencoders.transformData.linearizer import UMazeLinearizer
 
     # Output to shell
     print()
@@ -209,7 +209,7 @@ def main(args):
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
-        from simpleBayes import decode_bayes as Training
+        from neuroencoders.simpleBayes import decode_bayes as Training
 
         TrainerBayes = Training.Trainer(ProjectPath, phase=args.phase)
         bayesMatrices = TrainerBayes.train_order_by_pos(
@@ -270,9 +270,11 @@ def main(args):
         )
 
     elif mode == "ann":
-        from fullEncoder import an_network as Training
-        from importData.juliaData.julia_data_parser import julia_spike_filter
-        from openEphysExport.generate_json import generate_json
+        from neuroencoders.fullEncoder import an_network as Training
+        from neuroencoders.importData.juliaData.julia_data_parser import (
+            julia_spike_filter,
+        )
+        from neuroencoders.openEphysExport.generate_json import generate_json
 
         # Create data
         folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
@@ -483,8 +485,10 @@ def main(args):
         print("Saved json file for Julia thresholds and checkpoints.")
 
     elif mode == "decode":
-        from decoder import decode
-        from importData.juliaData.julia_data_parser import julia_spike_filter
+        from neuroencoders.decoder import decode
+        from neuroencoders.importData.juliaData.julia_data_parser import (
+            julia_spike_filter,
+        )
 
         if not os.path.isfile(ProjectPath.json):
             sys.exit(
@@ -524,12 +528,14 @@ def main(args):
             print_results.print_results(Decoder.folderResult, windowSizeMS=windowSizeMS)
 
     elif mode == "compare":
-        from fullEncoder import an_network as Training
-        from importData.compareSpikeFiltering import WaveFormComparator
-        from importData.juliaData.julia_data_parser import julia_spike_filter
-        from openEphysExport.generate_json import generate_json
-        from resultAnalysis import paper_figures
-        from simpleBayes import decode_bayes as BayesTrainer
+        from neuroencoders.fullEncoder import an_network as Training
+        from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
+        from neuroencoders.importData.juliaData.julia_data_parser import (
+            julia_spike_filter,
+        )
+        from neuroencoders.openEphysExport.generate_json import generate_json
+        from neuroencoders.resultAnalysis import paper_figures
+        from neuroencoders.simpleBayes import decode_bayes as BayesTrainer
 
         ### Bayes
         TrainerBayes = BayesTrainer.Trainer(ProjectPath)

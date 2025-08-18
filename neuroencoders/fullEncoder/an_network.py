@@ -208,7 +208,7 @@ class LSTMandSpikeNetwork:
                 ]
             else:
                 self.isTransformer = True
-                from fullEncoder.nnUtils import (
+                from neuroencoders.fullEncoder.nnUtils import (
                     MaskedGlobalAveragePooling1D,
                     PositionalEncoding,
                     TransformerEncoderBlock,
@@ -927,7 +927,7 @@ class LSTMandSpikeNetwork:
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
 
-        from fullEncoder.nnUtils import (
+        from neuroencoders.fullEncoder.nnUtils import (
             NeuralDataAugmentation,
             create_flatten_augmented_groups_fn,
         )
@@ -2027,7 +2027,7 @@ class LSTMandSpikeNetwork:
         """
         Call this ONCE before training to fit the DenseWeight model
         """
-        from fullEncoder.nnUtils import DenseLossProcessor
+        from neuroencoders.fullEncoder.nnUtils import DenseLossProcessor
 
         # Unpack kwargs
         behaviorData = kwargs.get("behaviorData", None)
