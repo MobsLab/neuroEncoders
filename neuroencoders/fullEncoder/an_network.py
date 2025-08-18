@@ -23,15 +23,16 @@ import numpy as np
 import pandas as pd
 import psutil
 import tensorflow as tf
-import wandb
 from tensorflow import keras
 from tqdm import tqdm
-from wandb import keras as wandbkeras
+
+import wandb
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper
+from wandb import keras as wandbkeras
 
 WandbMetricsLogger = wandbkeras.WandbMetricsLogger
 

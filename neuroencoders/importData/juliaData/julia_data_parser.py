@@ -56,7 +56,10 @@ def julia_spike_filter(
             )
         if not os.path.exists(projectPath.dat):
             raise ValueError("the dat file does not exist :" + projectPath.dat)
-        codepath = os.path.join(folderCode, "importData/juliaData/")
+        if "juliaData" not in folderCode:
+            codepath = os.path.join(folderCode, "importData/juliaData/")
+        else:
+            codepath = folderCode
         # TODO: Update to have the correct code path
         if singleSpike:
             subprocess.run(
