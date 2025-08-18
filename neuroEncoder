@@ -36,7 +36,7 @@ def main(args):
         else:
             os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
-            from utils import management
+            from neuroencoders.utils import management
 
             deviceName = management.manage_devices("CPU")
     if args.mode == "decode":
@@ -277,7 +277,9 @@ def main(args):
         from neuroencoders.openEphysExport.generate_json import generate_json
 
         # Create data
-        folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
+        import neuroencoders.importData.juliaData as jD
+
+        folderCode = os.path.dirname(jD.__file__) + os.path.sep
         windowStride = args.striding
         strideFactor = round(args.window / windowStride, 4)
         # check if windowStride is an integer, if not raise an error
