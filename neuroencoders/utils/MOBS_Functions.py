@@ -1887,16 +1887,33 @@ class Results_Loader:
                         ].load_data(
                             suffixes=["_training", "_" + kwargs.get("template", "pre")]
                         )
+                        if kwargs.get("load_bayes", False):
+                            self.results_dict[nameExp][mouse_full_name][
+                                "training"
+                            ].test_bayes(
+                                suffixes=[
+                                    "_training",
+                                    "_" + kwargs.get("template", "pre"),
+                                ]
+                            )
 
                     try:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=["_training", suffix]
                         )
                         found_training = True
+                        if kwargs.get("load_bayes", False):
+                            self.results_dict[nameExp][mouse_full_name][
+                                phase
+                            ].test_bayes(suffixes=["_training", suffix])
                     except FileNotFoundError:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=[suffix]
                         )
+                        if kwargs.get("load_bayes", False):
+                            self.results_dict[nameExp][mouse_full_name][
+                                phase
+                            ].test_bayes(suffixes=[suffix])
 
         if found_training:
             self.phases.append("training")

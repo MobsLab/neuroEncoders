@@ -270,14 +270,13 @@ def main(args):
         )
 
     elif mode == "ann":
+        # Create data
+        import neuroencoders.importData.juliaData as jD
         from neuroencoders.fullEncoder import an_network as Training
         from neuroencoders.importData.juliaData.julia_data_parser import (
             julia_spike_filter,
         )
         from neuroencoders.openEphysExport.generate_json import generate_json
-
-        # Create data
-        import neuroencoders.importData.juliaData as jD
 
         folderCode = os.path.dirname(jD.__file__) + os.path.sep
         windowStride = args.striding
