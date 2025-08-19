@@ -1698,14 +1698,12 @@ class LSTMandSpikeNetwork:
                 map_index_in_dat, num_parallel_calls=tf.data.AUTOTUNE
             )
             IDdat = list(datasetIndexInDat.as_numpy_iterator())
-            outLoss = np.expand_dims(output[2], axis=1)
 
             predictions[sleepName] = {
                 "featurePred": output[0],
                 "predLoss": output[1],
                 "times": times,
                 "posIndex": posIndex,
-                "lossFromOutputLoss": outLoss,
                 "indexInDat": IDdat,
             }
             if l_function:
@@ -1973,13 +1971,14 @@ class LSTMandSpikeNetwork:
             folderToSave = os.path.join(
                 self.folderResultSleep, str(folderName), sleepName
             )
+            phase = ""
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
         else:
             folderToSave = os.path.join(self.folderResult, str(folderName))
 
         if phase is not None:
-            suffix = f"_{phase}"
+            suffix = f"_{phase}" if phase != "" else ""
         else:
             suffix = self.suffix
 
