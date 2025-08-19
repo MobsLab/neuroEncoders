@@ -14,6 +14,7 @@ import pykeops as pykeops
 
 # Pykeops
 from pykeops.numpy import LazyTensor as LazyTensor_np
+from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
 from neuroencoders.importData import import_clusters
@@ -2415,7 +2416,9 @@ class Trainer:
             )
         return inferResultsDic
 
-    def calculate_linear_tuning_curve(self, linearization_function, behaviorData):
+    def calculate_linear_tuning_curve(
+        self, linearization_function, behaviorData, min_occ=5
+    ):
         """
         Calculate the linear tuning curve for each cell based on spike times and position data.
         """
@@ -2439,7 +2442,9 @@ class Trainer:
         )
         epochForField = np.array([minTime, maxTime])
         _, linearTraj = linearization_function(behaviorData["Positions"])
-        timesMask = inEpochs(np.squeeze(behaviorData["positionTime"]), epochForField)[0]
+        timesMask = inEpochsMask(
+            np.squeeze(behaviorData["positionTime"]), epochForField
+        ).flatten()
         timeLinear = np.squeeze(behaviorData["positionTime"][timesMask, :])
         linearTraj = linearTraj[timesMask]
         linSpace = np.arange(min(linearTraj), max(linearTraj), step=0.01)
@@ -2453,7 +2458,7 @@ class Trainer:
                 spikeTimes = spikeTimes[inEpochs(spikeTimes, epochForField)]
 
                 # Find position of the animal at the time of each spike
-                if spikeTimes.any():
+                if spikeTimes.any() and len(spikeTimes) > min_occ:
                     spikeTimesLazy = pykeops.numpy.Vj(
                         spikeTimes[:, None].astype(dtype=np.float64)
                     )
@@ -2466,8 +2471,18 @@ class Trainer:
                     spikePos = linearTraj[idPosInSpikes]
                     # Create histogram of spike position (find P(spikes|position))
                     histSpikes, binEdges = np.histogram(spikePos, bins=linSpace)
-                    # Find tuning curve
-                    histTuning = histSpikes / histPos
+
+                    # We need to smooth a bit the histogram to avoid NaNs
+                    histSpikes_smooth = gaussian_filter1d(histSpikes, sigma=2)
+                    histPos_smooth = gaussian_filter1d(histPos, sigma=2)
+
+                    # Find tuning curve (handle NaNs)
+                    histTuning = np.divide(
+                        histSpikes_smooth,
+                        histPos_smooth,
+                        out=np.zeros_like(histSpikes_smooth, dtype=float),
+                        where=histPos_smooth > 0,
+                    )
                     linearPlaceFields.append(histTuning)  # save
                 else:
                     linearPlaceFields.append(np.zeros(len(linSpace) - 1))

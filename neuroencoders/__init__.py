@@ -12,11 +12,13 @@ Submodules:
         - utils: General utilities
 """
 
-from . import decoder
-from . import importData
-from . import fullEncoder
-from . import openEphysExport
-from . import resultAnalysis
-from . import simpleBayes
-from . import transformData
-from . import utils
+from . import (
+    decoder,
+    fullEncoder,
+    importData,
+    openEphysExport,
+    resultAnalysis,
+    simpleBayes,
+    transformData,
+    utils,
+)

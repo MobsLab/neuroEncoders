@@ -40,3 +40,7 @@ notebooks/debug.ipynb
 /notebooks/hyper_paper.ipynb
 /notebooks/get_gifs.py
 /notebooks/this is gold.ipynb
+notebooks/bayes_decoders.pickle
+.gitignore
+notebooks/bayes_matrices.pickle
+notebooks/outputs.pickle
