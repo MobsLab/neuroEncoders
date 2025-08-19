@@ -18,10 +18,10 @@ from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.resultAnalysis import print_results
 from neuroencoders.resultAnalysis.paper_figures import PaperFigures
 from neuroencoders.transformData.linearizer import UMazeLinearizer
-from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import Params, Project
+from neuroencoders.utils.PathForExperiments import path_for_experiments
 
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
@@ -1072,12 +1072,8 @@ class Mouse_Results(Params, PaperFigures):
         from neuroencoders.fullEncoder.an_network import (
             LSTMandSpikeNetwork as NNTrainer,
         )
-        from neuroencoders.simpleBayes.decode_bayes import (
-            DecoderConfig,
-        )
-        from neuroencoders.simpleBayes.decode_bayes import (
-            Trainer as BayesTrainer,
-        )
+        from neuroencoders.simpleBayes.decode_bayes import DecoderConfig
+        from neuroencoders.simpleBayes.decode_bayes import Trainer as BayesTrainer
 
         if hasattr(self, "deviceName"):
             deviceName = kwargs.pop("deviceName", self.deviceName)

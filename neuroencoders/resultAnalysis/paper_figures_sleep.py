@@ -1,32 +1,18 @@
 import os
 
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pykeops
 import seaborn as sns
 import tables
-from matplotlib.colors import LinearSegmentedColormap
 from statannotations.Annotator import Annotator
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
-
-white_viridis = LinearSegmentedColormap.from_list(
-    "white_viridis",
-    [
-        (0, "#ffffff"),
-        (1e-20, "#ffffff"),
-        (0.2, "#404388"),
-        (0.4, "#2a788e"),
-        (0.6, "#21a784"),
-        (0.8, "#78d151"),
-        (1, "#fde624"),
-    ],
-    N=256,
-)
-EC = np.array([45, 39])  # range of x and y in cm
+from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
+from neuroencoders.utils.global_classes import Project
+from neuroencoders.utils.viz_params import white_viridis
 
 pykeops.set_verbose(False)
 
@@ -34,11 +20,11 @@ pykeops.set_verbose(False)
 class PaperFiguresSleep:
     def __init__(
         self,
-        projectPath,
-        behavior_data,
-        trainerBayes,
+        projectPath: Project,
+        behavior_data: dict,
+        trainerBayes: TrainerBayes,
         linearizationFunction,
-        bayesMatrices={},
+        bayesMatrices: dict = {},
         timeWindows=[36],
         sleepNames=["PreSleep", "PostSleep"],
         rippleChoice="start",
@@ -66,13 +52,23 @@ class PaperFiguresSleep:
         self.cm = plt.get_cmap("tab20b")
         # Manage folders
         if folderFigures is None:
-            self.folderFigures = os.path.join(self.projectPath.resultsPath, "figures")
+            self.folderFigures = os.path.join(
+                self.projectPath.experimentPath, "figures"
+            )
         else:
             self.folderFigures = os.path.join(
-                self.projectPath.resultsPath, folderFigures
+                self.projectPath.experimentPath, folderFigures
             )
         if not os.path.exists(self.folderFigures):
             os.mkdir(self.folderFigures)
+        try:
+            self.folderResultSleep = self.projectPath.folderResultSleep
+        except AttributeError:
+            self.folderResultSleep = os.path.join(
+                self.projectPath.experimentPath, "results_Sleep"
+            )
+            self.projectPath.folderResultSleep = self.folderResultSleep
+
         self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
 
     def load_data(self):
@@ -87,9 +83,7 @@ class PaperFiguresSleep:
             time[sleepName] = []
             losspred[sleepName] = []
             for ws in self.timeWindows:
-                pathToSleep = os.path.join(
-                    self.projectPath.resultsPath, "results_Sleep", str(ws), sleepName
-                )
+                pathToSleep = os.path.join(self.folderResultSleep, str(ws), sleepName)
                 lpredpos[sleepName].append(
                     np.squeeze(
                         np.array(
@@ -220,8 +214,8 @@ class PaperFiguresSleep:
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f"example_sleep_nn.png"))
-        fig.savefig(os.path.join(self.folderFigures, f"example_sleep_nn.svg"))
+        fig.savefig(os.path.join(self.folderFigures, "example_sleep_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, "example_sleep_nn.svg"))
 
     def fig_sleep_distributution_linear(self):
         fig, ax = plt.subplots(
@@ -245,8 +239,8 @@ class PaperFiguresSleep:
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_nn.png"))
-        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_nn.svg"))
+        fig.savefig(os.path.join(self.folderFigures, "distr_sleep_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, "distr_sleep_nn.svg"))
 
     def fig_sleep_distributution_lossPred(self):
         fig, ax = plt.subplots(
@@ -270,8 +264,8 @@ class PaperFiguresSleep:
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_pred_loss_nn.png"))
-        fig.savefig(os.path.join(self.folderFigures, f"distr_sleep_pred_loss_nn.svg"))
+        fig.savefig(os.path.join(self.folderFigures, "distr_sleep_pred_loss_nn.png"))
+        fig.savefig(os.path.join(self.folderFigures, "distr_sleep_pred_loss_nn.svg"))
 
     def fig_sleep_barplot_lossPred(self):
         predLoss = np.concatenate(

@@ -34,6 +34,7 @@ SHOCK_COLOR = "xkcd:hot pink"
 SAFE_COLOR = "cornflowerblue"
 SHOCK_COLOR_PREDICTED = "xkcd:carnation"
 SAFE_COLOR_PREDICTED = "xkcd:bright sky blue"
+MIDDLE_COLOR = "xkcd:lavender"
 
 FREEZING_POINTS_COLOR = "xkcd:light blue"
 FREEZING_LINE_COLOR = "xkcd:light blue"

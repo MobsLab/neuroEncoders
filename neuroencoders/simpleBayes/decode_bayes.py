@@ -101,6 +101,7 @@ class Trainer:
             ValueError: If the projectPath is not provided or if the phase is not valid.
         """
         self.phase = phase
+        self.suffix = "_" + phase if phase else ""
         self.projectPath = projectPath
         self.config = config or DecoderConfig(**kwargs)
         self.clusterData = import_clusters.load_spike_sorting(
@@ -247,7 +248,6 @@ class Trainer:
         Returns:
             bayesMatrices: dict, containing the trained matrices for Bayesian inference.
         """
-        self.logger.info("Training and ordering neurons by position preference...")
 
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
@@ -266,7 +266,9 @@ class Trainer:
                         "Redundant training requested, re-training Bayesian matrices."
                     )
             except FileNotFoundError:
-                self.logger.info("Training new Bayesian matrices...")
+                self.logger.info(
+                    "Training and ordering neurons by position preference..."
+                )
                 bayesMatrices = self.train(
                     behaviorData, onTheFlyCorrection=onTheFlyCorrection
                 )
@@ -1131,6 +1133,62 @@ class Trainer:
         }
         return outputResults
 
+    def test_sleep_as_NN(
+        self,
+        behaviorData: Dict,
+        bayesMatrices: Dict,
+        windowSizeMS: float = 36,
+        sleepEpochs: List = [],
+        l_function=None,
+        save_posteriors: bool = False,
+        save_as_pickle: bool = True,
+        sleepNameList: List = [],
+        **kwargs,
+    ) -> Dict:
+        """
+        Test the model on sleep epochs using the neural network approach with improved evaluation and cross-validation.
+
+        Args:
+            behaviorData: dict, containing the position and time data.
+            bayesMatrices: dict, containing the precomputed matrices for Bayesian inference.
+            windowSizeMS: int, size of the window in milliseconds.
+            sleepEpochs: list, epochs to consider for sleep decoding.
+            l_function: callable, optional linearization function.
+            save_posteriors: bool, whether to save full posterior maps.
+            save_as_pickle: bool, whether to save results as a pickle file.
+            sleepNameList: list of sleep names (e.g. ["preSleep", "postSleep"...])
+            **kwargs: additional keyword arguments for flexibility (e.g., phase).
+
+        Returns:
+            outputResults: dict, containing predictions, performance metrics, and optionally CV results.
+        """
+        if not sleepNameList:
+            sleepNameList = behaviorData["Times"]["sleepNames"]
+            sleepEpochs = behaviorData["Times"]["sleepEpochs"]
+
+        self.logger.info(f"Starting Bayesian decoding with {windowSizeMS}ms windows")
+
+        for idsleep, sleepName in enumerate(sleepNameList):
+            timeSleepStart = sleepEpochs[2 * idsleep][0]
+            timeSleepStop = sleepEpochs[2 * idsleep + 1][0]
+            sleep_epoch = [timeSleepStart, timeSleepStop]
+            timeStepPred = behaviorData["positionTime"][
+                inEpochs(behaviorData["positionTime"][:, 0], sleep_epoch)
+            ]
+            self.test_as_NN(
+                behaviorData=behaviorData,
+                bayesMatrices=bayesMatrices,
+                timeStepPred=timeStepPred,
+                windowSizeMS=windowSizeMS,
+                sleepEpochs=sleep_epoch,
+                l_function=l_function,
+                save_posteriors=save_posteriors,
+                save_as_pickle=save_as_pickle,
+                sleepName=sleepName,
+                **kwargs,
+            )
+        return {}
+
     def test_as_NN(
         self,
         behaviorData: Dict,
@@ -1144,6 +1202,7 @@ class Trainer:
         cv_folds: int = 5,
         save_posteriors: bool = False,
         save_as_pickle: bool = True,
+        sleepName: str = "Sleep",
         **kwargs,
     ) -> Dict:
         """
@@ -1169,6 +1228,7 @@ class Trainer:
 
         windowSize = windowSizeMS / 1000
         self.logger.info(f"Starting Bayesian decoding with {windowSizeMS}ms windows")
+        isSleep = len(sleepEpochs) > 0
 
         # Prepare spike data for the specified epochs
         clusters_time, clusters = self._prepare_spike_data(
@@ -1202,38 +1262,36 @@ class Trainer:
             save_posteriors,
         )
 
-        # Get ground truth positions
-        featureTrue = self._get_ground_truth_positions(
-            timeStepPred, behaviorData, useTrain
-        )
-
-        # Compute comprehensive performance metrics
-        performance_metrics = self._compute_detailed_performance(
-            processed_results, featureTrue, l_function
-        )
-
-        # Perform cross-validation if requested
-        cv_results = None
-        if cross_validate:
-            self.logger.info(f"Performing {cv_folds}-fold cross-validation...")
-            cv_results = self._perform_cross_validation(
-                behaviorData,
-                bayesMatrices,
-                windowSizeMS,
-                l_function,
-                cv_folds,
-                useTrain,
-                sleepEpochs,
+        if not isSleep:
+            # Get ground truth positions
+            featureTrue = self._get_ground_truth_positions(
+                timeStepPred, behaviorData, useTrain
             )
+
+            # Compute comprehensive performance metrics
+            performance_metrics = self._compute_detailed_performance(
+                processed_results, featureTrue, l_function
+            )
+
+            # Perform cross-validation if requested
+            cv_results = None
+            if cross_validate:
+                self.logger.info(f"Performing {cv_folds}-fold cross-validation...")
+                cv_results = self._perform_cross_validation(
+                    behaviorData,
+                    bayesMatrices,
+                    windowSizeMS,
+                    l_function,
+                    cv_folds,
+                    useTrain,
+                    sleepEpochs,
+                )
 
         # Compile final results
         outputResults = {
             "featurePred": processed_results["positions"],
             "proba": processed_results["confidence"],
             "times": timeStepPred,
-            "featureTrue": featureTrue,
-            "posLoss": performance_metrics["posLoss"],
-            "performance": performance_metrics,
             "speed_mask": behaviorData["Times"]["speedFilter"],
             "decoding_params": {
                 "windowSizeMS": windowSizeMS,
@@ -1242,19 +1300,26 @@ class Trainer:
                 "n_nan_fixed": processed_results.get("n_nan_fixed", 0),
             },
         }
+        if not isSleep:
+            outputGroundTruth = {
+                "featureTrue": featureTrue,
+                "posLoss": performance_metrics["posLoss"],
+                "performance": performance_metrics,
+            }
+            # Add cross-validation results
+            if cv_results is not None:
+                outputResults["cross_validation"] = cv_results
+
+            outputResults.update(outputGroundTruth)
 
         # Add posterior maps if requested
         if save_posteriors and "posterior_maps" in processed_results:
             outputResults["probaMaps"] = processed_results["posterior_maps"]
 
-        # Add cross-validation results
-        if cv_results is not None:
-            outputResults["cross_validation"] = cv_results
-
         # Apply linearization if provided
         if l_function is not None:
             outputResults = self._apply_linearization_transform(
-                outputResults, l_function
+                outputResults, l_function, isSleep=isSleep
             )
 
         # Save results
@@ -1264,6 +1329,8 @@ class Trainer:
             phase=kwargs.get("phase", self.phase),
             cross_validate=cross_validate,
             save_as_pickle=save_as_pickle,
+            sleepName=sleepName,
+            sleep=isSleep,
         )
 
         # Log summary statistics
@@ -1978,22 +2045,29 @@ class Trainer:
 
         return fold_epochs
 
-    def _apply_linearization_transform(self, results: Dict, l_function) -> Dict:
+    def _apply_linearization_transform(
+        self, results: Dict, l_function, isSleep: bool = False
+    ) -> Dict:
         """Apply linearization function to results"""
 
         try:
             # Apply to predictions
             proj_pred, linear_pred = l_function(results["featurePred"])
-            proj_true, linearTrue = l_function(results["featureTrue"])
-
             results.update(
                 {
                     "projPred": proj_pred,
-                    "projTruePos": proj_true,
                     "linearPred": linear_pred,
-                    "linearTrue": linearTrue,
                 }
             )
+            if not isSleep:
+                proj_true, linearTrue = l_function(results["featureTrue"])
+
+                results.update(
+                    {
+                        "projTruePos": proj_true,
+                        "linearTrue": linearTrue,
+                    }
+                )
 
         except Exception as e:
             self.logger.error(f"Linearization failed: {e}")
@@ -2010,10 +2084,11 @@ class Trainer:
         self.logger.info("=== Decoding Summary ===")
         self.logger.info(f"Window size: {params['windowSizeMS']}ms")
         self.logger.info(f"Time steps: {params['n_time_steps']}")
-        self.logger.info(f"Mean error: {perf['mean_error']:.2f} units")
-        self.logger.info(f"Median error: {perf['median_error']:.2f} units")
-        self.logger.info(f"RMSE: {perf['rmse']:.2f} units")
-        self.logger.info(f"Mean confidence: {perf['mean_confidence']:.3f}")
+        if "mean_error" in perf:
+            self.logger.info(f"Mean error: {perf['mean_error']:.2f} units")
+            self.logger.info(f"Median error: {perf['median_error']:.2f} units")
+            self.logger.info(f"RMSE: {perf['rmse']:.2f} units")
+            self.logger.info(f"Mean confidence: {perf['mean_confidence']:.3f}")
 
         if params.get("n_nan_fixed", 0) > 0:
             self.logger.warning(f"Fixed {params['n_nan_fixed']} NaN predictions")
@@ -2294,11 +2369,12 @@ class Trainer:
             )
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
+            phase = ""
         else:
             folderToSave = os.path.join(self.folderResult, str(folderName))
 
         if phase is not None:
-            suffix = f"_{phase}"
+            suffix = f"_{phase}" if phase != "" else ""
         else:
             suffix = f"_{self.suffix}"
         if cross_validate:
