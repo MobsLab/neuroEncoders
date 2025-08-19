@@ -613,7 +613,7 @@ def main(args):
             bayesMatrices=bayesMatrices,
         )
         figures.load_data()
-        figures.test_bayes()
+        figures.load_bayes()
         figures.fig_example_linear()
         figures.hist_linerrors()
         figures.nnVSbayes()

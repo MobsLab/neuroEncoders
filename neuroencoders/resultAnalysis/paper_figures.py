@@ -233,11 +233,12 @@ class PaperFigures:
                 "posIndex": posIndex,
             }
 
-    def test_bayes(self, suffixes=None):
+    def load_bayes(self, suffixes=None, **kwargs):
         """
-        Quickly test the bayesian decoding on the data, using the trainerBayes.
+        Quickly load the bayesian decoding on the data, using the trainerBayes.
         If the bayesMatrices are not provided, it will train them using the
         trainerBayes.train_order_by_pos method.
+        If the testing results are already saved, it will load them - otherwise it will perform a decoding.
 
         Returns
         -------
@@ -249,12 +250,17 @@ class PaperFigures:
                 - probaBayes: list of probabilities for each time window
                 - time: list of time arrays for each time window
         """
-        if (
-            not hasattr(self.trainerBayes, "linearPreferredPos")
-            and "Occupation" not in self.bayesMatrices.keys()
-        ):
+        if not hasattr(self.trainerBayes, "linearPreferredPos"):
             self.bayesMatrices = self.trainerBayes.train_order_by_pos(
-                self.behaviorData, l_function=self.l_function
+                self.behaviorData,
+                l_function=self.l_function,
+                bayesMatrices=self.bayesMatrices
+                if (
+                    (isinstance(self.bayesMatrices, dict))
+                    and ("Occupation" in self.bayesMatrices.keys())
+                )
+                else None,
+                **kwargs,
             )
 
         # quickly obtain bayesian decoding:
@@ -269,6 +275,7 @@ class PaperFigures:
             lPredPosBayes = []
             probaBayes = []
             fPredBayes = []
+            posLossBayes = []
             for i, ws in enumerate(self.timeWindows):
                 try:
                     lPredPosBayes.append(
@@ -312,8 +319,36 @@ class PaperFigures:
                             dtype=np.float32,
                         )
                     )
-                except:
-                    print("Did not find results in folder, will test now")
+                    posLossBayes.append(
+                        np.array(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"bayes_posLoss{suffix}.csv",
+                                )
+                            ).values[:, 1:],
+                            dtype=np.float32,
+                        )
+                    )
+
+                    if (
+                        fPredBayes[i].shape
+                        != self.resultsNN_phase[suffix]["fullPred"][i].shape
+                    ):
+                        raise ValueError(
+                            "Bayesian and NN results do not have the same shape for "
+                            + str(ws)
+                            + " ms window."
+                        )
+                except (FileNotFoundError, ValueError) as e:
+                    print(
+                        f"""
+                        Did not find bayesian results in folder, will test now:
+                        {e}
+                        """
+                    )
 
                     timesToPredict = self.resultsNN_phase[suffix]["time"][i][
                         :, np.newaxis
@@ -323,13 +358,21 @@ class PaperFigures:
                         self.bayesMatrices,
                         timesToPredict,
                         windowSizeMS=ws,
+                        useTrain=kwargs.get("useTrain", "training" in suffix),
+                        l_function=self.l_function,
+                        phase=suffix.strip("_"),
                     )
-                    infPos = outputsBayes["featurePred"][:, 0:2]
-                    _, linearBayesPos = self.l_function(infPos)
+                    infPos = outputsBayes["featurePred"]
 
-                    lPredPosBayes.append(linearBayesPos)
+                    if "linearPred" in outputsBayes:
+                        lPredPosBayes.append(outputsBayes["linearPred"])
+                    else:
+                        _, linearBayesPos = self.l_function(infPos)
+                        lPredPosBayes.append(linearBayesPos)
+
                     fPredBayes.append(infPos)
                     probaBayes.append(outputsBayes["proba"])
+                    posLossBayes.append(outputsBayes["posLoss"])
 
             # Output
             if suffix == self.suffix or len(self.suffixes) == 1:
@@ -337,44 +380,50 @@ class PaperFigures:
                     "linPred": lPredPosBayes,
                     "fullPred": fPredBayes,
                     "probaBayes": probaBayes,
+                    "posLossBayes": posLossBayes,
                     "time": self.resultsNN_phase[suffix]["time"],
                 }
             self.resultsBayes_phase[suffix] = {
                 "linPred": lPredPosBayes,
                 "fullPred": fPredBayes,
                 "probaBayes": probaBayes,
+                "posLossBayes": posLossBayes,
                 "time": self.resultsNN_phase[suffix]["time"],
             }
 
         return self.resultsBayes
 
-    def fig_example_XY(self, timeWindow):
+    def fig_example_XY(self, timeWindow, suffix=None, phase=None):
         idWindow = self.timeWindows.index(timeWindow)
         fig, ax = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(19, 8))
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         for idim in range(2):
             ax[idim, 0].plot(
-                self.resultsNN["time"][idWindow],
-                self.resultsNN["truePos"][idWindow][:, idim],
+                self.resultsNN_phase[suffix]["time"][idWindow],
+                self.resultsNN_phase[suffix]["truePos"][idWindow][:, idim],
                 c="black",
                 alpha=0.3,
             )
             ax[idim, 0].scatter(
-                self.resultsNN["time"][idWindow],
-                self.resultsNN["fullPred"][idWindow][:, idim],
+                self.resultsNN_phase[suffix]["time"][idWindow],
+                self.resultsNN_phase[suffix]["fullPred"][idWindow][:, idim],
                 c=self.cm(12 + idWindow),
                 alpha=0.9,
                 label=(str(self.timeWindows[idWindow]) + " ms"),
                 s=1,
             )
             ax[idim, 1].plot(
-                self.resultsNN["time"][idWindow],
-                self.resultsNN["truePos"][idWindow][:, idim],
+                self.resultsNN_phase[suffix]["time"][idWindow],
+                self.resultsNN_phase[suffix]["truePos"][idWindow][:, idim],
                 c="black",
                 alpha=0.3,
             )
             ax[idim, 1].scatter(
-                self.resultsNN["time"][idWindow],
-                self.resultsBayes["fullPred"][idWindow][:, idim],
+                self.resultsNN_phase[suffix]["time"][idWindow],
+                self.resultsBayes_phase[suffix]["fullPred"][idWindow][:, idim],
                 c=self.cm(idWindow),
                 alpha=0.9,
                 label=(str(self.timeWindows[idWindow]) + " ms"),
@@ -392,39 +441,45 @@ class PaperFigures:
         ax[1, 0].set_ylabel("Y", fontsize="xx-large")
         ax[1, 0].set_xlabel("Time (s)", fontsize="xx-large")
         ax[1, 1].set_xlabel("Time (s)", fontsize="xx-large")
+        # set suffix
+        fig.suptitle(f"2D decoding for phase {suffix.strip('_')}", fontsize="xx-large")
         # Save figure
         fig.tight_layout()
         fig.show()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                f"example2D_nn_bayes_{timeWindow}ms{self.suffix}.png",
+                f"example2D_nn_bayes_{timeWindow}ms{suffix}.png",
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                f"example2D_nn_bayes_{timeWindow}ms{self.suffix}.svg",
+                f"example2D_nn_bayes_{timeWindow}ms{suffix}.svg",
             )
         )
 
-    def fig_example_linear(self):
+    def fig_example_linear(self, suffix=None, phase=None):
         ## Figure 1: on habituation set, speed filtered, we plot an example of bayesian and neural network decoding
         # ANN results
         # TODO: why is it speed filtered?
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         fig, ax = plt.subplots(
             len(self.timeWindows), 2, sharex=True, figsize=(15, 10), sharey=True
         )
         if len(self.timeWindows) == 1:
             ax[0].plot(
-                self.resultsNN["time"][0],
-                self.resultsNN["linTruePos"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsNN_phase[suffix]["linTruePos"][0],
                 c="black",
                 alpha=0.3,
             )
             ax[0].scatter(
-                self.resultsNN["time"][0],
-                self.resultsNN["linPred"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsNN_phase[suffix]["linPred"][0],
                 c=self.cm(12 + 0),
                 alpha=0.9,
                 label=(str(self.timeWindows[0]) + " ms"),
@@ -439,8 +494,8 @@ class PaperFigures:
         else:
             [
                 a.plot(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linTruePos"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linTruePos"][i],
                     c="black",
                     alpha=0.3,
                 )
@@ -448,8 +503,8 @@ class PaperFigures:
             ]
             for i in range(len(self.timeWindows)):
                 ax[i, 0].scatter(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linPred"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linPred"][i],
                     c=self.cm(12 + i),
                     alpha=0.9,
                     label=(str(self.timeWindows[i]) + " ms"),
@@ -470,14 +525,14 @@ class PaperFigures:
         # Bayes
         if len(self.timeWindows) == 1:
             ax[1].plot(
-                self.resultsNN["time"][0],
-                self.resultsNN["linTruePos"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsNN_phase[suffix]["linTruePos"][0],
                 c="black",
                 alpha=0.3,
             )
             ax[1].scatter(
-                self.resultsNN["time"][0],
-                self.resultsBayes["linPred"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsBayes_phase[suffix]["linPred"][0],
                 c=self.cm(0),
                 alpha=0.9,
                 label=(str(self.timeWindows[0]) + " ms"),
@@ -491,8 +546,8 @@ class PaperFigures:
         else:
             [
                 a.plot(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linTruePos"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linTruePos"][i],
                     c="black",
                     alpha=0.3,
                 )
@@ -500,8 +555,8 @@ class PaperFigures:
             ]
             for i in range(len(self.timeWindows)):
                 ax[i, 1].scatter(
-                    self.resultsNN["time"][i],
-                    self.resultsBayes["linPred"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsBayes_phase[suffix]["linPred"][i],
                     c=self.cm(i),
                     alpha=0.9,
                     label=(str(self.timeWindows[i]) + " ms"),
@@ -520,49 +575,63 @@ class PaperFigures:
             ax[len(self.timeWindows) - 1, 1].set_xlabel("time (s)", fontsize="xx-large")
             [a.set_ylabel("linear position", fontsize="xx-large") for a in ax[:, 0]]
             [ax[i, 0].set_yticks([0, 0.4, 0.8]) for i in range(len(self.timeWindows))]
+        # give suffix in title
+        fig.suptitle(
+            f"Linear position decoding for phase {suffix.strip('_')}",
+            fontsize="xx-large",
+        )
         # Save figure
         fig.tight_layout()
         fig.show()
-        fig.savefig(
-            os.path.join(self.folderFigures, f"example_nn_bayes{self.suffix}.png")
-        )
-        fig.savefig(
-            os.path.join(self.folderFigures, f"example_nn_bayes{self.suffix}.svg")
-        )
+        fig.savefig(os.path.join(self.folderFigures, f"example_nn_bayes{suffix}.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"example_nn_bayes{suffix}.svg"))
 
-    def compare_nn_bayes(self, timeWindow, isCM=False, isShow=False):
+    def compare_nn_bayes(
+        self, timeWindow, suffix=None, phase=None, isCM=False, isShow=False
+    ):
         idWindow = self.timeWindows.index(timeWindow)
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Data
         if isCM:
-            nnD = self.resultsNN["fullPred"][idWindow] * EC
-            bayesD = self.resultsBayes["fullPred"][idWindow] * EC
+            nnD = self.resultsNN_phase[suffix]["fullPred"][idWindow] * EC
+            bayesD = self.resultsBayes_phase[suffix]["fullPred"][idWindow] * EC
             title = "Euclidian distance (cm)"
         else:
-            nnD = self.resultsNN["fullPred"][idWindow]
-            bayesD = self.resultsBayes["fullPred"][idWindow]
+            nnD = self.resultsNN_phase[suffix]["fullPred"][idWindow]
+            bayesD = self.resultsBayes_phase[suffix]["fullPred"][idWindow]
             title = "Euclidian distance"
         distMean = np.linalg.norm(nnD - bayesD, axis=1)
 
         # find the best polynomial fit of euclidian error = f(time)
-        poly = np.polyfit(self.resultsNN["time"][idWindow], distMean, deg=3)
-        polyFit = np.polyval(poly, self.resultsNN["time"][idWindow])
+        poly = np.polyfit(
+            self.resultsNN_phase[suffix]["time"][idWindow], distMean, deg=3
+        )
+        polyFit = np.polyval(poly, self.resultsNN_phase[suffix]["time"][idWindow])
 
-        # Plot euclidian distance between fullPred of resultsNN and resultsBayes
+        # Plot euclidian distance between fullPred of resultsNN_phase[suffix] and resultsBayes
         if isShow:
             fig, ax = plt.subplots(1, 1, figsize=(15, 10))
             ax.scatter(
-                self.resultsNN["time"][idWindow],
+                self.resultsNN_phase[suffix]["time"][idWindow],
                 distMean,
                 c="black",
                 alpha=0.9,
                 label=(str(self.timeWindows[idWindow]) + " ms"),
                 s=1,
             )
-            ax.plot(self.resultsNN["time"][idWindow], polyFit, c="xkcd:cherry red")
+            ax.plot(
+                self.resultsNN_phase[suffix]["time"][idWindow],
+                polyFit,
+                c="xkcd:cherry red",
+            )
             ax.set_title(
                 "Euclidian distance between neural network and bayesian decoder \n"
                 + str(self.timeWindows[idWindow])
-                + " window",
+                + " window, phase "
+                + suffix.strip("_"),
                 fontsize="xx-large",
             )
             ax.set_xlabel("time (s)", fontsize="xx-large")
@@ -571,42 +640,68 @@ class PaperFigures:
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    f"nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms{self.suffix}.png",
+                    f"nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms{suffix}.png",
                 )
             )
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    f"nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms{self.suffix}.svg",
+                    f"nn_bayes_eucledian_distance_{self.timeWindows[idWindow]}_ms{suffix}.svg",
                 )
             )
 
         return np.mean(distMean)
 
-    def hist_linerrors(self, speed="all"):
+    def hist_linerrors(
+        self, suffix=None, phase=None, speed="all", mask=None, use_mask=False
+    ):
         ### Prepare the data
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
+
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         # Data
         lErrorNN = [
-            np.abs(self.resultsNN["linTruePos"][i] - self.resultsNN["linPred"][i])
+            np.abs(
+                self.resultsNN_phase[suffix]["linTruePos"][i]
+                - self.resultsNN_phase[suffix]["linPred"][i]
+            )
             for i in range(len(self.timeWindows))
         ]
         lErrorBayes = [
-            np.abs(self.resultsNN["linTruePos"][i] - self.resultsBayes["linPred"][i])
+            np.abs(
+                self.resultsNN_phase[suffix]["linTruePos"][i]
+                - self.resultsBayes_phase[suffix]["linPred"][i]
+            )
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -697,18 +792,21 @@ class PaperFigures:
         ax[2].set_ylabel("cumulative \n histogram", fontsize="x-large")
         ax[2].set_xlabel("absolute linear error", fontsize="x-large")
         ax[3].set_xlabel("absolute linear error", fontsize="x-large")
+        fig.suptitle(
+            f"Cumulative histograms of linear position errors for phase {suffix.strip('_')}"
+        )
         fig.tight_layout()
         fig.show()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"cumulativeHist_{str(speed)}{self.suffix}.png"),
+                (f"cumulativeHist_{str(speed)}{suffix}.png"),
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"cumulativeHist_{str(speed)}{self.suffix}.svg"),
+                (f"cumulativeHist_{str(speed)}{suffix}.svg"),
             )
         )
 
@@ -841,40 +939,68 @@ class PaperFigures:
         )
         return fig
 
-    def mean_linerrors(self, speed="all", filtProp=None, errorType="sem"):
+    def mean_linerrors(
+        self,
+        suffix=None,
+        phase=None,
+        speed="all",
+        filtProp=None,
+        errorType="sem",
+        mask=None,
+        use_mask=False,
+    ):
         ### Prepare the data
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         if filtProp is not None:
             # Calculate filtering values
             sortedLPred = [
-                np.argsort(self.resultsNN["predLoss"][iw])
+                np.argsort(self.resultsNN_phase[suffix]["predLoss"][iw])
                 for iw in range(len(self.timeWindows))
             ]
             thresh = [
                 np.squeeze(
-                    self.resultsNN["predLoss"][iw][
+                    self.resultsNN_phase[suffix]["predLoss"][iw][
                         sortedLPred[iw][int(len(sortedLPred[iw]) * filtProp)]
                     ]
                 )
                 for iw in range(len(self.timeWindows))
             ]
             filters_lpred = [
-                np.ones(self.resultsNN["time"][iw].shape).astype(np.bool)
-                * np.less_equal(self.resultsNN["predLoss"][iw], thresh[iw])
+                np.ones(self.resultsNN_phase[suffix]["time"][iw].shape).astype(np.bool)
+                * np.less_equal(
+                    self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw]
+                )
                 for iw in range(len(self.timeWindows))
             ]
         else:
@@ -894,11 +1020,17 @@ class PaperFigures:
 
         # Data
         lErrorNN = [
-            np.abs(self.resultsNN["linTruePos"][i] - self.resultsNN["linPred"][i])
+            np.abs(
+                self.resultsNN_phase[suffix]["linTruePos"][i]
+                - self.resultsNN_phase[suffix]["linPred"][i]
+            )
             for i in range(len(self.timeWindows))
         ]
         lErrorBayes = [
-            np.abs(self.resultsNN["linTruePos"][i] - self.resultsBayes["linPred"][i])
+            np.abs(
+                self.resultsNN_phase[suffix]["linTruePos"][i]
+                - self.resultsBayes_phase[suffix]["linPred"][i]
+            )
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -1052,70 +1184,103 @@ class PaperFigures:
 
         ax.set_ylabel("mean linear error")
         fig.legend()
+        fig.suptitle(
+            f"Mean linear position error for phase {suffix.strip('_')}, speed: {speed}"
+        )
         fig.show()
         if filtProp is None:
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanError_{str(speed)}{self.suffix}.png"),
+                    (f"meanError_{str(speed)}{suffix}.png"),
                 )
             )
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanError_{str(speed)}{self.suffix}.svg"),
+                    (f"meanError_{str(speed)}{suffix}.svg"),
                 )
             )
         else:
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanError_{str(speed)}_filt{self.suffix}.png"),
+                    (f"meanError_{str(speed)}_filt{suffix}.png"),
                 )
             )
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanError_{str(speed)}_filt{self.suffix}.svg"),
+                    (f"meanError_{str(speed)}_filt{suffix}.svg"),
                 )
             )
 
         return lErrorNN_mean, lerrorBayes_err, lErrorBayes_mean, lerrorBayes_err
 
-    def mean_euclerrors(self, speed="all", filtProp=None, errorType="sem", isCM=False):
+    def mean_euclerrors(
+        self,
+        suffix=None,
+        phase=None,
+        speed="all",
+        filtProp=None,
+        errorType="sem",
+        isCM=False,
+        mask=None,
+        use_mask=False,
+    ):
         ### Prepare the data
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
+
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         if filtProp is not None:
             # Calculate filtering values
             sortedLPred = [
-                np.argsort(self.resultsNN["predLoss"][iw])
+                np.argsort(self.resultsNN_phase[suffix]["predLoss"][iw])
                 for iw in range(len(self.timeWindows))
             ]
             thresh = [
                 np.squeeze(
-                    self.resultsNN["predLoss"][iw][
+                    self.resultsNN_phase[suffix]["predLoss"][iw][
                         sortedLPred[iw][int(len(sortedLPred[iw]) * filtProp)]
                     ]
                 )
                 for iw in range(len(self.timeWindows))
             ]
             filters_lpred = [
-                np.ones(self.resultsNN["time"][iw].shape).astype(np.bool)
-                * np.less_equal(self.resultsNN["predLoss"][iw], thresh[iw])
+                np.ones(self.resultsNN_phase[suffix]["time"][iw].shape).astype(np.bool)
+                * np.less_equal(
+                    self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw]
+                )
                 for iw in range(len(self.timeWindows))
             ]
         else:
@@ -1138,24 +1303,29 @@ class PaperFigures:
         bayesD = {}
         if isCM:
             nnD["pred"] = [
-                self.resultsNN["fullPred"][i] * EC for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["fullPred"][i] * EC
+                for i in range(len(self.timeWindows))
             ]
             nnD["true"] = [
-                self.resultsNN["truePos"][i] * EC for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["truePos"][i] * EC
+                for i in range(len(self.timeWindows))
             ]
             bayesD["pred"] = [
-                self.resultsBayes["fullPred"][i] * EC
+                self.resultsBayes_phase[suffix]["fullPred"][i] * EC
                 for i in range(len(self.timeWindows))
             ]
         else:
             nnD["pred"] = [
-                self.resultsNN["fullPred"][i] for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["fullPred"][i]
+                for i in range(len(self.timeWindows))
             ]
             nnD["true"] = [
-                self.resultsNN["truePos"][i] for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["truePos"][i]
+                for i in range(len(self.timeWindows))
             ]
             bayesD["pred"] = [
-                self.resultsBayes["fullPred"][i] for i in range(len(self.timeWindows))
+                self.resultsBayes_phase[suffix]["fullPred"][i]
+                for i in range(len(self.timeWindows))
             ]
         errorNN = [
             np.linalg.norm(nnD["true"][i] - nnD["pred"][i], axis=1, ord=2)
@@ -1318,50 +1488,74 @@ class PaperFigures:
         ax.set_ylabel("mean euclidian error", fontsize="xx-large")
 
         fig.legend()
+        fig.suptitle(
+            f"Mean euclidian position error for phase {suffix.strip('_')}, speed: {speed}",
+            fontsize="xx-large",
+        )
         fig.show()
         if filtProp is None:
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanEuclError_{str(speed)}{self.suffix}.png"),
+                    (f"meanEuclError_{str(speed)}{suffix}.png"),
                 )
             )
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanEuclError_{str(speed)}{self.suffix}.svg"),
+                    (f"meanEuclError_{str(speed)}{suffix}.svg"),
                 )
             )
         else:
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanEuclError_{str(speed)}_filt{self.suffix}.png"),
+                    (f"meanEuclError_{str(speed)}_filt{suffix}.png"),
                 )
             )
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
-                    (f"meanEuclError_{str(speed)}_filt{self.suffix}.svg"),
+                    (f"meanEuclError_{str(speed)}_filt{suffix}.svg"),
                 )
             )
 
         return errorNN_mean, errorNN_err, errorBayes_mean, errorBayes_err
 
-    def nnVSbayes(self, speed="all"):
+    def nnVSbayes(
+        self, suffix=None, phase=None, speed="all", mask=None, use_mask=False
+    ):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
+
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -1380,14 +1574,14 @@ class PaperFigures:
             ax = [ax]  # compatibility move
         for iw in range(len(self.timeWindows)):
             ax[iw].scatter(
-                self.resultsBayes["linPred"][iw][masks[iw]],
-                self.resultsNN["linPred"][iw][masks[iw]],
+                self.resultsBayes_phase[suffix]["linPred"][iw][masks[iw]],
+                self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]],
                 s=1,
                 c="grey",
             )
             ax[iw].hist2d(
-                self.resultsBayes["linPred"][iw][masks[iw]],
-                self.resultsNN["linPred"][iw][masks[iw]],
+                self.resultsBayes_phase[suffix]["linPred"][iw][masks[iw]],
+                self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]],
                 (45, 45),
                 cmap=white_viridis,
                 alpha=0.8,
@@ -1419,32 +1613,38 @@ class PaperFigures:
             for a in ax
         ]
         plt.suptitle(
-            (f"Position decoded during \n{str(speed)} speed periods"),
+            (
+                f"Position decoded during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
+            ),
             fontsize="xx-large",
         )
         fig.show()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"NNvsBayesian_{str(speed)}{self.suffix}.png"),
+                (f"NNvsBayesian_{str(speed)}{suffix}.png"),
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"NNvsBayesian_{str(speed)}{self.suffix}.svg"),
+                (f"NNvsBayesian_{str(speed)}{suffix}.svg"),
             )
         )
 
-    def predLoss_vs_trueLoss(self, speed="all", mode="2d"):
+    def predLoss_vs_trueLoss(self, suffix=None, phase=None, speed="all", mode="2d"):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Calculate error
         if mode == "2d":
             errors = [
                 np.sqrt(
                     np.sum(
                         np.square(
-                            self.resultsNN["truePos"][iw]
-                            - self.resultsNN["fullPred"][iw]
+                            self.resultsNN_phase[suffix]["truePos"][iw]
+                            - self.resultsNN_phase[suffix]["fullPred"][iw]
                         ),
                         axis=1,
                     )
@@ -1453,7 +1653,10 @@ class PaperFigures:
             ]
         elif mode == "1d":
             errors = [
-                np.abs(self.resultsNN["linTruePos"][iw] - self.resultsNN["linPred"][iw])
+                np.abs(
+                    self.resultsNN_phase[suffix]["linTruePos"][iw]
+                    - self.resultsNN_phase[suffix]["linPred"][iw]
+                )
                 for iw in range(len(self.timeWindows))
             ]
         else:
@@ -1461,17 +1664,19 @@ class PaperFigures:
 
         # Masks
         habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
+            inEpochsMask(
+                self.resultsNN_phase[suffix]["time"][i],
+                self.behaviorData["Times"]["testEpochs"],
             )
             for i in range(len(self.timeWindows))
         ]
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -1489,13 +1694,13 @@ class PaperFigures:
             ax = [ax]  # compatibility move
         for iw in range(len(self.timeWindows)):
             ax[iw].scatter(
-                self.resultsNN["predLoss"][iw][masks[iw]],
+                self.resultsNN_phase[suffix]["predLoss"][iw][masks[iw]],
                 errors[iw][masks[iw]],
                 c="grey",
                 s=1,
             )
             ax[iw].hist2d(
-                self.resultsNN["predLoss"][iw][masks[iw]],
+                self.resultsNN_phase[suffix]["predLoss"][iw][masks[iw]],
                 errors[iw][masks[iw]],
                 (30, 30),
                 cmap=white_viridis,
@@ -1513,35 +1718,57 @@ class PaperFigures:
             ax[iw].tick_params(axis="x", which="major", labelsize=15, rotation=45)
             ax[iw].ticklabel_format(axis="x", style="sci", scilimits=(-3, 3))
 
+        fig.suptitle(
+            f"Predicted loss vs true error during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
+        )
         fig.tight_layout()
         fig.show()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"predLoss_vs_trueLoss{str(speed)}{self.suffix}.png"),
+                (f"predLoss_vs_trueLoss{str(speed)}{suffix}.png"),
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"predLoss_vs_trueLoss{str(speed)}{self.suffix}.svg"),
+                (f"predLoss_vs_trueLoss{str(speed)}{suffix}.svg"),
             )
         )
 
-    def fig_example_2d(self, speed="all"):
+    def fig_example_2d(
+        self, suffix=None, phase=None, speed="all", mask=None, use_mask=False
+    ):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
 
@@ -1558,7 +1785,8 @@ class PaperFigures:
             [[0, 0, 1, 1, 0.63, 0.63, 0.35, 0.35, 0], [0, 1, 1, 0, 0, 0.75, 0.75, 0, 0]]
         )
         ts = [
-            self.resultsNN["time"][iw][mask[iw]] for iw in range(len(self.timeWindows))
+            self.resultsNN_phase[suffix]["time"][iw][mask[iw]]
+            for iw in range(len(self.timeWindows))
         ]
         # Trajectory figure
         cm = plt.get_cmap("turbo")
@@ -1567,15 +1795,15 @@ class PaperFigures:
             ax = [ax]  # compatibility move
         for iw in range(len(self.timeWindows)):
             ax[iw].plot(
-                self.resultsNN["truePos"][iw][mask[iw], 0],
-                self.resultsNN["truePos"][iw][mask[iw], 1],
+                self.resultsNN_phase[suffix]["truePos"][iw][mask[iw], 0],
+                self.resultsNN_phase[suffix]["truePos"][iw][mask[iw], 1],
                 color="black",
                 label="true traj",
                 zorder=2,
             )
             ax[iw].scatter(
-                self.resultsNN["fullPred"][iw][mask[iw], 0],
-                self.resultsNN["truePos"][iw][mask[iw], 1],
+                self.resultsNN_phase[suffix]["fullPred"][iw][mask[iw], 0],
+                self.resultsNN_phase[suffix]["truePos"][iw][mask[iw], 1],
                 c="red",
                 s=3,
                 label="predicted traj",
@@ -1587,38 +1815,58 @@ class PaperFigures:
             ax[iw].plot(
                 mazeBorder.transpose()[:, 0], mazeBorder.transpose()[:, 1], c="black"
             )
+            ax[iw].set_title((str(self.timeWindows[iw]) + " ms"), fontsize="x-large")
         fig.legend()
         fig.suptitle(
-            f"Example of decoded trajectories during \n{str(speed)} speed periods"
+            f"Example of decoded trajectories during \n{str(speed)} speed periods for phase {suffix.strip('_')}",
         )
         fig.show()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"decoded_trajectories_{str(speed)}{self.suffix}.png"),
+                (f"decoded_trajectories_{str(speed)}{suffix}.png"),
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"decoded_trajectories_{str(speed)}{self.suffix}.svg"),
+                (f"decoded_trajectories_{str(speed)}{suffix}.svg"),
             )
         )
 
-    def predLoss_linError(self, speed="all", step=0.1):
+    def predLoss_linError(
+        self, suffix=None, phase=None, speed="all", step=0.1, mask=None, use_mask=False
+    ):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
-            for i in range(len(self.timeWindows))
-        ]
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
         habMaskFast = [
-            (habMask[i]) * (self.resultsNN["speedMask"][i])
+            (habMask[i]) * (self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         habMaskSlow = [
-            (habMask[i]) * np.logical_not(self.resultsNN["speedMask"][i][i])
+            (habMask[i])
+            * np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i][i])
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -1633,15 +1881,15 @@ class PaperFigures:
         ## Calculate errors at each level of predLoss
         errors = [
             np.abs(
-                self.resultsNN["linTruePos"][iw][masks[iw]]
-                - self.resultsNN["linPred"][iw][masks[iw]]
+                self.resultsNN_phase[suffix]["linTruePos"][iw][masks[iw]]
+                - self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]]
             )
             for iw in range(len(self.timeWindows))
         ]
         predLoss_ticks = [
             np.arange(
-                np.min(self.resultsNN["predLoss"][iw][masks[iw]]),
-                np.max(self.resultsNN["predLoss"][iw][masks[iw]]),
+                np.min(self.resultsNN_phase[suffix]["predLoss"][iw][masks[iw]]),
+                np.max(self.resultsNN_phase[suffix]["predLoss"][iw][masks[iw]]),
                 step,
             )
             for iw in range(len(self.timeWindows))
@@ -1653,7 +1901,8 @@ class PaperFigures:
                     np.mean(
                         errors[iw][
                             np.less_equal(
-                                self.resultsNN["predLoss"][iw][masks[iw]], pfilt
+                                self.resultsNN_phase[suffix]["predLoss"][iw][masks[iw]],
+                                pfilt,
                             )
                         ]
                     )
@@ -1679,39 +1928,56 @@ class PaperFigures:
             "Neural network \n prediction filtering value", fontsize="x-large"
         )
         ax.set_ylabel("mean absolute linear err4or", fontsize="x-large")
-        ax.set_title((speed + " speed"), fontsize="x-large")
+        ax.set_title(
+            (speed + " speed" + "phase " + suffix.strip("_")), fontsize="x-large"
+        )
         fig.legend(loc=(0.87, 0.17), fontsize=12)
         fig.show()
 
-        fig.savefig(
-            os.path.join(self.folderFigures, f"predLoss_vs_error{self.suffix}.png")
-        )
-        fig.savefig(
-            os.path.join(self.folderFigures, f"predLoss_vs_error{self.suffix}.svg")
-        )
+        fig.savefig(os.path.join(self.folderFigures, f"predLoss_vs_error{suffix}.png"))
+        fig.savefig(os.path.join(self.folderFigures, f"predLoss_vs_error{suffix}.svg"))
 
-    def predLoss_euclError(self, speed="all", step=0.01, isCM=False, scaled=False):
+    def predLoss_euclError(
+        self,
+        suffix=None,
+        phase=None,
+        speed="all",
+        step=0.01,
+        isCM=False,
+        scaled=False,
+        mask=None,
+        use_mask=False,
+    ):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         REMOVED_PERCENTAGE = 1
         # Data
         nnD = {}
         if isCM:
             nnD["pred"] = [
-                self.resultsNN["fullPred"][i] * EC for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["fullPred"][i] * EC
+                for i in range(len(self.timeWindows))
             ]
             nnD["true"] = [
-                self.resultsNN["truePos"][i] * EC for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["truePos"][i] * EC
+                for i in range(len(self.timeWindows))
             ]
         else:
             nnD["pred"] = [
-                self.resultsNN["fullPred"][i] for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["fullPred"][i]
+                for i in range(len(self.timeWindows))
             ]
             nnD["true"] = [
-                self.resultsNN["truePos"][i] for i in range(len(self.timeWindows))
+                self.resultsNN_phase[suffix]["truePos"][i]
+                for i in range(len(self.timeWindows))
             ]
 
         # Scale predicted loss between 0 and 1
         predLoss = [
-            self.resultsNN["predLoss"][iw] for iw in range(len(self.timeWindows))
+            self.resultsNN_phase[suffix]["predLoss"][iw]
+            for iw in range(len(self.timeWindows))
         ]
         if scaled:
             predLoss_scaled = [
@@ -1724,17 +1990,30 @@ class PaperFigures:
         else:
             predLoss_scaled = predLoss
         # Masks
-        habMask = [
-            ep.inEpochsMask(
-                self.resultsNN["time"][i], self.behaviorData["Times"]["testEpochs"]
-            )
+        if mask is None:
+            if use_mask:
+                habMask = [
+                    inEpochsMask(
+                        self.resultsNN_phase[suffix]["time"][i],
+                        self.behaviorData["Times"]["testEpochs"],
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+            else:
+                habMask = [
+                    np.ones(self.resultsNN_phase[suffix]["time"][i].shape).astype(
+                        np.bool
+                    )
+                    for i in range(len(self.timeWindows))
+                ]
+        else:
+            habMask = mask
+        habMaskFast = [
+            self.resultsNN_phase[suffix]["speedMask"][i]
             for i in range(len(self.timeWindows))
         ]
-        habMaskFast = [
-            self.resultsNN["speedMask"][i] for i in range(len(self.timeWindows))
-        ]
         habMaskSlow = [
-            np.logical_not(self.resultsNN["speedMask"][i])
+            np.logical_not(self.resultsNN_phase[suffix]["speedMask"][i])
             for i in range(len(self.timeWindows))
         ]
         if speed == "all":
@@ -1806,39 +2085,45 @@ class PaperFigures:
             "Neural network \n prediction filtering value", fontsize="x-large"
         )
         ax.set_ylabel("Euclidean error (cm)", fontsize="x-large")
-        ax.set_title((speed + " speed"), fontsize="x-large")
+        ax.set_title(
+            (speed + " speed" + " and phase " + suffix.strip("_")), fontsize="x-large"
+        )
         fig.legend(loc=(0.87, 0.17), fontsize=12)
         fig.show()
 
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                f"predLossScaled_vs_euclError_{speed}{self.suffix}.png",
+                f"predLossScaled_vs_euclError_{speed}{suffix}.png",
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                f"predLossScaled_vs_euclError_{speed}{self.suffix}.svg",
+                f"predLossScaled_vs_euclError_{speed}{suffix}.svg",
             )
         )
 
         return predLoss_ticks[0], errors_filtered
 
-    def fig_example_linear_filtered(self, fprop=0.3):
+    def fig_example_linear_filtered(self, suffix=None, phase=None, fprop=0.3):
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
         # Calculate filtering values
         sortedLPred = [
-            np.argsort(self.resultsNN["predLoss"][iw])
+            np.argsort(self.resultsNN_phase[suffix]["predLoss"][iw])
             for iw in range(len(self.timeWindows))
         ]
         sortedprobaBayes = [
-            np.argsort(self.resultsBayes["probaBayes"][iw])
+            np.argsort(self.resultsBayes_phase[suffix]["probaBayes"][iw])
             for iw in range(len(self.timeWindows))
         ]
 
         thresh = [
             np.squeeze(
-                self.resultsNN["predLoss"][iw][
+                self.resultsNN_phase[suffix]["predLoss"][iw][
                     sortedLPred[iw][int(len(sortedLPred[iw]) * fprop)]
                 ]
             )
@@ -1846,7 +2131,7 @@ class PaperFigures:
         ]
         threshBayes = [
             np.squeeze(
-                self.resultsBayes["probaBayes"][iw][
+                self.resultsBayes_phase[suffix]["probaBayes"][iw][
                     sortedprobaBayes[iw][int(len(sortedprobaBayes[iw]) * fprop)]
                 ]
             )
@@ -1854,13 +2139,15 @@ class PaperFigures:
         ]
 
         filters_lpred = [
-            np.ones(self.resultsNN["time"][iw].shape).astype(np.bool)
-            * np.less_equal(self.resultsNN["predLoss"][iw], thresh[iw])
+            np.ones(self.resultsNN_phase[suffix]["time"][iw].shape).astype(np.bool)
+            * np.less_equal(self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw])
             for iw in range(len(self.timeWindows))
         ]
         filters_bayes = [
-            np.ones(self.resultsBayes["time"][iw].shape).astype(np.bool)
-            * np.greater_equal(self.resultsBayes["probaBayes"][iw], threshBayes[iw])
+            np.ones(self.resultsBayes_phase[suffix]["time"][iw].shape).astype(np.bool)
+            * np.greater_equal(
+                self.resultsBayes_phase[suffix]["probaBayes"][iw], threshBayes[iw]
+            )
             for iw in range(len(self.timeWindows))
         ]
 
@@ -1870,21 +2157,24 @@ class PaperFigures:
         # All points
         if len(self.timeWindows) == 1:
             ax[0].plot(
-                self.resultsNN["time"][0],
-                self.resultsNN["linTruePos"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsNN_phase[suffix]["linTruePos"][0],
                 c="black",
                 alpha=0.3,
             )
             ax[0].scatter(
-                self.resultsNN["time"][0][filters_lpred[0]],
-                self.resultsNN["linPred"][0][filters_lpred[0]],
+                self.resultsNN_phase[suffix]["time"][0][filters_lpred[0]],
+                self.resultsNN_phase[suffix]["linPred"][0][filters_lpred[0]],
                 c=self.cm(12 + 0),
                 alpha=0.9,
                 label=(str(self.timeWindows[0]) + " ms"),
                 s=1,
             )
             ax[0].set_title(
-                "Neural network decoder \n " + str(self.timeWindows[0]) + " window",
+                "Neural network decoder \n "
+                + str(self.timeWindows[0])
+                + " window for phase "
+                + suffix.strip("_"),
                 fontsize="xx-large",
             )
             ax[0].set_ylabel("linear position", fontsize="xx-large")
@@ -1892,8 +2182,8 @@ class PaperFigures:
         else:
             [
                 a.plot(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linTruePos"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linTruePos"][i],
                     c="black",
                     alpha=0.3,
                 )
@@ -1901,8 +2191,8 @@ class PaperFigures:
             ]
             for i in range(len(self.timeWindows)):
                 ax[i, 0].scatter(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linPred"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linPred"][i],
                     c=self.cm(12 + i),
                     alpha=0.9,
                     label=(str(self.timeWindows[i]) + " ms"),
@@ -1910,7 +2200,10 @@ class PaperFigures:
                 )
             if i == 0:
                 ax[i, 0].set_title(
-                    "Neural network decoder \n " + str(self.timeWindows[i]) + " window",
+                    "Neural network decoder \n "
+                    + str(self.timeWindows[i])
+                    + " window for phase "
+                    + suffix.strip("_"),
                     fontsize="xx-large",
                 )
             else:
@@ -1921,14 +2214,14 @@ class PaperFigures:
         # Filtered data
         if len(self.timeWindows) == 1:
             ax[1].plot(
-                self.resultsNN["time"][0],
-                self.resultsNN["linTruePos"][0],
+                self.resultsNN_phase[suffix]["time"][0],
+                self.resultsNN_phase[suffix]["linTruePos"][0],
                 c="black",
                 alpha=0.3,
             )
             ax[1].scatter(
-                self.resultsNN["time"][0][filters_lpred[0]],
-                self.resultsNN["linPred"][0][filters_lpred[0]],
+                self.resultsNN_phase[suffix]["time"][0][filters_lpred[0]],
+                self.resultsNN_phase[suffix]["linPred"][0][filters_lpred[0]],
                 c=self.cm(12 + 0),
                 alpha=0.9,
                 label=(str(self.timeWindows[0]) + " ms"),
@@ -1939,15 +2232,16 @@ class PaperFigures:
                 + str(fprop * 100)
                 + "% of predicitons \n"
                 + str(self.timeWindows[0])
-                + " ms window",
+                + " ms window for phase "
+                + suffix.strip("_"),
                 fontsize="xx-large",
             )
             ax[1].set_xlabel("time (s)", fontsize="xx-large")
         else:
             [
                 a.plot(
-                    self.resultsNN["time"][i],
-                    self.resultsNN["linTruePos"][i],
+                    self.resultsNN_phase[suffix]["time"][i],
+                    self.resultsNN_phase[suffix]["linTruePos"][i],
                     c="black",
                     alpha=0.3,
                 )
@@ -1955,8 +2249,8 @@ class PaperFigures:
             ]
             for i in range(len(self.timeWindows)):
                 ax[i, 1].scatter(
-                    self.resultsNN["time"][i][filters_lpred[i]],
-                    self.resultsNN["linPred"][i][filters_lpred[i]],
+                    self.resultsNN_phase[suffix]["time"][i][filters_lpred[i]],
+                    self.resultsNN_phase[suffix]["linPred"][i][filters_lpred[i]],
                     c=self.cm(12 + i),
                     alpha=0.9,
                     label=(str(self.timeWindows[i]) + " ms"),
@@ -1968,7 +2262,8 @@ class PaperFigures:
                         + str(fprop * 100)
                         + "% of predicitons \n"
                         + str(self.timeWindows[0])
-                        + " ms window",
+                        + " ms window for phase "
+                        + suffix.strip("_"),
                         fontsize="xx-large",
                     )
                 else:
@@ -1985,13 +2280,13 @@ class PaperFigures:
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"example_nn_bayes_filtered_{str(fprop * 100)}%{self.suffix}.png"),
+                (f"example_nn_bayes_filtered_{str(fprop * 100)}%{suffix}.png"),
             )
         )
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                (f"example_nn_bayes_filtered_{str(fprop * 100)}%{self.suffix}.svg"),
+                (f"example_nn_bayes_filtered_{str(fprop * 100)}%{suffix}.svg"),
             )
         )
 

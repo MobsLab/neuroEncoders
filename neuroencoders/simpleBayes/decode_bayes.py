@@ -242,7 +242,7 @@ class Trainer:
             behaviorData: dict, containing the position and time data.
             l_function: callable, linearization function.
             use_linear_tuning: bool, whether to use linear tuning for ordering.
-            **kwargs: additional arguments including onTheFlyCorrection
+            **kwargs: additional arguments including onTheFlyCorrection, bayesMatrices, redo.
 
         Returns:
             bayesMatrices: dict, containing the trained matrices for Bayesian inference.
@@ -252,8 +252,24 @@ class Trainer:
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
 
-        ### Perform training (build marginal and local rate functions)
-        bayesMatrices = self.train(behaviorData, onTheFlyCorrection=onTheFlyCorrection)
+        ### Perform training (build marginal and local rate functions) ONLY IF bayesMatrices is not provided/pre-existing
+        if kwargs.get("bayesMatrices", None) is None:
+            try:
+                if not kwargs.get("redo", False):
+                    with open(
+                        os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
+                    ) as f:
+                        bayesMatrices = pickle.load(f)
+                    self.logger.info("Loaded existing Bayesian matrices.")
+                else:
+                    raise FileNotFoundError(
+                        "Redundant training requested, re-training Bayesian matrices."
+                    )
+            except FileNotFoundError:
+                self.logger.info("Training new Bayesian matrices...")
+                bayesMatrices = self.train(
+                    behaviorData, onTheFlyCorrection=onTheFlyCorrection
+                )
 
         if use_linear_tuning and l_function is not None:
             # Use linear tuning curves for more accurate ordering
@@ -1145,6 +1161,7 @@ class Trainer:
             cv_folds: int, number of folds for cross-validation.
             save_posteriors: bool, whether to save full posterior maps.
             save_as_pickle: bool, whether to save results as a pickle file.
+            **kwargs: additional keyword arguments for flexibility (e.g., phase).
 
         Returns:
             outputResults: dict, containing predictions, performance metrics, and optionally CV results.
@@ -2009,237 +2026,6 @@ class Trainer:
                 )
 
         self.logger.info("========================")
-
-    # def test_as_NN(
-    #     self,
-    #     behaviorData,
-    #     bayesMatrices,
-    #     timeStepPred,
-    #     windowSizeMS=36,
-    #     useTrain=False,
-    #     sleepEpochs=[],
-    #     l_function=None,
-    #     **kwargs,
-    # ):
-    #     """
-    #     Test the model using the neural network approach.
-    #
-    #     Args:
-    #     --------
-    #         behaviorData: dict, containing the position and time data.
-    #         bayesMatrices: dict, containing the precomputed matrices for Bayesian inference.
-    #         timeStepPred: array, time steps for prediction.
-    #         windowSizeMS: int, size of the window in milliseconds.
-    #         useTrain: bool, whether to use training epochs for prediction.
-    #         sleepEpochs: list, epochs to consider for sleep decoding.
-    #         l_function: callable, optional linearization function.
-    #
-    #     Returns:
-    #     --------
-    #         outputResults: dict, containing the predicted positions, probabilities, and true positions.
-    #
-    #     """
-    #     windowSize = windowSizeMS / 1000
-    #
-    #     if useTrain:
-    #         epochsTrain = [
-    #             inEpochsMask(
-    #                 self.clusterData["Spike_times"][tetrode][:, 0],
-    #                 behaviorData["Times"]["trainEpochs"],
-    #             )
-    #             for tetrode in range(len(self.clusterData["Spike_times"]))
-    #         ]
-    #         epochsTest = [
-    #             inEpochsMask(
-    #                 self.clusterData["Spike_times"][tetrode][:, 0],
-    #                 behaviorData["Times"]["testEpochs"],
-    #             )
-    #             for tetrode in range(len(self.clusterData["Spike_times"]))
-    #         ]
-    #         clustersTime = [
-    #             self.clusterData["Spike_times"][tetrode][
-    #                 epochsTrain[tetrode] + epochsTest[tetrode]
-    #             ]
-    #             for tetrode in range(len(self.clusterData["Spike_times"]))
-    #         ]
-    #         clusters = [
-    #             self.clusterData["Spike_labels"][tetrode][
-    #                 epochsTrain[tetrode] + epochsTest[tetrode]
-    #             ]
-    #             for tetrode in range(len(self.clusterData["Spike_times"]))
-    #         ]
-    #     else:
-    #         if len(sleepEpochs) > 0:
-    #             clustersTime = [
-    #                 self.clusterData["Spike_times"][tetrode][
-    #                     inEpochs(
-    #                         self.clusterData["Spike_times"][tetrode][:, 0], sleepEpochs
-    #                     )
-    #                 ]
-    #                 for tetrode in range(len(self.clusterData["Spike_times"]))
-    #             ]
-    #             clusters = [
-    #                 self.clusterData["Spike_labels"][tetrode][
-    #                     inEpochs(
-    #                         self.clusterData["Spike_times"][tetrode][:, 0], sleepEpochs
-    #                     )
-    #                 ]
-    #                 for tetrode in range(len(self.clusterData["Spike_times"]))
-    #             ]
-    #         else:
-    #             clustersTime = [
-    #                 self.clusterData["Spike_times"][tetrode][
-    #                     inEpochs(
-    #                         self.clusterData["Spike_times"][tetrode][:, 0],
-    #                         behaviorData["Times"]["testEpochs"],
-    #                     )
-    #                 ]
-    #                 for tetrode in range(len(self.clusterData["Spike_times"]))
-    #             ]
-    #             clusters = [
-    #                 self.clusterData["Spike_labels"][tetrode][
-    #                     inEpochs(
-    #                         self.clusterData["Spike_times"][tetrode][:, 0],
-    #                         behaviorData["Times"]["testEpochs"],
-    #                     )
-    #                 ]
-    #                 for tetrode in range(len(self.clusterData["Spike_times"]))
-    #             ]
-    #
-    #     print("\nBUILDING POSITION PROBAS")
-    #     occupation, marginalRateFunctions, rateFunctions = [
-    #         bayesMatrices[key]
-    #         for key in ["occupation", "marginalRateFunctions", "rateFunctions"]
-    #     ]
-    #     mask = occupation > (np.max(occupation) / self.maskingFactor)
-    #     logOccupation = np.log(occupation + np.min(occupation[mask]))
-    #     ### Build Poisson term
-    #     allPoisson = [
-    #         np.exp((-windowSize) * marginalRateFunctions[tetrode])
-    #         for tetrode in range(len(clusters))
-    #     ]
-    #     allPoisson = np.log(reduce(np.multiply, allPoisson))
-    #     ### Log of rate functions
-    #     logRF = []
-    #     for tetrode in range(np.shape(rateFunctions)[0]):
-    #         temp = []
-    #         for cluster in range(np.shape(rateFunctions[tetrode])[0]):
-    #             temp.append(
-    #                 np.log(
-    #                     rateFunctions[tetrode][cluster]
-    #                     + np.min(
-    #                         rateFunctions[tetrode][cluster][
-    #                             rateFunctions[tetrode][cluster] != 0
-    #                         ]
-    #                     )
-    #                 )
-    #             )
-    #         logRF.append(temp)
-    #
-    #     ### Decoding loop
-    #     print("Parallel pykeops bayesian test")
-    #     outputPOps = parallel_pred_as_NN(
-    #         timeStepPred,
-    #         windowSize,
-    #         allPoisson,
-    #         clusters,
-    #         clustersTime,
-    #         logRF,
-    #         logOccupation,
-    #     )
-    #     print("finished bayesian guess")
-    #
-    #     idPos = np.unravel_index(outputPOps[1], shape=allPoisson.shape)
-    #     inferredPos = np.array(
-    #         [
-    #             bayesMatrices["bins"][i][idPos[i][:, 0]]
-    #             for i in range(len(bayesMatrices["bins"]))
-    #         ]
-    #     )
-    #     # probability moved back to linear scale
-    #     # inferredProba = np.exp(outputPOps[0]) / np.sum(np.exp(outputPOps[0]), axis=0)
-    #     inferredProba = outputPOps[0]
-    #     inferResults = np.concatenate(
-    #         [np.transpose(inferredPos), inferredProba], axis=-1
-    #     )
-    #
-    #     # NOTE: A few values of probability predictions present NaN in pykeops
-    #     print("Resolving nan issue from pykeops over a few bins")
-    #     badBins = np.where(np.isnan(inferResults[:, 2]))[0]
-    #     for bin in badBins:
-    #         binStartTime = timeStepPred[bin]
-    #         binStopTime = binStartTime + windowSize
-    #         tetrodesContributions = []
-    #         tetrodesContributions.append(allPoisson)
-    #         for tetrode in range(len(clusters)):
-    #             binProbas = clusters[tetrode][
-    #                 np.intersect1d(
-    #                     np.where(clustersTime[tetrode][:, 0] > binStartTime),
-    #                     np.where(clustersTime[tetrode][:, 0] < binStopTime),
-    #                 )
-    #             ]
-    #             # Note:  we would lose some spikes if we used the clusterData[Spike_pos_index]
-    #             # because some spike might be closest to one position further away than windowSize,
-    #             # yet themselves be close to the spike time
-    #             binClusters = np.sum(binProbas, 0)
-    #             # Terms that come from spike information
-    #             if np.sum(binClusters) > 0.5:
-    #                 spikePattern = reduce(
-    #                     lambda a, b: a + b,
-    #                     [
-    #                         (logRF[tetrode][cluster] + binClusters[cluster])
-    #                         for cluster in range(np.shape(binClusters)[0])
-    #                     ],
-    #                 )
-    #             else:
-    #                 spikePattern = np.multiply(np.zeros(np.shape(logOccupation)), mask)
-    #             tetrodesContributions.append(spikePattern)
-    #         # Guessed probability map
-    #         positionProba = reduce(lambda a, b: a + b, tetrodesContributions)
-    #         positionProba = (
-    #             positionProba + logOccupation
-    #         )  # prior: Occupation deduced from training!!
-    #         # probability moved back to linear scale
-    #         positionProba = np.exp(positionProba) / np.sum(np.exp(positionProba))
-    #         inferResults[bin, 2] = np.max(positionProba)
-    #         inferResults[np.isnan(inferResults[:, 2]), 2] = 0  # to correct for overflow
-    #
-    #     # Get the true position
-    #     idTestEpoch = inEpochsMask(
-    #         behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
-    #     )
-    #     if useTrain:
-    #         idTrainEpoch = inEpochsMask(
-    #             behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-    #         )
-    #         idTestEpoch = idTrainEpoch + idTestEpoch
-    #     realPos = behaviorData["Positions"][idTestEpoch]
-    #     realTimes = behaviorData["positionTime"][idTestEpoch]
-    #     idsNN = []
-    #     for timeStamp in timeStepPred:
-    #         idsNN.append(np.abs(realTimes - timeStamp).argmin())
-    #     idsNN = np.array(idsNN)
-    #     featTrue = realPos[idsNN]
-    #
-    #     outputResults = {
-    #         "featurePred": inferResults[:, :2],
-    #         "proba": inferResults[:, 2],
-    #         "times": timeStepPred,
-    #         "featureTrue": featTrue,
-    #         "speed_mask": behaviorData["Times"]["speedFilter"],
-    #     }  # , "probaMaps": position_proba
-    #
-    #     if l_function:
-    #         projPredPos, linearPred = l_function(inferResults[:, :2])
-    #         projTruePos, linearTrue = l_function(featTrue)
-    #         outputResults["projPred"] = projPredPos
-    #         outputResults["projTruePos"] = projTruePos
-    #         outputResults["linearPred"] = linearPred
-    #         outputResults["linearTrue"] = linearTrue
-    #
-    #     self.saveResults(outputResults, folderName=windowSizeMS, phase=phase)
-    #
-    #     return outputResults
 
     def sleep_decoding(
         self,
