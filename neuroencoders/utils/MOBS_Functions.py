@@ -18,10 +18,10 @@ from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.resultAnalysis import print_results
 from neuroencoders.resultAnalysis.paper_figures import PaperFigures
 from neuroencoders.transformData.linearizer import UMazeLinearizer
+from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import Params, Project
-from neuroencoders.utils.PathForExperiments import path_for_experiments
 
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
@@ -868,10 +868,13 @@ class Mouse_Results(Params, PaperFigures):
             self.load_trainers(**kwargs)
         PaperFigures.__init__(
             self,
-            self.Project,
-            self.DataHelper.fullBehavior,
-            self.bayes if hasattr(self, "bayes") else None,
-            self.l_function,
+            projectPath=self.Project,
+            behaviorData=self.DataHelper.fullBehavior,
+            trainerBayes=self.bayes if hasattr(self, "bayes") else None,
+            bayesMatrices=self.bayes_matrices
+            if hasattr(self, "bayes_matrices")
+            else None,
+            l_function=self.l_function,
             timeWindows=self.windows_values,
             phase=self.phase,
         )
@@ -883,8 +886,10 @@ class Mouse_Results(Params, PaperFigures):
         This is necessary for compatibility with multiprocessing and other serialization methods.
         """
         state = self.__dict__.copy()
-        # Remove attributes that cannot be pickled
+        # Remove attributes that cannot be pickled or are not needed for serialization (too big)
         state.pop("ann", None)
+        state.pop("bayes", None)
+        state.pop("bayes_matrices", None)
         return state
 
     def __setstate__(self, state):
@@ -939,7 +944,7 @@ class Mouse_Results(Params, PaperFigures):
         state = self.__getstate__()
         # If the selfect has a load_trainers method, call it
         if hasattr(self, "load_trainers"):
-            self.which = state.pop("which", "all")
+            self.which = state.pop("which", "both")
             keys_to_pop = [
                 "deviceName",
                 "phase",
@@ -1056,16 +1061,23 @@ class Mouse_Results(Params, PaperFigures):
             **kwargs: Additional keyword arguments for trainer initialization such as:
                 deviceName (str): Device to use for training ('gpu' or 'cpu').
                 debug (bool): Whether to run in debug mode.
-                bandwidth (int): Bandwidth for the bayes trainer.
-                kernel (str): Kernel type for the bayes trainer.
-                maskingFactor (float): Masking factor for the bayes trainer.
+
+                Regarding the bayes trainer and DecoderConfig kwargs:
+                    bandwidth (int): Bandwidth for the bayes trainer.
+                    kernel (str): Kernel type for the bayes trainer.
+                    maskingFactor (float): Masking factor for the bayes trainer.
 
 
         """
         from neuroencoders.fullEncoder.an_network import (
             LSTMandSpikeNetwork as NNTrainer,
         )
-        from neuroencoders.simpleBayes.decode_bayes import Trainer as BayesTrainer
+        from neuroencoders.simpleBayes.decode_bayes import (
+            DecoderConfig,
+        )
+        from neuroencoders.simpleBayes.decode_bayes import (
+            Trainer as BayesTrainer,
+        )
 
         if hasattr(self, "deviceName"):
             deviceName = kwargs.pop("deviceName", self.deviceName)
@@ -1108,9 +1120,27 @@ class Mouse_Results(Params, PaperFigures):
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
                 if not hasattr(self, "bayes"):
+                    self.bayes_config = DecoderConfig(**kwargs)
                     self.bayes = BayesTrainer(
-                        self.projects[winMS], phase=self.phase, **kwargs
+                        self.projects[winMS],
+                        config=self.bayes_config,
+                        phase=self.phase,
+                        **kwargs,
                     )
+                    try:
+                        with open(
+                            os.path.join(
+                                self.folderResult,
+                                "bayesMatrices.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            bayes_matrices = pickle.load(f)
+                        self.bayes_matrices = bayes_matrices
+                    except (FileNotFoundError, AttributeError) as e:
+                        warn(
+                            f"You asked for bayes trainer, but no bayes matrices pickle was found."
+                        )
 
     def load_results(
         self, winMS=None, redo=False, force=False, phase=None, which="both", **kwargs
@@ -1191,7 +1221,7 @@ class Mouse_Results(Params, PaperFigures):
                             **kwargs,
                         )
                 else:
-                    print(f"Force loading results for window {win}.")
+                    print(f"Force loading ann results for window {win}.")
                     self.load_trainers(which="ann", **kwargs)
                     try:
                         self.ann[win].test(
@@ -1226,26 +1256,73 @@ class Mouse_Results(Params, PaperFigures):
                 )
 
             if which.lower() in ["bayes", "both"]:
-                self.load_trainers(which="bayes", **kwargs)
-                mask = inEpochsMask(
-                    self.data_helper[win].fullBehavior["positionTime"][:, 0],
-                    self.data_helper[win].fullBehavior["Times"]["testEpochs"],
-                )
-                if phase == "training":
-                    mask += inEpochsMask(
+                outputs = None
+                if not redo:
+                    try:
+                        suffix = f"_{phase}" if phase is not None else ""
+                        with open(
+                            os.path.expanduser(
+                                os.path.join(
+                                    self.folderResult,
+                                    win,
+                                    f"bayes_decoding_results{suffix}.pkl",
+                                )
+                            ),
+                            "rb",
+                        ) as f:
+                            outputs = pickle.load(f)
+                    except FileNotFoundError:
+                        self.load_trainers(which="bayes", **kwargs)
+                        mask = inEpochsMask(
+                            self.data_helper[win].fullBehavior["positionTime"][:, 0],
+                            self.data_helper[win].fullBehavior["Times"]["testEpochs"],
+                        )
+                        if phase == "training":
+                            mask += inEpochsMask(
+                                self.data_helper[win].fullBehavior["positionTime"][
+                                    :, 0
+                                ],
+                                self.data_helper[win].fullBehavior["Times"][
+                                    "trainEpochs"
+                                ],
+                            )
+                        timeStepPred = self.data_helper[win].fullBehavior[
+                            "positionTime"
+                        ][mask]
+                        outputs = self.bayes.test_as_NN(
+                            self.data_helper[win].fullBehavior,
+                            self.bayes_matrices,
+                            timeStepPred,
+                            windowSizeMS=win_value,
+                            l_function=self.l_function,
+                            useTrain=phase == "training",
+                            **kwargs,
+                        )
+                else:
+                    print(f"Force loading bayesian results for window {win}.")
+                    self.load_trainers(which="bayes", **kwargs)
+                    mask = inEpochsMask(
                         self.data_helper[win].fullBehavior["positionTime"][:, 0],
-                        self.data_helper[win].fullBehavior["Times"]["trainEpochs"],
+                        self.data_helper[win].fullBehavior["Times"]["testEpochs"],
                     )
-                timeStepPred = self.data_helper[win].fullBehavior["positionTime"][mask]
-                outputs = self.bayes.test_as_NN(
-                    self.data_helper[win].fullBehavior,
-                    self.bayes_matrices,
-                    timeStepPred,
-                    windowSizeMS=win_value,
-                    l_function=self.l_function,
-                    useTrain=phase == "training",
-                    **kwargs,
-                )
+                    if phase == "training":
+                        mask += inEpochsMask(
+                            self.data_helper[win].fullBehavior["positionTime"][:, 0],
+                            self.data_helper[win].fullBehavior["Times"]["trainEpochs"],
+                        )
+                    timeStepPred = self.data_helper[win].fullBehavior["positionTime"][
+                        mask
+                    ]
+                    outputs = self.bayes.test_as_NN(
+                        self.data_helper[win].fullBehavior,
+                        self.bayes_matrices,
+                        timeStepPred,
+                        windowSizeMS=win_value,
+                        l_function=self.l_function,
+                        useTrain=phase == "training",
+                        **kwargs,
+                    )
+
                 (
                     mean_eucl_bayes,
                     select_lin_bayes,
@@ -1887,10 +1964,11 @@ class Results_Loader:
                         ].load_data(
                             suffixes=["_training", "_" + kwargs.get("template", "pre")]
                         )
+
                         if kwargs.get("load_bayes", False):
                             self.results_dict[nameExp][mouse_full_name][
                                 "training"
-                            ].test_bayes(
+                            ].load_bayes(
                                 suffixes=[
                                     "_training",
                                     "_" + kwargs.get("template", "pre"),
@@ -1905,7 +1983,7 @@ class Results_Loader:
                         if kwargs.get("load_bayes", False):
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
-                            ].test_bayes(suffixes=["_training", suffix])
+                            ].load_bayes(suffixes=["_training", suffix])
                     except FileNotFoundError:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=[suffix]
@@ -1913,7 +1991,7 @@ class Results_Loader:
                         if kwargs.get("load_bayes", False):
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
-                            ].test_bayes(suffixes=[suffix])
+                            ].load_bayes(suffixes=[suffix])
 
         if found_training:
             self.phases.append("training")
@@ -2056,6 +2134,21 @@ class Results_Loader:
                                 "direction_fromBehavior": direction_from_behavior,
                                 "direction_fromNN": direction_fromNN,
                             }
+                            # if bayesian results are loaded, add them to the dataframe
+                            if (
+                                hasattr(results, "bayes")
+                                and "fullPred" in results.resultsBayes
+                            ):
+                                row["bayesPred"] = results.resultsBayes_phase[prefix][
+                                    "fullPred"
+                                ][id]
+                                row["bayesLinPred"] = results.resultsBayes_phase[
+                                    prefix
+                                ]["linPred"][id].flatten()
+                                row["bayesProba"] = results.resultsBayes_phase[prefix][
+                                    "probaBayes"
+                                ][id].flatten()
+
                             data.append(row)
                     else:
                         raise TypeError(
