@@ -673,7 +673,6 @@ def path_for_experiments_df(experiment_name: str, training_name: str) -> pd.Data
 
 
 class Mouse_Results(Params, PaperFigures):
-    # (Project, Params, DataHelper, UMazeLinearizer):
     """
     Class to handle results for a specific mouse in an experiment.
     It will load the directory structure and parse all available windows.
@@ -1133,9 +1132,9 @@ class Mouse_Results(Params, PaperFigures):
                         ) as f:
                             bayes_matrices = pickle.load(f)
                         self.bayes_matrices = bayes_matrices
-                    except (FileNotFoundError, AttributeError) as e:
+                    except (FileNotFoundError, AttributeError):
                         warn(
-                            f"You asked for bayes trainer, but no bayes matrices pickle was found."
+                            "You asked for bayes trainer, but no bayes matrices pickle was found."
                         )
 
     def load_results(

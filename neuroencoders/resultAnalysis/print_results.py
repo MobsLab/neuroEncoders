@@ -23,20 +23,6 @@ def print_results(
     dir: str,
     **kwargs,
 ):
-    # show=True,
-    # typeDec: str = "NN",
-    # euclidean: bool = False,
-    # results=[],
-    # lossSelection: float = 0.3,
-    # avoid_zero: bool = False,
-    # windowSizeMS: int = 36,
-    # force=True,
-    # target="pos",
-    # phase=None,
-    # useSpeedMask=True,
-    # with_hist_distribution=True,
-    # skip_linear_plots=None,
-    # training_data=None,
     """
     This function is used to print the results of the decoding and save some associated figures.
 

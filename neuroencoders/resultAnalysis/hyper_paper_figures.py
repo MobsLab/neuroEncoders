@@ -3,8 +3,6 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-plt.style.use(os.path.join(os.path.dirname(__file__), "ne.mplstyle"))
 import seaborn as sns
 from scipy.stats import sem
 

@@ -234,15 +234,12 @@ class Trainer:
         self.logger.info("Training completed successfully.")
         return bayesMatrices
 
-    def train_order_by_pos(
-        self, behaviorData: Dict, l_function=None, use_linear_tuning=False, **kwargs
-    ) -> Dict:
+    def train_order_by_pos(self, behaviorData: Dict, l_function, **kwargs) -> Dict:
         """
         Train the model and order the clusters by their preferred position.
         Args:
             behaviorData: dict, containing the position and time data.
             l_function: callable, linearization function.
-            use_linear_tuning: bool, whether to use linear tuning for ordering.
             **kwargs: additional arguments including onTheFlyCorrection, bayesMatrices, redo.
 
         Returns:
@@ -261,6 +258,19 @@ class Trainer:
                     ) as f:
                         bayesMatrices = pickle.load(f)
                     self.logger.info("Loaded existing Bayesian matrices.")
+
+                    # Check if the matrices are already saved with linear ordering
+                    if "orderedLinearPlaceFields" in bayesMatrices:
+                        self.linearPreferredPos = bayesMatrices["linearPreferredPos"]
+                        self.linearPosArgSort = bayesMatrices["linearPosArgSort"]
+                        self.orderedPlaceFields = bayesMatrices["orderedPlaceFields"]
+                        self.orderedLinearPlaceFields = bayesMatrices[
+                            "orderedLinearPlaceFields"
+                        ]
+                        self.logger.info(
+                            "Using pre-existing linear ordering of neurons found in pickle file."
+                        )
+                        return bayesMatrices
                 else:
                     raise FileNotFoundError(
                         "Redundant training requested, re-training Bayesian matrices."
@@ -273,69 +283,51 @@ class Trainer:
                     behaviorData, onTheFlyCorrection=onTheFlyCorrection
                 )
 
-        if use_linear_tuning and l_function is not None:
-            # Use linear tuning curves for more accurate ordering
-            self.logger.info("Computing linear tuning curves for ordering...")
-            linear_place_fields, bin_edges = self.calculate_linear_tuning_curve(
-                l_function, behaviorData
-            )
+        # Use linear tuning curves for more accurate ordering
+        self.logger.info("Computing linear tuning curves for ordering...")
+        linear_place_fields, bin_edges = self.calculate_linear_tuning_curve(
+            l_function, behaviorData
+        )
 
-            # Find preferred position for each neuron from linear tuning curve
-            preferred_linear_positions = []
-            for tuning_curve in linear_place_fields:
-                if np.any(tuning_curve > 0):
-                    # Find peak of tuning curve
-                    peak_idx = np.argmax(tuning_curve)
-                    # Convert bin index to position (center of bin)
-                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
-                    preferred_linear_positions.append(preferred_pos)
-                else:
-                    # No spikes - assign to beginning
-                    preferred_linear_positions.append(bin_edges[0])
-
-            preferred_linear_positions = np.array(preferred_linear_positions)
-
-            # Create ordering
-            self.linearPosArgSort = np.argsort(preferred_linear_positions)
-            self.linearPreferredPos = preferred_linear_positions[self.linearPosArgSort]
-
-            # Store ordered place fields (both 2D and linear)
-            place_fields = []
-            for rate_group in bayesMatrices["rateFunctions"]:
-                place_fields.extend(rate_group)
-            self.orderedPlaceFields = np.array(place_fields)[self.linearPosArgSort]
-            self.orderedLinearPlaceFields = np.array(linear_place_fields)[
-                self.linearPosArgSort
-            ]
-
-            self.logger.info(
-                f"Ordered {len(self.linearPosArgSort)} neurons by linear tuning curve"
-            )
-        else:
-            # Extract preferred positions
-            preferred_positions = self._extract_preferred_positions(bayesMatrices)
-
-            # Apply linearization function
-            if l_function is not None:
-                _, linear_positions = l_function(preferred_positions)
+        # Find preferred position for each neuron from linear tuning curve
+        preferred_linear_positions = []
+        for tuning_curve in linear_place_fields:
+            if np.any(tuning_curve > 0):
+                # Find peak of tuning curve
+                peak_idx = np.argmax(tuning_curve)
+                # Convert bin index to position (center of bin)
+                preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+                preferred_linear_positions.append(preferred_pos)
             else:
-                # Default linearization (just use x-coordinate)
-                linear_positions = preferred_positions[:, 0]
+                # No spikes - assign to beginning
+                preferred_linear_positions.append(bin_edges[0])
 
-            # Create ordering
-            self.linearPosArgSort = np.argsort(linear_positions)
-            self.linearPreferredPos = linear_positions[self.linearPosArgSort]
+        preferred_linear_positions = np.array(preferred_linear_positions)
 
-            # Store ordered place fields
-            place_fields = []
-            for rate_group in bayesMatrices["rateFunctions"]:
-                place_fields.extend(rate_group)
-            self.orderedPlaceFields = np.array(place_fields)[self.linearPosArgSort]
+        # Create ordering
+        self.linearPosArgSort = np.argsort(preferred_linear_positions)
+        self.linearPreferredPos = preferred_linear_positions[self.linearPosArgSort]
 
-            if self.verbose:
-                self.logger.info(
-                    f"Ordered {len(self.linearPosArgSort)} neurons by position preference"
-                )
+        # Store ordered place fields (both 2D and linear)
+        place_fields = []
+        for rate_group in bayesMatrices["rateFunctions"]:
+            place_fields.extend(rate_group)
+        self.orderedPlaceFields = np.array(place_fields)[self.linearPosArgSort]
+        self.orderedLinearPlaceFields = np.array(linear_place_fields)[
+            self.linearPosArgSort
+        ]
+
+        self.logger.info(
+            f"Ordered {len(self.linearPosArgSort)} neurons by linear tuning curve"
+        )
+        if kwargs.get("save", True):
+            # save new attributes to bayesMatrices
+            bayesMatrices["linearPosArgSort"] = self.linearPosArgSort
+            bayesMatrices["linearPreferredPos"] = self.linearPreferredPos
+            bayesMatrices["orderedPlaceFields"] = self.orderedPlaceFields
+            bayesMatrices["orderedLinearPlaceFields"] = self.orderedLinearPlaceFields
+            with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
+                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
 
         return bayesMatrices
 
@@ -1387,31 +1379,45 @@ class Trainer:
         marginal_rate_functions = bayesMatrices["marginalRateFunctions"]
         rate_functions = bayesMatrices["rateFunctions"]
 
-        # Create mask for valid positions
-        mask = occupation > (np.max(occupation) / self.config.masking_factor)
+        # Improved masking strategy - logistic thresholding
+        occupation_threshold = np.max(occupation) / self.config.masking_factor
+        sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
+        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
 
         # Log occupation with regularization
-        log_occupation = np.log(occupation + np.min(occupation[mask]))
+        log_occupation = np.log(
+            occupation + np.min(np.multiply(occupation, mask)) * 1e-2
+        )
 
         # Poisson terms (probability of no spikes)
-        all_poisson = [
-            np.exp(-windowSize * marginal_rate_functions[tetrode])
-            for tetrode in range(len(marginal_rate_functions))
-        ]
-        all_poisson = np.log(reduce(np.multiply, all_poisson))
+        all_poisson = []
+        for tetrode in range(len(marginal_rate_functions)):
+            # Clip very high rates to prevent numerical issues
+            clipped_rates = np.clip(marginal_rate_functions[tetrode], 1e-10, 100)
+            poisson_term = np.exp(-windowSize * clipped_rates)
+            all_poisson.append(poisson_term)
 
-        # Log rate functions with improved numerical stability
+        all_poisson = np.log(np.prod(all_poisson, axis=0))
+
         log_rf = []
         for tetrode in range(len(rate_functions)):
             tetrode_log_rf = []
             for cluster in range(len(rate_functions[tetrode])):
                 rate_map = rate_functions[tetrode][cluster]
-                min_nonzero = (
-                    np.min(rate_map[rate_map != 0])
-                    if np.any(rate_map != 0)
-                    else self.config.regularization_factor
-                )
-                log_rate = np.log(rate_map + min_nonzero)
+
+                # Use percentile-based regularization instead of minimum
+                nonzero_rates = rate_map[rate_map > 0]
+                if len(nonzero_rates) > 0:
+                    regularization = np.percentile(nonzero_rates, 1)  # 1st percentile
+                else:
+                    regularization = self.config.regularization_factor
+
+                # Apply mask to regularization - don't regularize masked areas
+                regularized_rates = rate_map.copy()
+                regularized_rates = mask * np.maximum(
+                    rate_map, regularization * 0.1
+                ) + (1 - mask) * (regularization * 0.1)
+                log_rate = np.log(regularized_rates)
                 tetrode_log_rf.append(log_rate)
             log_rf.append(tetrode_log_rf)
 
@@ -1686,22 +1692,24 @@ class Trainer:
 
         # Basic position errors
         position_errors = np.linalg.norm(featurePred - featureTrue, axis=1)
+        num_nans = np.sum(np.isnan(position_errors))
 
         # Core metrics
         metrics = {
             "posLoss": position_errors,
-            "mean_error": np.mean(position_errors),
-            "median_error": np.median(position_errors),
-            "std_error": np.std(position_errors),
-            "rmse": np.sqrt(np.mean(position_errors**2)),
-            "max_error": np.max(position_errors),
-            "min_error": np.min(position_errors),
+            "n_nan_skipped": num_nans,
+            "mean_error": np.nanmean(position_errors),
+            "median_error": np.nanmedian(position_errors),
+            "std_error": np.nanstd(position_errors),
+            "rmse": np.sqrt(np.nanmean(position_errors**2)),
+            "max_error": np.nanmax(position_errors),
+            "min_error": np.nanmin(position_errors),
             "error_percentiles": {
-                "25th": np.percentile(position_errors, 25),
-                "75th": np.percentile(position_errors, 75),
-                "90th": np.percentile(position_errors, 90),
-                "95th": np.percentile(position_errors, 95),
-                "99th": np.percentile(position_errors, 99),
+                "25th": np.nanpercentile(position_errors, 25),
+                "75th": np.nanpercentile(position_errors, 75),
+                "90th": np.nanpercentile(position_errors, 90),
+                "95th": np.nanpercentile(position_errors, 95),
+                "99th": np.nanpercentile(position_errors, 99),
             },
         }
 
@@ -1766,12 +1774,14 @@ class Trainer:
             _, linearTrue = l_function(featureTrue)
 
             linear_errors = np.abs(linear_pred - linearTrue)
+            num_nans = np.sum(np.isnan(linear_errors))
 
             return {
-                "mean_error": np.mean(linear_errors),
-                "median_error": np.median(linear_errors),
-                "std_error": np.std(linear_errors),
-                "rmse": np.sqrt(np.mean(linear_errors**2)),
+                "n_nan_skipped": num_nans,
+                "mean_error": np.nanmean(linear_errors),
+                "median_error": np.nanmedian(linear_errors),
+                "std_error": np.nanstd(linear_errors),
+                "rmse": np.sqrt(np.nanmean(linear_errors**2)),
                 "correlation": np.corrcoef(linear_pred, linearTrue)[0, 1],
             }
         except Exception as e:
@@ -2085,6 +2095,9 @@ class Trainer:
         self.logger.info(f"Window size: {params['windowSizeMS']}ms")
         self.logger.info(f"Time steps: {params['n_time_steps']}")
         if "mean_error" in perf:
+            self.logger.info(
+                f"Number of NaN predictions skipped: {perf['n_nan_skipped']}"
+            )
             self.logger.info(f"Mean error: {perf['mean_error']:.2f} units")
             self.logger.info(f"Median error: {perf['median_error']:.2f} units")
             self.logger.info(f"RMSE: {perf['rmse']:.2f} units")

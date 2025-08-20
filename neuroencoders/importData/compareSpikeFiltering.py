@@ -80,38 +80,46 @@ class WaveFormComparator:
 
         # Manage epochs
         if self.useTrain:
-            epochMask = ep.inEpochsMask(
+            epochMask = inEpochsMask(
                 behavior_data["positionTime"][:, 0],
                 behavior_data["Times"]["trainEpochs"],
+            ) + inEpochsMask(
+                behavior_data["positionTime"][:, 0],
+                behavior_data["Times"]["testEpochs"],
             )
         else:
-            if bool(self.sleepName) and not self.useTrain:
+            if bool(self.sleepName):
                 idsleep = behavior_data["Times"]["sleepNames"].index(self.sleepName)
                 timeSleepStart = behavior_data["Times"]["sleepEpochs"][2 * idsleep][0]
                 timeSleepStop = behavior_data["Times"]["sleepEpochs"][2 * idsleep + 1][
                     0
                 ]
             else:
-                epochMask = ep.inEpochsMask(
+                epochMask = inEpochsMask(
                     behavior_data["positionTime"][:, 0],
                     behavior_data["Times"]["testEpochs"],
                 )
 
         # Load dataset
         if bool(self.sleepName):
-            dataset = tf.data.TFRecordDataset(
-                os.path.join(
-                    self.projectPath.dataPath,
-                    ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
-                )
+            dataset_name = os.path.join(
+                self.projectPath.dataPath,
+                ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
         else:
-            dataset = tf.data.TFRecordDataset(
-                os.path.join(
-                    self.projectPath.dataPath,
-                    ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
-                )
+            dataset_name = os.path.join(
+                self.projectPath.dataPath,
+                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
             )
+
+        # Verify that the dataset is not empty
+        if not tf.io.gfile.exists(dataset_name) or not tf.io.gfile.glob(dataset_name):
+            raise FileNotFoundError(
+                f"The dataset file does not exist: {dataset_name}. "
+            )
+
+        dataset = tf.data.TFRecordDataset(dataset_name)
+        # Parse dataset
         self.dataset = dataset.map(
             lambda *vals: nnUtils.parse_serialized_spike(self.feat_desc, *vals),
             num_parallel_calls=tf.data.AUTOTUNE,
