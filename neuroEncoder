@@ -209,64 +209,238 @@ def main(args):
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
-        from neuroencoders.simpleBayes import decode_bayes as Training
+        from neuroencoders.simpleBayes import decode_bayes as BayesTraining
 
-        TrainerBayes = Training.Trainer(ProjectPath, phase=args.phase)
-        bayesMatrices = TrainerBayes.train_order_by_pos(
-            DataHelper.fullBehavior, l_function=l_function
-        )
         try:
             import numpy as np
             import pandas as pd
 
-            if args.phase is not None:
-                suffix = f"_{args.phase}"
-            else:
-                suffix = ""
-            timeStepPred = np.squeeze(
-                np.array(
-                    pd.read_csv(
-                        os.path.join(
-                            ProjectPath.folderResult,
-                            str(windowSizeMS),
-                            f"timeStepsPred{suffix}.csv",
-                        )
-                    ).values[:, 1:],
-                    dtype=np.float64,
-                )
+            TrainerBayes = BayesTraining.Trainer(ProjectPath, phase=args.phase)
+            # Load or create bayesMatrices
+            bayesMatrices = TrainerBayes.train_order_by_pos(
+                DataHelper.fullBehavior, l_function=l_function
             )
+
+            # now run the fancy inference
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        TrainerBayes.folderResult,
+                        str(windowSizeMS),
+                        "errorFig_2d_bayes_training_inferring.png",
+                    )
+                )
+                or args.redo
+            ):
+                print("Testing training set")
+                timeStepPred = np.squeeze(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                ProjectPath.folderResult,
+                                str(windowSizeMS),
+                                "timeStepsPred_training.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float64,
+                    )
+                ).flatten()
+                outputs = TrainerBayes.test_as_NN(
+                    DataHelper.fullBehavior,
+                    bayesMatrices,
+                    timeStepPred,
+                    windowSizeMS=windowSizeMS,
+                    useTrain=True,
+                    l_function=l_function,
+                    phase="training",
+                )
+                print_results.print_results(
+                    TrainerBayes.folderResult,
+                    typeDec="bayes",
+                    results=outputs,
+                    windowSizeMS=windowSizeMS,
+                    show=show_figures,
+                    lossSelection=0.1,
+                    euclidean=False,
+                    target=args.target,
+                    phase="training",
+                    force=args.redo,
+                    useSpeedMask=True,
+                    training_data=TrainerBayes.training_data,
+                    l_function=l_function,
+                )
+
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        TrainerBayes.folderResult,
+                        str(windowSizeMS),
+                        f"errorFig_2d_bayes_{args.phase}_inferring.png",
+                    )
+                )
+                or args.redo
+            ):
+                print("Testing inference set")
+                timeStepPred = np.squeeze(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                ProjectPath.folderResult,
+                                str(windowSizeMS),
+                                f"timeStepsPred_{args.phase}.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float64,
+                    )
+                ).flatten()
+                outputs = TrainerBayes.test_as_NN(
+                    DataHelper.fullBehavior,
+                    bayesMatrices,
+                    timeStepPred,
+                    windowSizeMS=windowSizeMS,
+                    useTrain=False,
+                    l_function=l_function,
+                    phase=args.phase,
+                )
+                print_results.print_results(
+                    TrainerBayes.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    results=outputs,
+                    typeDec="bayes",
+                    show=show_figures,
+                    lossSelection=0.1,
+                    euclidean=False,
+                    target=args.target,
+                    phase=args.phase,
+                    training_data=TrainerBayes.training_data,
+                    useSpeedMask=False,
+                    l_function=l_function,
+                )
+
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        TrainerBayes.folderResult,
+                        str(windowSizeMS),
+                        "bayes_featurePred_cond.csv",
+                    )
+                )
+                or args.redo
+            ):
+                print("Testing conditioning set")
+                timeStepPred = np.squeeze(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                ProjectPath.folderResult,
+                                str(windowSizeMS),
+                                "timeStepsPred_cond.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float64,
+                    )
+                ).flatten()
+                outputs = TrainerBayes.test_as_NN(
+                    DataHelper_cond.fullBehavior,
+                    bayesMatrices,
+                    timeStepPred,
+                    windowSizeMS=windowSizeMS,
+                    useTrain=True,
+                    l_function=l_function,
+                    phase="cond",
+                )
+                print_results.print_results(
+                    TrainerBayes.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    results=outputs,
+                    typeDec="bayes",
+                    show=show_figures,
+                    lossSelection=0.1,
+                    euclidean=False,
+                    target=args.target,
+                    phase="cond",
+                    training_data=TrainerBayes.training_data,
+                    useSpeedMask=False,
+                    l_function=l_function,
+                )
         except FileNotFoundError:
             raise ValueError(
                 'To run the bayes mode as NN, you need to run the "NN" trainer first.'
             )
 
-        outputs = TrainerBayes.test_as_NN(
+        if args.test_sleep:
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        TrainerBayes.folderResultSleep,
+                        str(windowSizeMS),
+                        "PostSleep",
+                        "bayes_featurePred.csv",
+                    )
+                )
+                or args.redo
+            ):
+                print("Testing sleep set")
+                # Test sleep as NN
+                outputs_sleep = TrainerBayes.test_sleep_as_NN(
+                    DataHelper.fullBehavior,
+                    bayesMatrices,
+                    windowSizeMS=windowSizeMS,
+                    l_function=l_function,
+                )
+
+        # Save and create alignment tools
+        from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
+
+        ### Compare and align trainset waveforms
+        WFCTrain = WaveFormComparator(
+            ProjectPath,
+            Parameters,
             DataHelper.fullBehavior,
-            bayesMatrices,
-            timeStepPred,
+            useTrain=True,
             windowSizeMS=windowSizeMS,
+            phase=args.phase,
+        )
+        WFCTrain.save_alignment_tools(
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+        )
+        ### Compare and align trainset waveforms
+        WFCTrainTest = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper.fullBehavior,
+            useTrain=True,
+            useAll=True,
+            windowSizeMS=windowSizeMS,
+            phase="training",
+        )
+        WFCTrainTest.save_alignment_tools(
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+        )
+        WFCTest = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper.fullBehavior,
             useTrain=False,
-            l_function=l_function,
+            windowSizeMS=windowSizeMS,
+            phase=args.phase,
+        )
+        WFCTest.save_alignment_tools(
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
         )
 
-        if args.test_sleep:
-            outputs_sleep = TrainerBayes.sleep_decoding(
-                DataHelper.fullBehavior,
-                bayesMatrices,
-                windowSizeMS=windowSizeMS,
-                l_function=l_function,
-            )
-        print_results.print_results(
-            TrainerBayes.folderResult,
-            typeDec="bayes",
-            results=outputs,
+        ### Compare and align conditioning waveforms
+        WFCCond = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper_cond.fullBehavior,
+            useTrain=True,
+            useAll=True,
             windowSizeMS=windowSizeMS,
-            show=show_figures,
-            lossSelection=0.1,
-            euclidean=False,
-            target=args.target,
             phase=args.phase,
-            force=args.redo,
+        )
+        WFCCond.save_alignment_tools(
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
         )
 
     elif mode == "ann":
@@ -331,7 +505,7 @@ def main(args):
         # if the folderResult exists, rename it to "copy_folderResult"
         if os.path.exists(NNTrainer.folderResult):
             copy_folderResult = os.path.join(
-                NNTrainer.folderResult, "..", "Big_copy_folderResult"
+                NNTrainer.folderResult, "..", "another_Big_copy_folderResult"
             )
             if os.path.exists(copy_folderResult):
                 # If the copy already exists, we do nothing
@@ -463,6 +637,7 @@ def main(args):
             )
 
         NNTrainer.clear_session()
+
         # Create json
         if isPL:
             modelPath = os.path.join(
@@ -589,6 +764,7 @@ def main(args):
             DataHelper.fullBehavior,
             useTrain=True,
             windowSizeMS=windowSizeMS,
+            phase=args.phase,
         )
         WFCTrain.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -599,6 +775,7 @@ def main(args):
             DataHelper.fullBehavior,
             useTrain=False,
             windowSizeMS=windowSizeMS,
+            phase=args.phase,
         )
         WFCTest.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -611,6 +788,7 @@ def main(args):
             TrainerBayes,
             l_function,
             bayesMatrices=bayesMatrices,
+            phase=args.phase,
         )
         figures.load_data()
         figures.load_bayes()

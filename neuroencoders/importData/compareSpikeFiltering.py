@@ -37,6 +37,7 @@ class WaveFormComparator:
         behavior_data,
         windowSizeMS=36,
         useTrain=True,
+        useAll=False,
         sleepName=[],
         **kwargs,
     ):  # todo allow for speed filtering
@@ -44,12 +45,10 @@ class WaveFormComparator:
         self.params = params
         self.behavior_data = behavior_data
         self.useTrain = useTrain
+        self.useAll = useAll
         self.sleepName = sleepName
         self.windowSizeMS = windowSizeMS
         phase = kwargs.get("phase", None)
-        assert phase == params.phase, (
-            "The phase of the WaveFormComparator must be the same as the one of the params"
-        )
         self.phase = phase
         self.suffix = f"_{phase}" if phase is not None else ""
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
@@ -71,9 +70,12 @@ class WaveFormComparator:
         for g in range(self.params.nGroups):
             self.feat_desc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)})
 
+        useAll_suffix = "_all" if useAll else ""
         # Manage folder
         self.alignedDataPath = os.path.join(
-            self.projectPath.dataPath, "aligned", str(windowSizeMS)
+            self.projectPath.dataPath,
+            f"aligned_{phase}{useAll_suffix}",
+            str(windowSizeMS),
         )
         if not os.path.isdir(self.alignedDataPath):
             os.makedirs(self.alignedDataPath)
@@ -83,10 +85,15 @@ class WaveFormComparator:
             epochMask = inEpochsMask(
                 behavior_data["positionTime"][:, 0],
                 behavior_data["Times"]["trainEpochs"],
-            ) + inEpochsMask(
-                behavior_data["positionTime"][:, 0],
-                behavior_data["Times"]["testEpochs"],
             )
+            if self.useAll:
+                epochMask = np.logical_or(
+                    epochMask,
+                    inEpochsMask(
+                        behavior_data["positionTime"][:, 0],
+                        behavior_data["Times"]["testEpochs"],
+                    ),
+                )
         else:
             if bool(self.sleepName):
                 idsleep = behavior_data["Times"]["sleepNames"].index(self.sleepName)
@@ -159,7 +166,7 @@ class WaveFormComparator:
         )
 
     def save_alignment_tools(
-        self, trainerBayes, linearizationFunction, windowSizeMS=36
+        self, trainerBayes, linearizationFunction, windowSizeMS=36, redo=False
     ):
         # Manage folder
         if self.useTrain:
@@ -171,8 +178,11 @@ class WaveFormComparator:
                 foldertosave = os.path.join(self.alignedDataPath, "test")
         if not os.path.isdir(foldertosave):
             os.makedirs(foldertosave)
-        if os.path.isfile(
-            os.path.join(foldertosave, f"spikeMat_times_window{self.suffix}.csv")
+        if (
+            os.path.isfile(
+                os.path.join(foldertosave, f"spikeMat_times_window{self.suffix}.csv")
+            )
+            and not redo
         ):
             return
 

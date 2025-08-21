@@ -133,10 +133,23 @@ class Trainer:
         self.ordered_neurons = None
         self.place_fields = None
 
-    def train(self, behaviorData: Dict, onTheFlyCorrection=False):
+    def train(self, behaviorData: Dict, onTheFlyCorrection=False, save=True) -> Dict:
         """
         Main training function to build the Bayesian matrices.
         """
+
+        if not hasattr(self, "training_data"):
+            # first, save the training data from the behaviorData
+            speedMask = behaviorData["Times"]["speedFilter"]
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+            )
+            totMask = speedMask * epochMask
+            full_training_true_positions = behaviorData["Positions"][totMask, :2]
+            self.training_data = full_training_true_positions
+            self.logger.info(
+                f"Training data saved with {full_training_true_positions.shape} valid positions."
+            )
         self.logger.info("Starting Bayesian training process...")
 
         # look for bandwidth in behaviorData. If it is found compare it with the one in config
@@ -226,10 +239,11 @@ class Trainer:
             },
         }
 
-        # save the bayes matrices
-        with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
-            pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
-        self.logger.info("Bayesian matrices saved successfully.")
+        if save:
+            # save the bayes matrices
+            with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
+                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+            self.logger.info("Bayesian matrices saved successfully.")
 
         self.logger.info("Training completed successfully.")
         return bayesMatrices
@@ -248,6 +262,52 @@ class Trainer:
 
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
+
+        if not hasattr(self, "training_data"):
+            # first, save the training data from the behaviorData
+            speedMask = behaviorData["Times"]["speedFilter"]
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+            )
+            totMask = speedMask * epochMask
+            full_training_true_positions = behaviorData["Positions"][totMask, :2]
+            self.training_data = full_training_true_positions
+            self.logger.info(
+                f"Training data saved with {full_training_true_positions.shape} valid positions."
+            )
+
+        if not hasattr(self, "spikeMatLabels"):
+            self.logger.info(
+                f"Initializing spike matrices for {len(self.clusterData['Spike_labels'])} tetrodes..."
+            )
+            # Gather all spikes in large array and sort it in time - We will need this when comparing waveforms and plotting pc
+            nbSpikes = [a.shape[0] for a in self.clusterData["Spike_labels"]]
+            nbNeurons = [a.shape[1] for a in self.clusterData["Spike_labels"]]
+            spikeMatLabels = np.zeros([np.sum(nbSpikes), np.sum(nbNeurons)])
+            spikeMatTimes = np.zeros([np.sum(nbSpikes), 1])
+            cnbSpikes = np.cumsum(nbSpikes)
+            cnbNeurons = np.cumsum(nbNeurons)
+
+            for id in range(len(nbSpikes)):
+                if id > 0:
+                    spikeMatLabels[
+                        cnbSpikes[id - 1] : cnbSpikes[id],
+                        cnbNeurons[id - 1] : cnbNeurons[id],
+                    ] = self.clusterData["Spike_labels"][id]
+                    spikeMatTimes[cnbSpikes[id - 1] : cnbSpikes[id], :] = (
+                        self.clusterData["Spike_times"][id]
+                    )
+                else:
+                    spikeMatLabels[0 : cnbSpikes[id], 0 : cnbNeurons[id]] = (
+                        self.clusterData["Spike_labels"][id]
+                    )
+                    spikeMatTimes[0 : cnbSpikes[id], :] = self.clusterData[
+                        "Spike_times"
+                    ][id]
+
+            spikeorder = np.argsort(spikeMatTimes[:, 0])
+            self.spikeMatLabels = spikeMatLabels[spikeorder, :]
+            self.spikeMatTimes = spikeMatTimes[spikeorder, :]
 
         ### Perform training (build marginal and local rate functions) ONLY IF bayesMatrices is not provided/pre-existing
         if kwargs.get("bayesMatrices", None) is None:
@@ -280,7 +340,9 @@ class Trainer:
                     "Training and ordering neurons by position preference..."
                 )
                 bayesMatrices = self.train(
-                    behaviorData, onTheFlyCorrection=onTheFlyCorrection
+                    behaviorData,
+                    onTheFlyCorrection=onTheFlyCorrection,
+                    save=kwargs.get("save", True),
                 )
 
         # Use linear tuning curves for more accurate ordering
@@ -1158,7 +1220,9 @@ class Trainer:
             sleepNameList = behaviorData["Times"]["sleepNames"]
             sleepEpochs = behaviorData["Times"]["sleepEpochs"]
 
-        self.logger.info(f"Starting Bayesian decoding with {windowSizeMS}ms windows")
+        self.logger.info(
+            f"Starting Bayesian decoding of Sleep Sessions with {windowSizeMS}ms windows"
+        )
 
         for idsleep, sleepName in enumerate(sleepNameList):
             timeSleepStart = sleepEpochs[2 * idsleep][0]
@@ -1167,6 +1231,9 @@ class Trainer:
             timeStepPred = behaviorData["positionTime"][
                 inEpochs(behaviorData["positionTime"][:, 0], sleep_epoch)
             ]
+            self.logger.info(
+                f"Sleep epoch {idsleep + 1}/{len(sleepNameList)}: {sleepName} from {timeSleepStart} to {timeSleepStop}"
+            )
             self.test_as_NN(
                 behaviorData=behaviorData,
                 bayesMatrices=bayesMatrices,
@@ -2088,13 +2155,13 @@ class Trainer:
     def _log_decoding_summary(self, outputResults: Dict):
         """Log a summary of decoding performance"""
 
-        perf = outputResults["performance"]
         params = outputResults["decoding_params"]
 
         self.logger.info("=== Decoding Summary ===")
         self.logger.info(f"Window size: {params['windowSizeMS']}ms")
         self.logger.info(f"Time steps: {params['n_time_steps']}")
-        if "mean_error" in perf:
+        if "performance" in outputResults:
+            perf = outputResults["performance"]
             self.logger.info(
                 f"Number of NaN predictions skipped: {perf['n_nan_skipped']}"
             )
@@ -2504,8 +2571,12 @@ def parallel_pred_as_NN(
     # Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
     # Here everything in log scale to avoid numerical overflow
     """
+    if isinstance(windowSize, int) or windowSize > 0.5:
+        raise ValueError(
+            "windowSize must be a float in seconds, typically around 0.036 for neural decoding."
+        )
 
-    binStartTime = firstSpikeNNtime
+    binStartTime = firstSpikeNNtime.reshape(-1, 1)
     binStopTime = binStartTime + windowSize
 
     # we will progressively add each tetrode contribution
