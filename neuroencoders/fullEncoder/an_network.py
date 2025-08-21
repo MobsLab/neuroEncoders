@@ -1066,7 +1066,7 @@ class LSTMandSpikeNetwork:
                         )
 
             if loaded:
-                if kwargs.get("fine_tune", False) and nb_epochs_already_trained >= 35:
+                if kwargs.get("fine_tune", True):
                     return
                 elif not kwargs.get("fine_tune", False):
                     return
