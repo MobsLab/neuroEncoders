@@ -20,6 +20,7 @@ import tensorflow as tf
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.utils.global_classes import Params, Project
 
 # We generate a model with the functional Model interface in tensorflow
 ########### FULL NETWORK CLASS #####################
@@ -27,7 +28,11 @@ from neuroencoders.importData.epochs_management import inEpochsMask
 
 class Decoder:
     def __init__(
-        self, projectPath, params, windowSizeMS=36, deviceName="/device:CPU:0"
+        self,
+        projectPath: Project,
+        params: Params,
+        windowSizeMS: int = 36,
+        deviceName: int = "/device:CPU:0",
     ):
         # Main parameters here
         self.projectPath = projectPath
