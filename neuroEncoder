@@ -149,7 +149,35 @@ def main(args):
             force_ref=False,
             isPredLoss=isPL,
         )
-        helpers = [DataHelper_cond, DataHelper]
+        # adding post test helper
+        rawdata_parser.speed_filter(
+            ProjectPath.folder,
+            overWrite=(True if args.redo else False),
+            phase="post",
+            template=args.phase,
+            window_range=2000,
+            force=True
+            if (args.phase is not None and not show_figures and not args.redo)
+            else False,
+        )
+        rawdata_parser.select_epochs(
+            ProjectPath.folder,
+            overWrite=(True if (args.redo and args.phase is not None) else False),
+            phase="post",
+            force=True if (args.phase is not None and not show_figures) else False,
+            find_best_sets=True,
+        )
+        DataHelper_post = DataHelperClass(
+            ProjectPath.xml,
+            mode=mode,
+            target=args.target,
+            phase="post",
+            nameExp=args.name,
+            windowSize=args.window,
+            force_ref=False,
+            isPredLoss=isPL,
+        )
+        helpers = [DataHelper_cond, DataHelper_post, DataHelper]
     for helper in helpers:
         # Create linearization function
         Linearizer = UMazeLinearizer(
@@ -363,6 +391,53 @@ def main(args):
                     useSpeedMask=False,
                     l_function=l_function,
                 )
+
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        TrainerBayes.folderResult,
+                        str(windowSizeMS),
+                        "bayes_featurePred_post.csv",
+                    )
+                )
+                or args.redo
+            ):
+                print("Testing post set")
+                timeStepPred = np.squeeze(
+                    np.array(
+                        pd.read_csv(
+                            os.path.join(
+                                ProjectPath.folderResult,
+                                str(windowSizeMS),
+                                "timeStepsPred_post.csv",
+                            )
+                        ).values[:, 1:],
+                        dtype=np.float64,
+                    )
+                ).flatten()
+                outputs = TrainerBayes.test_as_NN(
+                    DataHelper_post.fullBehavior,
+                    bayesMatrices,
+                    timeStepPred,
+                    windowSizeMS=windowSizeMS,
+                    useTrain=True,
+                    l_function=l_function,
+                    phase="post",
+                )
+                print_results.print_results(
+                    TrainerBayes.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    results=outputs,
+                    typeDec="bayes",
+                    show=show_figures,
+                    lossSelection=0.1,
+                    euclidean=False,
+                    target=args.target,
+                    phase="post",
+                    training_data=TrainerBayes.training_data,
+                    useSpeedMask=False,
+                    l_function=l_function,
+                )
         except FileNotFoundError:
             raise ValueError(
                 'To run the bayes mode as NN, you need to run the "NN" trainer first.'
@@ -443,6 +518,19 @@ def main(args):
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
         )
 
+        ### Compare and align PostTests waveforms
+        WFCPost = WaveFormComparator(
+            ProjectPath,
+            Parameters,
+            DataHelper_post.fullBehavior,
+            useTrain=True,
+            useAll=True,
+            windowSizeMS=windowSizeMS,
+            phase=args.phase,
+        )
+        WFCPost.save_alignment_tools(
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+        )
     elif mode == "ann":
         # Create data
         import neuroencoders.importData.juliaData as jD
@@ -612,6 +700,40 @@ def main(args):
                 euclidean=False,
                 target=args.target,
                 phase="cond",
+                training_data=NNTrainer.training_data,
+                useSpeedMask=False,
+                l_function=l_function,
+            )
+
+        if (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    "featurePred_post.csv",
+                )
+            )
+            or args.redo
+        ):
+            print("Testing PostTest set")
+            NNTrainer.test(
+                DataHelper_post.fullBehavior,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                l_function=l_function,
+                useSpeedFilter=False,
+                phase="post",
+                useTrain=True,
+            )
+
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.1,
+                euclidean=False,
+                target=args.target,
+                phase="post",
                 training_data=NNTrainer.training_data,
                 useSpeedMask=False,
                 l_function=l_function,
