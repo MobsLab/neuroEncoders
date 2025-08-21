@@ -10,6 +10,7 @@ from tqdm import tqdm
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.utils.global_classes import Params, Project
 
 ## Different strategies are used for spike filtering in the case of the NN and of spike sorting.
 # To make sure we end up with a fair comparison between the bayesian algorithm
@@ -32,12 +33,12 @@ pykeops.set_verbose(False)
 class WaveFormComparator:
     def __init__(
         self,
-        projectPath,
-        params,
-        behavior_data,
-        windowSizeMS=36,
-        useTrain=True,
-        useAll=False,
+        projectPath: Project,
+        params: Params,
+        behavior_data: dict,
+        windowSizeMS: int = 36,
+        useTrain: bool = True,
+        useAll: bool = False,
         sleepName=[],
         **kwargs,
     ):  # todo allow for speed filtering

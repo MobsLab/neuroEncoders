@@ -31,7 +31,7 @@ from wandb import keras as wandbkeras
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import inEpochsMask
-from neuroencoders.utils.global_classes import DataHelper
+from neuroencoders.utils.global_classes import DataHelper, Params, Project
 
 WandbMetricsLogger = wandbkeras.WandbMetricsLogger
 
@@ -60,11 +60,11 @@ class LSTMandSpikeNetwork:
 
     def __init__(
         self,
-        projectPath,
-        params,
-        deviceName="/device:CPU:0",
-        debug=False,
-        phase=None,
+        projectPath: Project,
+        params: Params,
+        deviceName: str = "/device:CPU:0",
+        debug: bool = False,
+        phase: str = None,
         **kwargs,
     ):
         super(LSTMandSpikeNetwork, self).__init__()
@@ -237,14 +237,13 @@ class LSTMandSpikeNetwork:
                     ]
                     + [
                         MaskedGlobalAveragePooling1D(device=self.deviceName),
+                        # removed the activations in dense layers for better scaleability
                         tf.keras.layers.Dense(
                             self.params.TransformerDenseSize1,
-                            activation=tf.nn.relu,
                             kernel_regularizer="l2",
                         ),
                         tf.keras.layers.Dense(
                             self.params.TransformerDenseSize2,
-                            activation=tf.nn.relu,
                             kernel_regularizer="l2",
                         ),
                     ]
