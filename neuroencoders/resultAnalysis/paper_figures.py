@@ -2071,10 +2071,14 @@ class PaperFigures:
         plt.show(block=block)
 
         fig.savefig(
-            os.path.join(self.folderFigures, f"predLoss_vs_error{suffix}_{typeDec}.png")
+            os.path.join(
+                self.folderFigures, f"predLoss_vs_Linerror{suffix}_{typeDec}.png"
+            )
         )
         fig.savefig(
-            os.path.join(self.folderFigures, f"predLoss_vs_error{suffix}_{typeDec}.svg")
+            os.path.join(
+                self.folderFigures, f"predLoss_vs_Linerror{suffix}_{typeDec}.svg"
+            )
         )
 
         return predLoss_ticks[0], errors_filtered
@@ -2759,7 +2763,14 @@ class PaperFigures:
     # and we scatter plot a link between its firing rate and the decoding.
 
     def plot_pc_tuning_curve_and_predictions(
-        self, suffix=None, phase=None, ws=None, block=True, show=False
+        self,
+        suffix=None,
+        phase=None,
+        ws=None,
+        block=True,
+        show=False,
+        useTrain=False,
+        useAll=True,
     ):
         if phase is not None:
             suffix = f"_{phase}"
@@ -2797,9 +2808,9 @@ class PaperFigures:
 
         loadName = os.path.join(
             self.projectPath.dataPath,
-            "aligned",
+            f"aligned{suffix}{'_all' if useAll else ''}",
             str(ws),
-            "test",
+            "test" if not useTrain else "train",
             f"spikeMat_window_popVector{self.suffix}.csv",
         )
         try:

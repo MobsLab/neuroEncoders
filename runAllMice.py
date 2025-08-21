@@ -228,7 +228,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
-        if win == 0.108 and run_bayes and lstmAndTransfo == "to_debug":
+        if run_bayes and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
         else:
             return cmd_ann, None

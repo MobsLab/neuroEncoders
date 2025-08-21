@@ -377,7 +377,7 @@ def speed_filter(
     # Parameters
     window_len = 14  # changed following Dima's advice
     window_idx = 0  # index of the window to show
-    from utils.global_classes import MAZE_COORDS
+    from neuroencoders.utils.global_classes import MAZE_COORDS
 
     filename = os.path.join(folder, "nnBehavior.mat")
     # as this if the first function, it should create the appropriate nnbehavior. Next functions will check for file existence
@@ -804,7 +804,6 @@ def select_epochs(
 
     global SetData, IsMultiSessions
     global timeToShow, keptSession, sessionStart, sessionStop, ep
-    from importData import epochs_management as ep
 
     # TODO: add a way to select training set in the middle of the dataset
     filename = os.path.join(folder, "nnBehavior.mat")
