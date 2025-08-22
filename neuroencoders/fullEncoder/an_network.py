@@ -216,6 +216,7 @@ class LSTMandSpikeNetwork:
                     MaskedGlobalAveragePooling1D,
                     PositionalEncoding,
                     TransformerEncoderBlock,
+                    UMazeProjectionLayer,
                 )
 
                 self.lstmsNets = (
@@ -301,6 +302,7 @@ class LSTMandSpikeNetwork:
                 dtype=tf.float32,
                 name="feature_projection_transformer",
             )
+            self.ProjectionInMazeLayer = UMazeProjectionLayer()
 
             # Gather the full model
             outputs = self.generate_model(**kwargs)
@@ -395,6 +397,7 @@ class LSTMandSpikeNetwork:
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
         myoutputPos = self.denseFeatureOutput(x)
+        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
 
         # 5. Loss prediction
 
@@ -501,6 +504,7 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.denseFeatureOutput(
                     self.dropoutLayer(output)
                 )  # positions
+                myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
 
                 # normalize the lstm output and the cnn features
                 output_norm = tf.nn.l2_normalize(output, axis=1)
@@ -806,6 +810,11 @@ class LSTMandSpikeNetwork:
         None
         """
 
+        from neuroencoders.fullEncoder.nnUtils import (
+            NeuralDataAugmentation,
+            create_flatten_augmented_groups_fn,
+        )
+
         ### Create neccessary arrays
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         windowSizeMS = kwargs.get("windowSizeMS", 36)
@@ -862,26 +871,6 @@ class LSTMandSpikeNetwork:
                 self.folderModels, str(windowSizeMS), key + "/cp.ckpt"
             )
 
-        # memory garbage collection class class
-        class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
-            """Monitor memory usage during training, collect garbage."""
-
-            def on_epoch_begin(self, epoch, logs=None):
-                print("**Epoch {}**".format(epoch))
-                print(
-                    "Memory usage on epoch begin: {}".format(
-                        psutil.Process(os.getpid()).memory_info().rss
-                    )
-                )
-
-            def on_epoch_end(self, epoch, logs=None):
-                print(
-                    "Memory usage on epoch end:   {}".format(
-                        psutil.Process(os.getpid()).memory_info().rss
-                    )
-                )
-                gc.collect()
-
         ## Get speed filter:
         speedMask = behaviorData["Times"]["speedFilter"]
 
@@ -930,10 +919,13 @@ class LSTMandSpikeNetwork:
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
 
-        from neuroencoders.fullEncoder.nnUtils import (
-            NeuralDataAugmentation,
-            create_flatten_augmented_groups_fn,
-        )
+        @keras.saving.register_keras_serializable()
+        def pos_loss(x, y):
+            return y
+
+        @keras.saving.register_keras_serializable()
+        def uncertainty_loss(x, y):
+            return y
 
         augmentation_config = NeuralDataAugmentation(device=self.deviceName, **kwargs)
 
@@ -1028,6 +1020,27 @@ class LSTMandSpikeNetwork:
                 tf.data.AUTOTUNE
             )  # prefetch entire batches
 
+        # memory garbage collection class class
+        class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
+            """Monitor memory usage during training, collect garbage."""
+
+            def on_epoch_begin(self, epoch, logs=None):
+                print("**Epoch {}**".format(epoch))
+                print(
+                    "Memory usage on epoch begin: {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+
+            def on_epoch_end(self, epoch, logs=None):
+                print(
+                    "Memory usage on epoch end:   {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+                gc.collect()
+                tf.keras.backend.clear_session()
+
         ### Train the model(s)
         # Initialize the model for C++ decoder
         # self.generate_model_Cplusplus()
@@ -1066,30 +1079,9 @@ class LSTMandSpikeNetwork:
                         )
 
             if loaded:
-                if kwargs.get("fine_tune", False):
-                    print(
-                        "Fine-tuning the model with the loaded weights from",
-                        checkpointPath[key],
-                    )
-                    print("first, we train the model with a new layer")
-
-                    original_model = self.model
-                    try:
-                        new_model = tf.keras.models.clone_model(
-                            original_model,
-                            clone_function=nnUtils.clone_model_with_custom_layer,
-                        )
-                        new_model.set_weights(original_model.get_weights())
-                        self.model = new_model
-                        print("model cloned")
-                    except Exception as e:
-                        print("Error cloning model:", e)
-                        self.model = original_model
-                        print("using original model")
-                    nb_epochs_already_trained = 40
-                    print("model loaded")
-                elif not kwargs.get("fine_tune", False):
-                    return
+                if not kwargs.get("fine_tune", False):
+                    print(f"Model loaded for {key}, skipping directly to next.")
+                    continue
 
             # Create a callback that saves the model's weights
             cp_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -1098,15 +1090,30 @@ class LSTMandSpikeNetwork:
             # Manage learning rates schedule
             if loaded and kwargs.get("fine_tune", False):
                 print("Fine-tuning the model with a lower learning rate, set to 0.0001")
-                # self.optimizer.learning_rate.assign(0.0001)
-                # self.model.optimizer.learning_rate.assign(0.0001)
-                # tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+                self.optimizer.learning_rate.assign(0.0001)
+                self.model.optimizer.learning_rate.assign(0.0001)
+                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+                # according to some sources we need to recompile the model after changing the learning rate
+                self.model.compile(
+                    optimizer=self.optimizer,
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
+                )
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.optimizer.learning_rate.assign(self.params.learningRates[0])
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
                 tf.keras.backend.set_value(
                     self.model.optimizer.learning_rate, self.params.learningRates[0]
+                )
+                self.model.compile(
+                    optimizer=self.optimizer,
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
                 )
             LRScheduler = self.LRScheduler(self.params.learningRates)
             if scheduler == "fixed":
@@ -1138,7 +1145,7 @@ class LSTMandSpikeNetwork:
                     }
                     ann_config["loaded"] = loaded
 
-                    prefix = "PROJECTING_" if loaded else ""
+                    prefix = "LOADED_" if loaded else ""
                     wandb.init(
                         entity="touseul",
                         project="rien de rien",
@@ -1216,9 +1223,20 @@ class LSTMandSpikeNetwork:
                         restore_best_weights=True,
                         start_from_epoch=50 - nb_epochs_already_trained,
                     )
-                    callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
+                    callbacks = [
+                        csvLogger[key],
+                        cp_callback,
+                        schedule,
+                        es_callback,
+                        MemoryUsageCallbackExtended(),
+                    ]
                 else:
-                    callbacks = [csvLogger[key], cp_callback, schedule]
+                    callbacks = [
+                        csvLogger[key],
+                        cp_callback,
+                        schedule,
+                        MemoryUsageCallbackExtended(),
+                    ]
 
                 if self.params.reduce_lr_on_plateau:
                     reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -1234,51 +1252,9 @@ class LSTMandSpikeNetwork:
                     # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
-                @keras.saving.register_keras_serializable()
-                def pos_loss(x, y):
-                    return y
-
-                @keras.saving.register_keras_serializable()
-                def uncertainty_loss(x, y):
-                    return y
-
-                self.model.compile(
-                    optimizer=tf.keras.optimizers.RMSprop(learning_rate=1e-5),
-                    loss={
-                        self.outNames[0]: pos_loss,
-                        self.outNames[1]: uncertainty_loss,
-                    },
-                )
-
                 hist = self.model.fit(
                     datasets["train"],
-                    epochs=25,  # short warmup training
-                    callbacks=[schedule, es_callback],  # , tb_callback,cp_callback
-                    validation_data=datasets["test"],
-                )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
-
-                for layer in self.model.layers:
-                    layer.trainable = False
-
-                # Then unfreeze the ones you want
-                last_two = nnUtils.get_last_dense_layers_before_output(self.model)
-                for name in last_two:
-                    name.trainable = True
-
-                self.model.get_layer("feature_output_with_proj").trainable = True
-
-                print("Unfreezed layers.")
-
-                self.model.compile(
-                    optimizer=tf.keras.optimizers.RMSprop(learning_rate=5e-4),
-                    loss={
-                        self.outNames[0]: pos_loss,
-                        self.outNames[1]: uncertainty_loss,
-                    },
-                )
-                hist = self.model.fit(
-                    datasets["train"],
-                    epochs=self.params.nEpochs,
+                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                 )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)

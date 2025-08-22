@@ -31,9 +31,9 @@ mice_nb = [
     "M1230_Known",
     "M1162_MFB",
 ]
-nameExp = "current_LogLoss_Transformer_Dense"
+nameExp = "projected_LogLoss_Dense"
 nbEpochs = str(200)
-run_bayes = True
+run_bayes = False
 run_ann = True
 target = "pos"
 phase = "pre"
