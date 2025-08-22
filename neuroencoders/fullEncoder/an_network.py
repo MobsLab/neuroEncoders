@@ -1066,8 +1066,28 @@ class LSTMandSpikeNetwork:
                         )
 
             if loaded:
-                if kwargs.get("fine_tune", True):
-                    return
+                if kwargs.get("fine_tune", False):
+                    print(
+                        "Fine-tuning the model with the loaded weights from",
+                        checkpointPath[key],
+                    )
+                    print("first, we train the model with a new layer")
+
+                    original_model = self.model
+                    try:
+                        new_model = tf.keras.models.clone_model(
+                            original_model,
+                            clone_function=nnUtils.clone_model_with_custom_layer,
+                        )
+                        new_model.set_weights(original_model.get_weights())
+                        self.model = new_model
+                        print("model cloned")
+                    except Exception as e:
+                        print("Error cloning model:", e)
+                        self.model = original_model
+                        print("using original model")
+                    nb_epochs_already_trained = 40
+                    print("model loaded")
                 elif not kwargs.get("fine_tune", False):
                     return
 
@@ -1078,9 +1098,9 @@ class LSTMandSpikeNetwork:
             # Manage learning rates schedule
             if loaded and kwargs.get("fine_tune", False):
                 print("Fine-tuning the model with a lower learning rate, set to 0.0001")
-                self.optimizer.learning_rate.assign(0.0001)
-                self.model.optimizer.learning_rate.assign(0.0001)
-                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+                # self.optimizer.learning_rate.assign(0.0001)
+                # self.model.optimizer.learning_rate.assign(0.0001)
+                # tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.optimizer.learning_rate.assign(self.params.learningRates[0])
@@ -1118,7 +1138,7 @@ class LSTMandSpikeNetwork:
                     }
                     ann_config["loaded"] = loaded
 
-                    prefix = "LOADED_" if loaded else ""
+                    prefix = "PROJECTING_" if loaded else ""
                     wandb.init(
                         entity="touseul",
                         project="rien de rien",
@@ -1214,12 +1234,55 @@ class LSTMandSpikeNetwork:
                     # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
+                @keras.saving.register_keras_serializable()
+                def pos_loss(x, y):
+                    return y
+
+                @keras.saving.register_keras_serializable()
+                def uncertainty_loss(x, y):
+                    return y
+
+                self.model.compile(
+                    optimizer=tf.keras.optimizers.RMSprop(learning_rate=1e-5),
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
+                )
+
                 hist = self.model.fit(
                     datasets["train"],
-                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
+                    epochs=25,  # short warmup training
+                    callbacks=[schedule, es_callback],  # , tb_callback,cp_callback
+                    validation_data=datasets["test"],
+                )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
+
+                for layer in self.model.layers:
+                    layer.trainable = False
+
+                # Then unfreeze the ones you want
+                last_two = nnUtils.get_last_dense_layers_before_output(self.model)
+                for name in last_two:
+                    name.trainable = True
+
+                self.model.get_layer("feature_output_with_proj").trainable = True
+
+                print("Unfreezed layers.")
+
+                self.model.compile(
+                    optimizer=tf.keras.optimizers.RMSprop(learning_rate=5e-4),
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
+                )
+                hist = self.model.fit(
+                    datasets["train"],
+                    epochs=self.params.nEpochs,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                 )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
+
                 self.trainLosses[key] = np.transpose(
                     np.stack(
                         [

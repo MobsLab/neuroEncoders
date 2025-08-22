@@ -1169,11 +1169,8 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
         if maze_params is None or not isinstance(maze_params, dict):
             if maze_params is not None:
                 maze_coords = np.array(maze_params)
-                print("using maze_params from input")
             else:
                 maze_coords = MAZE_COORDS
-
-                print("using default maze_coords")
             maze_params = {
                 "x_min": maze_coords[:, 0].min(),
                 "x_max": maze_coords[:, 0].max(),
@@ -1185,7 +1182,6 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
             }
         self.maze_params = maze_params
         self.smoothing_factor = smoothing_factor
-        print(self.maze_params)
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -1373,6 +1369,99 @@ def test_projection_layer(
     plt.show()
 
     return projected
+
+
+# Custom layer that combines feature_output and UMazeProjectionLayer
+class FeatureOutputWithUMaze(tf.keras.layers.Layer):
+    def __init__(self, orig_layer_config, maze_params=None, **kwargs):
+        super().__init__(**kwargs)
+        # Rebuild the original layer (Dense in your case)
+        self.orig = tf.keras.layers.Dense.from_config(orig_layer_config)
+        self.proj = UMazeProjectionLayer(maze_params=maze_params)
+
+    def call(self, inputs, **kwargs):
+        x = self.orig(inputs, **kwargs)
+        return self.proj(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "orig_layer_config": self.orig.get_config(),
+                "maze_params": self.proj.maze_params,
+            }
+        )
+        return config
+
+    # ---- Weight management ----
+    def get_weights(self):
+        # Only the Dense has trainable weights
+        return self.orig.get_weights()
+
+    def set_weights(self, weights):
+        # Load into the Dense
+        self.orig.set_weights(weights)
+
+    @property
+    def trainable_weights(self):
+        # Expose only Dense's trainable weights
+        return self.orig.trainable_weights
+
+    @property
+    def non_trainable_weights(self):
+        return self.orig.non_trainable_weights
+
+
+def clone_model_with_custom_layer(layer):
+    if layer.name == "feature_output":
+        print(" --> Replacing with custom stack")
+        return FeatureOutputWithUMaze(
+            layer.get_config(), name=layer.name + "_with_proj"
+        )
+    # TODO: at some points, implement maze_coords
+    return layer
+
+
+def get_last_dense_layers_before_output(
+    model, output_layer_name="feature_output_with_proj", k=2
+):
+    """
+    Finds the last k Dense layers that feed into the given output layer.
+
+    Args:
+        model: Keras Functional model
+        output_layer_name: name of the custom output layer
+        k: number of Dense layers to return (default 2)
+
+    Returns:
+        List of Keras layer objects
+    """
+    output_layer = model.get_layer(output_layer_name)
+
+    # Get all layers connected to it (recursively)
+    visited = set()
+    stack = [output_layer]
+    dense_layers = []
+
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        # Collect Dense layers
+        if isinstance(current, tf.keras.layers.Dense):
+            dense_layers.append(current)
+
+        # Add inbound layers to stack
+        for node in current._inbound_nodes:
+            inbound_layers = node.inbound_layers
+            if not isinstance(inbound_layers, list):
+                inbound_layers = [inbound_layers]
+            stack.extend(inbound_layers)
+
+    # Return the last k Dense layers in order of appearance
+    return dense_layers[:k][::-1]  # reverse so closest layers come last
 
 
 class DenseLossProcessor:
