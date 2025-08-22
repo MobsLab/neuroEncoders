@@ -1182,6 +1182,7 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
             }
         self.maze_params = maze_params
         self.smoothing_factor = smoothing_factor
+        print(f"UMazeProjectionLayer initialized with params: {self.maze_params}")
 
     def build(self, input_shape):
         super().build(input_shape)
