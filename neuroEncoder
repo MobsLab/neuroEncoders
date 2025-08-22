@@ -569,6 +569,36 @@ def main(args):
             linearizer=Linearizer,
         )
 
+        # if the folderResult exists, copy it to "copy_folderResult"
+        if os.path.exists(NNTrainer.folderModels) or os.path.exists(
+            os.path.join(
+                NNTrainer.folderModels, str(windowSizeMS), "full", "checkpoint"
+            )
+        ):
+            import shutil
+
+            copy_folderModels = os.path.join(
+                NNTrainer.folderModels, "..", "folderModels_beforeUMazeProj"
+            )
+            if os.path.exists(copy_folderModels):
+                # If the copy already exists, we do nothing
+                pass
+            else:
+                shutil.copytree(NNTrainer.folderModels, copy_folderModels)
+                print(f"copied {NNTrainer.folderModels} to {copy_folderModels}")
+
+        # if the folderResult exists, rename it to "copy_folderResult"
+        if os.path.exists(NNTrainer.folderResult):
+            copy_folderResult = os.path.join(
+                NNTrainer.folderResult, "..", "legacy_folderResult_beforeUMazeProj"
+            )
+            if os.path.exists(copy_folderResult):
+                # If the copy already exists, we do nothing
+                pass
+            else:
+                os.rename(NNTrainer.folderResult, copy_folderResult)
+                print(f"Renamed {NNTrainer.folderResult} to {copy_folderResult}")
+
         if (
             not os.path.exists(
                 os.path.join(
@@ -588,20 +618,8 @@ def main(args):
                 denseweight=True,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.252 else 3,
+                fine_tune=True,
             )
-
-        # if the folderResult exists, rename it to "copy_folderResult"
-        if os.path.exists(NNTrainer.folderResult):
-            copy_folderResult = os.path.join(
-                NNTrainer.folderResult, "..", "another_Big_copy_folderResult"
-            )
-            if os.path.exists(copy_folderResult):
-                # If the copy already exists, we do nothing
-                pass
-            else:
-                os.rename(NNTrainer.folderResult, copy_folderResult)
-                print(f"Renamed {NNTrainer.folderResult} to {copy_folderResult}")
-
         # now run the fancy inference
         if (
             not os.path.exists(
