@@ -575,11 +575,13 @@ class LSTMandSpikeNetwork:
 
             if self.params.transform_w_log:
                 posLoss = tf.identity(
-                    tf.math.log(tf.math.reduce_mean(tempPosLoss)), name="posLoss"
+                    tf.math.log(tf.math.reduce_mean(tempPosLoss)),
+                    name="posLoss",  # log cm2 or ~ 2 * log cm
                 )
             else:
                 posLoss = tf.identity(
-                    tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)), name="posLoss"
+                    tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)),
+                    name="posLoss",  # cm
                 )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
@@ -588,24 +590,26 @@ class LSTMandSpikeNetwork:
             # # outputPredLoss is supposed to be in cm2 and predict the MSE loss.
             # preUncertaintyLoss is in cm2^2 as it's the MSE between the predicted loss and the posLoss
             if self.params.transform_w_log:
-                logPosLoss = tf.math.log(tf.add(tempPosLoss, self.epsilon))
+                logPosLoss = tf.math.log(
+                    tf.add(tempPosLoss, self.epsilon)
+                )  # log cm2 or ~ 2 * log cm
                 preUncertaintyLoss = tf.losses.mean_squared_error(
                     outputPredLoss, tf.stop_gradient(logPosLoss)
-                )
+                )  # in (log cm2)^2 or ~ 4 (log cm)^2
                 uncertaintyLoss = tf.identity(
                     tf.math.log(
                         tf.add(tf.math.reduce_mean(preUncertaintyLoss), self.epsilon)
                     ),
                     name="uncertaintyLoss",
-                )
+                )  # log (log(cm2)^2) or ~ log(4) + log 2(log cm))
             else:
                 preUncertaintyLoss = tf.math.sqrt(
                     tf.math.sqrt(
                         tf.losses.mean_squared_error(
                             outputPredLoss, tf.stop_gradient(tempPosLoss)
-                        )
-                    )
-                )
+                        )  # in cm2^2 (MSE between predicted loss and posLoss)
+                    )  # now in cm2
+                )  # now in cm
 
                 # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
                 uncertaintyLoss = tf.identity(
@@ -913,7 +917,7 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
-            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
+            return tf.reduce_all(tf.math.is_finite(pos_data))
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
@@ -1148,7 +1152,7 @@ class LSTMandSpikeNetwork:
                     prefix = "LOADED_" if loaded else ""
                     wandb.init(
                         entity="touseul",
-                        project="rien de rien",
+                        project="projected rien de rien",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
@@ -1451,7 +1455,7 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
-            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
+            return tf.reduce_all(tf.math.is_finite(pos_data))
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
@@ -1821,7 +1825,11 @@ class LSTMandSpikeNetwork:
             return nnUtils.import_true_pos(posFeature)(x)
 
         def filter_nan_pos(x):
-            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(x["pos"])))
+            pos_data = x["pos"]
+            # convert to float if it's a binary pred
+            if pos_data.dtype in [tf.int32, tf.int64]:
+                pos_data = tf.cast(pos_data, tf.float64)
+            return tf.reduce_all(tf.math.is_finite(pos_data))
 
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
