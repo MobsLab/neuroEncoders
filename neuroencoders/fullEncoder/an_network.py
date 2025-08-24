@@ -922,7 +922,8 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
-            return tf.reduce_all(tf.math.is_finite(pos_data))
+
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
@@ -1460,7 +1461,7 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
-            return tf.reduce_all(tf.math.is_finite(pos_data))
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
@@ -1834,7 +1835,8 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
-            return tf.reduce_all(tf.math.is_finite(pos_data))
+
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
