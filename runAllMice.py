@@ -31,9 +31,9 @@ mice_nb = [
     "M1230_Known",
     "M1162_MFB",
 ]
-nameExp = "current_LogLoss_Transformer_Dense"
+nameExp = "projected_LinearLoss_Dense"
 nbEpochs = str(200)
-run_bayes = True
+run_bayes = False
 run_ann = True
 target = "pos"
 phase = "pre"
@@ -193,7 +193,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             target,
             # "--predicted_loss",
             "--early_stop",
-            "--transform_w_log",
+            # "--transform_w_log",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

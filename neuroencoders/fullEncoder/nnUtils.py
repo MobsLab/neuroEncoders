@@ -1,9 +1,11 @@
 # Load libs
 import os
 from typing import Dict, Optional, Tuple
-from warnings import warn
 
 import numpy as np
+from denseweight import DenseWeight
+
+from neuroencoders.utils.global_classes import MAZE_COORDS
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
@@ -1084,9 +1086,6 @@ class LinearizationLayer(tf.keras.layers.Layer):
         )
 
 
-from denseweight import DenseWeight
-
-
 @keras.saving.register_keras_serializable(
     package="Custom_Layers", name="DynamicDenseWeightLayer"
 )
@@ -1152,6 +1151,318 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         if training_data is not None:
             fitted_dw.fit(training_data)
         return cls(fitted_denseweight=fitted_dw, device=config.pop("device", "/cpu:0"))
+
+
+class UMazeProjectionLayer(tf.keras.layers.Layer):
+    def __init__(self, smoothing_factor=0.01, maze_params=None, **kwargs):
+        """
+        Differentiable projection layer that softly constrains (x,y) predictions
+        to lie within a U-shaped maze.
+
+        Args:
+            maze_params (dict): Defines maze geometry.
+            smoothing_factor (float): Controls softness of constraints.
+        """
+        super().__init__(**kwargs)
+
+        # Default parameters based on your maze image
+        if maze_params is None or not isinstance(maze_params, dict):
+            if maze_params is not None:
+                maze_coords = np.array(maze_params)
+            else:
+                maze_coords = MAZE_COORDS
+            maze_params = {
+                "x_min": maze_coords[:, 0].min(),
+                "x_max": maze_coords[:, 0].max(),
+                "y_min": maze_coords[:, 1].min(),
+                "y_max": maze_coords[:, 1].max(),
+                "gap_x_min": maze_coords[-2, 0],
+                "gap_x_max": maze_coords[-4, 0],
+                "gap_y_min": maze_coords[-3, 1],
+            }
+        self.maze_params = maze_params
+        self.smoothing_factor = smoothing_factor
+        print(f"UMazeProjectionLayer initialized with params: {self.maze_params}")
+
+    def build(self, input_shape):
+        super().build(input_shape)
+
+    def call(self, inputs):
+        x, y = inputs[..., 0], inputs[..., 1]
+        x_proj, y_proj = self._project_points(x, y)
+        return tf.stack([x_proj, y_proj], axis=1)
+
+    def _project_points(self, x, y):
+        dtype = x.dtype
+        gap_x_min = tf.constant(self.maze_params["gap_x_min"], dtype=dtype)
+        gap_x_max = tf.constant(self.maze_params["gap_x_max"], dtype=dtype)
+        gap_y_min = tf.constant(self.maze_params["gap_y_min"], dtype=dtype)
+
+        # Define constraint lines
+        lines = tf.stack(
+            [
+                [gap_x_min, 0.0, gap_x_min, gap_y_min],  # left vertical
+                [gap_x_max, 0.0, gap_x_max, gap_y_min],  # right vertical
+                [gap_x_min, gap_y_min, gap_x_max, gap_y_min],  # top horizontal
+            ],
+            axis=0,
+        )  # (3,4)
+
+        # Expand predictions (N,1)
+        px, py = tf.expand_dims(x, -1), tf.expand_dims(y, -1)
+
+        # Unpack line endpoints
+        x1, y1, x2, y2 = [lines[:, i][tf.newaxis, :] for i in range(4)]  # (1,3)
+
+        # Project onto each line
+        dx, dy = x2 - x1, y2 - y1
+        t = tf.clip_by_value(
+            ((px - x1) * dx + (py - y1) * dy) / (dx**2 + dy**2 + 1e-8), 0.0, 1.0
+        )
+        proj_x, proj_y = x1 + t * dx, y1 + t * dy  # (N,3)
+
+        # Distances
+        dist = tf.sqrt((px - proj_x) ** 2 + (py - proj_y) ** 2)  # (N,3)
+
+        # Find closest projection
+        min_idx = tf.argmin(dist, axis=-1, output_type=tf.int32)  # (N,)
+        closest_proj_x = tf.gather(proj_x, min_idx, axis=1, batch_dims=1)
+        closest_proj_y = tf.gather(proj_y, min_idx, axis=1, batch_dims=1)
+        closest_dist = tf.gather(dist, min_idx, axis=1, batch_dims=1)
+
+        batch_size = tf.shape(x)[0]
+
+        # --- Noise (scaled by distance) ---
+        left_noise_x = (
+            -tf.random.uniform((batch_size,), 0.0, 0.5, dtype=dtype) * closest_dist
+        )
+        right_noise_x = (
+            tf.random.uniform((batch_size,), 0.0, 0.5, dtype=dtype) * closest_dist
+        )
+        global_noise_y = (
+            tf.random.normal((batch_size,), mean=0.0, stddev=0.3, dtype=dtype)
+            * closest_dist
+        )
+        top_noise_x = (
+            tf.random.normal((batch_size,), mean=0.0, stddev=0.2, dtype=dtype)
+            * closest_dist
+        )
+        top_noise_y = (
+            tf.random.uniform((batch_size,), 0.0, 0.5, dtype=dtype) * closest_dist
+        )
+
+        noise_x = tf.stack([left_noise_x, right_noise_x, top_noise_x], axis=1)  # (N,3)
+        noise_y = tf.stack([global_noise_y, global_noise_y, top_noise_y], axis=1)
+
+        chosen_noise_x = tf.gather(noise_x, min_idx, axis=1, batch_dims=1)
+        chosen_noise_y = tf.gather(noise_y, min_idx, axis=1, batch_dims=1)
+
+        proj_x_noisy = closest_proj_x + chosen_noise_x
+        proj_y_noisy = closest_proj_y + chosen_noise_y
+
+        # Soft inside indicator
+        inside_soft = (
+            tf.sigmoid((gap_x_max - x) / self.smoothing_factor)
+            * tf.sigmoid((x - gap_x_min) / self.smoothing_factor)
+            * tf.sigmoid((gap_y_min - y) / self.smoothing_factor)
+        )
+
+        x_final = (1 - inside_soft) * x + inside_soft * proj_x_noisy
+        y_final = (1 - inside_soft) * y + inside_soft * proj_y_noisy
+
+        # Clip to maze corridor
+        x_final = tf.clip_by_value(
+            x_final, self.maze_params["x_min"], self.maze_params["x_max"]
+        )
+        y_final = tf.clip_by_value(
+            y_final, self.maze_params["y_min"], self.maze_params["y_max"]
+        )
+
+        return x_final, y_final
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "maze_params": self.maze_params,
+                "smoothing_factor": self.smoothing_factor,
+            }
+        )
+        return config
+
+
+# Test the projection layer
+def test_projection_layer(
+    test_predictions=None, maze_params=None, smoothing_factor=0.01
+):
+    """Test the projection layer with sample data"""
+
+    # Create some test predictions (some in valid regions, some in gap)
+    if test_predictions is None:
+        test_predictions = tf.constant(
+            [
+                [0, 0],
+                [1, 1],
+                [0.2, 0.5],  # Valid - left arm
+                [0.8, 0.3],  # Valid - right arm
+                [0.65, 0.9],
+                [0.75, 0.9],
+                [0.5, 0.8],  # Invalid - in gap, should be projected
+                [0.5, 0.5],  # Invalid - in gap, should be projected
+                [0.1, 0.5],  # Invalid - in gap, should be projected
+                [0.45, 0.9],  # Invalid - in gap, should snap to left
+                [0.55, 0.7],  # Invalid - in gap, should snap to right
+            ]
+        )
+    else:
+        test_predictions = tf.constant(test_predictions, dtype=tf.float32)
+
+    # Create and test the layer
+    projection_layer = UMazeProjectionLayer(
+        smoothing_factor=smoothing_factor, maze_params=maze_params
+    )
+    projected = projection_layer(test_predictions)
+    error = tf.sqrt(tf.reduce_sum((test_predictions - projected) ** 2, axis=1))
+    mean_error = tf.reduce_mean(error)
+
+    print(f"Mean Error on {test_predictions.shape[0]} predictions: {mean_error:.4f}")
+
+    # plot the result
+    import matplotlib.pyplot as plt
+
+    if maze_params is None:
+        maze_params = MAZE_COORDS
+        print("Using default maze coordinates for plotting")
+
+    plt.figure()
+    plt.plot(maze_params[:, 0], maze_params[:, 1], "k-", label="Maze Path")
+    # plot by matching each point in test_predictions to its projected point
+    plt.scatter(
+        test_predictions[:, 0],
+        test_predictions[:, 1],
+        c="blue",
+        label="Original Predictions",
+        alpha=0.5,
+    )
+    plt.scatter(
+        projected[:, 0],
+        projected[:, 1],
+        c="red",
+        label="Projected Predictions",
+        alpha=0.5,
+    )
+    # now plot lines between pred and projected points
+    for i in range(max(len(test_predictions), 1000)):
+        plt.plot(
+            [test_predictions[i, 0], projected[i, 0]],
+            [test_predictions[i, 1], projected[i, 1]],
+            "r--",
+            alpha=0.3,
+        )
+
+    plt.xlim(-0.2, 1.2)
+    plt.ylim(-0.2, 1.2)
+    plt.title("UMaze Projection Layer Test")
+    plt.xlabel("X Coordinate")
+    plt.ylabel("Y Coordinate")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    return projected
+
+
+# Custom layer that combines feature_output and UMazeProjectionLayer
+class FeatureOutputWithUMaze(tf.keras.layers.Layer):
+    def __init__(self, orig_layer_config, maze_params=None, **kwargs):
+        super().__init__(**kwargs)
+        # Rebuild the original layer (Dense in your case)
+        self.orig = tf.keras.layers.Dense.from_config(orig_layer_config)
+        self.proj = UMazeProjectionLayer(maze_params=maze_params)
+
+    def call(self, inputs, **kwargs):
+        x = self.orig(inputs, **kwargs)
+        return self.proj(x)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "orig_layer_config": self.orig.get_config(),
+                "maze_params": self.proj.maze_params,
+            }
+        )
+        return config
+
+    # ---- Weight management ----
+    def get_weights(self):
+        # Only the Dense has trainable weights
+        return self.orig.get_weights()
+
+    def set_weights(self, weights):
+        # Load into the Dense
+        self.orig.set_weights(weights)
+
+    @property
+    def trainable_weights(self):
+        # Expose only Dense's trainable weights
+        return self.orig.trainable_weights
+
+    @property
+    def non_trainable_weights(self):
+        return self.orig.non_trainable_weights
+
+
+def clone_model_with_custom_layer(layer):
+    if layer.name == "feature_output":
+        print(" --> Replacing with custom stack")
+        return FeatureOutputWithUMaze(
+            layer.get_config(), name=layer.name + "_with_proj"
+        )
+    # TODO: at some points, implement maze_coords
+    return layer
+
+
+def get_last_dense_layers_before_output(
+    model, output_layer_name="feature_output_with_proj", k=2
+):
+    """
+    Finds the last k Dense layers that feed into the given output layer.
+
+    Args:
+        model: Keras Functional model
+        output_layer_name: name of the custom output layer
+        k: number of Dense layers to return (default 2)
+
+    Returns:
+        List of Keras layer objects
+    """
+    output_layer = model.get_layer(output_layer_name)
+
+    # Get all layers connected to it (recursively)
+    visited = set()
+    stack = [output_layer]
+    dense_layers = []
+
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+
+        # Collect Dense layers
+        if isinstance(current, tf.keras.layers.Dense):
+            dense_layers.append(current)
+
+        # Add inbound layers to stack
+        for node in current._inbound_nodes:
+            inbound_layers = node.inbound_layers
+            if not isinstance(inbound_layers, list):
+                inbound_layers = [inbound_layers]
+            stack.extend(inbound_layers)
+
+    # Return the last k Dense layers in order of appearance
+    return dense_layers[:k][::-1]  # reverse so closest layers come last
 
 
 class DenseLossProcessor:

@@ -216,6 +216,7 @@ class LSTMandSpikeNetwork:
                     MaskedGlobalAveragePooling1D,
                     PositionalEncoding,
                     TransformerEncoderBlock,
+                    UMazeProjectionLayer,
                 )
 
                 self.lstmsNets = (
@@ -301,6 +302,7 @@ class LSTMandSpikeNetwork:
                 dtype=tf.float32,
                 name="feature_projection_transformer",
             )
+            self.ProjectionInMazeLayer = UMazeProjectionLayer()
 
             # Gather the full model
             outputs = self.generate_model(**kwargs)
@@ -395,6 +397,7 @@ class LSTMandSpikeNetwork:
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
         myoutputPos = self.denseFeatureOutput(x)
+        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
 
         # 5. Loss prediction
 
@@ -501,6 +504,7 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.denseFeatureOutput(
                     self.dropoutLayer(output)
                 )  # positions
+                myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
 
                 # normalize the lstm output and the cnn features
                 output_norm = tf.nn.l2_normalize(output, axis=1)
@@ -571,11 +575,13 @@ class LSTMandSpikeNetwork:
 
             if self.params.transform_w_log:
                 posLoss = tf.identity(
-                    tf.math.log(tf.math.reduce_mean(tempPosLoss)), name="posLoss"
+                    tf.math.log(tf.math.reduce_mean(tempPosLoss)),
+                    name="posLoss",  # log cm2 or ~ 2 * log cm
                 )
             else:
                 posLoss = tf.identity(
-                    tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)), name="posLoss"
+                    tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)),
+                    name="posLoss",  # cm
                 )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
@@ -584,24 +590,26 @@ class LSTMandSpikeNetwork:
             # # outputPredLoss is supposed to be in cm2 and predict the MSE loss.
             # preUncertaintyLoss is in cm2^2 as it's the MSE between the predicted loss and the posLoss
             if self.params.transform_w_log:
-                logPosLoss = tf.math.log(tf.add(tempPosLoss, self.epsilon))
+                logPosLoss = tf.math.log(
+                    tf.add(tempPosLoss, self.epsilon)
+                )  # log cm2 or ~ 2 * log cm
                 preUncertaintyLoss = tf.losses.mean_squared_error(
                     outputPredLoss, tf.stop_gradient(logPosLoss)
-                )
+                )  # in (log cm2)^2 or ~ 4 (log cm)^2
                 uncertaintyLoss = tf.identity(
                     tf.math.log(
                         tf.add(tf.math.reduce_mean(preUncertaintyLoss), self.epsilon)
                     ),
                     name="uncertaintyLoss",
-                )
+                )  # log (log(cm2)^2) or ~ log(4) + log 2(log cm))
             else:
                 preUncertaintyLoss = tf.math.sqrt(
                     tf.math.sqrt(
                         tf.losses.mean_squared_error(
                             outputPredLoss, tf.stop_gradient(tempPosLoss)
-                        )
-                    )
-                )
+                        )  # in cm2^2 (MSE between predicted loss and posLoss)
+                    )  # now in cm2
+                )  # now in cm
 
                 # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
                 uncertaintyLoss = tf.identity(
@@ -806,6 +814,11 @@ class LSTMandSpikeNetwork:
         None
         """
 
+        from neuroencoders.fullEncoder.nnUtils import (
+            NeuralDataAugmentation,
+            create_flatten_augmented_groups_fn,
+        )
+
         ### Create neccessary arrays
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         windowSizeMS = kwargs.get("windowSizeMS", 36)
@@ -862,26 +875,6 @@ class LSTMandSpikeNetwork:
                 self.folderModels, str(windowSizeMS), key + "/cp.ckpt"
             )
 
-        # memory garbage collection class class
-        class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
-            """Monitor memory usage during training, collect garbage."""
-
-            def on_epoch_begin(self, epoch, logs=None):
-                print("**Epoch {}**".format(epoch))
-                print(
-                    "Memory usage on epoch begin: {}".format(
-                        psutil.Process(os.getpid()).memory_info().rss
-                    )
-                )
-
-            def on_epoch_end(self, epoch, logs=None):
-                print(
-                    "Memory usage on epoch end:   {}".format(
-                        psutil.Process(os.getpid()).memory_info().rss
-                    )
-                )
-                gc.collect()
-
         ## Get speed filter:
         speedMask = behaviorData["Times"]["speedFilter"]
 
@@ -924,16 +917,20 @@ class LSTMandSpikeNetwork:
             # convert to float if it's a binary pred
             if pos_data.dtype in [tf.int32, tf.int64]:
                 pos_data = tf.cast(pos_data, tf.float64)
+
             return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
         @tf.autograph.experimental.do_not_convert
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
 
-        from neuroencoders.fullEncoder.nnUtils import (
-            NeuralDataAugmentation,
-            create_flatten_augmented_groups_fn,
-        )
+        @keras.saving.register_keras_serializable()
+        def pos_loss(x, y):
+            return y
+
+        @keras.saving.register_keras_serializable()
+        def uncertainty_loss(x, y):
+            return y
 
         augmentation_config = NeuralDataAugmentation(device=self.deviceName, **kwargs)
 
@@ -1028,6 +1025,27 @@ class LSTMandSpikeNetwork:
                 tf.data.AUTOTUNE
             )  # prefetch entire batches
 
+        # memory garbage collection class class
+        class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
+            """Monitor memory usage during training, collect garbage."""
+
+            def on_epoch_begin(self, epoch, logs=None):
+                print("**Epoch {}**".format(epoch))
+                print(
+                    "Memory usage on epoch begin: {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+
+            def on_epoch_end(self, epoch, logs=None):
+                print(
+                    "Memory usage on epoch end:   {}".format(
+                        psutil.Process(os.getpid()).memory_info().rss
+                    )
+                )
+                gc.collect()
+                tf.keras.backend.clear_session()
+
         ### Train the model(s)
         # Initialize the model for C++ decoder
         # self.generate_model_Cplusplus()
@@ -1066,10 +1084,9 @@ class LSTMandSpikeNetwork:
                         )
 
             if loaded:
-                if kwargs.get("fine_tune", False) and nb_epochs_already_trained >= 35:
-                    return
-                elif not kwargs.get("fine_tune", False):
-                    return
+                if not kwargs.get("fine_tune", False):
+                    print(f"Model loaded for {key}, skipping directly to next.")
+                    continue
 
             # Create a callback that saves the model's weights
             cp_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -1081,12 +1098,27 @@ class LSTMandSpikeNetwork:
                 self.optimizer.learning_rate.assign(0.0001)
                 self.model.optimizer.learning_rate.assign(0.0001)
                 tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+                # according to some sources we need to recompile the model after changing the learning rate
+                self.model.compile(
+                    optimizer=self.optimizer,
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
+                )
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.optimizer.learning_rate.assign(self.params.learningRates[0])
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
                 tf.keras.backend.set_value(
                     self.model.optimizer.learning_rate, self.params.learningRates[0]
+                )
+                self.model.compile(
+                    optimizer=self.optimizer,
+                    loss={
+                        self.outNames[0]: pos_loss,
+                        self.outNames[1]: uncertainty_loss,
+                    },
                 )
             LRScheduler = self.LRScheduler(self.params.learningRates)
             if scheduler == "fixed":
@@ -1121,7 +1153,7 @@ class LSTMandSpikeNetwork:
                     prefix = "LOADED_" if loaded else ""
                     wandb.init(
                         entity="touseul",
-                        project="rien de rien",
+                        project="projected rien de rien",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
@@ -1196,9 +1228,20 @@ class LSTMandSpikeNetwork:
                         restore_best_weights=True,
                         start_from_epoch=50 - nb_epochs_already_trained,
                     )
-                    callbacks = [csvLogger[key], cp_callback, schedule, es_callback]
+                    callbacks = [
+                        csvLogger[key],
+                        cp_callback,
+                        schedule,
+                        es_callback,
+                        MemoryUsageCallbackExtended(),
+                    ]
                 else:
-                    callbacks = [csvLogger[key], cp_callback, schedule]
+                    callbacks = [
+                        csvLogger[key],
+                        cp_callback,
+                        schedule,
+                        MemoryUsageCallbackExtended(),
+                    ]
 
                 if self.params.reduce_lr_on_plateau:
                     reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -1220,6 +1263,7 @@ class LSTMandSpikeNetwork:
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                 )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
+
                 self.trainLosses[key] = np.transpose(
                     np.stack(
                         [
@@ -1782,7 +1826,12 @@ class LSTMandSpikeNetwork:
             return nnUtils.import_true_pos(posFeature)(x)
 
         def filter_nan_pos(x):
-            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(x["pos"])))
+            pos_data = x["pos"]
+            # convert to float if it's a binary pred
+            if pos_data.dtype in [tf.int32, tf.int64]:
+                pos_data = tf.cast(pos_data, tf.float64)
+
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
         def map_parse_serialized_sequence(*vals):
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
