@@ -583,7 +583,7 @@ def main(args):
                 load_model=False,
                 denseweight=True,
                 l_function=l_function,
-                num_augmentations=5 if args.window < 0.252 else 3,
+                num_augmentations=11 if args.window < 0.252 else 3,
             )
         # now run the fancy inference
         if (
