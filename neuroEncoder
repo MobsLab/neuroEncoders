@@ -221,7 +221,7 @@ def main(args):
         windowSize=args.window,
         nEpochs=args.epochs,
         phase=args.phase,
-        batchSize=128 if args.window < 0.252 else 64,
+        batchSize=256 if args.window < 0.252 else 128,
         save_json=True,
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
@@ -230,10 +230,6 @@ def main(args):
 
     # Save ProjectPath object
     save_project_to_pickle(ProjectPath)
-    # Save main parameters in json file in the Params.folder
-    # save_project_to_pickle(
-    #     Parameters, output=os.path.join(Parameters.resultsPath, "Parameters.pkl")
-    # )
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
@@ -584,24 +580,11 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=True,
+                load_model=False,
                 denseweight=True,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.252 else 3,
             )
-
-        # if the folderResult exists, rename it to "copy_folderResult"
-        if os.path.exists(NNTrainer.folderResult):
-            copy_folderResult = os.path.join(
-                NNTrainer.folderResult, "..", "another_Big_copy_folderResult"
-            )
-            if os.path.exists(copy_folderResult):
-                # If the copy already exists, we do nothing
-                pass
-            else:
-                os.rename(NNTrainer.folderResult, copy_folderResult)
-                print(f"Renamed {NNTrainer.folderResult} to {copy_folderResult}")
-
         # now run the fancy inference
         if (
             not os.path.exists(
@@ -914,14 +897,14 @@ def main(args):
         )
         figures.load_data()
         figures.load_bayes()
-        figures.fig_example_linear()
-        figures.hist_linerrors()
-        figures.nnVSbayes()
-        figures.predLoss_vs_trueLoss()
-        figures.fig_example_2d()
-        figures.predLoss_linError()
-        figures.predLoss_linError()
-        figures.fig_example_linear_filtered()
+        figures.fig_example_linear(block=False)
+        figures.hist_linerrors(block=False, speed="fast")
+        figures.nnVSbayes(block=False, speed="fast")
+        figures.predLoss_vs_trueLoss(block=False, speed="fast")
+        figures.fig_example_2d(block=False, speed="fast")
+        figures.predLoss_linError(block=False, speed="fast")
+        figures.predLoss_euclError(block=False, speed="fast")
+        figures.fig_example_linear_filtered(block=False)
 
 
 if __name__ == "__main__":
