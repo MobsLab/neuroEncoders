@@ -304,6 +304,8 @@ class LSTMandSpikeNetwork:
             )
             self.ProjectionInMazeLayer = UMazeProjectionLayer()
 
+            self.GaussianHeatmap = nnUtils.GaussianHeatmapLayer(name="gaussian_heatmap")
+
             # Gather the full model
             outputs = self.generate_model(**kwargs)
             # Build two models
@@ -396,8 +398,11 @@ class LSTMandSpikeNetwork:
         output = self.lstmsNets[-3](output, mask=mymask)  # pooling
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
-        myoutputPos = self.denseFeatureOutput(x)
-        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+        if not kwargs.get("gaussian_heatmap", False):
+            myoutputPos = self.denseFeatureOutput(x)
+            myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+        else:
+            logits = self.GaussianHeatmap.feature_to_logits_map(x)
 
         # 5. Loss prediction
 

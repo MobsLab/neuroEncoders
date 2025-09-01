@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from denseweight import DenseWeight
+from tensorflow.data.experimental import rejection_resample
 
 from neuroencoders.utils.global_classes import MAZE_COORDS
 
@@ -1463,6 +1464,165 @@ def get_last_dense_layers_before_output(
 
     # Return the last k Dense layers in order of appearance
     return dense_layers[:k][::-1]  # reverse so closest layers come last
+
+
+class GaussianHeatmapLayer(tf.keras.layers.Layer):
+    """
+    Layer that generates Gaussian heatmaps for given true positions.
+    This layer computes a Gaussian heatmap based on the true positions
+    """
+
+    def __init__(
+        self, training_positions, grid_size=(45, 45), eps=1e-8, sigma=0.03, **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.training_positions = training_positions
+        self.grid_size = grid_size
+        self.sigma = sigma
+        self.GRID_H = grid_size[0]
+        self.GRID_W = grid_size[1]
+        self.EPS = eps
+
+        x_cent = tf.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
+        y_cent = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
+        self.Xc, self.Yc = tf.meshgrid(x_cent, y_cent)  # (H,W)
+        self.FORBID = tf.cast(
+            (self.Xc >= 0.35) & (self.Xc <= 0.65) & (self.Yc >= 0.0) & (self.Yc <= 0.7),
+            tf.float32,
+        )  # (H,W)
+        self.occ = self.occupancy_map(self.training_positions)
+        self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        self.NEG = tf.constant(-1e9, tf.float32)
+
+        self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
+
+    def gaussian_heatmap_targets(self, true_xy, sigma=0.03):
+        tx = true_xy[:, 0][:, None, None]
+        ty = true_xy[:, 1][:, None, None]
+        g = tf.exp(
+            -0.5 * ((self.Xc[None] - tx) ** 2 + (self.Yc[None] - ty) ** 2) / sigma**2
+        )
+        g = g * (1.0 - self.FORBID[None])
+        Z = tf.reduce_sum(g, [1, 2], keepdims=True)
+        allowed = tf.reduce_sum(1.0 - self.FORBID)
+        tiny = (self.EPS / tf.cast(allowed, tf.float32)) * (1.0 - self.FORBID)[None]
+        return tf.where(Z > 0, g / (Z + self.EPS), tiny)  # (B,H,W)
+
+    def positions_to_bins(self, pos):
+        xs = np.clip((pos[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
+        ys = np.clip((pos[:, 1] * self.GRID_H).astype(int), 0, self.GRID_H - 1)
+        return ys * self.GRID_W + xs
+
+    def occupancy_map(self, positions):
+        occ = np.zeros((self.GRID_H, self.GRID_W), np.float32)
+        idx = self.positions_to_bins(positions)
+        for k in idx:
+            occ[k // self.GRID_W, k % self.GRID_W] += 1
+        return occ * (1.0 - self.FORBID.numpy())
+
+    def weight_map_from_occ(self, occ, alpha=0.5, eps=1e-3):
+        inv = (1.0 / (occ + eps)) ** alpha
+        inv /= np.mean(inv[occ > 0])  # mean≈1
+        return tf.constant(inv, tf.float32)
+
+    def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=self.WMAP):
+        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        probs = tf.nn.softmax(masked_logits, axis=[1, 2])
+        weights = wmap[None] * (1.0 - self.FORBID[None])
+        se = tf.square(probs - target_hw)
+        # normalize by sum of weights to keep scale stable
+        return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
+
+    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None):
+        """
+        Compute KL-divergence between target heatmap and predicted distribution.
+        KL(P||Q) = sum P * log(P/Q)
+        """
+        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        log_probs = tf.nn.log_softmax(masked_logits, axis=[1, 2])  # log Q
+        P = target_hw  # already normalized heatmap
+
+        kl = P * (tf.math.log(P + self.EPS) - log_probs)
+
+        # Optional: weight rare bins via wmap
+        if wmap is not None:
+            weights = wmap[None] * (1.0 - self.FORBID[None])
+            kl *= weights
+        else:
+            weights = 1.0 - self.FORBID[None]
+            kl *= weights
+
+        # weight and normalize
+        kl = tf.reduce_mean(tf.reduce_sum(kl, [1, 2]))
+        return kl
+
+    def decode_and_uncertainty(self, logits_hw):
+        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        probs = tf.nn.softmax(masked_logits, axis=[1, 2])
+        ex = tf.reduce_sum(probs * self.Xc[None], [1, 2])
+        ey = tf.reduce_sum(probs * self.Yc[None], [1, 2])
+        varx = tf.reduce_sum(
+            probs * tf.square(self.Xc[None] - ex[:, None, None]), [1, 2]
+        )
+        vary = tf.reduce_sum(
+            probs * tf.square(self.Yc[None] - ey[:, None, None]), [1, 2]
+        )
+        maxp = tf.reduce_max(tf.reshape(probs, [tf.shape(probs)[0], -1]), axis=1)
+        H = -tf.reduce_sum(probs * tf.math.log(probs + self.EPS), [1, 2])
+        # normalize entropy by allowed bins
+        n_allowed = tf.cast(tf.reduce_sum(1.0 - self.FORBID), tf.float32)
+        Hn = H / tf.math.log(n_allowed + self.EPS)
+        return tf.stack([ex, ey], -1), maxp, Hn, (varx + vary)
+
+    def bin_class(self, example):
+        pos = example["pos"]
+        x = tf.cast(
+            tf.clip_by_value(pos[0] * self.GRID_W, 0, self.GRID_W - 1), tf.int32
+        )
+        y = tf.cast(
+            tf.clip_by_value(pos[1] * self.GRID_H, 0, self.GRID_H - 1), tf.int32
+        )
+        cls = y * self.GRID_W + x
+        # Map forbidden bins to a dummy class that we'll exclude by giving it zero target mass:
+        forbidden_here = tf.greater(self.FORBID[y, x], 0)
+        return tf.where(forbidden_here, -1, cls)  # -1 = invalid
+
+    def prepare_dataset(self, dataset):
+        # Build initial/target distributions (numpy)
+        counts = np.bincount(
+            self.positions_to_bins(self.training_positions),
+            minlength=self.GRID_H * self.GRID_W,
+        ).astype(np.float32)
+        target = np.ones(self.GRID_H * self.GRID_W, np.float32)
+        target /= target.sum()
+
+        # Adapter to drop invalid (-1) before resampling:
+        ds_valid = dataset.filter(lambda ex: tf.greater_equal(self.bin_class(ex), 0))
+
+        resampled = ds_valid.apply(
+            rejection_resample(
+                class_func=bin_class,
+                target_dist=target,
+                initial_dist=counts / np.maximum(1.0, counts.sum()),
+                seed=42,
+            )
+        ).map(lambda cls, ex: ex)
+        return resampled
+
+    def fit_temperature(self, val_logits, val_targets, iters=200, lr=1e-2):
+        logT = tf.Variable(0.0, trainable=True)
+        opt = tf.keras.optimizers.Adam(lr)
+        for _ in range(iters):
+            with tf.GradientTape() as t:
+                scaled = val_logits / tf.exp(logT)
+                logp = tf.nn.log_softmax(
+                    tf.where(self.FORBID[None] > 0, self.NEG, scaled), axis=[1, 2]
+                )
+                nll = -tf.reduce_mean(tf.reduce_sum(val_targets * logp, [1, 2]))
+            opt.apply_gradients([(t.gradient(nll, logT), logT)])
+        return float(tf.exp(logT).numpy())
+
+    # inference: probs = softmax(mask_logits / T_cal)
 
 
 class DenseLossProcessor:
