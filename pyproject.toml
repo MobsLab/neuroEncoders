@@ -1,6 +1,6 @@
 [project]
 name = "neuroencoders"
-version = "2.1"
+dynamic = ["version"]
 description = "Neuroencoders is a Python package for the analysis of neural data, including encoding models, decoding models, and visualization tools."
 authors = [
     { name = "Dima Bryzgalov", email = "bryzgalovdm@gmail.com" },
@@ -50,6 +50,7 @@ dependencies = [
     "termplotlib>=0.3.9",
     "tqdm>=4.67.1",
     "wandb>=0.20.1",
+    "xlsxwriter>=3.2.5",
 ]
 
 [dependency-groups]
@@ -129,3 +130,14 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["neuroencoders"]
+
+[tool.uv.sources]
+neuroencoders = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"
