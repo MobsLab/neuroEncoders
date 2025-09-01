@@ -2335,8 +2335,7 @@ wheels = [
 
 [[package]]
 name = "neuroencoders"
-version = "2.1"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "bokeh" },
     { name = "cmcrameri" },
@@ -2381,6 +2380,7 @@ dependencies = [
     { name = "termplotlib" },
     { name = "tqdm" },
     { name = "wandb" },
+    { name = "xlsxwriter" },
 ]
 
 [package.dev-dependencies]
@@ -2440,6 +2440,7 @@ requires-dist = [
     { name = "termplotlib", specifier = ">=0.3.9" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "wandb", specifier = ">=0.20.1" },
+    { name = "xlsxwriter", specifier = ">=3.2.5" },
 ]
 
 [package.metadata.requires-dev]
@@ -4876,6 +4877,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/31/cbce966b6760e62d005c237961e839a755bf0c907199248394e2ee03ab05/wrapt-1.14.1-cp311-cp311-musllinux_1_1_x86_64.whl", hash = "sha256:49ef582b7a1152ae2766557f0550a9fcbf7bbd76f43fbdc94dd3bf07cc7168be", size = 83361 },
     { url = "https://files.pythonhosted.org/packages/9a/aa/ab46fb18072b86e87e0965a402f8723217e8c0312d1b3e2a91308df924ab/wrapt-1.14.1-cp311-cp311-win32.whl", hash = "sha256:358fe87cc899c6bb0ddc185bf3dbfa4ba646f05b1b0b9b5a27c2cb92c2cea204", size = 33454 },
     { url = "https://files.pythonhosted.org/packages/ba/7e/14113996bc6ee68eb987773b4139c87afd3ceff60e27e37648aa5eb2798a/wrapt-1.14.1-cp311-cp311-win_amd64.whl", hash = "sha256:26046cd03936ae745a502abf44dac702a5e6880b2b01c29aea8ddf3353b68224", size = 35616 },
+]
+
+[[package]]
+name = "xlsxwriter"
+version = "3.2.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/47/7704bac42ac6fe1710ae099b70e6a1e68ed173ef14792b647808c357da43/xlsxwriter-3.2.5.tar.gz", hash = "sha256:7e88469d607cdc920151c0ab3ce9cf1a83992d4b7bc730c5ffdd1a12115a7dbe", size = 213306 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/34/a22e6664211f0c8879521328000bdcae9bf6dbafa94a923e531f6d5b3f73/xlsxwriter-3.2.5-py3-none-any.whl", hash = "sha256:4f4824234e1eaf9d95df9a8fe974585ff91d0f5e3d3f12ace5b71e443c1c6abd", size = 172347 },
 ]
 
 [[package]]
