@@ -425,6 +425,59 @@ class LSTMandSpikeNetwork:
 
         return myoutputPos, outputPredLoss, output, sumFeatures
 
+    def apply_lstm_architecture(self, allFeatures, sumFeatures, mymask, **kwargs):
+        """
+        Shared lstm logic that can be called from generate_model.
+        This ensures the lstm architecture is defined only once.
+
+        Args:
+            allFeatures: Features after dropout (batch_size, seq_len, feature_dim)
+            mymask: Attention mask (batch_size, seq_len)
+            **kwargs: Additional arguments
+
+        Returns:
+            tuple: (myoutputPos, outputPredLoss, output, sumFeatures)
+        """
+
+        print("Using LSTM architecture !")
+        # LSTM blocks with masking and dropout
+        for ilstm, lstmLayer in enumerate(self.lstmsNets):
+            if ilstm == 0:
+                if len(self.lstmsNets) == 1:
+                    output = lstmLayer(allFeatures, mask=mymask)
+                else:
+                    outputSeq = lstmLayer(allFeatures, mask=mymask)
+                    outputSeq = self.lstmdropOutLayer(outputSeq)
+            elif ilstm == len(self.lstmsNets) - 1:
+                output = lstmLayer(outputSeq, mask=mymask)
+            else:
+                outputSeq = lstmLayer(outputSeq, mask=mymask)
+                outputSeq = self.lstmdropOutLayer(outputSeq)
+
+        ### Outputs
+        myoutputPos = self.denseFeatureOutput(self.dropoutLayer(output))  # positions
+        # Projection in UMaze space
+        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+
+        # normalize the lstm output and the cnn features
+        output_norm = tf.nn.l2_normalize(output, axis=1)
+        sumFeatures_norm = tf.nn.l2_normalize(sumFeatures, axis=1)
+
+        output_features = tf.stop_gradient(
+            tf.concat([output_norm, sumFeatures_norm], axis=1)
+        )
+
+        for i, denseLayer in enumerate(self.denseLossLayers):
+            if i == self.params.nDenseLayers - 1:
+                break
+            else:
+                output_features = denseLayer(output_features)
+                output_features = self.dropoutLayer(output_features)
+        # output_features is now the output of the forelast dense layer
+        outputPredLoss = self.denseLoss2(output_features)
+
+        return myoutputPos, outputPredLoss, output, sumFeatures
+
     def generate_model(self, **kwargs):
         """
         Generate the full model with the CNN, LSTM and Dense layers.
@@ -492,43 +545,11 @@ class LSTMandSpikeNetwork:
 
             # LSTM
             if not kwargs.get("isTransformer", False):
-                print("using LSTM architecture !")
-                for ilstm, lstmLayer in enumerate(self.lstmsNets):
-                    if ilstm == 0:
-                        if len(self.lstmsNets) == 1:
-                            output = lstmLayer(allFeatures, mask=mymask)
-                        else:
-                            outputSeq = lstmLayer(allFeatures, mask=mymask)
-                            outputSeq = self.lstmdropOutLayer(outputSeq)
-                    elif ilstm == len(self.lstmsNets) - 1:
-                        output = lstmLayer(outputSeq, mask=mymask)
-                    else:
-                        outputSeq = lstmLayer(outputSeq, mask=mymask)
-                        outputSeq = self.lstmdropOutLayer(outputSeq)
-
-                ### Outputs
-                myoutputPos = self.denseFeatureOutput(
-                    self.dropoutLayer(output)
-                )  # positions
-                myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
-
-                # normalize the lstm output and the cnn features
-                output_norm = tf.nn.l2_normalize(output, axis=1)
-                sumFeatures_norm = tf.nn.l2_normalize(sumFeatures, axis=1)
-
-                output_features = tf.stop_gradient(
-                    tf.concat([output_norm, sumFeatures_norm], axis=1)
+                myoutputPos, outputPredLoss, output, sumFeatures = (
+                    self.apply_lstm_architecture(
+                        allFeatures, sumFeatures, mymask, **kwargs
+                    )
                 )
-
-                for i, denseLayer in enumerate(self.denseLossLayers):
-                    if i == self.params.nDenseLayers - 1:
-                        break
-                    else:
-                        output_features = denseLayer(output_features)
-                        output_features = self.dropoutLayer(output_features)
-                # output_features is now the output of the forelast dense layer
-                outputPredLoss = self.denseLoss2(output_features)
-
             else:
                 # Use shared transformer logic
                 myoutputPos, outputPredLoss, output, sumFeatures = (
