@@ -1525,7 +1525,9 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         inv /= np.mean(inv[occ > 0])  # mean≈1
         return tf.constant(inv, tf.float32)
 
-    def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=self.WMAP):
+    def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
+        if wmap is None:
+            wmap = self.WMAP
         masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
         probs = tf.nn.softmax(masked_logits, axis=[1, 2])
         weights = wmap[None] * (1.0 - self.FORBID[None])

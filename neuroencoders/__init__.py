@@ -12,6 +12,15 @@ Submodules:
         - utils: General utilities
 """
 
+from importlib.metadata import PackageNotFoundError
+
+try:
+    from importlib.metadata import version
+
+    __version__ = version("neuroencoders")
+except PackageNotFoundError:
+    __version__ = "0.0.0"  # fallback if not installed
+
 from . import (
     decoder,
     fullEncoder,
