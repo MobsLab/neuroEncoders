@@ -13,7 +13,6 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from importData import epochs_management as ep
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, NoNorm
 from matplotlib.legend_handler import HandlerTuple
@@ -28,6 +27,7 @@ from sklearn.metrics import (
     recall_score,
 )
 
+from neuroencoders.importData import epochs_management as ep
 from neuroencoders.utils.viz_params import (
     ALL_STIMS_COLOR,
     ALPHA_DELTA_LINE,

@@ -718,7 +718,7 @@ class LSTMandSpikeNetwork:
         # Compile the model
         # TODO: use params.optimizer instead of hardcoding RMSprop
         self.optimizer = tf.keras.optimizers.RMSprop(
-            learning_rate=kwargs.get("lr", self.params.learningRates[0], clipnorm=1.0)
+            learning_rate=kwargs.get("lr", self.params.learningRates[0])
         )
         if not predLossOnly:
             # Full model
@@ -1124,7 +1124,7 @@ class LSTMandSpikeNetwork:
                 # compute oversampling ratios
                 rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
                 rep_factors = np.minimum(
-                    rep_factors, 15.0
+                    rep_factors, 20.0
                 )  # clip to avoid extreme repeats
                 rep_factors_tf = tf.constant(rep_factors, tf.float32)
 
