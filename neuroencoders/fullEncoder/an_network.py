@@ -19,6 +19,7 @@ import gc
 import matplotlib.pyplot as plt
 
 # Get common libraries
+import dill as pickle
 import numpy as np
 import pandas as pd
 import psutil
@@ -93,6 +94,19 @@ class LSTMandSpikeNetwork:
                 )
             else:
                 self.setup_dynamic_dense_loss(**kwargs)
+
+        if getattr(params, "GaussianHeatmap", False) or getattr(
+            params, "OversamplingResampling", False
+        ):
+            assert not params.denseweight, (
+                "Cannot use both GaussianHeatmap and DenseWeight"
+            )
+            if kwargs.get("behaviorData", None) is None:
+                warnings.warn(
+                    '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
+                )
+            else:
+                self.setup_gaussian_heatmap(**kwargs)
 
         self._build_model(**kwargs)
         # if kwargs.get("extractTransformer", False):
@@ -305,8 +319,6 @@ class LSTMandSpikeNetwork:
             )
             self.ProjectionInMazeLayer = UMazeProjectionLayer()
 
-            self.GaussianHeatmap = nnUtils.GaussianHeatmapLayer(name="gaussian_heatmap")
-
             # Gather the full model
             outputs = self.generate_model(**kwargs)
             # Build two models
@@ -399,11 +411,14 @@ class LSTMandSpikeNetwork:
         output = self.lstmsNets[-3](output, mask=mymask)  # pooling
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
-        if not kwargs.get("gaussian_heatmap", False):
+
+        if not getattr(self.params, "GaussianHeatmap", False):
+            print("Using usual position output layer")
             myoutputPos = self.denseFeatureOutput(x)
             myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
         else:
-            logits = self.GaussianHeatmap.feature_to_logits_map(x)
+            print("Using Gaussian Heatmap position output layer")
+            myoutputPos = self.GaussianHeatmap(x)
 
         # 5. Loss prediction
 
@@ -589,8 +604,16 @@ class LSTMandSpikeNetwork:
             # we assume myoutputPos is in cm x cm,
             # as self.truePos (modulo [0,1] normalization)
             # in ~cm2 as no loss is sqrt or log
+            if getattr(self.params, "GaussianHeatmap", False):
+                print("Using Gaussian Heatmap targets and KL loss")
+                targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(self.truePos)
+                tempPosLoss = self.GaussianHeatmap.safe_kl_heatmap_loss(
+                    myoutputPos, targets_hw
+                )
 
-            tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
+            else:
+                print("Using usual loss function")
+                tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
             # for main loss functions:
             # if loss function is mse
             # tempPosLoss is in cm2
@@ -601,14 +624,22 @@ class LSTMandSpikeNetwork:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
 
             if self.params.transform_w_log:
+                print("Using log transform for the position loss")
                 posLoss = tf.identity(
                     tf.math.log(tf.math.reduce_mean(tempPosLoss)),
                     name="posLoss",  # log cm2 or ~ 2 * log cm
                 )
-            else:
+            elif not getattr(self.params, "GaussianHeatmap", False):
+                print("Using sqrt transform for the loss predictor")
                 posLoss = tf.identity(
                     tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)),
                     name="posLoss",  # cm
+                )
+            else:
+                print("this is gaussian heatmap, simply using the mean loss")
+                posLoss = tf.identity(
+                    tf.math.reduce_mean(tempPosLoss),
+                    name="posLoss",  # unitless
                 )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
@@ -629,7 +660,8 @@ class LSTMandSpikeNetwork:
                     ),
                     name="uncertaintyLoss",
                 )  # log (log(cm2)^2) or ~ log(4) + log 2(log cm))
-            else:
+            elif not getattr(self.params, "GaussianHeatmap", False):
+                print("Using sqrt transform for the loss predictor")
                 preUncertaintyLoss = tf.math.sqrt(
                     tf.math.sqrt(
                         tf.losses.mean_squared_error(
@@ -639,6 +671,15 @@ class LSTMandSpikeNetwork:
                 )  # now in cm
 
                 # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
+                uncertaintyLoss = tf.identity(
+                    tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
+                )
+            else:
+                print("this is gaussian heatmap, simply using the mean predictor loss")
+                # TODO: temperature scaling of the loss predictor for the GaussianHeatmap case
+                preUncertaintyLoss = tf.losses.mean_squared_error(
+                    outputPredLoss, tf.stop_gradient(tempPosLoss)
+                )
                 uncertaintyLoss = tf.identity(
                     tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
                 )
@@ -686,7 +727,7 @@ class LSTMandSpikeNetwork:
         # Compile the model
         # TODO: use params.optimizer instead of hardcoding RMSprop
         self.optimizer = tf.keras.optimizers.RMSprop(
-            learning_rate=kwargs.get("lr", self.params.learningRates[0])
+            learning_rate=kwargs.get("lr", self.params.learningRates[0], clipnorm=1.0)
         )
         if not predLossOnly:
             # Full model
@@ -1110,7 +1151,7 @@ class LSTMandSpikeNetwork:
                             e,
                         )
 
-            if loaded:
+            if loaded and nb_epochs_already_trained > 100:
                 if not kwargs.get("fine_tune", False):
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue
@@ -1526,6 +1567,14 @@ class LSTMandSpikeNetwork:
         if self.target.lower() == "direction":
             outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
 
+        if getattr(self.params, "GaussianHeatmap", False):
+            output_logits = outputTest[0]
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+            # reconstruct outputTest tuple with xy pred instead of heatmap
+            outputTest = (xy.numpy(), outputTest[1], outputTest[2], outputTest[3])
+
         ### Post-inferring management
         print("gathering true feature")
 
@@ -1593,6 +1642,13 @@ class LSTMandSpikeNetwork:
             testOutput["projTruePos"] = projTruePos
             testOutput["linearPred"] = linearPred
             testOutput["linearTrue"] = linearTrue
+
+        if getattr(self.params, "GaussianHeatmap", False):
+            # add uncertainty and confidence metrics to output dict
+            testOutput["logits_hw"] = output_logits
+            testOutput["var_total"] = var_total
+            testOutput["Hn"] = Hn
+            testOutput["maxp"] = maxp
 
         # Save the results
         self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
@@ -2039,7 +2095,13 @@ class LSTMandSpikeNetwork:
             )
 
     def saveResults(
-        self, test_output, folderName=36, sleep=False, sleepName="Sleep", phase=None
+        self,
+        test_output,
+        folderName=36,
+        sleep=False,
+        sleepName="Sleep",
+        phase=None,
+        save_as_pickle=True,
     ):
         # Manage folders to save
         if sleep:
@@ -2100,6 +2162,12 @@ class LSTMandSpikeNetwork:
             if "linearTrue" in test_output:
                 df = pd.DataFrame(test_output["linearTrue"])
                 df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
+
+        if save_as_pickle:
+            # save the whole results dictionary
+            filename = os.path.join(folderToSave, f"decoding_results{suffix}.pkl")
+            with open(filename, "wb") as f:
+                pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
 
     def setup_dynamic_dense_loss(self, **kwargs):
         """
@@ -2187,6 +2255,38 @@ class LSTMandSpikeNetwork:
                 print("✓ Applied Dynamic Dense Loss reweighting")
 
         return temp_pos_loss
+
+    def setup_gaussian_heatmap(self, **kwargs):
+        from neuroencoders.fullEncoder.nnUtils import GaussianHeatmapLayer
+
+        # Unpack kwargs
+        behaviorData = kwargs.get("behaviorData", None)
+        if behaviorData is None:
+            raise ValueError(
+                "You must provide behaviorData to setup Gaussian Heatmap Layer."
+            )
+        grid_size = kwargs.get("grid_size", self.params.GaussianGridSize)
+        eps = kwargs.get("eps", self.params.GaussianEps)
+        sigma = kwargs.get("sigma", self.params.GaussianSigma)
+        neg = kwargs.get("neg", self.params.GaussianNeg)
+        name = kwargs.get("name", "gaussian_heatmap")
+
+        print("Setting up GaussianHeatmapLayer...")
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][totMask, :2]
+
+        self.GaussianHeatmap = GaussianHeatmapLayer(
+            training_positions=full_training_true_positions,
+            grid_size=grid_size,
+            eps=eps,
+            sigma=sigma,
+            neg=neg,
+            name=name,
+        )
 
     def extract_cnn_model(self):
         """
