@@ -581,9 +581,9 @@ def main(args):
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
                 load_model=False,
-                denseweight=True,
+                fine_tune=False,
                 l_function=l_function,
-                num_augmentations=11 if args.window < 0.252 else 3,
+                num_augmentations=6 if args.window < 0.252 else 3,
             )
         # now run the fancy inference
         if (
