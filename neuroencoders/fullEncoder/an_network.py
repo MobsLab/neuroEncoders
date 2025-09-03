@@ -413,11 +413,9 @@ class LSTMandSpikeNetwork:
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
 
         if not getattr(self.params, "GaussianHeatmap", False):
-            print("Using usual position output layer")
             myoutputPos = self.denseFeatureOutput(x)
             myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
         else:
-            print("Using Gaussian Heatmap position output layer")
             myoutputPos = self.GaussianHeatmap(x)
 
         # 5. Loss prediction
@@ -605,14 +603,12 @@ class LSTMandSpikeNetwork:
             # as self.truePos (modulo [0,1] normalization)
             # in ~cm2 as no loss is sqrt or log
             if getattr(self.params, "GaussianHeatmap", False):
-                print("Using Gaussian Heatmap targets and KL loss")
                 targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(self.truePos)
                 tempPosLoss = self.GaussianHeatmap.safe_kl_heatmap_loss(
                     myoutputPos, targets_hw
                 )
 
             else:
-                print("Using usual loss function")
                 tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
             # for main loss functions:
             # if loss function is mse
@@ -624,19 +620,16 @@ class LSTMandSpikeNetwork:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
 
             if self.params.transform_w_log:
-                print("Using log transform for the position loss")
                 posLoss = tf.identity(
                     tf.math.log(tf.math.reduce_mean(tempPosLoss)),
                     name="posLoss",  # log cm2 or ~ 2 * log cm
                 )
             elif not getattr(self.params, "GaussianHeatmap", False):
-                print("Using sqrt transform for the loss predictor")
                 posLoss = tf.identity(
                     tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)),
                     name="posLoss",  # cm
                 )
             else:
-                print("this is gaussian heatmap, simply using the mean loss")
                 posLoss = tf.identity(
                     tf.math.reduce_mean(tempPosLoss),
                     name="posLoss",  # unitless
@@ -661,7 +654,6 @@ class LSTMandSpikeNetwork:
                     name="uncertaintyLoss",
                 )  # log (log(cm2)^2) or ~ log(4) + log 2(log cm))
             elif not getattr(self.params, "GaussianHeatmap", False):
-                print("Using sqrt transform for the loss predictor")
                 preUncertaintyLoss = tf.math.sqrt(
                     tf.math.sqrt(
                         tf.losses.mean_squared_error(
@@ -675,7 +667,6 @@ class LSTMandSpikeNetwork:
                     tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
                 )
             else:
-                print("this is gaussian heatmap, simply using the mean predictor loss")
                 # TODO: temperature scaling of the loss predictor for the GaussianHeatmap case
                 preUncertaintyLoss = tf.losses.mean_squared_error(
                     outputPredLoss, tf.stop_gradient(tempPosLoss)
@@ -738,8 +729,8 @@ class LSTMandSpikeNetwork:
                 loss={
                     # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
                     outputs[2].name.split("/Identity")[0]: pos_loss,
-                    # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
-                    outputs[3].name.split("/Identity")[0]: uncertainty_loss,
+                    # # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    # outputs[3].name.split("/Identity")[0]: uncertainty_loss,
                 },
             )
             # Get internal names of losses
@@ -1050,6 +1041,147 @@ class LSTMandSpikeNetwork:
                 posFeature = behaviorData["Positions"]
             datasets[key] = datasets[key].map(nnUtils.import_true_pos(posFeature))
             datasets[key] = datasets[key].filter(filter_nan_pos)
+
+            # now that we have clean positions, we can resample if needed
+            if self.params.OversamplingResampling and key == "train":
+                print("Using oversampling resampling on the training set")
+
+                # FIX: make sure GaussianHeatmap is initialized - force it ?
+
+                GRID_H, GRID_W = (
+                    self.GaussianHeatmap.GRID_H,
+                    self.GaussianHeatmap.GRID_W,
+                )
+                # instead of oversampling on such tiny grid, we take a coarser grid mesh
+                stride = 3
+                coarse_H, coarse_W = GRID_H // stride, GRID_W // stride
+
+                @tf.autograph.experimental.do_not_convert
+                def map_bin_class(ex):
+                    return nnUtils.bin_class(
+                        ex,
+                        GRID_H,
+                        GRID_W,
+                        stride,
+                        self.GaussianHeatmap.FORBID,
+                    )
+
+                # should not be useful as true positions are already allowed!
+                datasets[key] = datasets[key].filter(
+                    lambda ex: tf.greater_equal(map_bin_class(ex), 0)
+                )
+
+                positions = self.GaussianHeatmap.training_positions
+                # filter position by map_bin_class
+                bins = self.GaussianHeatmap.positions_to_bins(positions)
+
+                # Convert fine bins → coarse bins
+                # Map to coarse bins
+                # Step 1: compute fine x,y indices
+                x_fine = bins % GRID_W
+                y_fine = bins // GRID_W
+
+                # Step 2: downscale to coarse grid
+                x_coarse = x_fine // stride
+                y_coarse = y_fine // stride
+
+                # Step 3: coarse bin index
+                coarse_bins = y_coarse * coarse_W + x_coarse  # shape same as positions
+                counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
+                    np.float32
+                )
+
+                # Flatten FORBID for easy masking
+                # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
+                FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+                for y in range(coarse_H):
+                    for x in range(coarse_W):
+                        # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
+                        if np.any(
+                            self.GaussianHeatmap.FORBID[
+                                y * stride : (y + 1) * stride,
+                                x * stride : (x + 1) * stride,
+                            ]
+                            > 0
+                        ):
+                            FORBID_coarse[y, x] = True
+                FORBID_flat = FORBID_coarse.flatten()
+                counts[FORBID_flat] = 0  # set forbidden bins to 0 count
+
+                allowed_bins = (counts > 0) & (~FORBID_flat)
+
+                # Normalize - empirical proba for each allowed bin
+                initial_dist = counts / np.maximum(1.0, counts.sum())
+                initial_dist = initial_dist[allowed_bins]
+                target_dist = np.ones(
+                    coarse_H * coarse_W,
+                    np.float32,
+                )
+                target_dist[FORBID_flat] = 0  # forbid forbidden bins
+                target_dist /= target_dist.sum()  # normalize to sum=1
+                target_dist = target_dist[allowed_bins]
+
+                # compute oversampling ratios
+                rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
+                rep_factors = np.minimum(
+                    rep_factors, 15.0
+                )  # clip to avoid extreme repeats
+                rep_factors_tf = tf.constant(rep_factors, tf.float32)
+
+                allowed_idx = np.where(allowed_bins)[0]
+                bin_to_allowed_idx = -np.ones_like(allowed_bins, dtype=int)
+                bin_to_allowed_idx[allowed_idx] = np.arange(len(allowed_idx))
+                # convert to tensor
+                allowed_bins = tf.constant(allowed_bins)
+                bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
+
+                # Map each example to repeated datasets
+                @tf.autograph.experimental.do_not_convert
+                def map_repeat(ex):
+                    mapped_cls = map_bin_class(ex)
+                    allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
+
+                    safe_idx = tf.maximum(allowed_idx_val, 0)  # -1 becomes 0
+                    # find idx in rep_factors (only allowed bins)
+                    repeats = tf.cast(
+                        tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
+                    )
+                    repeats = tf.where(allowed_idx_val >= 0, repeats, 0)
+                    return tf.cond(
+                        repeats > 0,
+                        lambda: tf.data.Dataset.from_tensors(ex).repeat(repeats),
+                        lambda: tf.data.Dataset.from_tensors(ex).take(0),
+                    )
+
+                datasets_before_oversampling = datasets[
+                    key
+                ]  # Save this before the oversampling block
+                datasets[key] = datasets[key].flat_map(map_repeat)
+                # shuffle after repeating to mix repeated samples
+                datasets[key] = datasets[key].shuffle(buffer_size=10000, seed=42)
+                datasets_after_oversampling = datasets[
+                    key
+                ]  # Save this before the oversampling block
+                from neuroencoders.importData.gui_elements import OversamplingVisualizer
+
+                if not os.path.exists(
+                    os.path.join(
+                        self.folderResult, str(windowSizeMS), "oversampling_effect.png"
+                    )
+                ):
+                    visualizer = OversamplingVisualizer(self.GaussianHeatmap)
+                    visualizer.visualize_oversampling_effect(
+                        datasets_before_oversampling,
+                        datasets_after_oversampling,
+                        stride=stride,  # Match your stride
+                        max_samples=20000,
+                        path=os.path.join(
+                            self.folderResult,
+                            str(windowSizeMS),
+                            "oversampling_effect.png",
+                        ),
+                    )
+
             datasets[key] = (
                 datasets[key].batch(self.params.batchSize, drop_remainder=True).cache()
             )
