@@ -1534,7 +1534,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         # normalize by sum of weights to keep scale stable
         return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
 
-    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=True):
+    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
         B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
         allowed_mask = 1.0 - self.FORBID[None]
 
@@ -1595,7 +1595,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
 
         return final_loss
 
-    def safe_kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=True):
+    def safe_kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=scale):
         """
         Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
         Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
