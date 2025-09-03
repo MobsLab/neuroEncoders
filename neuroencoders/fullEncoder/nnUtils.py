@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from denseweight import DenseWeight
-from tensorflow.data.experimental import rejection_resample
+from scipy.ndimage import gaussian_filter
 
 from neuroencoders.utils.global_classes import MAZE_COORDS
 
@@ -1473,7 +1473,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
     """
 
     def __init__(
-        self, training_positions, grid_size=(45, 45), eps=1e-8, sigma=0.03, **kwargs
+        self,
+        training_positions,
+        grid_size=(45, 45),
+        eps=1e-8,
+        sigma=0.03,
+        neg=-100,
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.training_positions = training_positions
@@ -1486,27 +1492,56 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         x_cent = tf.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
         y_cent = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
         self.Xc, self.Yc = tf.meshgrid(x_cent, y_cent)  # (H,W)
+
+        # TODO: make FORBID configurable - just like UMazeProjectionLayer
         self.FORBID = tf.cast(
-            (self.Xc >= 0.35) & (self.Xc <= 0.65) & (self.Yc >= 0.0) & (self.Yc <= 0.7),
+            (self.Xc >= 0.35) & (self.Xc <= 0.65) & (self.Yc <= 0.7),
             tf.float32,
         )  # (H,W)
         self.occ = self.occupancy_map(self.training_positions)
         self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
-        self.NEG = tf.constant(-1e9, tf.float32)
+        self.NEG = tf.constant(neg, tf.float32)
 
+        # final dense layer to map features to logits
         self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
 
-    def gaussian_heatmap_targets(self, true_xy, sigma=0.03):
-        tx = true_xy[:, 0][:, None, None]
-        ty = true_xy[:, 1][:, None, None]
-        g = tf.exp(
-            -0.5 * ((self.Xc[None] - tx) ** 2 + (self.Yc[None] - ty) ** 2) / sigma**2
+    def call(self, inputs):
+        """
+        Forward pass through the layer.
+
+        Args:
+            inputs: Tensor of shape [B, feature_dim]
+
+        Returns:
+            logits_hw: Tensor of shape [B, H, W] representing unnormalized logits
+        """
+        logits_flat = self.feature_to_logits_map(inputs)
+        logits_hw = tf.reshape(logits_flat, [-1, self.GRID_H, self.GRID_W])
+        return logits_hw
+
+    def gaussian_heatmap_targets(self, pos_batch, sigma=None):
+        if sigma is None:
+            sigma = self.sigma
+        # pos_batch: [B, 2] true [x,y] positions
+        X = self.Xc[None]
+        Y = self.Yc[None]
+
+        dx = pos_batch[:, 0][:, None, None] - X
+        dy = pos_batch[:, 1][:, None, None] - Y
+        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+
+        # Apply forbidden mask here too
+        allowed_mask = 1.0 - self.FORBID[None]
+        gauss *= allowed_mask
+
+        # Safer normalization
+        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
+        gauss = tf.where(
+            gauss_sum > self.EPS,
+            gauss / (gauss_sum + self.EPS),
+            allowed_mask / tf.reduce_sum(allowed_mask),
         )
-        g = g * (1.0 - self.FORBID[None])
-        Z = tf.reduce_sum(g, [1, 2], keepdims=True)
-        allowed = tf.reduce_sum(1.0 - self.FORBID)
-        tiny = (self.EPS / tf.cast(allowed, tf.float32)) * (1.0 - self.FORBID)[None]
-        return tf.where(Z > 0, g / (Z + self.EPS), tiny)  # (B,H,W)
+        return gauss
 
     def positions_to_bins(self, pos):
         xs = np.clip((pos[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
@@ -1520,96 +1555,293 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
             occ[k // self.GRID_W, k % self.GRID_W] += 1
         return occ * (1.0 - self.FORBID.numpy())
 
-    def weight_map_from_occ(self, occ, alpha=0.5, eps=1e-3):
-        inv = (1.0 / (occ + eps)) ** alpha
-        inv /= np.mean(inv[occ > 0])  # mean≈1
-        return tf.constant(inv, tf.float32)
+    def weight_map_from_occ(
+        self,
+        occ,
+        alpha=0.05,
+        eps=None,
+        smooth_sigma=1.0,
+        max_weight=15.0,
+        log_scale=False,
+    ):
+        """
+        Compute weight map from occupancy counts, ignoring forbidden and zero-count bins.
+
+        - Forbidden bins: always weight=0
+        - Zero-count bins: always weight=0 (ignored)
+        """
+        if eps is None:
+            eps = self.EPS
+
+        # Mask forbidden regions early
+        forbid_mask = self.FORBID.numpy().astype(bool)
+        occ = occ.copy()
+        occ[forbid_mask] = 0.0
+
+        # Optional smoothing (but ignore forbid bins!)
+        if smooth_sigma is not None and smooth_sigma > 0:
+            occ = gaussian_filter(occ, sigma=smooth_sigma, mode="constant")
+            occ[forbid_mask] = 0.0
+
+        # Define weights only on bins with occupancy > 0
+        valid_mask = (occ > 0) & (~forbid_mask)
+
+        if log_scale:
+            inv = np.zeros_like(occ, dtype=np.float32)
+            inv[valid_mask] = 1.0 / np.log1p(occ[valid_mask] + eps)
+        else:
+            inv = np.zeros_like(occ, dtype=np.float32)
+            inv[valid_mask] = (1.0 / (occ[valid_mask] + eps)) ** alpha
+
+        # Normalize mean weight on valid bins ≈ 1
+        if np.any(valid_mask):
+            inv[valid_mask] /= np.mean(inv[valid_mask])
+
+        # Clip excessively large weights (only on valid bins)
+        if max_weight is not None:
+            inv[valid_mask] = np.clip(inv[valid_mask], 0.0, max_weight)
+
+        # Forbidden + zero-count bins remain 0
+        return tf.constant(inv, dtype=tf.float32)
 
     def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
-        if wmap is None:
-            wmap = self.WMAP
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
         masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
-        probs = tf.nn.softmax(masked_logits, axis=[1, 2])
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+        probs_flat = tf.nn.softmax(logits_flat, axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
         weights = wmap[None] * (1.0 - self.FORBID[None])
         se = tf.square(probs - target_hw)
         # normalize by sum of weights to keep scale stable
         return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
 
-    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None):
-        """
-        Compute KL-divergence between target heatmap and predicted distribution.
-        KL(P||Q) = sum P * log(P/Q)
-        """
-        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
-        log_probs = tf.nn.log_softmax(masked_logits, axis=[1, 2])  # log Q
-        P = target_hw  # already normalized heatmap
+    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=True):
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+        allowed_mask = 1.0 - self.FORBID[None]
 
-        kl = P * (tf.math.log(P + self.EPS) - log_probs)
+        # Safety clipping to prevent extreme logits
+        logits_hw = tf.clip_by_value(logits_hw, -20.0, 20.0)
 
-        # Optional: weight rare bins via wmap
+        # Mask forbidden bins in logits
+        safe_neg = self.NEG
+        masked_logits = tf.where(self.FORBID[None] > 0, safe_neg, logits_hw)
+
+        # Get predicted probabilities (not log probabilities)
+        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Process targets with safety checks
+        P = target_hw * allowed_mask
+        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        safe_eps = tf.maximum(self.EPS, 1e-8)
+
+        P = tf.where(
+            P_sum > safe_eps,
+            P / (P_sum + safe_eps),
+            allowed_mask / tf.reduce_sum(allowed_mask),
+        )
+
+        # Ensure final normalization
+        P_sum_final = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        P = P / (P_sum_final + safe_eps)
+
+        # Define threshold for meaningful probability mass
+        threshold = safe_eps * 10
+
+        # CORRECTED KL FORMULA: Only compute KL where P has meaningful mass
+        # KL(P||Q) = sum P * log(P/Q) only where P > threshold
+        kl = tf.where(
+            P > threshold,
+            P * tf.math.log(P / tf.maximum(probs, safe_eps)),
+            0.0,  # Zero contribution where P is negligible
+        )
+
+        # Apply weighting
         if wmap is not None:
-            weights = wmap[None] * (1.0 - self.FORBID[None])
-            kl *= weights
-        else:
-            weights = 1.0 - self.FORBID[None]
-            kl *= weights
-
-        # weight and normalize
-        kl = tf.reduce_mean(tf.reduce_sum(kl, [1, 2]))
-        return kl
-
-    def decode_and_uncertainty(self, logits_hw):
-        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
-        probs = tf.nn.softmax(masked_logits, axis=[1, 2])
-        ex = tf.reduce_sum(probs * self.Xc[None], [1, 2])
-        ey = tf.reduce_sum(probs * self.Yc[None], [1, 2])
-        varx = tf.reduce_sum(
-            probs * tf.square(self.Xc[None] - ex[:, None, None]), [1, 2]
-        )
-        vary = tf.reduce_sum(
-            probs * tf.square(self.Yc[None] - ey[:, None, None]), [1, 2]
-        )
-        maxp = tf.reduce_max(tf.reshape(probs, [tf.shape(probs)[0], -1]), axis=1)
-        H = -tf.reduce_sum(probs * tf.math.log(probs + self.EPS), [1, 2])
-        # normalize entropy by allowed bins
-        n_allowed = tf.cast(tf.reduce_sum(1.0 - self.FORBID), tf.float32)
-        Hn = H / tf.math.log(n_allowed + self.EPS)
-        return tf.stack([ex, ey], -1), maxp, Hn, (varx + vary)
-
-    def bin_class(self, example):
-        pos = example["pos"]
-        x = tf.cast(
-            tf.clip_by_value(pos[0] * self.GRID_W, 0, self.GRID_W - 1), tf.int32
-        )
-        y = tf.cast(
-            tf.clip_by_value(pos[1] * self.GRID_H, 0, self.GRID_H - 1), tf.int32
-        )
-        cls = y * self.GRID_W + x
-        # Map forbidden bins to a dummy class that we'll exclude by giving it zero target mass:
-        forbidden_here = tf.greater(self.FORBID[y, x], 0)
-        return tf.where(forbidden_here, -1, cls)  # -1 = invalid
-
-    def prepare_dataset(self, dataset):
-        # Build initial/target distributions (numpy)
-        counts = np.bincount(
-            self.positions_to_bins(self.training_positions),
-            minlength=self.GRID_H * self.GRID_W,
-        ).astype(np.float32)
-        target = np.ones(self.GRID_H * self.GRID_W, np.float32)
-        target /= target.sum()
-
-        # Adapter to drop invalid (-1) before resampling:
-        ds_valid = dataset.filter(lambda ex: tf.greater_equal(self.bin_class(ex), 0))
-
-        resampled = ds_valid.apply(
-            rejection_resample(
-                class_func=bin_class,
-                target_dist=target,
-                initial_dist=counts / np.maximum(1.0, counts.sum()),
-                seed=42,
+            weights = wmap[None]
+            valid_mask = tf.cast(weights > 0, tf.float32)
+            kl = kl * weights
+            loss_per_sample = tf.reduce_sum(kl, axis=[1, 1]) / (
+                tf.reduce_sum(weights * valid_mask) + safe_eps
             )
-        ).map(lambda cls, ex: ex)
-        return resampled
+            final_loss = tf.reduce_mean(loss_per_sample)
+
+        else:
+            # Compute final loss with scaling to prevent gradient explosion
+            final_loss = tf.reduce_mean(tf.reduce_sum(kl, axis=[1, 2]))
+
+        if scale:
+            # Scale down the loss to prevent gradient explosion (divide by 100)
+            return final_loss / 100.0
+
+        return final_loss
+
+    def safe_kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=True):
+        """
+        Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
+        Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
+        """
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+        allowed_mask = 1.0 - self.FORBID[None]
+
+        # Clip logits for stability and apply forbid mask
+        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+
+        # Normalize target distribution P
+        P = target_hw * allowed_mask
+        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        P = tf.where(
+            P_sum > self.EPS,
+            P / (P_sum + self.EPS),
+            allowed_mask / tf.reduce_sum(allowed_mask),
+        )
+        P = P / (tf.reduce_sum(P, axis=[1, 2], keepdims=True) + self.EPS)
+        P_flat = tf.reshape(P, [B, H * W])
+
+        # --- KL(P||Q) = cross_entropy(P,Q) - entropy(P) ---
+        ce = tf.nn.softmax_cross_entropy_with_logits(
+            labels=P_flat, logits=logits_flat
+        )  # shape [B]
+        entropy = -tf.reduce_sum(
+            P_flat * tf.math.log(P_flat + self.EPS), axis=-1
+        )  # [B]
+        kl = ce - entropy
+
+        # Apply weighting map if provided
+        if wmap is not None:
+            weights = wmap[None]
+            valid_mask = tf.cast(weights > 0, tf.float32)
+            wsum = tf.reduce_sum(weights * valid_mask) + self.EPS
+            kl = kl * (tf.reduce_sum(weights) / wsum)
+
+        loss = tf.reduce_mean(kl)
+
+        if scale:
+            loss /= 100.0
+
+        return loss
+
+    def decode_and_uncertainty(self, logits_hw, mode="argmax"):
+        """
+        Decode predicted heatmap into expected [x, y] position,
+        computing confidence/uncertainty metrics while excluding forbidden bins.
+
+        Args:
+            logits_hw: [B, H, W] unnormalized logits from the model
+            mode: 'expectation' or 'argmax' (default) for decoding method
+            #FIX: for now argmax is default since expectation can yield positions in forbidden region (eg predictions in both left and right arm, center of mass yields a point outside maze)
+
+        Returns:
+            mean_pos: [B, 2] expected position [ex, ey]
+            maxp: [B] max probability of any allowed bin
+            Hn: [B] normalized entropy over allowed bins (0-1)
+            var: [B] total variance (varx + vary)
+        """
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+
+        # Mask forbidden bins in logits
+        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+
+        # Flatten grid for softmax
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+        log_probs_flat = tf.nn.log_softmax(logits_flat, axis=-1)
+        probs_flat = tf.exp(log_probs_flat)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Explicitly zero forbidden bins
+        allowed_mask = 1.0 - self.FORBID[None]
+        probs_allowed = probs * allowed_mask
+
+        # Renormalize over allowed bins
+        probs_allowed /= (
+            tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True) + self.EPS
+        )
+
+        if mode == "expectation":
+            # Expected position using only allowed bins
+            ex = tf.reduce_sum(probs_allowed * self.Xc[None], axis=[1, 2])
+            ey = tf.reduce_sum(probs_allowed * self.Yc[None], axis=[1, 2])
+        elif mode == "argmax":
+            # Argmax bin (always inside allowed region)
+            idx = tf.argmax(
+                tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
+            )
+            W64 = tf.cast(W, tf.int64)
+            iy = idx // W64
+            ix = idx % W64
+            ex = tf.gather(tf.reshape(self.Xc, [-1]), idx)
+            ey = tf.gather(tf.reshape(self.Yc, [-1]), idx)
+        else:
+            raise ValueError("mode must be 'expectation' or 'argmax'")
+
+        if mode == "expectation":
+            # Variance
+            varx = tf.reduce_sum(
+                probs_allowed * tf.square(self.Xc[None] - ex[:, None, None]), [1, 2]
+            )
+            vary = tf.reduce_sum(
+                probs_allowed * tf.square(self.Yc[None] - ey[:, None, None]), [1, 2]
+            )
+            var = varx + vary
+        else:
+            var = tf.zeros([B])
+
+        # Max probability
+        maxp = tf.reduce_max(tf.reshape(probs_allowed, [B, H * W]), axis=1)
+
+        # Entropy (only allowed bins)
+        probs_flat_allowed = tf.reshape(probs_allowed, [B, H * W])
+        H_entropy = -tf.reduce_sum(
+            probs_flat_allowed * tf.math.log(probs_flat_allowed + self.EPS), axis=1
+        )
+        n_allowed = tf.cast(tf.reduce_sum(allowed_mask), tf.float32)
+        Hn = H_entropy / tf.math.log(n_allowed + self.EPS)  # normalized entropy (0-1)
+        xy = tf.stack([ex, ey], axis=-1)
+        # xy = self.project_out_of_forbid(xy)
+
+        return xy, maxp, Hn, var
+
+    def project_out_of_forbid(self, xy, forbid_box=(0.35, 0.65, 0.0, 0.7)):
+        """
+        Project decoded positions back into allowed space if inside forbidden region.
+
+        Args:
+            xy: [B, 2] predicted positions
+            forbid_box: (xmin, xmax, ymin, ymax)
+
+        Returns:
+            xy_projected: [B, 2] corrected positions
+        """
+        xmin, xmax, ymin, ymax = forbid_box
+        x, y = xy[:, 0], xy[:, 1]
+
+        inside_x = tf.logical_and(x >= xmin, x <= xmax)
+        inside_y = tf.logical_and(y >= ymin, y <= ymax)
+        inside = tf.logical_and(inside_x, inside_y)
+
+        # If inside forbidden region, snap to closest edge of the rectangle
+        x_clamped = tf.where(x < xmin, xmin, tf.where(x > xmax, xmax, x))
+        y_clamped = tf.where(y < ymin, ymin, tf.where(y > ymax, ymax, y))
+
+        # Distance to each edge
+        dx_left = tf.abs(x - xmin)
+        dx_right = tf.abs(x - xmax)
+        dy_bottom = tf.abs(y - ymin)
+        dy_top = tf.abs(y - ymax)
+
+        # Pick closest edge
+        move_x_left = dx_left <= tf.minimum(dx_right, tf.minimum(dy_bottom, dy_top))
+        move_x_right = dx_right <= tf.minimum(dx_left, tf.minimum(dy_bottom, dy_top))
+        move_y_bot = dy_bottom <= tf.minimum(dy_top, tf.minimum(dx_left, dx_right))
+        move_y_top = dy_top <= tf.minimum(dy_bottom, tf.minimum(dx_left, dx_right))
+
+        # New coordinates
+        new_x = tf.where(move_x_left, xmin, tf.where(move_x_right, xmax, x_clamped))
+        new_y = tf.where(move_y_bot, ymin, tf.where(move_y_top, ymax, y_clamped))
+
+        corrected = tf.stack([new_x, new_y], axis=-1)
+        return tf.where(inside[:, None], corrected, xy)
 
     def fit_temperature(self, val_logits, val_targets, iters=200, lr=1e-2):
         logT = tf.Variable(0.0, trainable=True)
@@ -1625,6 +1857,28 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         return float(tf.exp(logT).numpy())
 
     # inference: probs = softmax(mask_logits / T_cal)
+
+
+def bin_class(example, GRID_W, GRID_H, stride, FORBID):
+    """
+    Map true (x,y) position to discrete bin class, -1 if forbidden.
+    """
+    pos = example["pos"]
+    x = tf.cast(tf.clip_by_value(pos[0] * GRID_W, 0, GRID_W - 1), tf.int32)
+    y = tf.cast(tf.clip_by_value(pos[1] * GRID_H, 0, GRID_H - 1), tf.int32)
+
+    # downscale to coarser grid
+    x_coarse = x // stride
+    y_coarse = y // stride
+
+    bin_cls = y * GRID_W + x
+    # Map forbidden bins to a dummy class that we'll exclude by giving it zero target mass:
+    coarse_W = GRID_W // stride
+    bin_cls = y_coarse * coarse_W + x_coarse  # ✅ FIXED: was y * GRID_W + x
+
+    # Check if forbidden
+    forbidden_here = tf.greater(FORBID[y_coarse * stride, x_coarse * stride], 0)
+    return tf.where(forbidden_here, -1, bin_cls)
 
 
 class DenseLossProcessor:
