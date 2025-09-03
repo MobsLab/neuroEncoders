@@ -730,7 +730,7 @@ class LSTMandSpikeNetwork:
                     # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
                     outputs[2].name.split("/Identity")[0]: pos_loss,
                     # # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
-                    # outputs[3].name.split("/Identity")[0]: uncertainty_loss,
+                    outputs[3].name.split("/Identity")[0]: uncertainty_loss,
                 },
             )
             # Get internal names of losses
