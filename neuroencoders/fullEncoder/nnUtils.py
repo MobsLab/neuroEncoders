@@ -1763,16 +1763,34 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         return tf.where(inside[:, None], corrected, xy)
 
     def fit_temperature(self, val_logits, val_targets, iters=200, lr=1e-2):
+        """
+        Fit temperature scaling parameter on validation set to minimize NLL.
+        Args:
+            val_logits: [N, H, W] logits from validation set
+            val_targets: [N, H, W] target heatmaps from validation set
+            iters: number of optimization steps
+            lr: learning rate for optimizer
+        Returns:
+            T_cal: fitted temperature scalar
+        """
         logT = tf.Variable(0.0, trainable=True)
         opt = tf.keras.optimizers.Adam(lr)
-        for _ in range(iters):
+        for step in range(iters):
             with tf.GradientTape() as t:
                 scaled = val_logits / tf.exp(logT)
-                logp = tf.nn.log_softmax(
-                    tf.where(self.FORBID[None] > 0, self.NEG, scaled), axis=[1, 2]
+                B, H, W = tf.shape(scaled)[0], tf.shape(scaled)[1], tf.shape(scaled)[2]
+                scaled_flat = tf.reshape(
+                    tf.where(self.FORBID[None] > 0, self.NEG, scaled), [B, H * W]
                 )
+                logp_flat = tf.nn.log_softmax(scaled_flat, axis=-1)
+                logp = tf.reshape(logp_flat, [B, H, W])
                 nll = -tf.reduce_mean(tf.reduce_sum(val_targets * logp, [1, 2]))
+
             opt.apply_gradients([(t.gradient(nll, logT), logT)])
+            if step % 50 == 0 or step == iters - 1:
+                print(
+                    f"Temp fit step {step}: NLL={nll.numpy():.4f}, T={tf.exp(logT).numpy():.4f}"
+                )
         return float(tf.exp(logT).numpy())
 
     # inference: probs = softmax(mask_logits / T_cal)

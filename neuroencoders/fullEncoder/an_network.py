@@ -94,6 +94,9 @@ class LSTMandSpikeNetwork:
                 )
             else:
                 self.setup_dynamic_dense_loss(**kwargs)
+        else:
+            self.setup_training_data(**kwargs)
+            # just for sake of compatibility
 
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
@@ -1283,7 +1286,7 @@ class LSTMandSpikeNetwork:
                             e,
                         )
 
-            if loaded and nb_epochs_already_trained > 100:
+            if loaded:
                 if not kwargs.get("fine_tune", False):
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue
@@ -1558,6 +1561,9 @@ class LSTMandSpikeNetwork:
         speedValue = kwargs.get("speedValue", None)
         phase = kwargs.get("phase", None)
         template = kwargs.get("template", None)
+        fit_temperature = kwargs.get("fit_temperature", False)
+        T_scaling = kwargs.get("T_scaling", None)
+        epochKey = kwargs.get("epochKey", "testEpochs")
 
         # TODO: change speed filter with custom speed
         # Create the folder
@@ -1602,7 +1608,7 @@ class LSTMandSpikeNetwork:
             )
         else:
             epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
+                behaviorData["positionTime"][:, 0], behaviorData["Times"][epochKey]
             )
         if useSpeedFilter:
             totMask = speedMask * epochMask
@@ -1696,17 +1702,6 @@ class LSTMandSpikeNetwork:
         print("INFERRING")
         outputTest = self.model.predict(dataset, verbose=1)
 
-        if self.target.lower() == "direction":
-            outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
-
-        if getattr(self.params, "GaussianHeatmap", False):
-            output_logits = outputTest[0]
-            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
-                output_logits
-            )
-            # reconstruct outputTest tuple with xy pred instead of heatmap
-            outputTest = (xy.numpy(), outputTest[1], outputTest[2], outputTest[3])
-
         ### Post-inferring management
         print("gathering true feature")
 
@@ -1717,9 +1712,38 @@ class LSTMandSpikeNetwork:
         datasetPos = dataset.map(map_true_feature, num_parallel_calls=tf.data.AUTOTUNE)
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
+
+        if self.target.lower() == "direction":
+            outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
+
+        if getattr(self.params, "GaussianHeatmap", False):
+            output_logits = outputTest[0]  # logits with shape (batch, H, W)
+
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+            # small hack to have the right shape for featureTrue (batch, 2)
+            featureTrue = np.reshape(fullFeatureTrue, [xy.shape[0], xy.shape[-1]])
+            if fit_temperature:
+                val_targets = self.GaussianHeatmap.gaussian_heatmap_targets(featureTrue)
+                T_scaling = self.GaussianHeatmap.fit_temperature(
+                    output_logits, val_targets, iters=400
+                )
+                return T_scaling
+
+            if T_scaling is not None:
+                output_logits = output_logits / T_scaling
+
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+            # reconstruct outputTest tuple with xy pred instead of heatmap
+            outputTest = (xy.numpy(), outputTest[1], outputTest[2], outputTest[3])
+
         featureTrue = np.reshape(
             fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]]
         )
+
         print("gathering times of the centre in the time window")
 
         @tf.autograph.experimental.do_not_convert
@@ -1781,6 +1805,7 @@ class LSTMandSpikeNetwork:
             testOutput["var_total"] = var_total
             testOutput["Hn"] = Hn
             testOutput["maxp"] = maxp
+            testOutput["T_scaling"] = T_scaling
 
         # Save the results
         self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
@@ -2301,21 +2326,32 @@ class LSTMandSpikeNetwork:
             with open(filename, "wb") as f:
                 pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
 
+    def setup_training_data(self, **kwargs):
+        # Unpack kwargs
+        behaviorData = kwargs.get("behaviorData", None)
+
+        if behaviorData is None:
+            raise ValueError(
+                "You must provide behaviorData to setup dynamic dense loss."
+            )
+
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][totMask, :2]
+        self.training_data = full_training_true_positions
+
     def setup_dynamic_dense_loss(self, **kwargs):
         """
         Call this ONCE before training to fit the DenseWeight model
         """
         from neuroencoders.fullEncoder.nnUtils import DenseLossProcessor
 
-        # Unpack kwargs
-        behaviorData = kwargs.get("behaviorData", None)
         alpha = kwargs.get("alpha", 1.3)
         verbose = kwargs.get("verbose", False)
         self.dynamicdense_verbose = verbose
-        if behaviorData is None:
-            raise ValueError(
-                "You must provide behaviorData to setup dynamic dense loss."
-            )
 
         if verbose:
             print("Setting up Dynamic Dense Loss...")
@@ -2328,16 +2364,9 @@ class LSTMandSpikeNetwork:
             verbose=verbose,
             device=self.deviceName,
         )
-
-        speedMask = behaviorData["Times"]["speedFilter"]
-        epochMask = inEpochsMask(
-            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-        )
-        totMask = speedMask * epochMask
-        full_training_true_positions = behaviorData["Positions"][totMask, :2]
         # Fit DenseWeight model on full training dataset
-        self.dense_loss_processor.fit_dense_weight_model(full_training_true_positions)
-        self.training_data = full_training_true_positions
+        self.setup_training_data(**kwargs)
+        self.dense_loss_processor.fit_dense_weight_model(self.training_data)
         self.training_weights = self.dense_loss_processor.training_weights
         self.linearized_training = self.dense_loss_processor.linearized_training
 
