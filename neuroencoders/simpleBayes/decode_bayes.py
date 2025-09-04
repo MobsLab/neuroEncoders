@@ -22,7 +22,7 @@ from neuroencoders.importData.epochs_management import inEpochs, inEpochsMask
 
 # Load custom code
 from neuroencoders.simpleBayes import butils
-from neuroencoders.utils.global_classes import Project
+from neuroencoders.utils.global_classes import Project, SpatialConstraintsMixin
 
 # !!!! TODO: all train-test in one function, too much repetition
 # TODO: option to remove zero cluster from training and testing
@@ -70,7 +70,11 @@ class DecoderConfig:
 
 
 # trainer class
-class Trainer:
+class Trainer(SpatialConstraintsMixin):
+    """
+    Unified Trainer class for Bayesian decoder - now implements same spatial constraints as ANN.
+    """
+
     def __init__(
         self,
         projectPath: Project,
@@ -87,6 +91,7 @@ class Trainer:
             None,
         ] = None,
         verbose: bool = True,
+        maze_params=None,
         **kwargs,
     ):
         """
@@ -96,10 +101,15 @@ class Trainer:
             projectPath: Project object, with proper params and directories.
             config: DecoderConfig, optional, configuration for the decoder.
             phase: str, optional, phase of the experiment (default is None).
-            **kwargs: additional keyword arguments for DecoderConfig.
+            verbose: bool, optional, whether to enable verbose logging (default is True).
+            maze_params: dict, optional, parameters for spatial constraints (default is None).
+            **kwargs: additional keyword arguments for DecoderConfig or grid size.
         Raises:
             ValueError: If the projectPath is not provided or if the phase is not valid.
         """
+
+        super().__init__(maze_params=maze_params, **kwargs)
+
         self.phase = phase
         self.suffix = "_" + phase if phase else ""
         self.projectPath = projectPath
@@ -133,7 +143,9 @@ class Trainer:
         self.ordered_neurons = None
         self.place_fields = None
 
-    def train(self, behaviorData: Dict, onTheFlyCorrection=False, save=True) -> Dict:
+    def train(
+        self, behaviorData: Dict, onTheFlyCorrection=False, save=True, **kwargs
+    ) -> Dict:
         """
         Main training function to build the Bayesian matrices.
         """
@@ -210,14 +222,15 @@ class Trainer:
         for tetrode_idx in tqdm(range(nTetrodes)):
             # Get tetrode-wise data
             tetrode_results = self._process_tetrode(
-                tetrode_idx,
-                speed_filters[tetrode_idx],
-                behaviorData,
-                gridFeature,
-                final_occupation,
-                occupation,
-                onTheFlyCorrection,
-                maxPos,
+                tetrode_idx=tetrode_idx,
+                speed_filter=speed_filters[tetrode_idx],
+                behaviorData=behaviorData,
+                gridFeature=gridFeature,
+                final_occupation=final_occupation,
+                raw_occupation=occupation,
+                onTheFlyCorrection=onTheFlyCorrection,
+                maxPos=maxPos,
+                **kwargs,
             )
 
             # construct the matrix for this tetrode
@@ -342,7 +355,8 @@ class Trainer:
                 bayesMatrices = self.train(
                     behaviorData,
                     onTheFlyCorrection=onTheFlyCorrection,
-                    save=kwargs.get("save", True),
+                    save=kwargs.pop("save", True),
+                    **kwargs,
                 )
 
         # Use linear tuning curves for more accurate ordering
@@ -416,7 +430,7 @@ class Trainer:
         self, positions: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, List]:
         """
-        Build occupation map with improved masking
+        Build occupation map with improved masking and unified constraints with ANN.
         Args:
             positions: np.ndarray, 2D array of positions (x, y) for KDE.
         Returns:
@@ -436,35 +450,78 @@ class Trainer:
                 f"Using adaptive bandwidth: {self.config.bandwidth:.4f} (based on {n_samples} samples). To be compared with fullBehaviorData['Bandwidth']: {self.config.fullBehaviorBandwidth:.4f}"
             )
 
+        # Bayesian decoder now FORCES butils.kdenD to use:
+        x_edges = np.linspace(
+            0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W
+        )  # Same as ANN
+        y_edges = np.linspace(
+            0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H
+        )  # Same as ANN
+        fixed_gridFeature = np.meshgrid(
+            x_edges, y_edges, indexing="xy"
+        )  # Same indexing as ANN
+
+        # Build occupation map using KDE - same as ANN
         gridFeature, occupation = butils.kdenD(
-            positions, self.config.bandwidth, kernel=self.config.kernel
+            positions,
+            self.config.bandwidth,
+            nbins=max(self.GRID_H, self.GRID_W),
+            kernel=self.config.kernel,
+            edges=fixed_gridFeature,
         )
+
+        # Apply unified spatial constraints FIRST
+        allowed_mask = self.get_allowed_mask(
+            use_tensorflow=False
+        )  # WARN: ij because butils.kdenD returns meshgrid in 'ij' indexing - ann returns the other way around
+        occupation = occupation * allowed_mask
 
         # Improved masking strategy - logistic thresholding
         # before :
         # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
         occupation_threshold = np.max(occupation) / self.config.masking_factor
         sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
-        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+        density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+
+        combined_mask = density_mask * allowed_mask
 
         # Add regularization instead of just replacing zeros
         self.logger.info(
             f"Occupation map regularization factor: {self.config.regularization_factor / occupation.size:.4e}. before would have been changed by {np.min(occupation[occupation != 0])}"
         )
-        eps = self.config.regularization_factor / occupation.size
-        occupation_reg = occupation + eps
+        eps = self.config.regularization_factor / np.sum(allowed_mask)
+        occupation_reg = occupation + eps * allowed_mask
         occupation_reg /= np.sum(occupation_reg)  # renormalize to sum to 1
-        occupation_inverse = 1 / occupation_reg
-        occupation_inverse = np.multiply(occupation_inverse, mask)
+
+        # Compute inverse with combined masking
+        occupation_inverse = np.divide(
+            1.0,
+            occupation_reg,
+            out=np.zeros_like(occupation_reg),
+            where=(occupation_reg > 0),
+        )
+        occupation_inverse = occupation_inverse * combined_mask
 
         if self.verbose:
-            self.logger.info(
-                f"Occupation map: max={np.max(occupation):.4f}, "
-                f"threshold={occupation_threshold:.4f}, "
-                f"effective masking of {100 * (1 - np.mean(mask)):.2f}%"
+            self._log_masking_stats(
+                allowed_mask, density_mask, combined_mask, occupation
             )
 
         return occupation_inverse, occupation, gridFeature
+
+    def _log_masking_stats(self, spatial_mask, density_mask, combined_mask, occupation):
+        """Log masking statistics"""
+        spatial_allowed_fraction = np.mean(spatial_mask)
+        density_allowed_fraction = np.mean(density_mask)
+        total_allowed_fraction = np.mean(combined_mask)
+
+        self.logger.info(
+            f"Occupation map stats:\n"
+            f"  - Max occupation: {np.max(occupation):.4f}\n"
+            f"  - Spatial constraint allows: {100 * spatial_allowed_fraction:.2f}% of space\n"
+            f"  - Density masking allows: {100 * density_allowed_fraction:.2f}% of space\n"
+            f"  - Total effective space: {100 * total_allowed_fraction:.2f}%"
+        )
 
     def _compute_rate_function(
         self,
@@ -493,12 +550,14 @@ class Trainer:
         _, rate_map = butils.kdenD(
             spike_positions,
             self.config.bandwidth,
-            edges=gridFeature,
+            edges=gridFeature,  # already same grid as occupation map
             kernel=self.config.kernel,
         )
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        rate_map = rate_map * allowed_mask
 
         # Normalize and apply occupation correction
-        eps = self.config.empty_unit_value / rate_map.size
+        eps = self.config.empty_unit_value / np.sum(allowed_mask)
         rate_map = rate_map + eps
         rate_map = rate_map / np.sum(rate_map)
         rate_map = (n_spikes * np.multiply(rate_map, final_occupation)) / learning_time
@@ -574,6 +633,7 @@ class Trainer:
         raw_occupation: np.ndarray,
         onTheFlyCorrection: bool,
         maxPos: Optional[float] = None,
+        **kwargs,
     ) -> Dict:
         """Process a single cluster: compute rate function and mutual information for train and speed filtered epochs.
         Args:
@@ -643,7 +703,7 @@ class Trainer:
                 rate_function /= np.sum(rate_function)
 
         # Compute mutual information
-        mutual_info = self._compute_mutual_info(rate_function, raw_occupation)
+        mutual_info = self._compute_mutual_info(rate_function, raw_occupation, **kwargs)
 
         return {
             "rate": rate_function,
@@ -655,7 +715,7 @@ class Trainer:
         self,
         rate_function: np.ndarray,
         occupation: np.ndarray,
-        method: str = "Skaggs",
+        mutual_info_method: str = "skaggs",
         n_rate_bins=5,
     ) -> float:
         """
@@ -664,6 +724,7 @@ class Trainer:
         Args:
             rate_function: np.ndarray, local rate function for the cluster.
             occupation: np.ndarray, occupation map NOT inverse occupation map.
+            mutual_info_method: str, method to compute mutual information ("skaggs", "i_sec", "shannon").
 
         Returns:
             float, mutual information value.
@@ -679,20 +740,26 @@ class Trainer:
         if mean_rate <= 0:
             return 0.0
 
-        if method.lower() == "skaggs" or method.lower() == "i_spike":  # bits/spike
+        if (
+            mutual_info_method.lower() == "skaggs"
+            or mutual_info_method.lower() == "i_spike"
+        ):  # bits/spike
+            print("Using Skaggs' method for mutual information (bits/spike)")
             mi = np.sum(
                 occupation[valid_mask]
                 * rate_function[valid_mask]
                 / mean_rate
                 * np.log2(rate_function[valid_mask] / mean_rate)
             )
-        elif method.lower == "i_sec":  # bits/sec
+        elif mutual_info_method.lower() == "i_sec":  # bits/sec
+            print("Using I_sec method for mutual information (bits/sec)")
             mi = np.sum(
                 occupation[valid_mask]
                 * rate_function[valid_mask]
                 * np.log2(rate_function[valid_mask] / mean_rate)
             )
-        elif method == "shannon":  # raw-sample Shannon MI
+        elif mutual_info_method.lower() == "shannon":  # raw-sample Shannon MI
+            print("Using Shannon's method for mutual information (bits)")
             rate_flat = rate_function.flatten()
             occ_flat = occupation.flatten()
             valid_mask = (rate_flat > 0) & (occ_flat > 0)
@@ -720,7 +787,7 @@ class Trainer:
             mask = p_ij > 0
             mi = np.sum(p_ij[mask] * np.log2(p_ij[mask] / (p_i @ p_j)[mask]))
         else:
-            raise ValueError(f"Unknown method {method}")
+            raise ValueError(f"Unknown method {mutual_info_method}")
 
         return mi
 
@@ -731,9 +798,10 @@ class Trainer:
         behaviorData: Dict,
         gridFeature: List,
         final_occupation: np.ndarray,
-        occupation: np.ndarray,
+        raw_occupation: np.ndarray,
         onTheFlyCorrection: bool,
         maxPos: Optional[float] = None,
+        **kwargs,
     ) -> Dict:
         """Process a single tetrode.
         Args:
@@ -774,15 +842,16 @@ class Trainer:
         for cluster_idx in range(n_clusters):
             # now process each cluster and find the local rate, which would be the rate function for each cluster
             cluster_results = self._process_cluster(
-                tetrode_idx,
-                cluster_idx,
-                speed_filter,
-                behaviorData,
-                gridFeature,
-                final_occupation,
-                occupation,
-                onTheFlyCorrection,
-                maxPos,
+                tetrode_idx=tetrode_idx,
+                cluster_idx=cluster_idx,
+                speed_filter=speed_filter,
+                behaviorData=behaviorData,
+                gridFeature=gridFeature,
+                final_occupation=final_occupation,
+                raw_occupation=raw_occupation,
+                onTheFlyCorrection=onTheFlyCorrection,
+                maxPos=maxPos,
+                **kwargs,
             )
 
             local_rates.append(cluster_results["rate"])
@@ -1443,31 +1512,44 @@ class Trainer:
         return clusters_time, clusters
 
     def _prepare_bayesian_terms(self, bayesMatrices: Dict, windowSize: float) -> Dict:
-        """Prepare and validate Bayesian terms for decoding"""
+        """
+        Prepare and validate Bayesian terms for decoding
+        Args:
+            bayesMatrices: dict, containing the precomputed matrices for Bayesian inference.
+            windowSize: float, size of the window in seconds.
+        Returns:
+            dict, containing processed log terms for decoding.
+        """
+
+        self.logger.info("BUILDING POSITION PROBAS")
 
         occupation = bayesMatrices["occupation"]
         marginal_rate_functions = bayesMatrices["marginalRateFunctions"]
         rate_functions = bayesMatrices["rateFunctions"]
 
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        occupation = occupation * allowed_mask
         # Improved masking strategy - logistic thresholding
         occupation_threshold = np.max(occupation) / self.config.masking_factor
         sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
-        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+        density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+
+        combined_mask = allowed_mask * density_mask
 
         # Log occupation with regularization
         log_occupation = np.log(
-            occupation + np.min(np.multiply(occupation, mask)) * 1e-2
+            occupation + np.min(np.multiply(occupation, combined_mask)) * 1e-4
         )
 
         # Poisson terms (probability of no spikes)
         all_poisson = []
         for tetrode in range(len(marginal_rate_functions)):
             # Clip very high rates to prevent numerical issues
-            clipped_rates = np.clip(marginal_rate_functions[tetrode], 1e-10, 100)
+            clipped_rates = np.clip(marginal_rate_functions[tetrode], 1e-10, 500)
             poisson_term = np.exp(-windowSize * clipped_rates)
             all_poisson.append(poisson_term)
 
-        all_poisson = np.log(np.prod(all_poisson, axis=0))
+        all_poisson = np.log(reduce(np.multiply, all_poisson))
 
         log_rf = []
         for tetrode in range(len(rate_functions)):
@@ -1484,9 +1566,9 @@ class Trainer:
 
                 # Apply mask to regularization - don't regularize masked areas
                 regularized_rates = rate_map.copy()
-                regularized_rates = mask * np.maximum(
+                regularized_rates = combined_mask * np.maximum(
                     rate_map, regularization * 0.1
-                ) + (1 - mask) * (regularization * 0.1)
+                ) + (1 - combined_mask) * (regularization * 0.1)
                 log_rate = np.log(regularized_rates)
                 tetrode_log_rf.append(log_rate)
             log_rf.append(tetrode_log_rf)
@@ -1495,7 +1577,7 @@ class Trainer:
             "all_poisson": all_poisson,
             "log_rf": log_rf,
             "log_occupation": log_occupation,
-            "mask": mask,
+            "mask": combined_mask,
         }
 
     def _run_parallel_decoding(
@@ -1507,7 +1589,18 @@ class Trainer:
         log_terms: Dict,
         save_posteriors: bool = False,
     ) -> Tuple:
-        """Run the parallel PyKeOps decoding (unchanged core algorithm)"""
+        """
+        Run the parallel PyKeOps decoding (unchanged core algorithm)
+        Args:
+            timeStepPred: array, time steps for prediction.
+            windowSize: float, size of the window in seconds.
+            clusters_time: list, spike times for each tetrode.
+            clusters: list, cluster data for each tetrode.
+            log_terms: dict, containing processed log terms for decoding.
+            save_posteriors: bool, whether to save full posterior maps.
+        Returns:
+            Tuple, containing (max_probs, max_indices) and optionally full_posteriors.
+        """
 
         spatial_shape = log_terms["all_poisson"].shape if save_posteriors else None
 
@@ -1536,7 +1629,21 @@ class Trainer:
         bayesMatrices: Dict,
         save_posteriors: bool = False,
     ) -> Dict:
-        """Process the raw decoding output with improved NaN handling"""
+        """
+        Process the raw decoding output with improved NaN handling
+        Args:
+            decoded_output: Tuple, output from the parallel decoding.
+            timeStepPred: array, time steps for prediction.
+            windowSize: float, size of the window in seconds.
+            clusters_time: list, spike times for each tetrode.
+            clusters: list, cluster data for each tetrode.
+            log_terms: dict, containing processed log terms for decoding.
+            bayesMatrices: dict, containing the precomputed matrices for Bayesian inference.
+            save_posteriors: bool, whether to save full posterior maps.
+
+        Returns:
+            dict, containing processed positions, confidence, and optionally posterior maps.
+        """
 
         # Extract positions and probabilities from PyKeOps output
         # Check if we got full posteriors
@@ -1554,6 +1661,8 @@ class Trainer:
                 for i in range(len(bayesMatrices["bins"]))
             ]
         ).T
+        # invert column 0 and 1 to match original code (x,y) convention due to a change in meshgrid
+        featurePred = featurePred[:, [1, 0]]
 
         # Get confidence values (convert back from log scale)
         confidences = max_probs

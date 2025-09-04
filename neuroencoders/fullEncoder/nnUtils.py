@@ -6,7 +6,7 @@ import numpy as np
 from denseweight import DenseWeight
 from scipy.ndimage import gaussian_filter
 
-from neuroencoders.utils.global_classes import MAZE_COORDS
+from neuroencoders.utils.global_classes import SpatialConstraintsMixin
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
@@ -1154,37 +1154,8 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         return cls(fitted_denseweight=fitted_dw, device=config.pop("device", "/cpu:0"))
 
 
-def extract_maze_boundaries(maze_params=None):
-    """
-    Extract maze boundaries from provided parameters or default coordinates.
-    Args:
-        maze_params (dict or array-like): If dict, should contain keys:
-            'x_min', 'x_max', 'y_min', 'y_max', 'gap_x_min', 'gap_x_max', 'gap_y_min'.
-            If array-like, should be an array of shape (N, 2) with (x, y) coordinates.
-            If None, defaults to predefined MAZE_COORDS.
-    Returns:
-        dict: Extracted maze boundaries.
-    """
-
-    if maze_params is None or not isinstance(maze_params, dict):
-        if maze_params is not None:
-            maze_coords = np.array(maze_params)
-        else:
-            maze_coords = MAZE_COORDS
-        maze_params = {
-            "x_min": maze_coords[:, 0].min(),
-            "x_max": maze_coords[:, 0].max(),
-            "y_min": maze_coords[:, 1].min(),
-            "y_max": maze_coords[:, 1].max(),
-            "gap_x_min": maze_coords[-2, 0],
-            "gap_x_max": maze_coords[-4, 0],
-            "gap_y_min": maze_coords[-3, 1],
-        }
-    return maze_params
-
-
-class UMazeProjectionLayer(tf.keras.layers.Layer):
-    def __init__(self, smoothing_factor=0.01, maze_params=None, **kwargs):
+class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
+    def __init__(self, grid_size, smoothing_factor=0.01, maze_params=None, **kwargs):
         """
         Differentiable projection layer that softly constrains (x,y) predictions
         to lie within a U-shaped maze.
@@ -1194,9 +1165,11 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
             smoothing_factor (float): Controls softness of constraints.
         """
         super().__init__(**kwargs)
-        self.maze_params = extract_maze_boundaries(maze_params)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
         self.smoothing_factor = smoothing_factor
-        print(f"UMazeProjectionLayer initialized with params: {self.maze_params}")
+        print(f"UMazeProjectionLayer initialized with params: {self.maze_params_dict}")
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -1208,9 +1181,9 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
 
     def _project_points(self, x, y):
         dtype = x.dtype
-        gap_x_min = tf.constant(self.maze_params["gap_x_min"], dtype=dtype)
-        gap_x_max = tf.constant(self.maze_params["gap_x_max"], dtype=dtype)
-        gap_y_min = tf.constant(self.maze_params["gap_y_min"], dtype=dtype)
+        gap_x_min = tf.constant(self.maze_params_dict["gap_x_min"], dtype=dtype)
+        gap_x_max = tf.constant(self.maze_params_dict["gap_x_max"], dtype=dtype)
+        gap_y_min = tf.constant(self.maze_params_dict["gap_y_min"], dtype=dtype)
 
         # Define constraint lines
         lines = tf.stack(
@@ -1286,10 +1259,10 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
 
         # Clip to maze corridor
         x_final = tf.clip_by_value(
-            x_final, self.maze_params["x_min"], self.maze_params["x_max"]
+            x_final, self.maze_params_dict["x_min"], self.maze_params_dict["x_max"]
         )
         y_final = tf.clip_by_value(
-            y_final, self.maze_params["y_min"], self.maze_params["y_max"]
+            y_final, self.maze_params_dict["y_min"], self.maze_params_dict["y_max"]
         )
 
         return x_final, y_final
@@ -1298,7 +1271,7 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "maze_params": self.maze_params,
+                "maze_params": self.maze_params_dict,
                 "smoothing_factor": self.smoothing_factor,
             }
         )
@@ -1322,7 +1295,7 @@ class FeatureOutputWithUMaze(tf.keras.layers.Layer):
         config.update(
             {
                 "orig_layer_config": self.orig.get_config(),
-                "maze_params": self.proj.maze_params,
+                "maze_params": self.proj.maze_params_dict,
             }
         )
         return config
@@ -1398,7 +1371,7 @@ def get_last_dense_layers_before_output(
     return dense_layers[:k][::-1]  # reverse so closest layers come last
 
 
-class GaussianHeatmapLayer(tf.keras.layers.Layer):
+class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     """
     Layer that generates Gaussian heatmaps for given true positions.
     This layer computes a Gaussian heatmap based on the true positions
@@ -1407,7 +1380,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
     def __init__(
         self,
         training_positions,
-        grid_size=(45, 45),
+        grid_size,
         eps=1e-8,
         sigma=0.03,
         neg=-100,
@@ -1415,30 +1388,36 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
         self.training_positions = training_positions
         self.grid_size = grid_size
         self.sigma = sigma
-        self.GRID_H = grid_size[0]
-        self.GRID_W = grid_size[1]
         self.EPS = eps
 
-        x_cent = tf.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
-        y_cent = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
-        self.Xc, self.Yc = tf.meshgrid(x_cent, y_cent)  # (H,W)
-
-        maze_params_dict = extract_maze_boundaries(maze_params)
-        self.FORBID = tf.cast(
-            (self.Xc >= maze_params_dict["gap_x_min"])
-            & (self.Xc <= maze_params_dict["gap_x_max"])
-            & (self.Yc <= maze_params_dict["gap_y_min"]),
-            tf.float32,
-        )  # (H,W)
+        self.FORBID = self.forbid_mask_tf  # (H,W)
         self.occ = self.occupancy_map(self.training_positions)
         self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
         self.NEG = tf.constant(neg, tf.float32)
 
         # final dense layer to map features to logits
         self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
+        self._validate_training_positions()
+
+    def _validate_training_positions(self):
+        """Validate that training positions don't fall in forbidden regions"""
+        bins = self.positions_to_bins(self.training_positions)
+        x_indices = bins % self.GRID_W
+        y_indices = bins // self.GRID_W
+        forbidden_positions = self.forbid_mask_np[y_indices, x_indices] > 0
+        # Filters out forbidden positions and warns user
+        n_forbidden = np.sum(forbidden_positions)
+        if n_forbidden > 0:
+            self.logger.warning(
+                f"Found {n_forbidden}/{len(self.training_positions)} training positions in forbidden regions"
+            )
+            self.training_positions = self.training_positions[~forbidden_positions]
 
     def call(self, inputs):
         """
@@ -1458,15 +1437,15 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         if sigma is None:
             sigma = self.sigma
         # pos_batch: [B, 2] true [x,y] positions
-        X = self.Xc[None]
-        Y = self.Yc[None]
+        X = self.Xc_tf[None]
+        Y = self.Yc_tf[None]
 
         dx = pos_batch[:, 0][:, None, None] - X
         dy = pos_batch[:, 1][:, None, None] - Y
         gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
 
         # Apply forbidden mask here too
-        allowed_mask = 1.0 - self.FORBID[None]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
         gauss *= allowed_mask
 
         # Safer normalization
@@ -1488,7 +1467,9 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         idx = self.positions_to_bins(positions)
         for k in idx:
             occ[k // self.GRID_W, k % self.GRID_W] += 1
-        return occ * (1.0 - self.FORBID.numpy())
+
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        return occ * allowed_mask
 
     def weight_map_from_occ(
         self,
@@ -1509,7 +1490,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
             eps = self.EPS
 
         # Mask forbidden regions early
-        forbid_mask = self.FORBID.numpy().astype(bool)
+        forbid_mask = self.forbid_mask_np.astype(bool)
         occ = occ.copy()
         occ[forbid_mask] = 0.0
 
@@ -1695,8 +1676,8 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
 
         if mode == "expectation":
             # Expected position using only allowed bins
-            ex = tf.reduce_sum(probs_allowed * self.Xc[None], axis=[1, 2])
-            ey = tf.reduce_sum(probs_allowed * self.Yc[None], axis=[1, 2])
+            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
         elif mode == "argmax":
             # Argmax bin (always inside allowed region)
             idx = tf.argmax(
@@ -1705,18 +1686,18 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
             W64 = tf.cast(W, tf.int64)
             iy = idx // W64
             ix = idx % W64
-            ex = tf.gather(tf.reshape(self.Xc, [-1]), idx)
-            ey = tf.gather(tf.reshape(self.Yc, [-1]), idx)
+            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
+            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
         else:
             raise ValueError("mode must be 'expectation' or 'argmax'")
 
         if mode == "expectation":
             # Variance
             varx = tf.reduce_sum(
-                probs_allowed * tf.square(self.Xc[None] - ex[:, None, None]), [1, 2]
+                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
             )
             vary = tf.reduce_sum(
-                probs_allowed * tf.square(self.Yc[None] - ey[:, None, None]), [1, 2]
+                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
             )
             var = varx + vary
         else:

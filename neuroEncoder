@@ -239,10 +239,14 @@ def main(args):
             import numpy as np
             import pandas as pd
 
-            TrainerBayes = BayesTraining.Trainer(ProjectPath, phase=args.phase)
+            TrainerBayes = BayesTraining.Trainer(
+                ProjectPath, phase=args.phase, grid_size=Parameters.GaussianGridSize
+            )
             # Load or create bayesMatrices
             bayesMatrices = TrainerBayes.train_order_by_pos(
-                DataHelper.fullBehavior, l_function=l_function
+                DataHelper.fullBehavior,
+                l_function=l_function,
+                mutual_info_method=Parameters.mutual_info_method,
             )
 
             # now run the fancy inference
