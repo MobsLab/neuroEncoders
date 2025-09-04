@@ -1410,7 +1410,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0003]
+            "learningRates", [0.0004]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
@@ -1454,7 +1454,7 @@ class Params:
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
         self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.07
+            "GaussianSigma", 0.045
         )  # 1/44 ~= 0.023, so it should cover ~3 bins
         self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
         self.GaussianNeg = -50  # value for forbidden zones in the heatmap
