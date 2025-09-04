@@ -586,16 +586,17 @@ def main(args):
                 num_augmentations=6 if args.window < 0.252 else 3,
             )
             T = None
-            if Parameters.GaussianHeatmap:
-                print("Will now run temperature scaling for gaussian heatmap")
-                T = NNTrainer.test(
-                    DataHelper.fullBehavior,
-                    fit_temperature=True,
-                    epochKey="lossPredSetEpochs",
-                    windowSizeMS=windowSizeMS,
-                    useSpeedFilter=True,
-                    isPredLoss=isPL,
-                )
+
+        if Parameters.GaussianHeatmap:
+            print("Will now run temperature scaling for gaussian heatmap")
+            T = NNTrainer.test(
+                DataHelper.fullBehavior,
+                fit_temperature=True,
+                epochKey="lossPredSetEpochs",
+                windowSizeMS=windowSizeMS,
+                useSpeedFilter=True,
+                isPredLoss=isPL,
+            )
         # now run the fancy inference
         if (
             not os.path.exists(

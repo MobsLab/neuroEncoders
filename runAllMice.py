@@ -22,7 +22,6 @@ win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
 # Mice name
 mice_nb = []
-mice_nb = ["M1199_PAG"]
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
@@ -31,7 +30,8 @@ mice_nb = [
     "M1230_Known",
     "M1162_MFB",
 ]
-nameExp = "projected_LinearLoss_Dense"
+# mice_nb = ["M1199_PAG"]
+nameExp = "bigSigma_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_bayes = False
 run_ann = True
@@ -194,6 +194,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             # "--predicted_loss",
             "--early_stop",
             # "--transform_w_log",
+            "--no-dense",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
@@ -271,13 +272,6 @@ def run_commands_parallel(mouse_commands):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python runAllMice.py <mode> [force]")
-        print("Modes: parallel")
-        print("       !!!sequential!!!")
-        print("Force: force")
-        mode = "sequential"
-
     mode = "sequential"
     force = False
     lstm = False
@@ -286,6 +280,12 @@ if __name__ == "__main__":
     sleep = "--sleep" in sys.argv
     force = "--force" in sys.argv
     lstm = "--lstm" in sys.argv
+
+    if len(sys.argv) < 2:
+        print("Usage: python runAllMice.py <mode> [force]")
+        print(f"Mode: {mode}")
+        print(f"Force: {force}")
+        mode = "sequential"
 
     if len(sys.argv) > 1 and sys.argv[1].lower() == "sequential":
         mode = "sequential"

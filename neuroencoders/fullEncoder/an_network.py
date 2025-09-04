@@ -1221,7 +1221,7 @@ class LSTMandSpikeNetwork:
             # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
             # At each epoch, the shuffle order is different.
             datasets[key] = datasets[key].shuffle(
-                buffer_size=1000,
+                buffer_size=10000,
                 reshuffle_each_iteration=True,
             )  # were talking in number of batches here, not time (so it does not make sense to use params.nSteps)
             datasets[key] = datasets[key].prefetch(
@@ -1835,6 +1835,7 @@ class LSTMandSpikeNetwork:
         windowSizeDecoder = kwargs.get("windowSizeDecoder", None)
         windowSizeMS = kwargs.get("windowSizeMS", 36)
         isPredLoss = kwargs.get("isPredLoss", False)
+        T_scaling = kwargs.get("T_scaling", None)
 
         # Create the folder
         if windowSizeDecoder is None:
@@ -1949,6 +1950,16 @@ class LSTMandSpikeNetwork:
             if self.target.lower() == "direction":
                 output = (tf.cast(output[0] > 0.5, tf.int32),)
 
+            if getattr(self.params, "GaussianHeatmap", False):
+                output_logits = output[0]  # logits with shape (batch, H, W)
+                xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                    output_logits
+                )
+                if T_scaling is not None:
+                    output_logits = output_logits / T_scaling
+
+                output = (xy.numpy(), output[1], output[2], output[3])
+
             # Post-infer management
             print(f"gathering times of the centre in the time window for {sleepName}")
 
@@ -1993,6 +2004,14 @@ class LSTMandSpikeNetwork:
                 projPredPos, linearPred = l_function(output[0][:, :2])
                 predictions[sleepName]["projPred"] = projPredPos
                 predictions[sleepName]["linearPred"] = linearPred
+
+            if getattr(self.params, "GaussianHeatmap", False):
+                # add uncertainty and confidence metrics to output dict
+                predictions[sleepName]["logits_hw"] = output_logits
+                predictions[sleepName]["var_total"] = var_total
+                predictions[sleepName]["Hn"] = Hn
+                predictions[sleepName]["maxp"] = maxp
+                predictions[sleepName]["T_scaling"] = T_scaling
 
         # Save the results
         for key in predictions.keys():
