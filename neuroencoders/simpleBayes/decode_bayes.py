@@ -270,7 +270,7 @@ class Trainer:
                 behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
             )
             totMask = speedMask * epochMask
-            full_training_true_positions = behaviorData["Positions"][totMask, :2]
+            full_training_true_positions = behaviorData["Positions"][totMask]
             self.training_data = full_training_true_positions
             self.logger.info(
                 f"Training data saved with {full_training_true_positions.shape} valid positions."
@@ -441,6 +441,8 @@ class Trainer:
         )
 
         # Improved masking strategy - logistic thresholding
+        # before :
+        # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
         occupation_threshold = np.max(occupation) / self.config.masking_factor
         sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
         mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
@@ -1390,6 +1392,7 @@ class Trainer:
             save_as_pickle=save_as_pickle,
             sleepName=sleepName,
             sleep=isSleep,
+            folderResult=kwargs.pop("folderResult", None),
         )
 
         # Log summary statistics
@@ -2439,19 +2442,26 @@ class Trainer:
         phase=None,
         cross_validate: bool = False,
         save_as_pickle: bool = True,
+        folderResult: Optional[str] = None,
     ) -> None:
         import pandas as pd
 
         # Manage folders to save
+        if folderResult is None:
+            if sleep:
+                folderResult = self.folderResultSleep
+            else:
+                folderResult = self.folderResult
+
         if sleep:
-            folderToSave = os.path.join(
-                self.folderResultSleep, str(folderName), sleepName
-            )
+            folderToSave = os.path.join(folderResult, str(folderName), sleepName)
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
             phase = ""
         else:
-            folderToSave = os.path.join(self.folderResult, str(folderName))
+            folderToSave = os.path.join(folderResult, str(folderName))
+
+        print(f"Saving results in {folderToSave}.")
 
         if phase is not None:
             suffix = f"_{phase}" if phase != "" else ""

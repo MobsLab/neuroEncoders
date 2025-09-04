@@ -1154,6 +1154,35 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         return cls(fitted_denseweight=fitted_dw, device=config.pop("device", "/cpu:0"))
 
 
+def extract_maze_boundaries(maze_params=None):
+    """
+    Extract maze boundaries from provided parameters or default coordinates.
+    Args:
+        maze_params (dict or array-like): If dict, should contain keys:
+            'x_min', 'x_max', 'y_min', 'y_max', 'gap_x_min', 'gap_x_max', 'gap_y_min'.
+            If array-like, should be an array of shape (N, 2) with (x, y) coordinates.
+            If None, defaults to predefined MAZE_COORDS.
+    Returns:
+        dict: Extracted maze boundaries.
+    """
+
+    if maze_params is None or not isinstance(maze_params, dict):
+        if maze_params is not None:
+            maze_coords = np.array(maze_params)
+        else:
+            maze_coords = MAZE_COORDS
+        maze_params = {
+            "x_min": maze_coords[:, 0].min(),
+            "x_max": maze_coords[:, 0].max(),
+            "y_min": maze_coords[:, 1].min(),
+            "y_max": maze_coords[:, 1].max(),
+            "gap_x_min": maze_coords[-2, 0],
+            "gap_x_max": maze_coords[-4, 0],
+            "gap_y_min": maze_coords[-3, 1],
+        }
+    return maze_params
+
+
 class UMazeProjectionLayer(tf.keras.layers.Layer):
     def __init__(self, smoothing_factor=0.01, maze_params=None, **kwargs):
         """
@@ -1165,23 +1194,7 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
             smoothing_factor (float): Controls softness of constraints.
         """
         super().__init__(**kwargs)
-
-        # Default parameters based on your maze image
-        if maze_params is None or not isinstance(maze_params, dict):
-            if maze_params is not None:
-                maze_coords = np.array(maze_params)
-            else:
-                maze_coords = MAZE_COORDS
-            maze_params = {
-                "x_min": maze_coords[:, 0].min(),
-                "x_max": maze_coords[:, 0].max(),
-                "y_min": maze_coords[:, 1].min(),
-                "y_max": maze_coords[:, 1].max(),
-                "gap_x_min": maze_coords[-2, 0],
-                "gap_x_max": maze_coords[-4, 0],
-                "gap_y_min": maze_coords[-3, 1],
-            }
-        self.maze_params = maze_params
+        self.maze_params = extract_maze_boundaries(maze_params)
         self.smoothing_factor = smoothing_factor
         print(f"UMazeProjectionLayer initialized with params: {self.maze_params}")
 
@@ -1398,6 +1411,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         eps=1e-8,
         sigma=0.03,
         neg=-100,
+        maze_params=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1412,9 +1426,11 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer):
         y_cent = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
         self.Xc, self.Yc = tf.meshgrid(x_cent, y_cent)  # (H,W)
 
-        # TODO: make FORBID configurable - just like UMazeProjectionLayer
+        maze_params_dict = extract_maze_boundaries(maze_params)
         self.FORBID = tf.cast(
-            (self.Xc >= 0.35) & (self.Xc <= 0.65) & (self.Yc <= 0.7),
+            (self.Xc >= maze_params_dict["gap_x_min"])
+            & (self.Xc <= maze_params_dict["gap_x_max"])
+            & (self.Yc <= maze_params_dict["gap_y_min"]),
             tf.float32,
         )  # (H,W)
         self.occ = self.occupancy_map(self.training_positions)

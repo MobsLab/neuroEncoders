@@ -1776,14 +1776,22 @@ class LSTMandSpikeNetwork:
         windowmaskSpeed = speedMask[
             posIndex
         ]  # the speedMask used in the table lookup call
-        posLoss = outputTest[2]
-        uncertaintyLoss = outputTest[3]
+        posLoss = (
+            outputTest[2].numpy() if hasattr(outputTest[2], "numpy") else outputTest[2]
+        )
+        uncertaintyLoss = (
+            outputTest[3].numpy() if hasattr(outputTest[3], "numpy") else outputTest[3]
+        )
 
         testOutput = {
-            "featurePred": outputTest[0],
+            "featurePred": outputTest[0].numpy()
+            if hasattr(outputTest[0], "numpy")
+            else outputTest[0],
             "featureTrue": featureTrue,
             "times": times,
-            "predLoss": outputTest[1],
+            "predLoss": outputTest[1].numpy()
+            if hasattr(outputTest[1], "numpy")
+            else outputTest[1],
             "posLoss": posLoss,
             "posIndex": posIndex,
             "speedMask": windowmaskSpeed,
@@ -1801,11 +1809,21 @@ class LSTMandSpikeNetwork:
 
         if getattr(self.params, "GaussianHeatmap", False):
             # add uncertainty and confidence metrics to output dict
-            testOutput["logits_hw"] = output_logits
-            testOutput["var_total"] = var_total
-            testOutput["Hn"] = Hn
-            testOutput["maxp"] = maxp
-            testOutput["T_scaling"] = T_scaling
+            testOutput["logits_hw"] = (
+                output_logits.numpy()
+                if hasattr(output_logits, "numpy")
+                else output_logits
+            )
+            testOutput["var_total"] = (
+                var_total.numpy() if hasattr(var_total, "numpy") else var_total
+            )
+            testOutput["Hn"] = Hn.numpy() if hasattr(Hn, "numpy") else Hn
+            testOutput["maxp"] = maxp.numpy() if hasattr(maxp, "numpy") else maxp
+            testOutput["T_scaling"] = (
+                (T_scaling.numpy() if hasattr(T_scaling, "numpy") else T_scaling)
+                if T_scaling is not None
+                else None
+            )
 
         # Save the results
         self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
