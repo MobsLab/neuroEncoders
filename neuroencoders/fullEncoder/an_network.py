@@ -320,7 +320,9 @@ class LSTMandSpikeNetwork:
                 dtype=tf.float32,
                 name="feature_projection_transformer",
             )
-            self.ProjectionInMazeLayer = UMazeProjectionLayer()
+            self.ProjectionInMazeLayer = UMazeProjectionLayer(
+                grid_size=kwargs.get("grid_size", self.params.GaussianGridSize)
+            )
 
             # Gather the full model
             outputs = self.generate_model(**kwargs)

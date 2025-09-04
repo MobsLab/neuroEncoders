@@ -33,7 +33,6 @@ mice_nb = [
 # mice_nb = ["M1199_PAG"]
 nameExp = "bigSigma_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
-run_bayes = False
 run_ann = True
 target = "pos"
 phase = "pre"
@@ -280,6 +279,7 @@ if __name__ == "__main__":
     sleep = "--sleep" in sys.argv
     force = "--force" in sys.argv
     lstm = "--lstm" in sys.argv
+    run_bayes = "--bayes" in sys.argv
 
     if len(sys.argv) < 2:
         print("Usage: python runAllMice.py <mode> [force]")
