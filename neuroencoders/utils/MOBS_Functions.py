@@ -1116,8 +1116,32 @@ class Mouse_Results(Params, PaperFigures):
             if i == 0 and which.lower() in ["bayes", "both"]:
                 if not hasattr(self, "bayes"):
                     self.bayes_config = DecoderConfig(**kwargs)
+                    if kwargs.get("bayes_project_path", None) is not None:
+                        self.bayes_config.extra_kwargs["project_path"] = kwargs.get(
+                            "bayes_project_path", None
+                        )
+                        print(
+                            f"loading custom bayes project path from {self.bayes_config.extra_kwargs['project_path']}"
+                        )
+                        try:
+                            project = Project.load(
+                                os.path.join(
+                                    self.bayes_config.extra_kwargs["project_path"],
+                                    f"Project_{winMS}.pkl",
+                                )
+                            )
+                        except (FileNotFoundError, AttributeError):
+                            project = Project.load(
+                                os.path.join(
+                                    self.path,
+                                    self.bayes_config.extra_kwargs["project_path"],
+                                    f"Project_{winMS}.pkl",
+                                )
+                            )
+                    else:
+                        project = self.projects[winMS]
                     self.bayes = BayesTrainer(
-                        self.projects[winMS],
+                        project,
                         config=self.bayes_config,
                         phase=self.phase,
                         **kwargs,
@@ -1125,7 +1149,7 @@ class Mouse_Results(Params, PaperFigures):
                     try:
                         with open(
                             os.path.join(
-                                self.folderResult,
+                                self.bayes.folderResult,
                                 "bayesMatrices.pkl",
                             ),
                             "rb",
@@ -1167,7 +1191,7 @@ class Mouse_Results(Params, PaperFigures):
                 try:
                     with open(
                         os.path.join(
-                            self.folderResult,
+                            self.bayes.folderResult,
                             "bayesMatrices.pkl",
                         ),
                         "rb",
@@ -1183,7 +1207,7 @@ class Mouse_Results(Params, PaperFigures):
                         self.retrain(which="bayes", **kwargs)
                         with open(
                             os.path.join(
-                                self.folderResult,
+                                self.bayes.folderResult,
                                 "bayesMatrices.pkl",
                             ),
                             "rb",
@@ -1258,7 +1282,7 @@ class Mouse_Results(Params, PaperFigures):
                         with open(
                             os.path.expanduser(
                                 os.path.join(
-                                    self.folderResult,
+                                    self.bayes.folderResult,
                                     win,
                                     f"bayes_decoding_results{suffix}.pkl",
                                 )
@@ -1324,7 +1348,7 @@ class Mouse_Results(Params, PaperFigures):
                     mean_lin_bayes,
                     select_lin_bayes,
                 ) = print_results.print_results(
-                    self.folderResult,
+                    self.bayes.folderResult,
                     typeDec="bayes",
                     results=outputs,
                     windowSizeMS=win_value,

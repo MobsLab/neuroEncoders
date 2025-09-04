@@ -303,8 +303,7 @@ class PaperFigures:
                             np.array(
                                 pd.read_csv(
                                     os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
+                                        self.trainerBayes.folderResult,
                                         str(ws),
                                         f"bayes_linearPred{suffix}.csv",
                                     )
@@ -318,8 +317,7 @@ class PaperFigures:
                             np.array(
                                 pd.read_csv(
                                     os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
+                                        self.trainerBayes.folderResult,
                                         str(ws),
                                         f"bayes_linearTrue{suffix}.csv",
                                     )
@@ -333,8 +331,7 @@ class PaperFigures:
                             np.array(
                                 pd.read_csv(
                                     os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
+                                        self.trainerBayes.folderResult,
                                         str(ws),
                                         f"bayes_proba{suffix}.csv",
                                     )
@@ -347,8 +344,7 @@ class PaperFigures:
                         np.array(
                             pd.read_csv(
                                 os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
+                                    self.trainerBayes.folderResult,
                                     str(ws),
                                     f"bayes_featurePred{suffix}.csv",
                                 )
@@ -360,8 +356,7 @@ class PaperFigures:
                         np.array(
                             pd.read_csv(
                                 os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
+                                    self.trainerBayes.folderResult,
                                     str(ws),
                                     f"bayes_featureTrue{suffix}.csv",
                                 )
@@ -374,8 +369,7 @@ class PaperFigures:
                             np.array(
                                 pd.read_csv(
                                     os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
+                                        self.trainerBayes.folderResult,
                                         str(ws),
                                         f"bayes_posLoss{suffix}.csv",
                                     )
@@ -389,8 +383,7 @@ class PaperFigures:
                             np.array(
                                 pd.read_csv(
                                     os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
+                                        self.trainerBayes.folderResult,
                                         str(ws),
                                         f"bayes_timeStepsPred{suffix}.csv",
                                     )
@@ -405,9 +398,11 @@ class PaperFigures:
                         != self.resultsNN_phase[suffix]["fullPred"][i].shape
                     ):
                         raise ValueError(
-                            "Bayesian and NN results do not have the same shape for "
-                            + str(ws)
-                            + " ms window."
+                            f"""
+                            Bayesian and NN results do not have the same shape for
+                            {str(ws)} ms window.
+                            Found shapes {fPredBayes[i].shape} and {self.resultsNN_phase[suffix]["fullPred"][i].shape}.
+                            """
                         )
                 except (FileNotFoundError, ValueError) as e:
                     print(
@@ -432,6 +427,9 @@ class PaperFigures:
                         useTrain=useTrain,
                         l_function=self.l_function,
                         phase=suffix.strip("_"),
+                        folderResult=os.path.join(
+                            self.projectPath.experimentPath, "results"
+                        ),  # here we choose base folder instead of trainerBayes.folderResult to save all results in the same place - bayesMatrices is already loaded anyway
                     )
                     infPos = outputsBayes["featurePred"]
 
