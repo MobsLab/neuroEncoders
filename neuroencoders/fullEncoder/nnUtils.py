@@ -1396,7 +1396,6 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.sigma = sigma
         self.EPS = eps
 
-        self.FORBID = self.forbid_mask_tf  # (H,W)
         self.occ = self.occupancy_map(self.training_positions)
         self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
         self.NEG = tf.constant(neg, tf.float32)
@@ -1414,7 +1413,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Filters out forbidden positions and warns user
         n_forbidden = np.sum(forbidden_positions)
         if n_forbidden > 0:
-            self.logger.warning(
+            print(
                 f"Found {n_forbidden}/{len(self.training_positions)} training positions in forbidden regions"
             )
             self.training_positions = self.training_positions[~forbidden_positions]
@@ -1479,6 +1478,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         smooth_sigma=1.0,
         max_weight=15.0,
         log_scale=False,
+        remove_isolated_zeros=True,
     ):
         """
         Compute weight map from occupancy counts, ignoring forbidden and zero-count bins.
@@ -1490,7 +1490,8 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             eps = self.EPS
 
         # Mask forbidden regions early
-        forbid_mask = self.forbid_mask_np.astype(bool)
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        forbid_mask = ~allowed_mask.astype(bool)
         occ = occ.copy()
         occ[forbid_mask] = 0.0
 
@@ -1498,6 +1499,9 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         if smooth_sigma is not None and smooth_sigma > 0:
             occ = gaussian_filter(occ, sigma=smooth_sigma, mode="constant")
             occ[forbid_mask] = 0.0
+
+        if remove_isolated_zeros:
+            forbid_mask, occ = self.remove_isolated_zeros(forbid_mask, occ)
 
         # Define weights only on bins with occupancy > 0
         valid_mask = (occ > 0) & (~forbid_mask)
@@ -1522,25 +1526,27 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
         B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
         logits_flat = tf.reshape(masked_logits, [B, H * W])
         probs_flat = tf.nn.softmax(logits_flat, axis=-1)
         probs = tf.reshape(probs_flat, [B, H, W])
-        weights = wmap[None] * (1.0 - self.FORBID[None])
+        if wmap is None:
+            wmap = self.WMAP
+        weights = wmap[None] * (1.0 - self.forbid_mask_tf[None])
         se = tf.square(probs - target_hw)
         # normalize by sum of weights to keep scale stable
         return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
 
     def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
         B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        allowed_mask = 1.0 - self.FORBID[None]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
 
         # Safety clipping to prevent extreme logits
         logits_hw = tf.clip_by_value(logits_hw, -20.0, 20.0)
 
         # Mask forbidden bins in logits
         safe_neg = self.NEG
-        masked_logits = tf.where(self.FORBID[None] > 0, safe_neg, logits_hw)
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, safe_neg, logits_hw)
 
         # Get predicted probabilities (not log probabilities)
         probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
@@ -1592,16 +1598,18 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         return final_loss
 
-    def safe_kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
+    def safe_kl_heatmap_loss(
+        self, logits_hw, target_hw, wmap=None, scale=False, return_batch=False
+    ):
         """
         Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
         Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
         """
         B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        allowed_mask = 1.0 - self.FORBID[None]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
 
         # Clip logits for stability and apply forbid mask
-        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
         logits_flat = tf.reshape(masked_logits, [B, H * W])
 
         # Normalize target distribution P
@@ -1631,6 +1639,9 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             wsum = tf.reduce_sum(weights * valid_mask) + self.EPS
             kl = kl * (tf.reduce_sum(weights) / wsum)
 
+        if return_batch:
+            return kl  # [B]
+
         loss = tf.reduce_mean(kl)
 
         if scale:
@@ -1657,7 +1668,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
 
         # Mask forbidden bins in logits
-        masked_logits = tf.where(self.FORBID[None] > 0, self.NEG, logits_hw)
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
 
         # Flatten grid for softmax
         logits_flat = tf.reshape(masked_logits, [B, H * W])
@@ -1666,7 +1677,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         probs = tf.reshape(probs_flat, [B, H, W])
 
         # Explicitly zero forbidden bins
-        allowed_mask = 1.0 - self.FORBID[None]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
         probs_allowed = probs * allowed_mask
 
         # Renormalize over allowed bins
@@ -1684,7 +1695,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
                 tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
             )
             W64 = tf.cast(W, tf.int64)
-            iy = idx // W64
+            iy = idx // W64  # for debugging
             ix = idx % W64
             ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
             ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
@@ -1718,7 +1729,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         return xy, maxp, Hn, var
 
-    def project_out_of_forbid(self, xy, forbid_box=(0.35, 0.65, 0.0, 0.7)):
+    def project_out_of_forbid(self, xy, forbid_box=None):
         """
         Project decoded positions back into allowed space if inside forbidden region.
 
@@ -1729,6 +1740,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         Returns:
             xy_projected: [B, 2] corrected positions
         """
+        if forbid_box is None:
+            forbid_box = (
+                self.maze_params_dict["gap_x_min"],
+                self.maze_params_dict["gap_x_max"],
+                0.0,
+                self.maze_params_dict["gap_y_min"],
+            )
         xmin, xmax, ymin, ymax = forbid_box
         x, y = xy[:, 0], xy[:, 1]
 
@@ -1777,7 +1795,8 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
                 scaled = val_logits / tf.exp(logT)
                 B, H, W = tf.shape(scaled)[0], tf.shape(scaled)[1], tf.shape(scaled)[2]
                 scaled_flat = tf.reshape(
-                    tf.where(self.FORBID[None] > 0, self.NEG, scaled), [B, H * W]
+                    tf.where(self.forbid_mask_tf[None] > 0, self.NEG, scaled),
+                    [B, H * W],
                 )
                 logp_flat = tf.nn.log_softmax(scaled_flat, axis=-1)
                 logp = tf.reshape(logp_flat, [B, H, W])
