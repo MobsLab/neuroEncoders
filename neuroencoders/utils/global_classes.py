@@ -1372,6 +1372,7 @@ class Params:
         self.nSteps = int(10000 * 0.036 / self.windowSize)  # used in the encoder
 
         ### from units encoder params
+        # MOVED TO DECODE CONFIG
         self.validCluWindow = 0.0005
         self.kernel = "epanechnikov"  # is not connected
         self.bandwidth = 0.1
@@ -1460,7 +1461,7 @@ class Params:
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
         self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.045
+            "GaussianSigma", 0.025
         )  # 1/44 ~= 0.023, so it should cover ~3 bins
         self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
         self.GaussianNeg = -50  # value for forbidden zones in the heatmap
@@ -1654,6 +1655,46 @@ class SpatialConstraintsMixin:
             return 1.0 - self.forbid_mask_tf
         else:
             return 1.0 - self.forbid_mask_np
+
+    def remove_isolated_zeros(self, forbid_mask, occ):
+        # Apply same zero-count bin removal logic as bayes occupation map
+        # Identify zero-count bins in allowed regions
+        allowed_mask = ~forbid_mask
+        zero_threshold = (
+            np.mean(occ[allowed_mask & (occ > 0)]) * 0.1
+            if np.any(allowed_mask & (occ > 0))
+            else 0
+        )
+
+        # identiy problematic zones
+        print(
+            f"Occupation map: {np.sum(occ == 0)} zero-occupation bins, {np.sum(occ[allowed_mask.astype(bool)] < zero_threshold)} low-density bins (below {zero_threshold:.4e}) in allowed zones."
+        )
+        low_density = (occ < zero_threshold) & allowed_mask
+
+        # Expand forbidden zones by 1 pixel
+        from scipy import ndimage
+
+        structure = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
+        expanded_forbidden = ndimage.binary_dilation(
+            forbid_mask, structure=structure, iterations=5
+        )
+
+        # Remove low-density bins adjacent to forbidden zones
+        problematic_bins = low_density & expanded_forbidden
+        forbid_mask = forbid_mask | problematic_bins  # Update forbidden mask
+        occ[problematic_bins] = 0.0
+
+        print(
+            f"Weight map: Removed {np.sum(problematic_bins)} low-density bins adjacent to forbidden zones"
+        )
+
+        self.update_allowed_mask(forbid_mask)
+        return forbid_mask, occ
+
+    def update_allowed_mask(self, forbid_mask):
+        self.forbid_mask_np = forbid_mask.astype(np.float32)  # dynamic update for ANN
+        self.forbid_mask_tf = tf.cast(forbid_mask, tf.float32)  # dynamic update for ANN
 
 
 def smooth_signal(signal, N):

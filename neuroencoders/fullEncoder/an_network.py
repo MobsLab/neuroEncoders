@@ -1068,7 +1068,7 @@ class LSTMandSpikeNetwork:
                         GRID_H,
                         GRID_W,
                         stride,
-                        self.GaussianHeatmap.FORBID,
+                        self.GaussianHeatmap.forbid_mask_tf,
                     )
 
                 # should not be useful as true positions are already allowed!
@@ -1103,7 +1103,7 @@ class LSTMandSpikeNetwork:
                     for x in range(coarse_W):
                         # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
                         if np.any(
-                            self.GaussianHeatmap.FORBID[
+                            self.GaussianHeatmap.forbid_mask_tf[
                                 y * stride : (y + 1) * stride,
                                 x * stride : (x + 1) * stride,
                             ]
@@ -1288,7 +1288,7 @@ class LSTMandSpikeNetwork:
                             e,
                         )
 
-            if loaded:
+            if loaded and nb_epochs_already_trained >= self.params.nEpochs / 2:
                 if not kwargs.get("fine_tune", False):
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue

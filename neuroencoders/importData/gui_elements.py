@@ -3335,7 +3335,7 @@ class OversamplingVisualizer:
         for y in range(coarse_H):
             for x in range(coarse_W):
                 if np.any(
-                    self.GaussianHeatmap.FORBID[
+                    self.GaussianHeatmap.forbid_mask_tf[
                         y * stride : (y + 1) * stride,
                         x * stride : (x + 1) * stride,
                     ]
@@ -3461,7 +3461,7 @@ class OversamplingVisualizer:
         for y in range(coarse_H):
             for x in range(coarse_W):
                 if np.any(
-                    self.GaussianHeatmap.FORBID[
+                    self.GaussianHeatmap.forbid_mask_tf[
                         y * stride : (y + 1) * stride,
                         x * stride : (x + 1) * stride,
                     ]
