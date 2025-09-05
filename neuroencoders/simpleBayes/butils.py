@@ -54,6 +54,9 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
     """
     if nbins is None:
         nbins = [45 for j in range(feature.shape[1])]
+    else:
+        if isinstance(nbins, int):
+            nbins = [nbins for j in range(feature.shape[1])]
     feature = feature.reshape(
         [feature.shape[0], -1]
     )  # make sure feature is of the shape [N,n]
@@ -68,7 +71,7 @@ def kdenD(feature, bandwidth, nbins=None, **kwargs):
             np.linspace(np.min(feature[:, i]), np.max(feature[:, i]), nbins[i])
             for i in range(feature.shape[1])
         ]
-        gridFeature = np.meshgrid(*lspace, indexing="ij")
+        gridFeature = np.meshgrid(*lspace, indexing="xy")
     xySample = np.vstack([gridFeature[i].ravel() for i in range(len(gridFeature))]).T
     kdeSKL = KernelDensity(kernel=kernel, bandwidth=bandwidth)
     kdeSKL.fit(feature)

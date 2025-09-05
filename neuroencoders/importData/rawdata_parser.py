@@ -410,13 +410,12 @@ def speed_filter(
                     .flatten()[-1]
                 )
                 print(f"with value: {np.exp(speedThresholdOG):.2f} cm/s")
-                try:
-                    speedOG = speedThresholdOG.astype(float)
-                except:
-                    speedOG = None
+                speedOG = speedThresholdOG.astype(float)
 
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                print(e)
                 speedOG = None
+                overWrite = True  # otherwise we never get to chose a new value
             if overWrite:
                 f.remove_node("/behavior", "speedMask")
             else:
