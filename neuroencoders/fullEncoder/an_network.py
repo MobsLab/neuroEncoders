@@ -19,6 +19,7 @@ import gc
 import matplotlib.pyplot as plt
 
 # Get common libraries
+import dill as pickle
 import numpy as np
 import pandas as pd
 import psutil
@@ -93,6 +94,22 @@ class LSTMandSpikeNetwork:
                 )
             else:
                 self.setup_dynamic_dense_loss(**kwargs)
+        else:
+            self.setup_training_data(**kwargs)
+            # just for sake of compatibility
+
+        if getattr(params, "GaussianHeatmap", False) or getattr(
+            params, "OversamplingResampling", False
+        ):
+            assert not params.denseweight, (
+                "Cannot use both GaussianHeatmap and DenseWeight"
+            )
+            if kwargs.get("behaviorData", None) is None:
+                warnings.warn(
+                    '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
+                )
+            else:
+                self.setup_gaussian_heatmap(**kwargs)
 
         self._build_model(**kwargs)
         # if kwargs.get("extractTransformer", False):
@@ -303,7 +320,9 @@ class LSTMandSpikeNetwork:
                 dtype=tf.float32,
                 name="feature_projection_transformer",
             )
-            self.ProjectionInMazeLayer = UMazeProjectionLayer()
+            self.ProjectionInMazeLayer = UMazeProjectionLayer(
+                grid_size=kwargs.get("grid_size", self.params.GaussianGridSize)
+            )
 
             # Gather the full model
             outputs = self.generate_model(**kwargs)
@@ -397,8 +416,12 @@ class LSTMandSpikeNetwork:
         output = self.lstmsNets[-3](output, mask=mymask)  # pooling
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
-        myoutputPos = self.denseFeatureOutput(x)
-        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+
+        if not getattr(self.params, "GaussianHeatmap", False):
+            myoutputPos = self.denseFeatureOutput(x)
+            myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+        else:
+            myoutputPos = self.GaussianHeatmap(x)
 
         # 5. Loss prediction
 
@@ -584,8 +607,14 @@ class LSTMandSpikeNetwork:
             # we assume myoutputPos is in cm x cm,
             # as self.truePos (modulo [0,1] normalization)
             # in ~cm2 as no loss is sqrt or log
+            if getattr(self.params, "GaussianHeatmap", False):
+                targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(self.truePos)
+                tempPosLoss = self.GaussianHeatmap.safe_kl_heatmap_loss(
+                    myoutputPos, targets_hw
+                )
 
-            tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
+            else:
+                tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
             # for main loss functions:
             # if loss function is mse
             # tempPosLoss is in cm2
@@ -600,10 +629,15 @@ class LSTMandSpikeNetwork:
                     tf.math.log(tf.math.reduce_mean(tempPosLoss)),
                     name="posLoss",  # log cm2 or ~ 2 * log cm
                 )
-            else:
+            elif not getattr(self.params, "GaussianHeatmap", False):
                 posLoss = tf.identity(
                     tf.math.reduce_mean(tf.math.sqrt(tempPosLoss)),
                     name="posLoss",  # cm
+                )
+            else:
+                posLoss = tf.identity(
+                    tf.math.reduce_mean(tempPosLoss),
+                    name="posLoss",  # unitless
                 )
 
             # remark: we need to also stop the gradient to propagate from posLoss to the network at the stage of
@@ -624,7 +658,7 @@ class LSTMandSpikeNetwork:
                     ),
                     name="uncertaintyLoss",
                 )  # log (log(cm2)^2) or ~ log(4) + log 2(log cm))
-            else:
+            elif not getattr(self.params, "GaussianHeatmap", False):
                 preUncertaintyLoss = tf.math.sqrt(
                     tf.math.sqrt(
                         tf.losses.mean_squared_error(
@@ -634,6 +668,14 @@ class LSTMandSpikeNetwork:
                 )  # now in cm
 
                 # back to cm to compute the uncertainty loss as the MSE between the predicted loss and the posLoss
+                uncertaintyLoss = tf.identity(
+                    tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
+                )
+            else:
+                # TODO: temperature scaling of the loss predictor for the GaussianHeatmap case
+                preUncertaintyLoss = tf.losses.mean_squared_error(
+                    outputPredLoss, tf.stop_gradient(tempPosLoss)
+                )
                 uncertaintyLoss = tf.identity(
                     tf.math.reduce_mean(preUncertaintyLoss, name="uncertaintyLoss")
                 )
@@ -692,7 +734,7 @@ class LSTMandSpikeNetwork:
                 loss={
                     # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
                     outputs[2].name.split("/Identity")[0]: pos_loss,
-                    # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
+                    # # tf_op_layer_ uncertainty loss (MSE between uncertainty and posLoss)
                     outputs[3].name.split("/Identity")[0]: uncertainty_loss,
                 },
             )
@@ -1004,6 +1046,147 @@ class LSTMandSpikeNetwork:
                 posFeature = behaviorData["Positions"]
             datasets[key] = datasets[key].map(nnUtils.import_true_pos(posFeature))
             datasets[key] = datasets[key].filter(filter_nan_pos)
+
+            # now that we have clean positions, we can resample if needed
+            if self.params.OversamplingResampling and key == "train":
+                print("Using oversampling resampling on the training set")
+
+                # FIX: make sure GaussianHeatmap is initialized - force it ?
+
+                GRID_H, GRID_W = (
+                    self.GaussianHeatmap.GRID_H,
+                    self.GaussianHeatmap.GRID_W,
+                )
+                # instead of oversampling on such tiny grid, we take a coarser grid mesh
+                stride = 3
+                coarse_H, coarse_W = GRID_H // stride, GRID_W // stride
+
+                @tf.autograph.experimental.do_not_convert
+                def map_bin_class(ex):
+                    return nnUtils.bin_class(
+                        ex,
+                        GRID_H,
+                        GRID_W,
+                        stride,
+                        self.GaussianHeatmap.forbid_mask_tf,
+                    )
+
+                # should not be useful as true positions are already allowed!
+                datasets[key] = datasets[key].filter(
+                    lambda ex: tf.greater_equal(map_bin_class(ex), 0)
+                )
+
+                positions = self.GaussianHeatmap.training_positions
+                # filter position by map_bin_class
+                bins = self.GaussianHeatmap.positions_to_bins(positions)
+
+                # Convert fine bins → coarse bins
+                # Map to coarse bins
+                # Step 1: compute fine x,y indices
+                x_fine = bins % GRID_W
+                y_fine = bins // GRID_W
+
+                # Step 2: downscale to coarse grid
+                x_coarse = x_fine // stride
+                y_coarse = y_fine // stride
+
+                # Step 3: coarse bin index
+                coarse_bins = y_coarse * coarse_W + x_coarse  # shape same as positions
+                counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
+                    np.float32
+                )
+
+                # Flatten FORBID for easy masking
+                # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
+                FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+                for y in range(coarse_H):
+                    for x in range(coarse_W):
+                        # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
+                        if np.any(
+                            self.GaussianHeatmap.forbid_mask_tf[
+                                y * stride : (y + 1) * stride,
+                                x * stride : (x + 1) * stride,
+                            ]
+                            > 0
+                        ):
+                            FORBID_coarse[y, x] = True
+                FORBID_flat = FORBID_coarse.flatten()
+                counts[FORBID_flat] = 0  # set forbidden bins to 0 count
+
+                allowed_bins = (counts > 0) & (~FORBID_flat)
+
+                # Normalize - empirical proba for each allowed bin
+                initial_dist = counts / np.maximum(1.0, counts.sum())
+                initial_dist = initial_dist[allowed_bins]
+                target_dist = np.ones(
+                    coarse_H * coarse_W,
+                    np.float32,
+                )
+                target_dist[FORBID_flat] = 0  # forbid forbidden bins
+                target_dist /= target_dist.sum()  # normalize to sum=1
+                target_dist = target_dist[allowed_bins]
+
+                # compute oversampling ratios
+                rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
+                rep_factors = np.minimum(
+                    rep_factors, 20.0
+                )  # clip to avoid extreme repeats
+                rep_factors_tf = tf.constant(rep_factors, tf.float32)
+
+                allowed_idx = np.where(allowed_bins)[0]
+                bin_to_allowed_idx = -np.ones_like(allowed_bins, dtype=int)
+                bin_to_allowed_idx[allowed_idx] = np.arange(len(allowed_idx))
+                # convert to tensor
+                allowed_bins = tf.constant(allowed_bins)
+                bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
+
+                # Map each example to repeated datasets
+                @tf.autograph.experimental.do_not_convert
+                def map_repeat(ex):
+                    mapped_cls = map_bin_class(ex)
+                    allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
+
+                    safe_idx = tf.maximum(allowed_idx_val, 0)  # -1 becomes 0
+                    # find idx in rep_factors (only allowed bins)
+                    repeats = tf.cast(
+                        tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
+                    )
+                    repeats = tf.where(allowed_idx_val >= 0, repeats, 0)
+                    return tf.cond(
+                        repeats > 0,
+                        lambda: tf.data.Dataset.from_tensors(ex).repeat(repeats),
+                        lambda: tf.data.Dataset.from_tensors(ex).take(0),
+                    )
+
+                datasets_before_oversampling = datasets[
+                    key
+                ]  # Save this before the oversampling block
+                datasets[key] = datasets[key].flat_map(map_repeat)
+                # shuffle after repeating to mix repeated samples
+                datasets[key] = datasets[key].shuffle(buffer_size=10000, seed=42)
+                datasets_after_oversampling = datasets[
+                    key
+                ]  # Save this before the oversampling block
+                from neuroencoders.importData.gui_elements import OversamplingVisualizer
+
+                if not os.path.exists(
+                    os.path.join(
+                        self.folderResult, str(windowSizeMS), "oversampling_effect.png"
+                    )
+                ):
+                    visualizer = OversamplingVisualizer(self.GaussianHeatmap)
+                    visualizer.visualize_oversampling_effect(
+                        datasets_before_oversampling,
+                        datasets_after_oversampling,
+                        stride=stride,  # Match your stride
+                        max_samples=20000,
+                        path=os.path.join(
+                            self.folderResult,
+                            str(windowSizeMS),
+                            "oversampling_effect.png",
+                        ),
+                    )
+
             datasets[key] = (
                 datasets[key].batch(self.params.batchSize, drop_remainder=True).cache()
             )
@@ -1040,7 +1223,7 @@ class LSTMandSpikeNetwork:
             # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
             # At each epoch, the shuffle order is different.
             datasets[key] = datasets[key].shuffle(
-                buffer_size=1000,
+                buffer_size=10000,
                 reshuffle_each_iteration=True,
             )  # were talking in number of batches here, not time (so it does not make sense to use params.nSteps)
             datasets[key] = datasets[key].prefetch(
@@ -1105,7 +1288,7 @@ class LSTMandSpikeNetwork:
                             e,
                         )
 
-            if loaded:
+            if loaded and nb_epochs_already_trained >= self.params.nEpochs / 2:
                 if not kwargs.get("fine_tune", False):
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue
@@ -1380,6 +1563,9 @@ class LSTMandSpikeNetwork:
         speedValue = kwargs.get("speedValue", None)
         phase = kwargs.get("phase", None)
         template = kwargs.get("template", None)
+        fit_temperature = kwargs.get("fit_temperature", False)
+        T_scaling = kwargs.get("T_scaling", None)
+        epochKey = kwargs.get("epochKey", "testEpochs")
 
         # TODO: change speed filter with custom speed
         # Create the folder
@@ -1424,7 +1610,7 @@ class LSTMandSpikeNetwork:
             )
         else:
             epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
+                behaviorData["positionTime"][:, 0], behaviorData["Times"][epochKey]
             )
         if useSpeedFilter:
             totMask = speedMask * epochMask
@@ -1518,9 +1704,6 @@ class LSTMandSpikeNetwork:
         print("INFERRING")
         outputTest = self.model.predict(dataset, verbose=1)
 
-        if self.target.lower() == "direction":
-            outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
-
         ### Post-inferring management
         print("gathering true feature")
 
@@ -1531,9 +1714,38 @@ class LSTMandSpikeNetwork:
         datasetPos = dataset.map(map_true_feature, num_parallel_calls=tf.data.AUTOTUNE)
         fullFeatureTrue = list(datasetPos.as_numpy_iterator())
         fullFeatureTrue = np.array(fullFeatureTrue)
+
+        if self.target.lower() == "direction":
+            outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
+
+        if getattr(self.params, "GaussianHeatmap", False):
+            output_logits = outputTest[0]  # logits with shape (batch, H, W)
+
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+            # small hack to have the right shape for featureTrue (batch, 2)
+            featureTrue = np.reshape(fullFeatureTrue, [xy.shape[0], xy.shape[-1]])
+            if fit_temperature:
+                val_targets = self.GaussianHeatmap.gaussian_heatmap_targets(featureTrue)
+                T_scaling = self.GaussianHeatmap.fit_temperature(
+                    output_logits, val_targets, iters=400
+                )
+                return T_scaling
+
+            if T_scaling is not None:
+                output_logits = output_logits / T_scaling
+
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+            # reconstruct outputTest tuple with xy pred instead of heatmap
+            outputTest = (xy.numpy(), outputTest[1], outputTest[2], outputTest[3])
+
         featureTrue = np.reshape(
             fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]]
         )
+
         print("gathering times of the centre in the time window")
 
         @tf.autograph.experimental.do_not_convert
@@ -1566,14 +1778,22 @@ class LSTMandSpikeNetwork:
         windowmaskSpeed = speedMask[
             posIndex
         ]  # the speedMask used in the table lookup call
-        posLoss = outputTest[2]
-        uncertaintyLoss = outputTest[3]
+        posLoss = (
+            outputTest[2].numpy() if hasattr(outputTest[2], "numpy") else outputTest[2]
+        )
+        uncertaintyLoss = (
+            outputTest[3].numpy() if hasattr(outputTest[3], "numpy") else outputTest[3]
+        )
 
         testOutput = {
-            "featurePred": outputTest[0],
+            "featurePred": outputTest[0].numpy()
+            if hasattr(outputTest[0], "numpy")
+            else outputTest[0],
             "featureTrue": featureTrue,
             "times": times,
-            "predLoss": outputTest[1],
+            "predLoss": outputTest[1].numpy()
+            if hasattr(outputTest[1], "numpy")
+            else outputTest[1],
             "posLoss": posLoss,
             "posIndex": posIndex,
             "speedMask": windowmaskSpeed,
@@ -1588,6 +1808,24 @@ class LSTMandSpikeNetwork:
             testOutput["projTruePos"] = projTruePos
             testOutput["linearPred"] = linearPred
             testOutput["linearTrue"] = linearTrue
+
+        if getattr(self.params, "GaussianHeatmap", False):
+            # add uncertainty and confidence metrics to output dict
+            testOutput["logits_hw"] = (
+                output_logits.numpy()
+                if hasattr(output_logits, "numpy")
+                else output_logits
+            )
+            testOutput["var_total"] = (
+                var_total.numpy() if hasattr(var_total, "numpy") else var_total
+            )
+            testOutput["Hn"] = Hn.numpy() if hasattr(Hn, "numpy") else Hn
+            testOutput["maxp"] = maxp.numpy() if hasattr(maxp, "numpy") else maxp
+            testOutput["T_scaling"] = (
+                (T_scaling.numpy() if hasattr(T_scaling, "numpy") else T_scaling)
+                if T_scaling is not None
+                else None
+            )
 
         # Save the results
         self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
@@ -1617,6 +1855,7 @@ class LSTMandSpikeNetwork:
         windowSizeDecoder = kwargs.get("windowSizeDecoder", None)
         windowSizeMS = kwargs.get("windowSizeMS", 36)
         isPredLoss = kwargs.get("isPredLoss", False)
+        T_scaling = kwargs.get("T_scaling", None)
 
         # Create the folder
         if windowSizeDecoder is None:
@@ -1731,6 +1970,16 @@ class LSTMandSpikeNetwork:
             if self.target.lower() == "direction":
                 output = (tf.cast(output[0] > 0.5, tf.int32),)
 
+            if getattr(self.params, "GaussianHeatmap", False):
+                output_logits = output[0]  # logits with shape (batch, H, W)
+                xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                    output_logits
+                )
+                if T_scaling is not None:
+                    output_logits = output_logits / T_scaling
+
+                output = (xy.numpy(), output[1], output[2], output[3])
+
             # Post-infer management
             print(f"gathering times of the centre in the time window for {sleepName}")
 
@@ -1775,6 +2024,14 @@ class LSTMandSpikeNetwork:
                 projPredPos, linearPred = l_function(output[0][:, :2])
                 predictions[sleepName]["projPred"] = projPredPos
                 predictions[sleepName]["linearPred"] = linearPred
+
+            if getattr(self.params, "GaussianHeatmap", False):
+                # add uncertainty and confidence metrics to output dict
+                predictions[sleepName]["logits_hw"] = output_logits
+                predictions[sleepName]["var_total"] = var_total
+                predictions[sleepName]["Hn"] = Hn
+                predictions[sleepName]["maxp"] = maxp
+                predictions[sleepName]["T_scaling"] = T_scaling
 
         # Save the results
         for key in predictions.keys():
@@ -2034,7 +2291,13 @@ class LSTMandSpikeNetwork:
             )
 
     def saveResults(
-        self, test_output, folderName=36, sleep=False, sleepName="Sleep", phase=None
+        self,
+        test_output,
+        folderName=36,
+        sleep=False,
+        sleepName="Sleep",
+        phase=None,
+        save_as_pickle=True,
     ):
         # Manage folders to save
         if sleep:
@@ -2096,21 +2359,38 @@ class LSTMandSpikeNetwork:
                 df = pd.DataFrame(test_output["linearTrue"])
                 df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
 
+        if save_as_pickle:
+            # save the whole results dictionary
+            filename = os.path.join(folderToSave, f"decoding_results{suffix}.pkl")
+            with open(filename, "wb") as f:
+                pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
+
+    def setup_training_data(self, **kwargs):
+        # Unpack kwargs
+        behaviorData = kwargs.get("behaviorData", None)
+
+        if behaviorData is None:
+            raise ValueError(
+                "You must provide behaviorData to setup dynamic dense loss."
+            )
+
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][totMask, :2]
+        self.training_data = full_training_true_positions
+
     def setup_dynamic_dense_loss(self, **kwargs):
         """
         Call this ONCE before training to fit the DenseWeight model
         """
         from neuroencoders.fullEncoder.nnUtils import DenseLossProcessor
 
-        # Unpack kwargs
-        behaviorData = kwargs.get("behaviorData", None)
         alpha = kwargs.get("alpha", 1.3)
         verbose = kwargs.get("verbose", False)
         self.dynamicdense_verbose = verbose
-        if behaviorData is None:
-            raise ValueError(
-                "You must provide behaviorData to setup dynamic dense loss."
-            )
 
         if verbose:
             print("Setting up Dynamic Dense Loss...")
@@ -2123,16 +2403,9 @@ class LSTMandSpikeNetwork:
             verbose=verbose,
             device=self.deviceName,
         )
-
-        speedMask = behaviorData["Times"]["speedFilter"]
-        epochMask = inEpochsMask(
-            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-        )
-        totMask = speedMask * epochMask
-        full_training_true_positions = behaviorData["Positions"][totMask, :2]
         # Fit DenseWeight model on full training dataset
-        self.dense_loss_processor.fit_dense_weight_model(full_training_true_positions)
-        self.training_data = full_training_true_positions
+        self.setup_training_data(**kwargs)
+        self.dense_loss_processor.fit_dense_weight_model(self.training_data)
         self.training_weights = self.dense_loss_processor.training_weights
         self.linearized_training = self.dense_loss_processor.linearized_training
 
@@ -2182,6 +2455,38 @@ class LSTMandSpikeNetwork:
                 print("✓ Applied Dynamic Dense Loss reweighting")
 
         return temp_pos_loss
+
+    def setup_gaussian_heatmap(self, **kwargs):
+        from neuroencoders.fullEncoder.nnUtils import GaussianHeatmapLayer
+
+        # Unpack kwargs
+        behaviorData = kwargs.get("behaviorData", None)
+        if behaviorData is None:
+            raise ValueError(
+                "You must provide behaviorData to setup Gaussian Heatmap Layer."
+            )
+        grid_size = kwargs.get("grid_size", self.params.GaussianGridSize)
+        eps = kwargs.get("eps", self.params.GaussianEps)
+        sigma = kwargs.get("sigma", self.params.GaussianSigma)
+        neg = kwargs.get("neg", self.params.GaussianNeg)
+        name = kwargs.get("name", "gaussian_heatmap")
+
+        print("Setting up GaussianHeatmapLayer...")
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][totMask, :2]
+
+        self.GaussianHeatmap = GaussianHeatmapLayer(
+            training_positions=full_training_true_positions,
+            grid_size=grid_size,
+            eps=eps,
+            sigma=sigma,
+            neg=neg,
+            name=name,
+        )
 
     def extract_cnn_model(self):
         """

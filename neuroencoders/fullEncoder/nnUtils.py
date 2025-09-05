@@ -4,8 +4,9 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 from denseweight import DenseWeight
+from scipy.ndimage import gaussian_filter
 
-from neuroencoders.utils.global_classes import MAZE_COORDS
+from neuroencoders.utils.global_classes import SpatialConstraintsMixin
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
@@ -1153,8 +1154,8 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         return cls(fitted_denseweight=fitted_dw, device=config.pop("device", "/cpu:0"))
 
 
-class UMazeProjectionLayer(tf.keras.layers.Layer):
-    def __init__(self, smoothing_factor=0.01, maze_params=None, **kwargs):
+class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
+    def __init__(self, grid_size, smoothing_factor=0.01, maze_params=None, **kwargs):
         """
         Differentiable projection layer that softly constrains (x,y) predictions
         to lie within a U-shaped maze.
@@ -1164,25 +1165,11 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
             smoothing_factor (float): Controls softness of constraints.
         """
         super().__init__(**kwargs)
-
-        # Default parameters based on your maze image
-        if maze_params is None or not isinstance(maze_params, dict):
-            if maze_params is not None:
-                maze_coords = np.array(maze_params)
-            else:
-                maze_coords = MAZE_COORDS
-            maze_params = {
-                "x_min": maze_coords[:, 0].min(),
-                "x_max": maze_coords[:, 0].max(),
-                "y_min": maze_coords[:, 1].min(),
-                "y_max": maze_coords[:, 1].max(),
-                "gap_x_min": maze_coords[-2, 0],
-                "gap_x_max": maze_coords[-4, 0],
-                "gap_y_min": maze_coords[-3, 1],
-            }
-        self.maze_params = maze_params
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
         self.smoothing_factor = smoothing_factor
-        print(f"UMazeProjectionLayer initialized with params: {self.maze_params}")
+        print(f"UMazeProjectionLayer initialized with params: {self.maze_params_dict}")
 
     def build(self, input_shape):
         super().build(input_shape)
@@ -1194,9 +1181,9 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
 
     def _project_points(self, x, y):
         dtype = x.dtype
-        gap_x_min = tf.constant(self.maze_params["gap_x_min"], dtype=dtype)
-        gap_x_max = tf.constant(self.maze_params["gap_x_max"], dtype=dtype)
-        gap_y_min = tf.constant(self.maze_params["gap_y_min"], dtype=dtype)
+        gap_x_min = tf.constant(self.maze_params_dict["gap_x_min"], dtype=dtype)
+        gap_x_max = tf.constant(self.maze_params_dict["gap_x_max"], dtype=dtype)
+        gap_y_min = tf.constant(self.maze_params_dict["gap_y_min"], dtype=dtype)
 
         # Define constraint lines
         lines = tf.stack(
@@ -1272,10 +1259,10 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
 
         # Clip to maze corridor
         x_final = tf.clip_by_value(
-            x_final, self.maze_params["x_min"], self.maze_params["x_max"]
+            x_final, self.maze_params_dict["x_min"], self.maze_params_dict["x_max"]
         )
         y_final = tf.clip_by_value(
-            y_final, self.maze_params["y_min"], self.maze_params["y_max"]
+            y_final, self.maze_params_dict["y_min"], self.maze_params_dict["y_max"]
         )
 
         return x_final, y_final
@@ -1284,92 +1271,11 @@ class UMazeProjectionLayer(tf.keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "maze_params": self.maze_params,
+                "maze_params": self.maze_params_dict,
                 "smoothing_factor": self.smoothing_factor,
             }
         )
         return config
-
-
-# Test the projection layer
-def test_projection_layer(
-    test_predictions=None, maze_params=None, smoothing_factor=0.01
-):
-    """Test the projection layer with sample data"""
-
-    # Create some test predictions (some in valid regions, some in gap)
-    if test_predictions is None:
-        test_predictions = tf.constant(
-            [
-                [0, 0],
-                [1, 1],
-                [0.2, 0.5],  # Valid - left arm
-                [0.8, 0.3],  # Valid - right arm
-                [0.65, 0.9],
-                [0.75, 0.9],
-                [0.5, 0.8],  # Invalid - in gap, should be projected
-                [0.5, 0.5],  # Invalid - in gap, should be projected
-                [0.1, 0.5],  # Invalid - in gap, should be projected
-                [0.45, 0.9],  # Invalid - in gap, should snap to left
-                [0.55, 0.7],  # Invalid - in gap, should snap to right
-            ]
-        )
-    else:
-        test_predictions = tf.constant(test_predictions, dtype=tf.float32)
-
-    # Create and test the layer
-    projection_layer = UMazeProjectionLayer(
-        smoothing_factor=smoothing_factor, maze_params=maze_params
-    )
-    projected = projection_layer(test_predictions)
-    error = tf.sqrt(tf.reduce_sum((test_predictions - projected) ** 2, axis=1))
-    mean_error = tf.reduce_mean(error)
-
-    print(f"Mean Error on {test_predictions.shape[0]} predictions: {mean_error:.4f}")
-
-    # plot the result
-    import matplotlib.pyplot as plt
-
-    if maze_params is None:
-        maze_params = MAZE_COORDS
-        print("Using default maze coordinates for plotting")
-
-    plt.figure()
-    plt.plot(maze_params[:, 0], maze_params[:, 1], "k-", label="Maze Path")
-    # plot by matching each point in test_predictions to its projected point
-    plt.scatter(
-        test_predictions[:, 0],
-        test_predictions[:, 1],
-        c="blue",
-        label="Original Predictions",
-        alpha=0.5,
-    )
-    plt.scatter(
-        projected[:, 0],
-        projected[:, 1],
-        c="red",
-        label="Projected Predictions",
-        alpha=0.5,
-    )
-    # now plot lines between pred and projected points
-    for i in range(max(len(test_predictions), 1000)):
-        plt.plot(
-            [test_predictions[i, 0], projected[i, 0]],
-            [test_predictions[i, 1], projected[i, 1]],
-            "r--",
-            alpha=0.3,
-        )
-
-    plt.xlim(-0.2, 1.2)
-    plt.ylim(-0.2, 1.2)
-    plt.title("UMaze Projection Layer Test")
-    plt.xlabel("X Coordinate")
-    plt.ylabel("Y Coordinate")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    return projected
 
 
 # Custom layer that combines feature_output and UMazeProjectionLayer
@@ -1389,7 +1295,7 @@ class FeatureOutputWithUMaze(tf.keras.layers.Layer):
         config.update(
             {
                 "orig_layer_config": self.orig.get_config(),
-                "maze_params": self.proj.maze_params,
+                "maze_params": self.proj.maze_params_dict,
             }
         )
         return config
@@ -1463,6 +1369,469 @@ def get_last_dense_layers_before_output(
 
     # Return the last k Dense layers in order of appearance
     return dense_layers[:k][::-1]  # reverse so closest layers come last
+
+
+class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
+    """
+    Layer that generates Gaussian heatmaps for given true positions.
+    This layer computes a Gaussian heatmap based on the true positions
+    """
+
+    def __init__(
+        self,
+        training_positions,
+        grid_size,
+        eps=1e-8,
+        sigma=0.03,
+        neg=-100,
+        maze_params=None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
+        self.training_positions = training_positions
+        self.grid_size = grid_size
+        self.sigma = sigma
+        self.EPS = eps
+
+        self.occ = self.occupancy_map(self.training_positions)
+        self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        self.NEG = tf.constant(neg, tf.float32)
+
+        # final dense layer to map features to logits
+        self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
+        self._validate_training_positions()
+
+    def _validate_training_positions(self):
+        """Validate that training positions don't fall in forbidden regions"""
+        bins = self.positions_to_bins(self.training_positions)
+        x_indices = bins % self.GRID_W
+        y_indices = bins // self.GRID_W
+        forbidden_positions = self.forbid_mask_np[y_indices, x_indices] > 0
+        # Filters out forbidden positions and warns user
+        n_forbidden = np.sum(forbidden_positions)
+        if n_forbidden > 0:
+            print(
+                f"Found {n_forbidden}/{len(self.training_positions)} training positions in forbidden regions"
+            )
+            self.training_positions = self.training_positions[~forbidden_positions]
+
+    def call(self, inputs):
+        """
+        Forward pass through the layer.
+
+        Args:
+            inputs: Tensor of shape [B, feature_dim]
+
+        Returns:
+            logits_hw: Tensor of shape [B, H, W] representing unnormalized logits
+        """
+        logits_flat = self.feature_to_logits_map(inputs)
+        logits_hw = tf.reshape(logits_flat, [-1, self.GRID_H, self.GRID_W])
+        return logits_hw
+
+    def gaussian_heatmap_targets(self, pos_batch, sigma=None):
+        if sigma is None:
+            sigma = self.sigma
+        # pos_batch: [B, 2] true [x,y] positions
+        X = self.Xc_tf[None]
+        Y = self.Yc_tf[None]
+
+        dx = pos_batch[:, 0][:, None, None] - X
+        dy = pos_batch[:, 1][:, None, None] - Y
+        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+
+        # Apply forbidden mask here too
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        gauss *= allowed_mask
+
+        # Safer normalization
+        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
+        gauss = tf.where(
+            gauss_sum > self.EPS,
+            gauss / (gauss_sum + self.EPS),
+            allowed_mask / tf.reduce_sum(allowed_mask),
+        )
+        return gauss
+
+    def positions_to_bins(self, pos):
+        xs = np.clip((pos[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
+        ys = np.clip((pos[:, 1] * self.GRID_H).astype(int), 0, self.GRID_H - 1)
+        return ys * self.GRID_W + xs
+
+    def occupancy_map(self, positions):
+        occ = np.zeros((self.GRID_H, self.GRID_W), np.float32)
+        idx = self.positions_to_bins(positions)
+        for k in idx:
+            occ[k // self.GRID_W, k % self.GRID_W] += 1
+
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        return occ * allowed_mask
+
+    def weight_map_from_occ(
+        self,
+        occ,
+        alpha=0.05,
+        eps=None,
+        smooth_sigma=1.0,
+        max_weight=15.0,
+        log_scale=False,
+        remove_isolated_zeros=True,
+    ):
+        """
+        Compute weight map from occupancy counts, ignoring forbidden and zero-count bins.
+
+        - Forbidden bins: always weight=0
+        - Zero-count bins: always weight=0 (ignored)
+        """
+        if eps is None:
+            eps = self.EPS
+
+        # Mask forbidden regions early
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        forbid_mask = ~allowed_mask.astype(bool)
+        occ = occ.copy()
+        occ[forbid_mask] = 0.0
+
+        # Optional smoothing (but ignore forbid bins!)
+        if smooth_sigma is not None and smooth_sigma > 0:
+            occ = gaussian_filter(occ, sigma=smooth_sigma, mode="constant")
+            occ[forbid_mask] = 0.0
+
+        if remove_isolated_zeros:
+            forbid_mask, occ = self.remove_isolated_zeros(forbid_mask, occ)
+
+        # Define weights only on bins with occupancy > 0
+        valid_mask = (occ > 0) & (~forbid_mask)
+
+        if log_scale:
+            inv = np.zeros_like(occ, dtype=np.float32)
+            inv[valid_mask] = 1.0 / np.log1p(occ[valid_mask] + eps)
+        else:
+            inv = np.zeros_like(occ, dtype=np.float32)
+            inv[valid_mask] = (1.0 / (occ[valid_mask] + eps)) ** alpha
+
+        # Normalize mean weight on valid bins ≈ 1
+        if np.any(valid_mask):
+            inv[valid_mask] /= np.mean(inv[valid_mask])
+
+        # Clip excessively large weights (only on valid bins)
+        if max_weight is not None:
+            inv[valid_mask] = np.clip(inv[valid_mask], 0.0, max_weight)
+
+        # Forbidden + zero-count bins remain 0
+        return tf.constant(inv, dtype=tf.float32)
+
+    def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+        probs_flat = tf.nn.softmax(logits_flat, axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
+        if wmap is None:
+            wmap = self.WMAP
+        weights = wmap[None] * (1.0 - self.forbid_mask_tf[None])
+        se = tf.square(probs - target_hw)
+        # normalize by sum of weights to keep scale stable
+        return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
+
+    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+
+        # Safety clipping to prevent extreme logits
+        logits_hw = tf.clip_by_value(logits_hw, -20.0, 20.0)
+
+        # Mask forbidden bins in logits
+        safe_neg = self.NEG
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, safe_neg, logits_hw)
+
+        # Get predicted probabilities (not log probabilities)
+        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Process targets with safety checks
+        P = target_hw * allowed_mask
+        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        safe_eps = tf.maximum(self.EPS, 1e-8)
+
+        P = tf.where(
+            P_sum > safe_eps,
+            P / (P_sum + safe_eps),
+            allowed_mask / tf.reduce_sum(allowed_mask),
+        )
+
+        # Ensure final normalization
+        P_sum_final = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        P = P / (P_sum_final + safe_eps)
+
+        # Define threshold for meaningful probability mass
+        threshold = safe_eps * 10
+
+        # CORRECTED KL FORMULA: Only compute KL where P has meaningful mass
+        # KL(P||Q) = sum P * log(P/Q) only where P > threshold
+        kl = tf.where(
+            P > threshold,
+            P * tf.math.log(P / tf.maximum(probs, safe_eps)),
+            0.0,  # Zero contribution where P is negligible
+        )
+
+        # Apply weighting
+        if wmap is not None:
+            weights = wmap[None]
+            valid_mask = tf.cast(weights > 0, tf.float32)
+            kl = kl * weights
+            loss_per_sample = tf.reduce_sum(kl, axis=[1, 1]) / (
+                tf.reduce_sum(weights * valid_mask) + safe_eps
+            )
+            final_loss = tf.reduce_mean(loss_per_sample)
+
+        else:
+            # Compute final loss with scaling to prevent gradient explosion
+            final_loss = tf.reduce_mean(tf.reduce_sum(kl, axis=[1, 2]))
+
+        if scale:
+            # Scale down the loss to prevent gradient explosion (divide by 100)
+            return final_loss / 100.0
+
+        return final_loss
+
+    def safe_kl_heatmap_loss(
+        self, logits_hw, target_hw, wmap=None, scale=False, return_batch=False
+    ):
+        """
+        Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
+        Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
+        """
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+
+        # Clip logits for stability and apply forbid mask
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+
+        # Normalize target distribution P
+        P = target_hw * allowed_mask
+        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
+        P = tf.where(
+            P_sum > self.EPS,
+            P / (P_sum + self.EPS),
+            allowed_mask / tf.reduce_sum(allowed_mask),
+        )
+        P = P / (tf.reduce_sum(P, axis=[1, 2], keepdims=True) + self.EPS)
+        P_flat = tf.reshape(P, [B, H * W])
+
+        # --- KL(P||Q) = cross_entropy(P,Q) - entropy(P) ---
+        ce = tf.nn.softmax_cross_entropy_with_logits(
+            labels=P_flat, logits=logits_flat
+        )  # shape [B]
+        entropy = -tf.reduce_sum(
+            P_flat * tf.math.log(P_flat + self.EPS), axis=-1
+        )  # [B]
+        kl = ce - entropy
+
+        # Apply weighting map if provided
+        if wmap is not None:
+            weights = wmap[None]
+            valid_mask = tf.cast(weights > 0, tf.float32)
+            wsum = tf.reduce_sum(weights * valid_mask) + self.EPS
+            kl = kl * (tf.reduce_sum(weights) / wsum)
+
+        if return_batch:
+            return kl  # [B]
+
+        loss = tf.reduce_mean(kl)
+
+        if scale:
+            loss /= 100.0
+
+        return loss
+
+    def decode_and_uncertainty(self, logits_hw, mode="argmax"):
+        """
+        Decode predicted heatmap into expected [x, y] position,
+        computing confidence/uncertainty metrics while excluding forbidden bins.
+
+        Args:
+            logits_hw: [B, H, W] unnormalized logits from the model
+            mode: 'expectation' or 'argmax' (default) for decoding method
+            #FIX: for now argmax is default since expectation can yield positions in forbidden region (eg predictions in both left and right arm, center of mass yields a point outside maze)
+
+        Returns:
+            mean_pos: [B, 2] expected position [ex, ey]
+            maxp: [B] max probability of any allowed bin
+            Hn: [B] normalized entropy over allowed bins (0-1)
+            var: [B] total variance (varx + vary)
+        """
+        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
+
+        # Mask forbidden bins in logits
+        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
+
+        # Flatten grid for softmax
+        logits_flat = tf.reshape(masked_logits, [B, H * W])
+        log_probs_flat = tf.nn.log_softmax(logits_flat, axis=-1)
+        probs_flat = tf.exp(log_probs_flat)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Explicitly zero forbidden bins
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        probs_allowed = probs * allowed_mask
+
+        # Renormalize over allowed bins
+        probs_allowed /= (
+            tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True) + self.EPS
+        )
+
+        if mode == "expectation":
+            # Expected position using only allowed bins
+            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
+        elif mode == "argmax":
+            # Argmax bin (always inside allowed region)
+            idx = tf.argmax(
+                tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
+            )
+            W64 = tf.cast(W, tf.int64)
+            iy = idx // W64  # for debugging
+            ix = idx % W64
+            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
+            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
+        else:
+            raise ValueError("mode must be 'expectation' or 'argmax'")
+
+        if mode == "expectation":
+            # Variance
+            varx = tf.reduce_sum(
+                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
+            )
+            vary = tf.reduce_sum(
+                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
+            )
+            var = varx + vary
+        else:
+            var = tf.zeros([B])
+
+        # Max probability
+        maxp = tf.reduce_max(tf.reshape(probs_allowed, [B, H * W]), axis=1)
+
+        # Entropy (only allowed bins)
+        probs_flat_allowed = tf.reshape(probs_allowed, [B, H * W])
+        H_entropy = -tf.reduce_sum(
+            probs_flat_allowed * tf.math.log(probs_flat_allowed + self.EPS), axis=1
+        )
+        n_allowed = tf.cast(tf.reduce_sum(allowed_mask), tf.float32)
+        Hn = H_entropy / tf.math.log(n_allowed + self.EPS)  # normalized entropy (0-1)
+        xy = tf.stack([ex, ey], axis=-1)
+        # xy = self.project_out_of_forbid(xy)
+
+        return xy, maxp, Hn, var
+
+    def project_out_of_forbid(self, xy, forbid_box=None):
+        """
+        Project decoded positions back into allowed space if inside forbidden region.
+
+        Args:
+            xy: [B, 2] predicted positions
+            forbid_box: (xmin, xmax, ymin, ymax)
+
+        Returns:
+            xy_projected: [B, 2] corrected positions
+        """
+        if forbid_box is None:
+            forbid_box = (
+                self.maze_params_dict["gap_x_min"],
+                self.maze_params_dict["gap_x_max"],
+                0.0,
+                self.maze_params_dict["gap_y_min"],
+            )
+        xmin, xmax, ymin, ymax = forbid_box
+        x, y = xy[:, 0], xy[:, 1]
+
+        inside_x = tf.logical_and(x >= xmin, x <= xmax)
+        inside_y = tf.logical_and(y >= ymin, y <= ymax)
+        inside = tf.logical_and(inside_x, inside_y)
+
+        # If inside forbidden region, snap to closest edge of the rectangle
+        x_clamped = tf.where(x < xmin, xmin, tf.where(x > xmax, xmax, x))
+        y_clamped = tf.where(y < ymin, ymin, tf.where(y > ymax, ymax, y))
+
+        # Distance to each edge
+        dx_left = tf.abs(x - xmin)
+        dx_right = tf.abs(x - xmax)
+        dy_bottom = tf.abs(y - ymin)
+        dy_top = tf.abs(y - ymax)
+
+        # Pick closest edge
+        move_x_left = dx_left <= tf.minimum(dx_right, tf.minimum(dy_bottom, dy_top))
+        move_x_right = dx_right <= tf.minimum(dx_left, tf.minimum(dy_bottom, dy_top))
+        move_y_bot = dy_bottom <= tf.minimum(dy_top, tf.minimum(dx_left, dx_right))
+        move_y_top = dy_top <= tf.minimum(dy_bottom, tf.minimum(dx_left, dx_right))
+
+        # New coordinates
+        new_x = tf.where(move_x_left, xmin, tf.where(move_x_right, xmax, x_clamped))
+        new_y = tf.where(move_y_bot, ymin, tf.where(move_y_top, ymax, y_clamped))
+
+        corrected = tf.stack([new_x, new_y], axis=-1)
+        return tf.where(inside[:, None], corrected, xy)
+
+    def fit_temperature(self, val_logits, val_targets, iters=200, lr=1e-2):
+        """
+        Fit temperature scaling parameter on validation set to minimize NLL.
+        Args:
+            val_logits: [N, H, W] logits from validation set
+            val_targets: [N, H, W] target heatmaps from validation set
+            iters: number of optimization steps
+            lr: learning rate for optimizer
+        Returns:
+            T_cal: fitted temperature scalar
+        """
+        logT = tf.Variable(0.0, trainable=True)
+        opt = tf.keras.optimizers.Adam(lr)
+        for step in range(iters):
+            with tf.GradientTape() as t:
+                scaled = val_logits / tf.exp(logT)
+                B, H, W = tf.shape(scaled)[0], tf.shape(scaled)[1], tf.shape(scaled)[2]
+                scaled_flat = tf.reshape(
+                    tf.where(self.forbid_mask_tf[None] > 0, self.NEG, scaled),
+                    [B, H * W],
+                )
+                logp_flat = tf.nn.log_softmax(scaled_flat, axis=-1)
+                logp = tf.reshape(logp_flat, [B, H, W])
+                nll = -tf.reduce_mean(tf.reduce_sum(val_targets * logp, [1, 2]))
+
+            opt.apply_gradients([(t.gradient(nll, logT), logT)])
+            if step % 50 == 0 or step == iters - 1:
+                print(
+                    f"Temp fit step {step}: NLL={nll.numpy():.4f}, T={tf.exp(logT).numpy():.4f}"
+                )
+        return float(tf.exp(logT).numpy())
+
+    # inference: probs = softmax(mask_logits / T_cal)
+
+
+def bin_class(example, GRID_W, GRID_H, stride, FORBID):
+    """
+    Map true (x,y) position to discrete bin class, -1 if forbidden.
+    """
+    pos = example["pos"]
+    x = tf.cast(tf.clip_by_value(pos[0] * GRID_W, 0, GRID_W - 1), tf.int32)
+    y = tf.cast(tf.clip_by_value(pos[1] * GRID_H, 0, GRID_H - 1), tf.int32)
+
+    # downscale to coarser grid
+    x_coarse = x // stride
+    y_coarse = y // stride
+
+    bin_cls = y * GRID_W + x
+    # Map forbidden bins to a dummy class that we'll exclude by giving it zero target mass:
+    coarse_W = GRID_W // stride
+    bin_cls = y_coarse * coarse_W + x_coarse  # ✅ FIXED: was y * GRID_W + x
+
+    # Check if forbidden
+    forbidden_here = tf.greater(FORBID[y_coarse * stride, x_coarse * stride], 0)
+    return tf.where(forbidden_here, -1, bin_cls)
 
 
 class DenseLossProcessor:

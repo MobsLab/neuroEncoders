@@ -13,7 +13,6 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from importData import epochs_management as ep
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LinearSegmentedColormap, NoNorm
 from matplotlib.legend_handler import HandlerTuple
@@ -28,6 +27,7 @@ from sklearn.metrics import (
     recall_score,
 )
 
+from neuroencoders.importData import epochs_management as ep
 from neuroencoders.utils.viz_params import (
     ALL_STIMS_COLOR,
     ALPHA_DELTA_LINE,
@@ -3230,6 +3230,293 @@ class ModelPerformanceVisualizer:
         print(f"True Negatives: {np.sum(self.true_negatives)}")
         print(f"False Positives: {np.sum(self.false_positives)}")
         print(f"False Negatives: {np.sum(self.false_negatives)}")
+
+
+class OversamplingVisualizer:
+    """Visualize the effect of oversampling resampling on spatial distribution"""
+
+    def __init__(self, gaussian_heatmap_model):
+        self.GaussianHeatmap = gaussian_heatmap_model
+        self.GRID_H = gaussian_heatmap_model.GRID_H
+        self.GRID_W = gaussian_heatmap_model.GRID_W
+
+    def extract_positions_from_dataset(self, dataset, max_samples=None):
+        """Extract positions from a tf.data.Dataset"""
+        positions = []
+        count = 0
+
+        for example in dataset:
+            if max_samples and count >= max_samples:
+                break
+
+            # Assuming 'pos' is the key for positions in your dataset dict
+            if isinstance(example, dict):
+                pos = example["pos"].numpy()
+            else:
+                # If dataset yields just positions
+                pos = example.numpy()
+
+            positions.append(pos)
+            count += 1
+
+        return np.array(positions)
+
+    def positions_to_coarse_bins(self, positions, stride=3):
+        """Convert positions to coarse bin indices (matching your oversampling logic)"""
+        # Convert positions to fine bins first
+        bins = self.GaussianHeatmap.positions_to_bins(positions)
+
+        # Convert to coarse bins (same logic as your code)
+        x_fine = bins % self.GRID_W
+        y_fine = bins // self.GRID_W
+        x_coarse = x_fine // stride
+        y_coarse = y_fine // stride
+
+        coarse_H, coarse_W = self.GRID_H // stride, self.GRID_W // stride
+        coarse_bins = y_coarse * coarse_W + x_coarse
+
+        return coarse_bins, coarse_H, coarse_W
+
+    def create_distribution_heatmap(self, positions, stride=3, title="Distribution"):
+        """Create a 2D heatmap showing spatial distribution of positions"""
+        coarse_bins, coarse_H, coarse_W = self.positions_to_coarse_bins(
+            positions, stride
+        )
+
+        # Count samples per bin
+        counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W)
+        distribution = counts.reshape(coarse_H, coarse_W)
+
+        return distribution
+
+    def visualize_oversampling_effect(
+        self,
+        dataset_before,
+        dataset_after,
+        stride=3,
+        max_samples=10000,
+        figsize=(15, 5),
+        path=None,
+    ):
+        """
+        Main visualization function comparing before/after oversampling
+
+        Args:
+            dataset_before: Dataset before oversampling
+            dataset_after: Dataset after oversampling
+            stride: Coarse grid stride (should match your oversampling)
+            max_samples: Max samples to analyze (for performance)
+            figsize: Figure size
+        """
+
+        print("Extracting positions from datasets...")
+
+        # Extract positions
+        pos_before = self.extract_positions_from_dataset(dataset_before, max_samples)
+        pos_after = self.extract_positions_from_dataset(dataset_after, max_samples)
+
+        print(f"Before oversampling: {len(pos_before)} samples")
+        print(f"After oversampling: {len(pos_after)} samples")
+        print(f"Oversampling ratio: {len(pos_after) / len(pos_before):.2f}x")
+
+        # Create distribution heatmaps
+        dist_before = self.create_distribution_heatmap(pos_before, stride)
+        dist_after = self.create_distribution_heatmap(pos_after, stride)
+
+        # Calculate difference
+        # Normalize by total samples for fair comparison
+        dist_before_norm = dist_before / dist_before.sum()
+        dist_after_norm = dist_after / dist_after.sum()
+        dist_diff = dist_after_norm - dist_before_norm
+
+        # Create forbidden mask for coarse grid
+        coarse_H, coarse_W = self.GRID_H // stride, self.GRID_W // stride
+        FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+        for y in range(coarse_H):
+            for x in range(coarse_W):
+                if np.any(
+                    self.GaussianHeatmap.forbid_mask_tf[
+                        y * stride : (y + 1) * stride,
+                        x * stride : (x + 1) * stride,
+                    ]
+                    > 0
+                ):
+                    FORBID_coarse[y, x] = True
+
+        # Create the visualization
+        fig, axes = plt.subplots(2, 3, figsize=figsize)
+
+        # Raw counts
+        im1 = axes[0, 0].imshow(dist_before, cmap="Blues", origin="lower")
+        axes[0, 0].set_title(f"Before Oversampling\n({len(pos_before)} samples)")
+        axes[0, 0].contour(FORBID_coarse, levels=[0.5], colors="red", linewidths=2)
+        plt.colorbar(im1, ax=axes[0, 0])
+
+        im2 = axes[0, 1].imshow(dist_after, cmap="Blues", origin="lower")
+        axes[0, 1].set_title(f"After Oversampling\n({len(pos_after)} samples)")
+        axes[0, 1].contour(FORBID_coarse, levels=[0.5], colors="red", linewidths=2)
+        plt.colorbar(im2, ax=axes[0, 1])
+
+        # Difference in raw counts
+        im3 = axes[0, 2].imshow(dist_after - dist_before, cmap="RdBu_r", origin="lower")
+        axes[0, 2].set_title("Difference (Raw Counts)")
+        axes[0, 2].contour(FORBID_coarse, levels=[0.5], colors="black", linewidths=2)
+        plt.colorbar(im3, ax=axes[0, 2])
+
+        # Normalized distributions
+        im4 = axes[1, 0].imshow(dist_before_norm, cmap="Blues", origin="lower")
+        axes[1, 0].set_title("Before (Normalized)")
+        axes[1, 0].contour(FORBID_coarse, levels=[0.5], colors="red", linewidths=2)
+        plt.colorbar(im4, ax=axes[1, 0])
+
+        im5 = axes[1, 1].imshow(dist_after_norm, cmap="Blues", origin="lower")
+        axes[1, 1].set_title("After (Normalized)")
+        axes[1, 1].contour(FORBID_coarse, levels=[0.5], colors="red", linewidths=2)
+        plt.colorbar(im5, ax=axes[1, 1])
+
+        # Normalized difference
+        vmax = np.abs(dist_diff).max()
+        im6 = axes[1, 2].imshow(
+            dist_diff, cmap="RdBu_r", origin="lower", vmin=-vmax, vmax=vmax
+        )
+        axes[1, 2].set_title("Difference (Normalized)")
+        axes[1, 2].contour(FORBID_coarse, levels=[0.5], colors="black", linewidths=2)
+        plt.colorbar(im6, ax=axes[1, 2])
+
+        plt.tight_layout()
+        if path is not None:
+            fig.savefig(path)
+            print(f"Saved figure to {path}")
+        plt.close(fig)
+
+        # Print statistics
+        self.print_distribution_stats(dist_before_norm, dist_after_norm, FORBID_coarse)
+
+        return dist_before, dist_after, dist_diff
+
+    def print_distribution_stats(self, dist_before, dist_after, forbid_mask):
+        """Print statistical comparison of distributions"""
+
+        # Only consider allowed bins
+        allowed_mask = ~forbid_mask
+
+        before_allowed = dist_before[allowed_mask]
+        after_allowed = dist_after[allowed_mask]
+
+        print("\n=== Distribution Statistics ===")
+        print(f"Allowed bins: {allowed_mask.sum()} / {forbid_mask.size}")
+        print(f"Forbidden bins: {forbid_mask.sum()} / {forbid_mask.size}")
+
+        print("\nBefore oversampling:")
+        print(f"  Min density: {before_allowed.min():.6f}")
+        print(f"  Max density: {before_allowed.max():.6f}")
+        print(f"  Mean density: {before_allowed.mean():.6f}")
+        print(f"  Std density: {before_allowed.std():.6f}")
+        print(f"  CV (std/mean): {before_allowed.std() / before_allowed.mean():.4f}")
+
+        print("\nAfter oversampling:")
+        print(f"  Min density: {after_allowed.min():.6f}")
+        print(f"  Max density: {after_allowed.max():.6f}")
+        print(f"  Mean density: {after_allowed.mean():.6f}")
+        print(f"  Std density: {after_allowed.std():.6f}")
+        print(f"  CV (std/mean): {after_allowed.std() / after_allowed.mean():.4f}")
+
+        # Uniformity metrics
+        uniform_target = 1.0 / allowed_mask.sum()  # Perfect uniform density
+
+        kl_before = self.kl_divergence_to_uniform(before_allowed, uniform_target)
+        kl_after = self.kl_divergence_to_uniform(after_allowed, uniform_target)
+
+        print("\nUniformity (KL divergence from uniform):")
+        print(f"  Before: {kl_before:.6f}")
+        print(f"  After: {kl_after:.6f}")
+        print(
+            f"  Improvement: {kl_before - kl_after:.6f} {'✓' if kl_after < kl_before else '✗'}"
+        )
+
+    def kl_divergence_to_uniform(self, distribution, uniform_target):
+        """Compute KL divergence from distribution to uniform"""
+        eps = 1e-8
+        distribution = np.clip(distribution, eps, 1.0)
+        return np.sum(distribution * np.log(distribution / (uniform_target + eps)))
+
+    def plot_histogram_comparison(
+        self, dataset_before, dataset_after, stride=3, max_samples=10000
+    ):
+        """Plot histograms of bin occupancy"""
+
+        pos_before = self.extract_positions_from_dataset(dataset_before, max_samples)
+        pos_after = self.extract_positions_from_dataset(dataset_after, max_samples)
+
+        coarse_bins_before, coarse_H, coarse_W = self.positions_to_coarse_bins(
+            pos_before, stride
+        )
+        coarse_bins_after, _, _ = self.positions_to_coarse_bins(pos_after, stride)
+
+        counts_before = np.bincount(coarse_bins_before, minlength=coarse_H * coarse_W)
+        counts_after = np.bincount(coarse_bins_after, minlength=coarse_H * coarse_W)
+
+        # Filter out forbidden bins
+        FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+        for y in range(coarse_H):
+            for x in range(coarse_W):
+                if np.any(
+                    self.GaussianHeatmap.forbid_mask_tf[
+                        y * stride : (y + 1) * stride,
+                        x * stride : (x + 1) * stride,
+                    ]
+                    > 0
+                ):
+                    FORBID_coarse[y, x] = True
+
+        allowed_mask = ~FORBID_coarse.flatten()
+        counts_before_allowed = counts_before[allowed_mask]
+        counts_after_allowed = counts_after[allowed_mask]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        ax1.hist(
+            counts_before_allowed, bins=30, alpha=0.7, label="Before", color="blue"
+        )
+        ax1.hist(counts_after_allowed, bins=30, alpha=0.7, label="After", color="red")
+        ax1.set_xlabel("Samples per bin")
+        ax1.set_ylabel("Number of bins")
+        ax1.set_title("Histogram of Bin Occupancy")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Box plot comparison
+        data_to_plot = [counts_before_allowed, counts_after_allowed]
+        ax2.boxplot(data_to_plot, labels=["Before", "After"])
+        ax2.set_ylabel("Samples per bin")
+        ax2.set_title("Box Plot Comparison")
+        ax2.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+
+# Usage example:
+"""
+# Initialize the visualizer
+visualizer = OversamplingVisualizer(your_gaussian_heatmap_model)
+
+# Compare before and after oversampling
+# You'll need to create/save your datasets before and after the oversampling step
+dist_before, dist_after, diff = visualizer.visualize_oversampling_effect(
+    dataset_before=train_dataset_before_oversampling,
+    dataset_after=train_dataset_after_oversampling,
+    stride=3,  # Should match your oversampling stride
+    max_samples=10000
+)
+
+# Additional histogram comparison
+visualizer.plot_histogram_comparison(
+    dataset_before_oversampling,
+    dataset_after_oversampling,
+    stride=3
+)
+"""
 
 
 def lighten_color(color, amount=0.5):

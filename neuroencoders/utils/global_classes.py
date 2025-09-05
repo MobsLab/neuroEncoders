@@ -11,6 +11,7 @@ import json
 import os
 import os.path
 from datetime import date
+from typing import Dict, Tuple
 from warnings import warn
 
 import dill as pickle
@@ -21,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tables
+import tensorflow as tf
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
@@ -1370,6 +1372,7 @@ class Params:
         self.nSteps = int(10000 * 0.036 / self.windowSize)  # used in the encoder
 
         ### from units encoder params
+        # MOVED TO DECODE CONFIG
         self.validCluWindow = 0.0005
         self.kernel = "epanechnikov"  # is not connected
         self.bandwidth = 0.1
@@ -1410,7 +1413,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0003]
+            "learningRates", [0.0004]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
@@ -1450,6 +1453,20 @@ class Params:
             "denseweight", True
         )  # dense weight loss for dataset imbalance
         self.denseweightAlpha = 0.8
+
+        self.mutual_info_method = kwargs.pop(
+            "mutual_info_method", "shannon"
+        )  # "skaggs" or "I_spike" or shannon or I_sec
+
+        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
+        self.GaussianSigma = kwargs.pop(
+            "GaussianSigma", 0.025
+        )  # 1/44 ~= 0.023, so it should cover ~3 bins
+        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
+        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
+
+        self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
 
         # self.transform = "log"  # "log" or "sqrt" or None
         self.transform_w_log = kwargs.pop(
@@ -1552,6 +1569,132 @@ class NumpyEncoder(json.JSONEncoder):
         if isinstance(obj, pd.DataFrame) or isinstance(obj, pd.Series):
             return obj.to_dict()
         return super().default(obj)
+
+
+class SpatialConstraintsMixin:
+    """
+    Mixin class to provide unified spatial constraints for both Bayesian and ANN decoders
+    """
+
+    def __init__(self, grid_size=(45, 45), maze_params=None, **kwargs):
+        self.grid_size = grid_size
+        self.GRID_H, self.GRID_W = grid_size
+
+        # Create coordinate grids (both numpy and tensorflow versions)
+        self._setup_coordinate_grids()
+
+        # Setup spatial constraints
+        self.maze_params_dict = self._extract_maze_boundaries(maze_params)
+        self.forbid_mask_np, self.forbid_mask_tf = self._create_spatial_masks()
+
+    def _setup_coordinate_grids(self):
+        """Create coordinate grids for both numpy and tensorflow"""
+        # Numpy version (for Bayesian decoder)
+        x_cent_np = np.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
+        y_cent_np = np.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
+        self.Xc_np, self.Yc_np = np.meshgrid(x_cent_np, y_cent_np, indexing="xy")
+
+        # TensorFlow version (for ANN decoder)
+        x_cent_tf = tf.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
+        y_cent_tf = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
+        self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
+
+    def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
+        """
+        Extract maze boundaries from provided parameters or default coordinates.
+        Args:
+            maze_params (dict or array-like): If dict, should contain keys:
+                'x_min', 'x_max', 'y_min', 'y_max', 'gap_x_min', 'gap_x_max', 'gap_y_min'.
+                If array-like, should be an array of shape (N, 2) with (x, y) coordinates.
+                If None, defaults to predefined MAZE_COORDS.
+        Returns:
+            dict: Extracted maze boundaries.
+        """
+
+        if maze_params is None or not isinstance(maze_params, dict):
+            if maze_params is not None:
+                maze_coords = np.array(maze_params)
+            else:
+                maze_coords = MAZE_COORDS
+            maze_params = {
+                "x_min": maze_coords[:, 0].min(),
+                "x_max": maze_coords[:, 0].max(),
+                "y_min": maze_coords[:, 1].min(),
+                "y_max": maze_coords[:, 1].max(),
+                "gap_x_min": maze_coords[-2, 0],
+                "gap_x_max": maze_coords[-4, 0],
+                "gap_y_min": maze_coords[-3, 1],
+            }
+        return maze_params
+
+    def _create_spatial_masks(self) -> Tuple[np.ndarray, tf.Tensor]:
+        """Create spatial constraint masks for both numpy and tensorflow"""
+        # Create forbidden region mask
+        # Note: Using your original logic where FORBID=1 means forbidden
+
+        # Numpy version
+        forbid_np = (
+            (self.Xc_np > self.maze_params_dict["gap_x_min"])
+            & (self.Xc_np < self.maze_params_dict["gap_x_max"])
+            & (self.Yc_np <= self.maze_params_dict["gap_y_min"])
+        ).astype(np.float32)
+
+        # TensorFlow version
+        forbid_tf = tf.cast(
+            (self.Xc_tf > self.maze_params_dict["gap_x_min"])
+            & (self.Xc_tf < self.maze_params_dict["gap_x_max"])
+            & (self.Yc_tf <= self.maze_params_dict["gap_y_min"]),
+            tf.float32,
+        )
+
+        return forbid_np, forbid_tf
+
+    def get_allowed_mask(self, use_tensorflow=False):
+        """Get allowed mask"""
+        if use_tensorflow:
+            return 1.0 - self.forbid_mask_tf
+        else:
+            return 1.0 - self.forbid_mask_np
+
+    def remove_isolated_zeros(self, forbid_mask, occ):
+        # Apply same zero-count bin removal logic as bayes occupation map
+        # Identify zero-count bins in allowed regions
+        allowed_mask = ~forbid_mask
+        zero_threshold = (
+            np.mean(occ[allowed_mask & (occ > 0)]) * 0.1
+            if np.any(allowed_mask & (occ > 0))
+            else 0
+        )
+
+        # identiy problematic zones
+        print(
+            f"Occupation map: {np.sum(occ == 0)} zero-occupation bins, {np.sum(occ[allowed_mask.astype(bool)] < zero_threshold)} low-density bins (below {zero_threshold:.4e}) in allowed zones."
+        )
+        low_density = (occ < zero_threshold) & allowed_mask
+
+        # Expand forbidden zones by 1 pixel
+        from scipy import ndimage
+
+        structure = ndimage.generate_binary_structure(2, 2)  # 8-connectivity
+        expanded_forbidden = ndimage.binary_dilation(
+            forbid_mask, structure=structure, iterations=5
+        )
+
+        # Remove low-density bins adjacent to forbidden zones
+        problematic_bins = low_density & expanded_forbidden
+        forbid_mask = forbid_mask | problematic_bins  # Update forbidden mask
+        occ[problematic_bins] = 0.0
+
+        print(
+            f"Weight map: Removed {np.sum(problematic_bins)} low-density bins adjacent to forbidden zones"
+        )
+
+        self.update_allowed_mask(forbid_mask)
+        return forbid_mask, occ
+
+    def update_allowed_mask(self, forbid_mask):
+        self.forbid_mask_np = forbid_mask.astype(np.float32)  # dynamic update for ANN
+        self.forbid_mask_tf = tf.cast(forbid_mask, tf.float32)  # dynamic update for ANN
 
 
 def smooth_signal(signal, N):
