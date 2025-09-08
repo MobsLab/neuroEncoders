@@ -31,7 +31,7 @@ mice_nb = [
     "M1162_MFB",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "smallSigma_GaussianHeatMap_LinearLoss"
+nameExp = "NO_PREDLOSS_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_ann = True
 target = "pos"

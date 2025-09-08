@@ -81,7 +81,7 @@ def print_results(
     suffix = f"_{phase}" if phase is not None else ""
     # Get data
     if typeDec == "NN":
-        predLossName = "predLoss"
+        predLossName = "entropy"
         pos = pd.read_csv(
             os.path.expanduser(
                 os.path.join(dir, str(windowSizeMS), f"featureTrue{suffix}.csv")
@@ -123,7 +123,7 @@ def print_results(
         qControl = np.squeeze(
             pd.read_csv(
                 os.path.expanduser(
-                    os.path.join(dir, str(windowSizeMS), f"lossPred{suffix}.csv")
+                    os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
                 )
             ).values[:, 1:]
         )
@@ -306,7 +306,10 @@ def print_results(
     )
     # Calculate 1d and 2d errors
     error = np.array(
-        [np.linalg.norm(inferring[i, :] - pos[i, :]) for i in range(inferring.shape[0])]
+        [
+            np.linalg.norm(inferring[i, :] - pos[i, :])
+            for i in range(max(inferring.shape[0], 2))
+        ]
     )  # eucledian distance
     if target.lower() != "pos":
         warnings.warn(
@@ -329,7 +332,7 @@ def print_results(
         skip_fig_interror = False
 
     if linear:
-        if target.lower() == "pos":
+        if "pos" in target.lower():
             lError = np.array(
                 [np.abs((linferring[n] - lpos[n])) for n in range(linferring.shape[0])]
             )
@@ -939,6 +942,13 @@ def fig_interror(
         warnings.warn(
             "useSpeedMask is True, so will be using speedMask to select the windows in fig_interror."
         )
+
+    if dimOutput > 2:
+        warn(
+            f"dimOutput should be 1 or 2 but is {dimOutput}, setting to 2 and plotting first 2 dimensions only."
+        )
+        dimOutput = 2
+        pos = pos[:, :2]
 
     suffix = f"_{phase}" if phase is not None else ""
     suffix = f"{suffix}_{name}" if name is not None else suffix

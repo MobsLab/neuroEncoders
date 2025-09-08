@@ -172,21 +172,39 @@ class PaperFigures:
                         )
                     ).flatten()
                 )
-                lossPred.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"lossPred{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    ).flatten()
-                )
+                try:
+                    lossPred.append(
+                        np.squeeze(
+                            np.array(
+                                pd.read_csv(
+                                    os.path.join(
+                                        self.projectPath.experimentPath,
+                                        "results",
+                                        str(ws),
+                                        f"lossPred{suffix}.csv",
+                                    )
+                                ).values[:, 1:],
+                                dtype=np.float32,
+                            )
+                        ).flatten()
+                    )
+                except FileNotFoundError:
+                    print("Adding entropy as lossPred")
+                    lossPred.append(
+                        np.squeeze(
+                            np.array(
+                                pd.read_csv(
+                                    os.path.join(
+                                        self.projectPath.experimentPath,
+                                        "results",
+                                        str(ws),
+                                        f"Hn{suffix}.csv",
+                                    )
+                                ).values[:, 1:],
+                                dtype=np.float32,
+                            )
+                        ).flatten()
+                    )
                 speedMask.append(
                     np.squeeze(
                         np.array(
