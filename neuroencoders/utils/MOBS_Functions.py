@@ -817,6 +817,8 @@ class Mouse_Results(Params, PaperFigures):
                     windowSize=int(winMS) / 1000,
                     **kwargs,
                 )
+                # we need that before loading params to have the right target
+                self.data_helper[winMS].get_true_target(in_place=True, **kwargs)
                 self.parameters[winMS] = Params(
                     self.data_helper[winMS],
                     windowSize=int(winMS) / 1000,

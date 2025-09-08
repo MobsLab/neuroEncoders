@@ -13,6 +13,17 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import matplotlib as mplt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle
+from neuroencoders.importData.gui_elements import (
+    plot_circular_comparison,
+    circular_mean_error,
+    create_polar_colorbar,
+)
 
 EC = np.array([45, 39])  # range of x and y in cm
 EC2 = np.array([44, 38])  # range of x and y in cm
@@ -268,7 +279,7 @@ def print_results(
     temp = qControltmp.argsort(axis=0)
     if typeDec == "NN":
         thresh = np.squeeze(qControltmp[temp[int(len(temp) * lossSelection)]])
-        selection = np.squeeze(qControl <= thresh)
+        selection = np.squeeze(qControl <= thresh)  # even with entropy, lower is better
     elif typeDec == "bayes":
         thresh = qControltmp[temp[int(len(temp) * (1 - lossSelection))]]
         selection = np.squeeze(qControl >= thresh)
@@ -305,10 +316,11 @@ def print_results(
         ")",
     )
     # Calculate 1d and 2d errors
+    num_cols = min(inferring.shape[1], 2)
     error = np.array(
         [
-            np.linalg.norm(inferring[i, :] - pos[i, :])
-            for i in range(max(inferring.shape[0], 2))
+            np.linalg.norm(inferring[i, :num_cols] - pos[i, :num_cols])
+            for i in range(inferring.shape[0])
         ]
     )  # eucledian distance
     if target.lower() != "pos":
@@ -338,7 +350,7 @@ def print_results(
             )
             print(
                 "mean linear error:",
-                np.nanmean(lError),
+                np.nanmean(lError) * maxPos,
                 "| selected error:",
                 np.nanmean(lError[frames]) * maxPos,
             )
@@ -415,19 +427,23 @@ def print_results(
         )
     else:
         warnings.warn("qControl is all zeros, not plotting the interactive figure")
-    overview_fig(
-        pos=pos,
-        inferring=inferring,
-        selection=selection,
-        outfolder=outdir,
-        dimOutput=dimOutput,
-        show=block,
-        speedMask=speedMask,
-        training_data=training_data,
-        posIndex=posIndex,
-        timeStepsPred=timeStepsPred,
-        **kwargs,
-    )
+    dimOutputs = [dimOutput]
+    if target.lower() == "posandheaddirectionandthigmo" and dimOutput == 4:
+        dimOutputs = [dimOutput, 2]
+    for dimOut in dimOutputs:
+        overview_fig(
+            pos=pos,
+            inferring=inferring,
+            selection=selection,
+            outfolder=outdir,
+            dimOutput=dimOut,
+            show=block,
+            speedMask=speedMask,
+            training_data=training_data,
+            posIndex=posIndex,
+            timeStepsPred=timeStepsPred,
+            **kwargs,
+        )
 
     if not skip_linear_plots:
         if training_data is not None and training_data.shape[1] == 2:
@@ -517,16 +533,16 @@ def overview_fig(
     - inferring: the inferred position of the mouse
     - selection: the selected windows
     - outfolder: the folder where to save the figure
-    - dimOutput: the dimension of the output (1 or 2)
+    - dimOutput: the dimension of the output (1, 2, or 4 for PosAndHeadDirectionAndThigmo)
     - show: if True, the figure will be shown (default: True)
     - typeDec: the type of decoder used (NN or bayes)
     - force: if True, the figure will be re-computed even if it already exists
     - with_hist_distribution: if True, the histogram distribution of the error will be plotted
     - speedMask : a mask to select the speed of the mouse (optional, if not provided, all data will be used)
     - **kwargs: additional arguments that can be passed to the function, such as:
-        - target: the target of the decoding (pos or lin or linAndThigmo)
+        - target: the target of the decoding (pos or lin or linAndThigmo or PosAndHeadDirectionAndThigmo)
         - phase: the phase of the experiment (e.g. "pre", "cond", "post")
-        - /!\ training_data: the data used for training the decoder (optional for histogram) /!\ Should be already speed masked!!!
+        - training_data: the data used for training the decoder (optional for histogram)
         - posIndex: the index of the position in the original data (optional, used for plotting)
         - timeStepsPred: the time steps of the predictions (optional, used for plotting)
 
@@ -557,9 +573,11 @@ def overview_fig(
         and not force
     ):
         return
+
+    # Define dimension names based on target
     if target.lower() == "pos":
         dim_names = ["X", "Y", "Linear Position"]
-    elif target.lower() == "lin":  # should not happend with dimOutput = 2
+    elif target.lower() == "lin":
         dim_names = ["Linear Position", "Thigmo", "Linear Position"]
     elif target.lower() == "linandthigmo":
         dim_names = ["Linear Position", "Thigmo", "Linear Position"]
@@ -567,40 +585,224 @@ def overview_fig(
         dim_names = ["Linear Position", "Direction", "Linear Position"]
     elif target.lower() == "direction":
         dim_names = ["Direction"]
+    elif target.lower() == "posandheaddirectionandthigmo":
+        if dimOutput != 4:
+            dim_names = ["X", "Y", "Linear Position", "Distance to Wall"]
+        else:
+            dim_names = ["X", "Y", "Head Direction", "Distance to Wall"]
+
     else:
         dim_names = ["position 0", "position 1", "Linear Position"]
 
     pos_to_show_on_histograms = training_data if training_data is not None else pos
 
-    if (
-        training_data is not None
-    ):  # we ASSUME that training_data is already speed masked
+    if training_data is not None:
         speedMask_on_histograms = np.ones(
             shape=pos_to_show_on_histograms.shape[0], dtype=bool
         )
-    elif (
-        speedMask is not None
-    ):  # speedMask is provided and has to be applied to the tested positions histograms
+    elif speedMask is not None:
         speedMask_on_histograms = speedMask
-    else:  # no speedMask provided, so we use all data
+    else:
         speedMask_on_histograms = np.ones(
             shape=pos_to_show_on_histograms.shape[0], dtype=bool
         )
 
     speedMask = (
         speedMask if speedMask is not None else np.ones(shape=pos.shape[0], dtype=bool)
-    )  # this is the speedMask used for the overview figure, it should be the same as the one used for the inferring and pos data.
+    )
 
     shown = "speedMask on test" if training_data is None else "speedMask on fullTrain"
 
     if useSpeedMask:
-        selection = np.logical_and(
-            selection, speedMask
-        )  # should already be the case, but just to be sure
+        selection = np.logical_and(selection, speedMask)
     else:
         shown = "all test data, no speedMask"
 
-    if dimOutput == 2:
+    # Main plotting logic
+    if target.lower() == "posandheaddirectionandthigmo" and dimOutput == 4:
+        # Create comprehensive figure with multiple subplots
+        fig = plt.figure(figsize=(20, 12))
+
+        # Main (x,y) scatter plot with head direction coloring
+        ax_main = plt.subplot2grid((3, 4), (0, 0), colspan=2, rowspan=2)
+
+        # Use head direction for coloring
+        # rescale head direction to good radians in [-pi, pi]
+        inferring[:, 2] = ((inferring[:, 2] + np.pi) % (2 * np.pi)) - np.pi
+        scatter = ax_main.scatter(
+            inferring[selection, 0],
+            inferring[selection, 1],
+            c=inferring[selection, 2],
+            cmap="hsv",
+            s=30,
+            alpha=0.7,
+            label="Predicted positions",
+        )
+
+        # Add colorbar for head direction
+        cbar = create_polar_colorbar(fig, scatter, ax_main.get_position())
+        # cbar = plt.colorbar(scatter, ax=ax_main)
+        # cbar.set_label("Head Direction (radians)", rotation=270, labelpad=15)
+
+        ax_main.set_xlabel("X Position")
+        ax_main.set_ylabel("Y Position")
+        ax_main.set_title("Position Predictions Colored by Head Direction")
+        ax_main.legend()
+        ax_main.grid(True, alpha=0.3)
+
+        # Circular plot for head direction
+        ax_circular = plt.subplot2grid((3, 4), (0, 2))
+        plot_circular_comparison(
+            ax_circular,
+            inferring[selection, 2],
+            pos[selection, 2],
+            "Head Direction Comparison",
+        )
+
+        # Distance to wall time series
+        ax_dist = plt.subplot2grid((3, 4), (0, 3))
+        ax_dist.plot(
+            timeStepsPred[selection],
+            inferring[selection, 3],
+            "r-",
+            alpha=0.7,
+            label="Predicted distance",
+        )
+        ax_dist.plot(
+            timeStepsPred[selection],
+            pos[selection, 3],
+            "b-",
+            alpha=0.7,
+            label="True distance",
+        )
+        ax_dist.set_xlabel("Time")
+        ax_dist.set_ylabel("Distance to Wall")
+        ax_dist.set_title("Distance to Wall Over Time")
+        ax_dist.legend()
+        ax_dist.grid(True, alpha=0.3)
+
+        # Time series for X and Y positions
+        ax_x_time = plt.subplot2grid((3, 4), (1, 2))
+        ax_x_time.plot(
+            timeStepsPred[selection],
+            inferring[selection, 0],
+            "r-",
+            alpha=0.7,
+            label="Predicted X",
+        )
+        ax_x_time.plot(
+            timeStepsPred[selection], pos[selection, 0], "b-", alpha=0.7, label="True X"
+        )
+        ax_x_time.set_xlabel("Time")
+        ax_x_time.set_ylabel("X Position")
+        ax_x_time.set_title("X Position Over Time")
+        ax_x_time.legend()
+        ax_x_time.grid(True, alpha=0.3)
+
+        ax_y_time = plt.subplot2grid((3, 4), (1, 3))
+        ax_y_time.plot(
+            timeStepsPred[selection],
+            inferring[selection, 1],
+            "r-",
+            alpha=0.7,
+            label="Predicted Y",
+        )
+        ax_y_time.plot(
+            timeStepsPred[selection], pos[selection, 1], "b-", alpha=0.7, label="True Y"
+        )
+        ax_y_time.set_xlabel("Time")
+        ax_y_time.set_ylabel("Y Position")
+        ax_y_time.set_title("Y Position Over Time")
+        ax_y_time.legend()
+        ax_y_time.grid(True, alpha=0.3)
+
+        # Error analysis plots
+        ax_pos_error = plt.subplot2grid((3, 4), (2, 0))
+        pos_error = np.sqrt(
+            (inferring[selection, 0] - pos[selection, 0]) ** 2
+            + (inferring[selection, 1] - pos[selection, 1]) ** 2
+        )
+        ax_pos_error.hist(pos_error, bins=30, alpha=0.7, color="purple")
+        ax_pos_error.set_xlabel("Position Error")
+        ax_pos_error.set_ylabel("Frequency")
+        ax_pos_error.set_title("Position Error Distribution")
+        ax_pos_error.grid(True, alpha=0.3)
+
+        ax_dir_error = plt.subplot2grid((3, 4), (2, 1))
+        dir_error = np.abs(
+            circular_mean_error(inferring[selection, 2], pos[selection, 2])
+        )
+        ax_dir_error.hist(dir_error, bins=30, alpha=0.7, color="orange")
+        ax_dir_error.set_xlabel("Head Direction Error (radians)")
+        ax_dir_error.set_ylabel("Frequency")
+        ax_dir_error.set_title("Head Direction Error Distribution")
+        ax_dir_error.grid(True, alpha=0.3)
+
+        ax_dist_error = plt.subplot2grid((3, 4), (2, 2))
+        dist_error = np.abs(inferring[selection, 3] - pos[selection, 3])
+        ax_dist_error.hist(dist_error, bins=30, alpha=0.7, color="green")
+        ax_dist_error.set_xlabel("Distance Error")
+        ax_dist_error.set_ylabel("Frequency")
+        ax_dist_error.set_title("Distance to Wall Error Distribution")
+        ax_dist_error.grid(True, alpha=0.3)
+
+        # Summary statistics
+        ax_stats = plt.subplot2grid((3, 4), (2, 3))
+        ax_stats.axis("off")
+        stats_text = f"""Summary Statistics:
+
+Position RMSE: {np.sqrt(np.mean(pos_error**2)):.3f}
+Direction MAE: {np.mean(dir_error):.3f} rad
+Distance MAE: {np.mean(dist_error):.3f}
+
+N samples: {selection.sum()}
+        """
+        ax_stats.text(
+            0.1,
+            0.9,
+            stats_text,
+            transform=ax_stats.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+            fontfamily="monospace",
+        )
+
+        plt.tight_layout()
+        fig.savefig(
+            os.path.join(
+                outfolder, f"4d_overviewFig_{dimOutput}d_{typeDec}{suffix}.png"
+            ),
+            dpi=150,
+        )
+        if show:
+            plt.show(block=True)
+        plt.close(fig)
+
+        fig, ax = plt.subplots()
+        scatter = ax.scatter(
+            inferring[selection, 0],
+            inferring[selection, 1],
+            c=inferring[selection, 3],
+            label="Predicted positions",
+        )
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label("Distance to Wall", rotation=270, labelpad=15)
+        ax.set_xlabel("X Position")
+        ax.set_ylabel("Y Position")
+        ax.set_title("Position Predictions Colored by Distance to Wall")
+        ax.legend()
+        if show:
+            plt.show(block=True)
+        fig.savefig(
+            os.path.join(
+                outfolder, f"overviewFig_{dimOutput}d_{typeDec}_DistWall{suffix}.png"
+            ),
+            dpi=150,
+        )
+        plt.close(fig)
+        return
+
+    elif dimOutput == 2:
         fig, ax = plt.subplots(figsize=(15, 9))
         if target.lower() != "linanddirection":
             for dim in range(dimOutput):
@@ -608,7 +810,7 @@ def overview_fig(
                     ax1 = plt.subplot2grid(
                         (dimOutput, 4 if not with_hist_distribution else 5),
                         (dim, 0),
-                        sharex=ax1,  # ruff: noqa: F821
+                        sharex=ax1,
                         colspan=4,
                     )
                 else:
@@ -621,15 +823,23 @@ def overview_fig(
                 ax1.scatter(
                     timeStepsPred[selection],
                     inferring[selection, dim],
+                    c=inferring[selection, 2]
+                    if (
+                        target.lower() == "posandheaddirectionandthigmo"
+                        and inferring.shape[1] > 2
+                    )
+                    else None,
+                    cmap="hsv"
+                    if (
+                        target.lower() == "posandheaddirectionandthigmo"
+                        and inferring.shape[1] > 2
+                    )
+                    else None,
                     label=f"guessed {dim_names[dim]} selection",
                     s=20,
                 )
                 ax1.scatter(
-                    timeStepsPred
-                    if not useSpeedMask
-                    else timeStepsPred[
-                        selection
-                    ],  # depending on useSpeedMask, we plot all the tested data or only the speed selected ones
+                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
                     pos[:, dim] if not useSpeedMask else pos[selection, dim],
                     s=24,
                     alpha=0.6,
@@ -682,6 +892,7 @@ def overview_fig(
                     ax1.set_xlabel("time")
                 ax1.set_ylabel(f"{dim_names[dim]}")
         else:
+            # Keep existing linanddirection logic
             from neuroencoders.importData.gui_elements import ModelPerformanceVisualizer
 
             ax1 = plt.subplot2grid(
@@ -706,15 +917,10 @@ def overview_fig(
                 marker="o",
                 alpha=1,
                 cmap=ListedColormap(["hotpink", "cornflowerblue"]),
-                # label=f"guessed {dim_names[0]} selection",
                 zorder=3,
             )
             ax1.plot(
-                timeStepsPred
-                if not useSpeedMask
-                else timeStepsPred[
-                    selection
-                ],  # depending on useSpeedMask, we plot all the tested data or only the speed selected ones
+                timeStepsPred if not useSpeedMask else timeStepsPred[selection],
                 pos[:, 0] if not useSpeedMask else pos[selection, 0],
                 ".-" if not useSpeedMask else "-",
                 markersize=6,
@@ -784,13 +990,12 @@ def overview_fig(
                 )
                 plt.setp(ax2.get_yticklabels(), visible=False)
                 ax2.set_xlabel(f"{dim_names[0]} distribution")
-                ax2.legend(
-                    fontsize="xx-small",
-                )
+                ax2.legend(fontsize="xx-small")
             else:
                 if selection.sum() > 0:
                     ax3 = plt.subplot2grid((1, 5), (0, 4))
                     visualizer._plot_error_distribution(ax=ax3)
+
     elif dimOutput == 1:
         if target.lower() != "direction":
             fig, ax = plt.subplots(figsize=(15, 9))
@@ -944,7 +1149,8 @@ def fig_interror(
         )
 
     if dimOutput > 2:
-        warn(
+        # WARN: this is very hacky and specific
+        warnings.warn(
             f"dimOutput should be 1 or 2 but is {dimOutput}, setting to 2 and plotting first 2 dimensions only."
         )
         dimOutput = 2
