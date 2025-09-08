@@ -433,6 +433,18 @@ class DataHelper(Project):
             positions = np.concatenate(
                 (positions.reshape(-1, 2), self.head_direction.reshape(-1, 1)), axis=1
             )
+        elif self.target.lower() == "posandheaddirectionandthigmo":
+            positions = self.positions
+            self.head_direction = self._get_head_direction(self.positions)
+            thigmo = self.dist2wall(self.positions, show=show)
+            positions = np.concatenate(
+                (
+                    positions.reshape(-1, 2),
+                    self.head_direction.reshape(-1, 1),
+                    thigmo.reshape(-1, 1),
+                ),
+                axis=1,
+            )
         elif self.target.lower() == "posandspeed":
             positions = self.positions
             self.speed = self._get_speed(self.positions, interval=1 / (15))
@@ -1418,8 +1430,20 @@ class Params:
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
 
-        self.lossActivation = None  # activation function for the loss layer
+        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
+        self.GaussianSigma = kwargs.pop(
+            "GaussianSigma", 0.025
+        )  # 1/44 ~= 0.023, so it should cover ~3 bins
+        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
+        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
 
+        self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
+
+        self.lossActivation = None  # activation function for the loss layer
+        self.featureActivation = kwargs.pop("featureActivation", None)
+
+        # TODO: put it in a function
         self.loss = kwargs.pop(
             "loss", "mse"
         )  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
@@ -1427,14 +1451,20 @@ class Params:
             self.loss = "binary_crossentropy"
 
         self.column_losses = {
-            "0": self.loss,
-            "1": "binary_crossentropy"
-            if "direction" in self.target.lower()
-            else "cyclic_mae",
+            "0": "cyclic_mae"
+            if "head" in self.target.lower()
+            else "binary_crossentropy",
+            "1": self.loss,
         }
+        self.heatmap_weight = kwargs.pop("heatmap_weight", 1.0)
+        self.others_weight = kwargs.pop("other_weight", 0.5)
+
         self.column_weights = (
             {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
         )
+        self.merge_columns = []
+        self.merge_losses = []
+        self.merge_weights = []
 
         if self.target.lower() == "posandheaddirectionandspeed":
             self.column_losses = {
@@ -1457,16 +1487,6 @@ class Params:
         self.mutual_info_method = kwargs.pop(
             "mutual_info_method", "shannon"
         )  # "skaggs" or "I_spike" or shannon or I_sec
-
-        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
-        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
-        self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.025
-        )  # 1/44 ~= 0.023, so it should cover ~3 bins
-        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
-        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
-
-        self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
 
         # self.transform = "log"  # "log" or "sqrt" or None
         self.transform_w_log = kwargs.pop(

@@ -1418,7 +1418,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             )
             self.training_positions = self.training_positions[~forbidden_positions]
 
-    def call(self, inputs):
+    def call(self, inputs, flatten=True):
         """
         Forward pass through the layer.
 
@@ -1426,11 +1426,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             inputs: Tensor of shape [B, feature_dim]
 
         Returns:
-            logits_hw: Tensor of shape [B, H, W] representing unnormalized logits
+            logits_hw: Tensor of shape [B, H*W] representing unnormalized logits
         """
         logits_flat = self.feature_to_logits_map(inputs)
-        logits_hw = tf.reshape(logits_flat, [-1, self.GRID_H, self.GRID_W])
-        return logits_hw
+        if not flatten:
+            logits_hw = tf.reshape(logits_flat, [-1, self.GRID_H, self.GRID_W])
+            return logits_hw
+        return logits_flat
 
     def gaussian_heatmap_targets(self, pos_batch, sigma=None):
         if sigma is None:
@@ -1599,7 +1601,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         return final_loss
 
     def safe_kl_heatmap_loss(
-        self, logits_hw, target_hw, wmap=None, scale=False, return_batch=False
+        self,
+        logits_hw,
+        target_hw,
+        wmap=None,
+        scale=False,
+        return_batch=False,
+        reduction=None,
     ):
         """
         Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
@@ -1639,7 +1647,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             wsum = tf.reduce_sum(weights * valid_mask) + self.EPS
             kl = kl * (tf.reduce_sum(weights) / wsum)
 
-        if return_batch:
+        if return_batch or reduction == "none":
             return kl  # [B]
 
         loss = tf.reduce_mean(kl)
@@ -1810,6 +1818,21 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         return float(tf.exp(logT).numpy())
 
     # inference: probs = softmax(mask_logits / T_cal)
+
+
+class KLHeatmapLoss(tf.keras.losses.Loss):
+    def __init__(self, gaussian_layer, wmap=None, scale=False, **kwargs):
+        super().__init__(reduction="none", **kwargs)
+        self.gaussian_layer = gaussian_layer
+        self.wmap = wmap
+        self.scale = scale
+
+    def call(self, y_true, y_pred):
+        # y_pred should be logits in shape [B, H, W]
+        # y_true should be target heatmap in shape [B, H, W]
+        return self.gaussian_layer.safe_kl_heatmap_loss(
+            y_pred, y_true, wmap=self.wmap, scale=self.scale, return_batch=True
+        )
 
 
 def bin_class(example, GRID_W, GRID_H, stride, FORBID):
