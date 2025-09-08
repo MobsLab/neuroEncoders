@@ -359,6 +359,7 @@ class DataHelper(Project):
             warn(
                 "old_positions already exist,meaning you already ran the true target ! beware."
             )
+            self.positions = self.old_positions
 
         if not hasattr(self, "l_function") and l_function is None:
             self.l_function = l_function

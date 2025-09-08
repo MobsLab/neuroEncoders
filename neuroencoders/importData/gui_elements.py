@@ -3545,6 +3545,176 @@ def lighten_color(color, amount=0.5):
     return crgb
 
 
+# Helper function for circular statistics
+def circular_mean_error(pred_angles, true_angles):
+    """Calculate circular mean error in radians"""
+    diff = pred_angles - true_angles
+    # Wrap to [-pi, pi]
+    diff = np.arctan2(np.sin(diff), np.cos(diff))
+    return diff
+
+
+def plot_circular_comparison(ax, pred_angles, true_angles, title="Head Direction"):
+    """Plot circular comparison of predicted vs true angles"""
+    # Create unit circle
+    theta = np.linspace(0, 2 * np.pi, 100)
+    ax.plot(np.cos(theta), np.sin(theta), "k-", alpha=0.3, linewidth=0.5)
+
+    # Plot predictions and true values
+    ax.scatter(
+        np.cos(pred_angles),
+        np.sin(pred_angles),
+        c="red",
+        alpha=0.6,
+        s=20,
+        label="Predicted",
+    )
+    ax.scatter(
+        np.cos(true_angles),
+        np.sin(true_angles),
+        c="blue",
+        alpha=0.6,
+        s=20,
+        label="True",
+    )
+
+    # Add arrows from true to predicted
+    for i in range(min(50, len(pred_angles))):  # Limit to 50 arrows for clarity
+        ax.annotate(
+            "",
+            xy=(np.cos(pred_angles[i]), np.sin(pred_angles[i])),
+            xytext=(np.cos(true_angles[i]), np.sin(true_angles[i])),
+            arrowprops=dict(arrowstyle="->", color="gray", alpha=0.3, lw=0.5),
+        )
+
+    ax.set_xlim(-1.1, 1.1)
+    ax.set_ylim(-1.1, 1.1)
+    ax.set_aspect("equal")
+    ax.set_title(title)
+    ax.legend()
+
+    # Add cardinal direction labels
+    ax.text(1.05, 0, "0°", ha="left", va="center")
+    ax.text(0, 1.05, "90°", ha="center", va="bottom")
+    ax.text(-1.05, 0, "180°", ha="right", va="center")
+    ax.text(0, -1.05, "270°", ha="center", va="top")
+
+
+def create_polar_colorbar(
+    fig, mappable, ax_pos, angle_range=(-np.pi, np.pi), title="Head\nDirection"
+):
+    """
+    Create a circular colorbar showing head direction angles that matches arctan2 output
+
+    Parameters:
+    -----------
+    fig : matplotlib.figure.Figure
+        The figure object to add the colorbar to
+    mappable : matplotlib.cm.ScalarMappable
+        The scatter plot or other mappable object (used for color mapping)
+    ax_pos : matplotlib.transforms.Bbox
+        Position of the main axis (use ax.get_position())
+    angle_range : tuple
+        Range of angles (min, max) - use (-π, π) for arctan2 output or (0, 2π) for wrapped
+
+    Returns:
+    --------
+    cax : matplotlib.axes.Axes
+        The colorbar axis object
+    """
+    # Create small circular axis for colorbar
+    cax = fig.add_axes(
+        [
+            ax_pos.x0 + ax_pos.width + 0.02,
+            ax_pos.y0 + ax_pos.height * 0.6,
+            0.1,
+            0.1,
+        ]
+    )
+    cax.set_xlim(-1.1, 1.1)
+    cax.set_ylim(-1.1, 1.1)
+    cax.set_aspect("equal")
+
+    # Create angles that match the HSV colormap mapping
+    # HSV maps [0, 1] to full color wheel, so we need to map our angle range to [0, 1]
+    n_segments = 256
+
+    if angle_range == (-np.pi, np.pi):
+        # For arctan2 output range [-π, π]
+        # Map to HSV: -π -> 0.5 (cyan), 0 -> 0 (red), π -> 0.5 (cyan)
+        # But we want: -π -> 0.5, 0 -> 0, π -> 1.0
+        angles = np.linspace(-np.pi, np.pi, n_segments)
+        hsv_values = (angles + np.pi) / (2 * np.pi)  # Map [-π, π] to [0, 1]
+    else:
+        # For range [0, 2π]
+        angles = np.linspace(0, 2 * np.pi, n_segments)
+        hsv_values = angles / (2 * np.pi)
+
+    colors = plt.cm.hsv(hsv_values)
+
+    for i, (angle, color) in enumerate(zip(angles[:-1], colors[:-1])):
+        # Draw small arc segments - note: we plot at the actual mathematical angle
+        arc_angles = np.linspace(angle, angles[i + 1], 10)
+        x_inner = 0.7 * np.cos(arc_angles)
+        y_inner = 0.7 * np.sin(arc_angles)
+        x_outer = 1.0 * np.cos(arc_angles)
+        y_outer = 1.0 * np.sin(arc_angles)
+
+        # Create polygon for arc segment
+        x_poly = np.concatenate([x_inner, x_outer[::-1]])
+        y_poly = np.concatenate([y_inner, y_outer[::-1]])
+        cax.fill(x_poly, y_poly, color=color, edgecolor="none")
+
+    # Add angle labels at correct mathematical positions
+    if angle_range == (-np.pi, np.pi):
+        label_angles = [0, np.pi / 2, np.pi, -np.pi / 2]  # Right, Up, Left, Down
+        label_texts = ["0°", "90°", "±180°", "-90°"]
+    else:
+        label_angles = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
+        label_texts = ["0°", "90°", "180°", "270°"]
+
+    for angle, text in zip(label_angles, label_texts):
+        x_label = 1.2 * np.cos(angle)
+        y_label = 1.2 * np.sin(angle)
+        cax.text(
+            x_label,
+            y_label,
+            text,
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+        )
+
+    # Add directional arrows
+    arrow_length = 0.15
+    for angle in label_angles:
+        x_start = 0.85 * np.cos(angle)
+        y_start = 0.85 * np.sin(angle)
+        dx = arrow_length * np.cos(angle)
+        dy = arrow_length * np.sin(angle)
+        cax.arrow(
+            x_start,
+            y_start,
+            dx,
+            dy,
+            head_width=0.05,
+            head_length=0.05,
+            fc="black",
+            ec="black",
+        )
+
+    cax.set_xticks([])
+    cax.set_yticks([])
+    cax.set_title(title, fontsize=11)
+
+    # Remove axes spines
+    for spine in cax.spines.values():
+        spine.set_visible(False)
+
+    return cax
+
+
 if __name__ == "__main__":
     # Run demonstration
     try:
