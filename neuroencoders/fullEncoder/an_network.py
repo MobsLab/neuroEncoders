@@ -1838,14 +1838,38 @@ class LSTMandSpikeNetwork:
                 output = (tf.cast(output[0] > 0.5, tf.int32),)
 
             if getattr(self.params, "GaussianHeatmap", False):
-                output_logits = output[0]  # logits with shape (batch, H, W)
+                if self.params.dimOutput > 2:
+                    output_logits = output[0][
+                        :, : self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H
+                    ]
+                    output_logits = tf.reshape(
+                        output_logits,
+                        (
+                            output_logits.shape[0],
+                            self.GaussianHeatmap.GRID_H,
+                            self.GaussianHeatmap.GRID_W,
+                        ),
+                    )  # logits with shape (batch, H, W)
+                    others = output[0][
+                        :, self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H :
+                    ]  # other outputs (speed, ...) with shape (batch, dimOutput-2)
+                else:
+                    # output_logits is already (batch, H, W) because flatten = False
+                    output_logits = output[0]
+
                 xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
                     output_logits
                 )
                 if T_scaling is not None:
                     output_logits = output_logits / T_scaling
 
-                output = (xy.numpy(), output[1])
+                if self.params.dimOutput > 2:
+                    # concatenate xy with the other outputs (speed, ...)
+                    total_output = tf.concat([xy, others], axis=-1)
+                else:
+                    total_output = xy
+                # reconstruct output tuple with xy pred instead of heatmap
+                output = (total_output.numpy(), output[1])
 
             # Post-infer management
             print(f"gathering times of the centre in the time window for {sleepName}")
