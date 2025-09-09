@@ -14,7 +14,7 @@ from tensorflow import keras
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
-class spikeNet:
+class spikeNet(tf.keras.layers.Layer):
     """
     This class is a convolutional network that takes as input a spike sequence from nChannels and returns a feature vector of size nFeatures.
 
@@ -32,8 +32,8 @@ class spikeNet:
     The convolutional layers are followed by 3 dense layers with a ReLU activation function. The dense layers have a size of nFeatures and the
         last dense layer has a size of nFeatures and is named "outputCNN{number}".
 
-    One filter of size (2,3) would roughly mean that the first filters "see" half of the channels and 3 time bins,
-        i.e. from (3*0.036/32) ~= 3 ms for 36 ms-based windows to ~100 ms for 1.08s-based windows.
+    One filter of size (2,3) would roughly mean that the first filters "see" 2 channels at a time and 3 bins of 32-ms timesteps,
+        i.e. (3*32/20000) ~= 4.8 ms for a sampling rate of 20 000Hz.
     """
 
     def __init__(
@@ -44,10 +44,13 @@ class spikeNet:
         number="",
         **kwargs,
     ):
+        name = kwargs.pop("name", f"spikeNet{number}")
+        super().__init__(name=name)
         self.nFeatures = nFeatures
         self.nChannels = nChannels
         self.device = device
         self.batch_normalization = kwargs.get("batch_normalization", True)
+        self.number = number
         with tf.device(self.device):
             self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="SAME")
             self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="SAME")
@@ -62,6 +65,10 @@ class spikeNet:
             self.maxPoolLayer3 = tf.keras.layers.MaxPool2D(
                 [1, 2], [1, 2], padding="SAME"
             )
+            if self.batch_normalization:
+                self.bn1 = tf.keras.layers.BatchNormalization()
+                self.bn2 = tf.keras.layers.BatchNormalization()
+                self.bn3 = tf.keras.layers.BatchNormalization()
 
             self.dropoutLayer = tf.keras.layers.Dropout(0.5)
             self.denseLayer1 = tf.keras.layers.Dense(self.nFeatures, activation="relu")
@@ -77,6 +84,7 @@ class spikeNet:
             "device": self.device,
             "nFeatures": self.nFeatures,
             "number": self.number,
+            "batch_normalization": self.batch_normalization,
         }
         return {**base_config, **config}
 
@@ -90,11 +98,14 @@ class spikeNet:
         device = config.pop("device", "/cpu:0")
         nFeatures = config.pop("nFeatures", 128)
         number = config.pop("number", "")
+        batch_normalization = config.pop("batch_normalization", True)
         return cls(
             nChannels=nChannels,
             device=device,
             nFeatures=nFeatures,
             number=number,
+            batch_normalization=batch_normalization,
+            **config,
         )
 
     def __call__(self, input):
@@ -105,19 +116,24 @@ class spikeNet:
             x = tf.expand_dims(input, axis=3)
             x = self.convLayer1(x)
             if self.batch_normalization:
-                x = tf.keras.layers.BatchNormalization()(x)
+                x = self.bn1(x)
             x = self.maxPoolLayer1(x)
             x = self.convLayer2(x)
             if self.batch_normalization:
-                x = tf.keras.layers.BatchNormalization()(x)
+                x = self.bn2(x)
             x = self.maxPoolLayer2(x)
             x = self.convLayer3(x)
             if self.batch_normalization:
-                x = tf.keras.layers.BatchNormalization()(x)
+                x = self.bn3(x)
             x = self.maxPoolLayer3(x)
 
+            # FIX:Dynamic reshape calculation instead of hardcoding
+            batch_size = tf.shape(x)[0]
+            flat_size = (
+                x.shape[1] * x.shape[2] * x.shape[3]
+            )  # this will be nChannels * time_bins/8 * 32 timsteps
             x = tf.reshape(
-                x, [-1, self.nChannels * 8 * 16]
+                x, [batch_size, flat_size]
             )  # change from 32 to 16 and 4 to 8
             # by pooling we moved from 32 bins to 4. By convolution we generated 32 channels
             x = self.denseLayer1(x)
@@ -126,8 +142,9 @@ class spikeNet:
             x = self.denseLayer3(x)
         return x
 
+    @property
     def variables(self):
-        return (
+        vars_list = (
             self.convLayer1.variables
             + self.convLayer2.variables
             + self.convLayer3.variables
@@ -138,9 +155,12 @@ class spikeNet:
             + self.denseLayer2.variables
             + self.denseLayer3.variables
         )
+        if self.batch_normalization:
+            vars_list += self.bn1.variables + self.bn2.variables + self.bn3.variables
+        return vars_list
 
     def layers(self):
-        return (
+        layers_list = (
             self.convLayer1,
             self.convLayer2,
             self.convLayer3,
@@ -151,6 +171,21 @@ class spikeNet:
             self.denseLayer2,
             self.denseLayer3,
         )
+        if self.batch_normalization:
+            layers_list += (self.bn1, self.bn2, self.bn3)
+        return layers_list
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        # validate input shape
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected input shape (batch, time, channels), got {input_shape}"
+            )
+        if input_shape[1] != self.nChannels:
+            raise ValueError(
+                f"Expected input shape with {self.nChannels} channels, got {input_shape[1]}"
+            )
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
@@ -226,7 +261,7 @@ def create_attention_mask_from_padding_mask(padding_mask):
 
 
 class PositionalEncoding(tf.keras.layers.Layer):
-    def __init__(self, max_len=10000, d_model=128, **kwargs):
+    def __init__(self, max_len=1000, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -504,7 +539,7 @@ def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_p
                 tensors["group" + str(g)],
                 [params.batchSize, -1, params.nChannelsPerGroup[g], 32],
             )
-        # even if batched: gather all together
+        # even if batched: gather all together, meaning batch and spikes are merged
         tensors["group" + str(g)] = tf.reshape(
             tensors["group" + str(g)], [-1, params.nChannelsPerGroup[g], 32]
         )

@@ -149,9 +149,11 @@ class LSTMandSpikeNetwork:
             "length": tf.io.FixedLenFeature([], tf.int64),
             # the index of the groups having spike sequences in the window
             "groups": tf.io.VarLenFeature(tf.int64),
-            # the exact time-steps of each spike measured in the various groups.
+            # the mean time-steps of each spike measured in the various groups.
             # Question: should the time not be a VarLenFeature??
             "time": tf.io.FixedLenFeature([], tf.float32),
+            # the exact time step from behaviorData["Times"]
+            "time_behavior": tf.io.FixedLenFeature([], tf.float32),
             # sample of the spike
             "indexInDat": tf.io.VarLenFeature(tf.int64),
         }
@@ -2110,6 +2112,9 @@ class LSTMandSpikeNetwork:
 
     # used in the data pipepline
     def create_indices(self, vals, addLinearizationTensor=False):
+        """
+        Create indices for gathering spikes from each group.
+        """
         for group in range(self.params.nGroups):
             spikePosition = tf.where(tf.equal(vals["groups"], group))
             # Note: inputGroups is already filled with -1 at position that correspond to filling

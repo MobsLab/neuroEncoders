@@ -1,6 +1,7 @@
 # Load libs
 import os
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pykeops
@@ -288,3 +289,283 @@ class WaveFormComparator:
         self.memmapFil = np.memmap(
             filPath, dtype=np.int16, mode="r", shape=(self.number_timeSteps, nChannels)
         )
+
+
+def reconstruct_spike_waveforms(vals, params):
+    """
+    Reconstruct individual spike waveforms from the processed tensors.
+
+    Args:
+        vals: Dictionary containing groups, group+str(g), and indices tensors
+        params: Parameters object with batchSize, nGroups, nChannelsPerGroup
+
+    Returns:
+        reconstructed_spikes: List of [batch, nspikes, nChannels, 32] arrays per group
+        spike_positions: List of positions where spikes occurred per group
+        batch_assignments: Which batch each spike belongs to
+    """
+    batch_size = params.batchSize
+    reconstructed_spikes = []
+    spike_positions = []
+    batch_assignments = []
+
+    # Reshape groups to [batch_size, seq_len]
+    groups_per_batch = tf.reshape(vals["groups"], [batch_size, -1])
+    seq_len_per_batch = tf.cast(tf.shape(groups_per_batch)[1], tf.int64)
+
+    for group in range(params.nGroups):
+        # Get spike waveforms for this group: [n_spikes, nChannels, 32]
+        group_spikes = vals[f"group{group}"]
+        n_channels = params.nChannelsPerGroup[group]
+
+        if tf.shape(group_spikes)[0] == 0:
+            # No spikes for this group
+            reconstructed_spikes.append(tf.zeros([batch_size, 0, n_channels, 32]))
+            spike_positions.append([])
+            batch_assignments.append([])
+            continue
+
+        # Get indices for this group: [total_positions]
+        indices = vals[f"indices{group}"]
+
+        # Find where spikes occur (non-zero indices)
+        spike_locations = tf.where(indices > 0)[:, 0]  # Positions with spikes
+        spike_indices = (
+            tf.gather(indices, spike_locations) - 1
+        )  # Convert to 0-based (subtract the +1 from create_indices)
+
+        # Convert positions to batch and sequence indices
+        batch_ids = spike_locations // seq_len_per_batch
+        seq_positions = spike_locations % seq_len_per_batch
+
+        # Group spikes by batch
+        spikes_per_batch = []
+        positions_per_batch = []
+
+        for batch_idx in range(batch_size):
+            # Find spikes belonging to this batch
+            batch_mask = tf.equal(batch_ids, batch_idx)
+            batch_spike_indices = tf.boolean_mask(spike_indices, batch_mask)
+            batch_positions = tf.boolean_mask(seq_positions, batch_mask)
+
+            # Get actual spike waveforms
+            if tf.shape(batch_spike_indices)[0] > 0:
+                batch_spikes = tf.gather(group_spikes, batch_spike_indices)
+            else:
+                batch_spikes = tf.zeros([0, n_channels, 32], dtype=group_spikes.dtype)
+
+            spikes_per_batch.append(batch_spikes)
+            positions_per_batch.append(batch_positions)
+
+        # Convert to consistent format
+        # Find max spikes per batch for padding
+        max_spikes = max(
+            [tf.shape(batch_spikes)[0] for batch_spikes in spikes_per_batch]
+        )
+        if max_spikes == 0:
+            max_spikes = 1  # Avoid empty tensor
+
+        padded_spikes = []
+        for batch_spikes in spikes_per_batch:
+            n_spikes = tf.shape(batch_spikes)[0]
+            if n_spikes > 0:
+                padding = max_spikes - n_spikes
+                if padding > 0:
+                    pad_zeros = tf.zeros(
+                        [padding, n_channels, 32], dtype=batch_spikes.dtype
+                    )
+                    padded_batch = tf.concat([batch_spikes, pad_zeros], axis=0)
+                else:
+                    padded_batch = batch_spikes
+            else:
+                padded_batch = tf.zeros(
+                    [max_spikes, n_channels, 32], dtype=group_spikes.dtype
+                )
+
+            padded_spikes.append(padded_batch)
+
+        # Stack to [batch_size, max_spikes, nChannels, 32]
+        reconstructed_group = tf.stack(padded_spikes, axis=0)
+
+        reconstructed_spikes.append(reconstructed_group)
+        spike_positions.append(positions_per_batch)
+        batch_assignments.append(batch_ids)
+
+    return reconstructed_spikes, spike_positions, batch_assignments
+
+
+def plot_spike_examples(
+    reconstructed_spikes,
+    spike_positions,
+    params,
+    batch_idx=0,
+    group=0,
+    max_spikes=10,
+    figsize=(15, 10),
+):
+    """
+    Plot examples of reconstructed spike waveforms.
+
+    Args:
+        reconstructed_spikes: Output from reconstruct_spike_waveforms
+        spike_positions: Spike positions from reconstruction
+        params: Parameters object
+        batch_idx: Which batch sample to plot
+        group: Which electrode group to plot
+        max_spikes: Maximum number of spikes to plot
+        figsize: Figure size for plotting
+    """
+    if group >= len(reconstructed_spikes):
+        print(
+            f"Group {group} not available. Available groups: 0-{len(reconstructed_spikes) - 1}"
+        )
+        return
+
+    group_spikes = reconstructed_spikes[group][batch_idx]  # [max_spikes, nChannels, 32]
+    n_channels = params.nChannelsPerGroup[group]
+
+    # Convert to numpy for plotting
+    spikes_np = group_spikes.numpy() if hasattr(group_spikes, "numpy") else group_spikes
+
+    # Find actual (non-zero) spikes
+    spike_norms = np.linalg.norm(spikes_np.reshape(spikes_np.shape[0], -1), axis=1)
+    valid_spike_mask = spike_norms > 1e-6  # Threshold for non-zero spikes
+    valid_spikes = spikes_np[valid_spike_mask]
+
+    n_valid = valid_spikes.shape[0]
+    n_to_plot = min(n_valid, max_spikes)
+
+    if n_to_plot == 0:
+        print(f"No valid spikes found in batch {batch_idx}, group {group}")
+        return
+
+    print(f"Plotting {n_to_plot} spikes from batch {batch_idx}, group {group}")
+    print(f"Total valid spikes in this sample: {n_valid}")
+
+    # Create subplot grid
+    rows = min(4, n_to_plot)
+    cols = max(1, n_to_plot // rows)
+    if n_to_plot % rows != 0:
+        cols += 1
+
+    fig, axes = plt.subplots(rows, cols, figsize=figsize)
+    if n_to_plot == 1:
+        axes = [axes]
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+
+    time_axis = np.linspace(0, 32, 32)  # 32 time steps
+
+    for i in range(n_to_plot):
+        row = i // cols
+        col = i % cols
+
+        if rows > 1:
+            ax = axes[row, col]
+        else:
+            ax = axes[col] if cols > 1 else axes[i]
+
+        spike_waveform = valid_spikes[i]  # [nChannels, 32]
+
+        # Plot each channel
+        for ch in range(n_channels):
+            ax.plot(
+                time_axis,
+                spike_waveform[ch, :],
+                label=f"Ch {ch}",
+                linewidth=1.5,
+                alpha=0.8,
+            )
+
+        ax.set_title(f"Spike {i + 1}")
+        ax.set_xlabel("Time steps")
+        ax.set_ylabel("Voltage")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    # Hide empty subplots
+    total_subplots = rows * cols
+    for i in range(n_to_plot, total_subplots):
+        row = i // cols
+        col = i % cols
+        if rows > 1:
+            axes[row, col].set_visible(False)
+        else:
+            if cols > 1:
+                axes[col].set_visible(False)
+
+    plt.tight_layout()
+    plt.suptitle(f"Spike Waveforms - Batch {batch_idx}, Group {group}", y=1.02)
+    plt.show()
+
+
+def analyze_spike_statistics(reconstructed_spikes, params):
+    """
+    Analyze statistics of reconstructed spikes across batches and groups.
+    """
+    print("=== SPIKE STATISTICS ===")
+
+    total_spikes_per_batch = []
+
+    for batch_idx in range(params.batchSize):
+        batch_total = 0
+        for group in range(params.nGroups):
+            group_spikes = reconstructed_spikes[group][batch_idx].numpy()
+
+            # Count non-zero spikes
+            spike_norms = np.linalg.norm(
+                group_spikes.reshape(group_spikes.shape[0], -1), axis=1
+            )
+            n_valid = np.sum(spike_norms > 1e-6)
+            batch_total += n_valid
+
+            if batch_idx < 5:  # Print details for first few batches
+                print(f"Batch {batch_idx}, Group {group}: {n_valid} spikes")
+
+        total_spikes_per_batch.append(batch_total)
+
+        if batch_idx < 5:
+            print(f"Batch {batch_idx} total: {batch_total} spikes")
+
+    print("\nOverall statistics:")
+    print(f"Mean spikes per batch: {np.mean(total_spikes_per_batch):.1f}")
+    print(f"Std spikes per batch: {np.std(total_spikes_per_batch):.1f}")
+    print(
+        f"Min/Max spikes per batch: {np.min(total_spikes_per_batch)}/{np.max(total_spikes_per_batch)}"
+    )
+
+
+# Usage example:
+def plot_spike_examples_from_vals(vals, params, **kwargs):
+    """
+    Complete pipeline: reconstruct and plot spikes from vals dictionary.
+
+    ```python
+    # Reconstruct spike waveforms
+    print("Reconstructing spike waveforms...")
+    reconstructed_spikes, spike_positions, batch_assignments = (
+        reconstruct_spike_waveforms(vals, params)
+    )
+
+    # Analyze statistics
+    analyze_spike_statistics(reconstructed_spikes, params)
+
+    # Plot examples
+    plot_spike_examples(reconstructed_spikes, spike_positions, params, **kwargs)
+
+    return reconstructed_spikes, spike_positions, batch_assignments
+    ```
+    """
+    # Reconstruct spike waveforms
+    print("Reconstructing spike waveforms...")
+    reconstructed_spikes, spike_positions, batch_assignments = (
+        reconstruct_spike_waveforms(vals, params)
+    )
+
+    # Analyze statistics
+    analyze_spike_statistics(reconstructed_spikes, params)
+
+    # Plot examples
+    plot_spike_examples(reconstructed_spikes, spike_positions, params, **kwargs)
+
+    return reconstructed_spikes, spike_positions, batch_assignments

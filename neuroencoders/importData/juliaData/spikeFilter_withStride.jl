@@ -158,7 +158,7 @@ function extract_spike_with_buffer(xmlPath, datPath, behavePath, fileName, datas
     nbits = parse(Float16, content(acquiSystem[1]["nBits"][1]))
     @assert nbits == 16
     Nchannel = parse(Float16, content(acquiSystem[1]["nChannels"][1]))
-    samplingRate = parse(Float16, content(acquiSystem[1]["samplingRate"][1]))
+    samplingRate = parse(Float64, content(acquiSystem[1]["samplingRate"][1])) # increase sampling rate to avoid time drift issues
     spd = xroot["spikeDetection"]
     groupList = spd[1]["channelGroups"][1]["group"]
     pint = s -> parse(Int64, s)
@@ -344,7 +344,8 @@ function extract_spike_with_buffer(xmlPath, datPath, behavePath, fileName, datas
 
         spikesFound = []
         for index in 1:1:BUFFERSIZE #
-            time = float(index + (idBuff - 1) * BUFFERSIZE) / samplingRate
+            const_dt = 1.0 / samplingRate # precise float64 to avoid precision issue
+            time = float(index + (idBuff - 1) * BUFFERSIZE) * const_dt
             for i in 1:1:nGroups
                 if possibleSpike_sum[i][index] > 0 && (index + (idBuff - 1) * BUFFERSIZE <= size(mmapFile, 1) - 16) #forbid too late spike because we would miss the info to capture waveform
                     # lastBestTime[i] = findtime(position_time,lastBestTime[i],time)
@@ -442,13 +443,15 @@ function extract_spike_with_buffer(xmlPath, datPath, behavePath, fileName, datas
                     spikes = [stack_spikes(spikeIndex[g], g) for g in 1:1:nGroups]
 
                     # save into tensorflow the spike window:
-                    if spikesFound[lastindex-1, 4] == -2
+                    pos_id_last = Int(spikesFound[lastindex-1, 4])
+                    if pos_id_last == -2
                         feat = Dict(
                             "pos_index" => [-2],
                             "pos" => Float32.([0, 0]),
                             "length" => [lastindex - startindex],
                             "groups" => Int.(spikesFound[startindex:(lastindex-1), 2] .- 1),
-                            "time" => [Float32.(mean(spikesFound[startindex:(lastindex-1), 1]))],
+                            "time" => [Float32.(mean(spikesFound[startindex:(lastindex-1), 1]))], # the mean time of the spikes in the window
+                            "time_behavior" => Float32.([position_time[clamp(1, 1, size(position_time, 1)), 1]]),  # time of the first position measure from nnBehavior.mat
                             "indexInDat" => Int.(spikesFound[startindex:(lastindex-1), 3] .- 1)
                         )
                     else
@@ -458,6 +461,7 @@ function extract_spike_with_buffer(xmlPath, datPath, behavePath, fileName, datas
                             "length" => [lastindex - startindex],
                             "groups" => Int.(spikesFound[startindex:(lastindex-1), 2] .- 1),
                             "time" => [Float32.(mean(spikesFound[startindex:(lastindex-1), 1]))],
+                            "time_behavior" => Float32.([position_time[pos_id_last, 1]]),  # behavior time of the last spike in the window
                             "indexInDat" => Int.(spikesFound[startindex:(lastindex-1), 3] .- 1)
                         )
                     end
