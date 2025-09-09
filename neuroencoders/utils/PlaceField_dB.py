@@ -905,7 +905,7 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
                 "Warning: Epoch restriction not supported with current neuroseries setup"
             )
 
-    fig, axes = plt.subplots(3, 2, figsize=(12, 15))
+    fig, axes = plt.subplots(3, 2)
     title = "Place Field Analysis"
     if epoch_restricted:
         title += " (Epoch Only)"
@@ -1048,7 +1048,7 @@ def plot_poisson_comparison(
                 "Warning: Epoch restriction not supported with current neuroseries setup"
             )
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 2)
     title = "Place Field vs Poisson Control Comparison"
     if epoch_restricted:
         title += " (Epoch Restricted)"

@@ -105,7 +105,7 @@ class AnimatedPositionPlotter:
         start_stim = self.data_helper.fullBehavior["Times"].get("start_stim", None)
         self.usePosMat = with_posMat
         if start_stim is not None:
-            self.plot_stims = True if kwargs.get("plot_stims", True) else False
+            self.plot_stims = kwargs.get("plot_stims", True)
         self.trail_length = trail_length
         self.lin_movie_duration = lin_movie_duration
         self.figsize = figsize
@@ -145,12 +145,16 @@ class AnimatedPositionPlotter:
         Extract and process data from data_helper.
         """
         # Get positions
-        self.positions_from_NN = None
         if kwargs.get("positions_from_NN", None) is not None:
             self.positions_from_NN = np.array(kwargs["positions_from_NN"])
             # self.og_positions_from_NN = self.positions_from_NN.copy()
             if kwargs.get("prediction_time", None) is not None:
                 self.prediction_positionTime = np.array(kwargs["prediction_time"])
+            else:
+                self.prediction_positionTime = None
+        else:
+            self.positions_from_NN = None
+            self.prediction_positionTime = None
 
         self.positions = np.array(self.data_helper.fullBehavior["Positions"])
         self.plot_all_stims = kwargs.get("plot_all_stims", False)
@@ -180,6 +184,8 @@ class AnimatedPositionPlotter:
 
         else:
             self.predicted = None
+            self.posIndex = None
+            self.posIndex_in_true_posIndex = None
 
         # Get linearized positions/predictions if available
         if kwargs.get("linearized_true", None) is not None:
@@ -206,7 +212,8 @@ class AnimatedPositionPlotter:
 
         if kwargs.get("predLossMask", None) is None:
             if self.predicted is None:
-                raise ValueError("what's the point of predLossMask if no prediction?")
+                print("skipping prediction and predloss")
+                self.predLossMask = None
             else:
                 self.predLossMask = np.ones(len(self.predicted), dtype=bool)
         else:
@@ -501,12 +508,12 @@ class AnimatedPositionPlotter:
             elif self.data_helper.target.lower() == "linandthigmo":
                 dim = "thigmo"
                 self.dim_name = "Dist2Wall"
-            elif "direction" in self.data_helper.target.lower():
-                dim = "direction"
-                self.dim_name = "Direction"
             elif self.data_helper.target.lower() == "posandheaddirectionandspeed":
                 dim = "PosHDSpeed"
                 self.dim_name = "PosHDSpeed"
+            elif self.data_helper.target.lower() == "direction":
+                dim = "direction"
+                self.dim_name = "Direction"
             else:
                 dim = np.ones_like(self.true_valid_indices)
 
@@ -973,7 +980,7 @@ class AnimatedPositionPlotter:
             "Linearized position (u.a.)",
             color="white" if kwargs.get("dark_theme", False) else "black",
         )
-        ax.legend(ax_handles, ax_labels, loc="lower right", fontsize=10, framealpha=0.5)
+        ax.legend(ax_handles, ax_labels, loc="lower left", fontsize=10, framealpha=0.5)
         ax.xaxis.set_major_formatter(
             FuncFormatter(time_formatter)
         )  # Format x-axis as time
@@ -1155,7 +1162,7 @@ class AnimatedPositionPlotter:
             dim_to_use = self.dim
 
         predicted_dim_to_use = kwargs.pop("predicted_dim", None)
-        if predicted_dim_to_use is None:
+        if predicted_dim_to_use is None and self.predicted is not None:
             predicted_dim_to_use = self.predicted_dim
 
         name_axis = kwargs.get("loc_in_gs", "left")
@@ -1163,7 +1170,8 @@ class AnimatedPositionPlotter:
         if name_axis not in self.axes_names:
             self.axes_names.append(name_axis)
         self.dims[name_axis] = dim_to_use
-        self.predicted_dims[name_axis] = predicted_dim_to_use
+        if self.predicted is not None:
+            self.predicted_dims[name_axis] = predicted_dim_to_use
 
         if not hasattr(self, "pair_points"):
             # Initialize pair_points if not already set
