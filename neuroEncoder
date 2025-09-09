@@ -1019,6 +1019,7 @@ if __name__ == "__main__":
                 "Posandspeed",
                 "Posandheaddirectionandspeed",
                 "PosAndHeadDirectionAndThigmo",
+                "PosAndDirectionAndThigmo",
             ],
         )
         p.add_argument(

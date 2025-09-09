@@ -1164,7 +1164,14 @@ class Mouse_Results(Params, PaperFigures):
                         )
 
     def load_results(
-        self, winMS=None, redo=False, force=False, phase=None, which="both", **kwargs
+        self,
+        winMS=None,
+        redo=False,
+        force=False,
+        phase=None,
+        which="both",
+        show=False,
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Load results for the specified window size.
@@ -1272,6 +1279,7 @@ class Mouse_Results(Params, PaperFigures):
                         typeDec="NN",
                         training_data=self.ann[win].training_data,
                         l_function=self.l_function,
+                        show=show,
                         **kwargs,
                     )
                 )
@@ -1356,6 +1364,7 @@ class Mouse_Results(Params, PaperFigures):
                     windowSizeMS=win_value,
                     target=self.target,
                     phase=phase,
+                    show=show,
                     **kwargs,
                 )
 
@@ -1898,6 +1907,7 @@ class Results_Loader:
             for mouse_nb, manipe, mouse_full_name in zip(
                 self.mice_nb, self.mice_manipes, self.mice_names
             ):
+                mouse_nb = str(mouse_nb)
                 if not any(
                     (self.Dir.name.str.contains(mouse_nb))
                     & (self.Dir.manipe.str.contains(manipe))

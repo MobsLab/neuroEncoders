@@ -621,7 +621,7 @@ def overview_fig(
     # Main plotting logic
     if target.lower() == "posandheaddirectionandthigmo" and dimOutput == 4:
         # Create comprehensive figure with multiple subplots
-        fig = plt.figure(figsize=(20, 12))
+        fig = plt.figure()
 
         # Main (x,y) scatter plot with head direction coloring
         ax_main = plt.subplot2grid((3, 4), (0, 0), colspan=2, rowspan=2)
@@ -803,7 +803,7 @@ N samples: {selection.sum()}
         return
 
     elif dimOutput == 2:
-        fig, ax = plt.subplots(figsize=(15, 9))
+        fig, ax = plt.subplots()
         if target.lower() != "linanddirection":
             for dim in range(dimOutput):
                 if dim > 0:
@@ -998,7 +998,7 @@ N samples: {selection.sum()}
 
     elif dimOutput == 1:
         if target.lower() != "direction":
-            fig, ax = plt.subplots(figsize=(15, 9))
+            fig, ax = plt.subplots()
             ax2 = plt.subplot2grid(
                 (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
             )
@@ -1061,7 +1061,7 @@ N samples: {selection.sum()}
         else:
             from neuroencoders.importData.gui_elements import ModelPerformanceVisualizer
 
-            fig, ax1 = plt.subplots(figsize=(15, 9))
+            fig, ax1 = plt.subplots()
             visualizer = ModelPerformanceVisualizer(
                 predictions=inferring[selection, 1],
                 ground_truth=pos[selection, 1],
@@ -1167,7 +1167,7 @@ def fig_interror(
         and not force
     ):
         return
-    fig, ax = plt.subplots(figsize=(15, 9))
+    fig, ax = plt.subplots()
     from matplotlib.widgets import Slider
     from mpl_toolkits.axes_grid1 import make_axes_locatable
 

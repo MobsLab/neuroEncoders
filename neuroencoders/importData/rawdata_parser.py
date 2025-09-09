@@ -495,8 +495,8 @@ def speed_filter(
         if speedOG is None:
             speedThreshold = max(
                 np.log(
-                    np.percentile(speedToshowSm[speedToshowSm >= 0], 70) + 10 ** (-8)
-                ),  # take 30% highest
+                    np.percentile(speedToshowSm[speedToshowSm >= 0], 50) + 10 ** (-8)
+                ),  # take 50% highest
                 np.log(4),  # default minimal threshold
             )
         else:
@@ -512,7 +512,7 @@ def speed_filter(
         speedFilter = speedToshowSm > np.exp(speedThreshold)
 
         # Figure
-        fig = plt.figure(figsize=(7, 15))
+        fig = plt.figure()
         fig.suptitle(
             f"Speed threshold selection for {phase}", fontsize=18, fontweight="bold"
         )
@@ -593,7 +593,7 @@ def speed_filter(
         ax = [ax0, ax1, ax2, ax3, ax4, ax5]
 
         # create scatter plot of environmental variable depending on speed
-        fig2d, ax2d = plt.subplots(figsize=(7, 7))
+        fig2d, ax2d = plt.subplots()
         idxs = np.arange(0, behToShow.shape[0])
         to_show = (
             (window_idx * window_range < idxs)

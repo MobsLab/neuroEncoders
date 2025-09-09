@@ -434,6 +434,18 @@ class DataHelper(Project):
             positions = np.concatenate(
                 (positions.reshape(-1, 2), self.head_direction.reshape(-1, 1)), axis=1
             )
+        elif self.target.lower() == "posanddirectionandthigmo":
+            positions = self.positions
+            self.direction = self._get_traveling_direction(self.positions)
+            thigmo = self.dist2wall(self.positions, show=show)
+            positions = np.concatenate(
+                (
+                    positions.reshape(-1, 2),
+                    self.direction.reshape(-1, 1),
+                    thigmo.reshape(-1, 1),
+                ),
+                axis=1,
+            )
         elif self.target.lower() == "posandheaddirectionandthigmo":
             positions = self.positions
             self.head_direction = self._get_head_direction(self.positions)
@@ -470,7 +482,7 @@ class DataHelper(Project):
             )
 
         if show:
-            from importData.gui_elements import AnimatedPositionPlotter
+            from neuroencoders.importData.gui_elements import AnimatedPositionPlotter
 
             plotter = AnimatedPositionPlotter(
                 data_helper=self,
@@ -889,6 +901,7 @@ class DataHelper(Project):
         if len(coords) == 3:
             x, y = zip(*coords)
             XYOutput = np.array([y, x])
+            plt.close(fig)
             return XYOutput
 
     def _transform_coordinates_and_image(
@@ -1066,7 +1079,7 @@ class DataHelper(Project):
         # Define zones
         self.ZoneEpochAligned = []
 
-        fig, ax = plt.subplots(figsize=(10, 10))
+        fig, ax = plt.subplots()
 
         ax.imshow(
             reference_image,
