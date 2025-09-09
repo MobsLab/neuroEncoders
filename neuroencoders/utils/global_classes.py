@@ -1414,6 +1414,7 @@ class Params:
         self.nHeads = kwargs.pop(
             "nHeads", 8
         )  # number of attention heads in the transformer if used
+        self.project_transformer = kwargs.pop("project_transformer", False)
 
         default_lstm_layers = 2 if not self.isTransformer else 4
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
@@ -1422,15 +1423,30 @@ class Params:
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
         self.ff_dim1 = kwargs.pop(
-            "ff_dim1", self.nFeatures * 2
+            "ff_dim1",
+            self.nFeatures * 2
+            if not self.project_transformer
+            else self.nFeatures * self.nGroups * 2,
         )  # first fully connected layer in Transformer arch dimension
         self.ff_dim2 = (
             self.nFeatures
+            if not self.project_transformer
+            else self.nFeatures * self.nGroups
         )  # second fully connected layer in Transformer arch dimension
 
         # if using transformer, we need to set 2 other dense layers output (after the multihead attention blocks)
-        self.TransformerDenseSize1 = kwargs.pop("TransformerDense1", self.nFeatures * 8)
-        self.TransformerDenseSize2 = kwargs.pop("TransformerDense2", self.nFeatures * 4)
+        self.TransformerDenseSize1 = kwargs.pop(
+            "TransformerDense1",
+            self.nFeatures * 8
+            if not self.project_transformer
+            else self.nFeatures * self.nGroups * 4,
+        )
+        self.TransformerDenseSize2 = kwargs.pop(
+            "TransformerDense2",
+            self.nFeatures * 4
+            if not self.project_transformer
+            else self.nFeatures * self.nGroups * 2,
+        )
 
         self.nDenseLayers = kwargs.pop(
             "nDenseLayers", 2
@@ -1459,7 +1475,7 @@ class Params:
 
         # TODO: put it in a function
         self.loss = kwargs.pop(
-            "loss", "mse"
+            "loss", "huber"
         )  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
         if self.target.lower() == "direction":
             self.loss = "binary_crossentropy"
@@ -1506,8 +1522,10 @@ class Params:
         self.transform_w_log = kwargs.pop(
             "transform_w_log", False
         )  # "log" or "sqrt" or None
-        self.delta = 0.4  # for the huber loss - roughly the random prediction threshold
-        self.alpha = 5
+        self.delta = (
+            0.01  # for the huber loss - roughly the random prediction threshold
+        )
+        self.alpha = 5  # for combined loss mse + msle
 
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 

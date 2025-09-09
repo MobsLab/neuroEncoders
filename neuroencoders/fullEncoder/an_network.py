@@ -160,7 +160,9 @@ class LSTMandSpikeNetwork:
         for g in range(self.params.nGroups):
             # the voltage values (discretized over 32 time bins) of each channel (4 most of the time)
             # of each spike of a given group in the window
-            self.featDesc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)})
+            self.featDesc.update(
+                {"group" + str(g): tf.io.VarLenFeature(tf.float32)}
+            )  # of length nSpikes * nChannels * 32
 
         # Loss obtained during training
         self.trainLosses = {}
@@ -170,7 +172,10 @@ class LSTMandSpikeNetwork:
         with tf.device(self.deviceName):
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
-                    shape=(self.params.nChannelsPerGroup[group], 32),
+                    shape=(
+                        self.params.nChannelsPerGroup[group],
+                        32,
+                    ),  # + batch size, which will be batchSize * maxNbOfSpikes
                     # the shape is N, 32 bc the voltage values are discretized over 32 time bins for each channel (4 most of the time)
                     # of each spike of a given group in the window
                     # we measure the voltage in 32 time steps windows. See the julia code.
@@ -242,12 +247,18 @@ class LSTMandSpikeNetwork:
                 self.lstmsNets = (
                     [
                         PositionalEncoding(
-                            d_model=self.params.nFeatures, device=self.deviceName
+                            d_model=self.params.nFeatures
+                            if getattr(self.params, "project_transformer", True)
+                            else self.params.nFeatures * self.params.nGroups,
+                            # if we dont shrink the feature dimension before feeding to the transformer, we need to account for the nGroups factor
+                            device=self.deviceName,
                         )
                     ]
                     + [
                         TransformerEncoderBlock(
-                            d_model=self.params.nFeatures,
+                            d_model=self.params.nFeatures
+                            if getattr(self.params, "project_transformer", True)
+                            else self.params.nFeatures * self.params.nGroups,
                             num_heads=self.params.nHeads,
                             ff_dim1=self.params.ff_dim1,
                             ff_dim2=self.params.ff_dim2,
@@ -279,19 +290,25 @@ class LSTMandSpikeNetwork:
             # Outputs
             print("Output dimension:", self.params.dimOutput)
             self.denseFeatureOutput = tf.keras.layers.Dense(
-                self.params.dimOutput - 2,
+                self.params.dimOutput - 2
+                if getattr(
+                    self.params, "GaussianHeatmap", False
+                )  # if we have a heatmap and other vars, only the others are predicted here
+                and self.params.dimOutput > 2
+                else self.params.dimOutput,
                 activation=self.params.featureActivation,  # ensures output is in [0,1]
                 dtype=tf.float32,
                 name="feature_output",
                 kernel_regularizer="l2",
             )
 
-            self.projection_layer = tf.keras.layers.Dense(
-                self.params.nFeatures,
-                activation="relu",
-                dtype=tf.float32,
-                name="feature_projection_transformer",
-            )
+            if getattr(self.params, "project_transformer", True):
+                self.transformer_projection_layer = tf.keras.layers.Dense(
+                    self.params.nFeatures,
+                    activation="relu",
+                    dtype=tf.float32,
+                    name="feature_projection_transformer",
+                )
             self.ProjectionInMazeLayer = UMazeProjectionLayer(
                 grid_size=kwargs.get("grid_size", self.params.GaussianGridSize)
             )
@@ -338,25 +355,29 @@ class LSTMandSpikeNetwork:
         This ensures the transformer architecture is defined only once.
 
         Args:
-            allFeatures: Features after dropout (batch_size, seq_len, feature_dim)
+            allFeatures: Features after dropout (batch_size, seq_len (ie maxNbOfSpikes), feature_dim * nGroups)
             allFeatures_raw: Raw features before dropout (for sumFeatures calculation)
             mymask: Attention mask (batch_size, seq_len)
             **kwargs: Additional arguments
 
         Returns:
-            tuple: (myoutputPos, outputPredLoss, output, sumFeatures)
+            tuple: (myoutputPos, output, sumFeatures)
         """
 
         print("Using Transformer architecture !")
-
-        # 1. Projection layer
-        allFeatures = self.projection_layer(allFeatures)
         masked_features = tf.where(
             tf.expand_dims(mymask, axis=-1),
             allFeatures_raw,
             tf.zeros_like(allFeatures_raw, dtype=allFeatures_raw.dtype),
         )
-        sumFeatures = tf.math.reduce_sum(self.projection_layer(masked_features), axis=1)
+        if getattr(self.params, "project_transformer", True):
+            # 1. Projection layer
+            allFeatures = self.transformer_projection_layer(allFeatures)
+            sumFeatures = tf.math.reduce_sum(
+                self.transformer_projection_layer(masked_features), axis=1
+            )
+        else:
+            sumFeatures = tf.math.reduce_sum(masked_features, axis=1)
 
         # 2. Positional encoding
         allFeatures = self.lstmsNets[0](allFeatures)
@@ -366,7 +387,7 @@ class LSTMandSpikeNetwork:
             if ilstm == 0:
                 if (
                     len(self.lstmsNets) == 5
-                ):  # num of transformer layers + one positional encoding + one pooling layer + 2 dense layers == 4 + ##transformer layers
+                ):  # num of transformer layers + one positional encoding + one pooling layer + 2 dense layers == 4 + #(transformer layers)
                     output = transformerLayer(allFeatures, mask=mymask)
                 else:
                     outputSeq = transformerLayer(allFeatures, mask=mymask)
@@ -394,12 +415,16 @@ class LSTMandSpikeNetwork:
             myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
         else:
             if self.params.dimOutput > 2:
-                myoutputPos = self.GaussianHeatmap(x)  # outputs a flattened heatmap
+                myoutputPos = self.GaussianHeatmap(
+                    x
+                )  # outputs a flattened heatmap for better concatenation afterwards
                 others = self.denseFeatureOutput(x)
                 # this way we have 2 different outputs in the model: a heatmap and some scalars
                 myoutputPos = tf.keras.layers.Concatenate()([myoutputPos, others])
             else:
-                myoutputPos = self.GaussianHeatmap(x, flatten=False)
+                myoutputPos = self.GaussianHeatmap(
+                    x, flatten=False
+                )  # we dont need to worry about flattening, it's the only output
 
         return myoutputPos, output, sumFeatures
 
@@ -453,9 +478,9 @@ class LSTMandSpikeNetwork:
             self.params.batchSize = kwargs.get("batchSize", self.params.batchSize)
             for group in range(self.params.nGroups):
                 x = self.inputsToSpikeNets[group]
-                # --> [NbKeptSpike,nbChannels,31] tensors
+                # --> [NbKeptSpike = batchSize * maxNbOfSpikes,nbChannels,31] tensors, created my nnUtils.parse_serialized_sequence(batched = True) in train/test calls.
                 x = self.spikeNets[group].apply(x)
-                # outputs a [NbSpikeOfTheGroup,nFeatures=self.params.nFeatures(default 128)] tensor.
+                # outputs a [NbSpikeOfTheGroup = batchSize * maxNbOfSpikes,nFeatures=self.params.nFeatures(default 64)] tensor.
                 # The gather strategy:
                 #   extract the final position of the spikes
                 # Note: inputGroups is already filled with -1 at position that correspond to filling
@@ -465,7 +490,9 @@ class LSTMandSpikeNetwork:
                 # We then gather either a value of
                 filledFeatureTrain = tf.gather(
                     tf.concat([self.zeroForGather, x], axis=0),
-                    self.indices[group],
+                    self.indices[
+                        group
+                    ],  # self.indices[group] contains the indices where to put the spikes of the group in the final tensor - created by self.create_indices in train/test calls.
                     axis=0,
                 )
                 # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
@@ -476,7 +503,7 @@ class LSTMandSpikeNetwork:
                     filledFeatureTrain,
                     [self.params.batchSize, -1, self.params.nFeatures],
                 )
-                # Reshaping the result of the spike net as batchSize:NbTotSpikeDetected:nFeatures
+                # Reshaping the result of the spike net as batchSize:MaxNbTotSpikeDetected:nFeatures
                 # this allow to separate spikes from the same window or from the same batch.
                 allFeatures.append(filledFeatureTrain)
             allFeatures = tf.tuple(tensors=allFeatures)
@@ -486,9 +513,14 @@ class LSTMandSpikeNetwork:
             allFeatures = tf.concat(
                 allFeatures, axis=2, name="concat_CNNs"
             )  # , name="concat1"
+            # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
             # We would like to mask timesteps that were added for batching purpose, before running the RNN
             batchedInputGroups = tf.reshape(
-                self.inputGroups, [self.params.batchSize, -1]
+                self.inputGroups,
+                [
+                    self.params.batchSize,
+                    -1,
+                ],  # self.inputGroups has shape (BatchSize * NbTotalSpikes) and is filled with group indices or -1
             )
             mymask = tf.not_equal(batchedInputGroups, -1)
 
@@ -505,6 +537,7 @@ class LSTMandSpikeNetwork:
             allFeatures = self.dropoutLayer(allFeatures)
 
             # LSTM
+            # TODO: at some point, analyse the output of lstm/transformer ?
             if not kwargs.get("isTransformer", False):
                 myoutputPos, output, sumFeatures = self.apply_lstm_architecture(
                     allFeatures, sumFeatures, mymask, **kwargs
@@ -515,62 +548,28 @@ class LSTMandSpikeNetwork:
                     allFeatures, allFeatures_raw, mymask, **kwargs
                 )
 
-            # TODO: change
-            ### Multi-column loss configuration
-            column_losses = getattr(
-                self.params,
-                "column_losses",
-                {str(i): self.params.loss for i in range(myoutputPos.shape[-1])},
-            )
-            column_weights = getattr(self.params, "column_weights", {})
-            merge_columns = getattr(self.params, "merge_columns", [])
-            merge_losses = getattr(self.params, "merge_losses", [])
-            merge_weights = getattr(self.params, "merge_weights", [])
-
-            # Create the loss instance
-            if len(column_weights) > 1 or any(
-                "," in spec for spec in column_losses.keys()
-            ):
-                print("Using multi-column loss")
-                loss_function = MultiColumnLossLayer(
-                    column_losses=column_losses,
-                    column_weights=column_weights,
-                    merge_columns=merge_columns,
-                    merge_losses=merge_losses,
-                    merge_weights=merge_weights,
-                    alpha=self.params.alpha,
-                    gaussian_layer=getattr(self, "GaussianHeatmap", None),
-                )  # actually it's more of a layer than a function
-
-            else:
-                # Single loss case
-                loss_function = _get_loss_function(
-                    self.params.loss,
-                    alpha=self.params.alpha,
-                    gaussian_layer=getattr(self, "GaussianHeatmap", None),
-                )
+            loss_function = self._parse_loss_function_from_params()
 
             #### note
             # bayesian loss function  = sum ((y_true - y_pred)^2 / sigma^2 + log(sigma^2))
-
             # we assume myoutputPos is in cm x cm,
             # as self.truePos (modulo [0,1] normalization)
             # in ~cm2 as no loss is sqrt or log
             if getattr(self.params, "GaussianHeatmap", False):
                 if self.params.dimOutput > 2:
+                    # we separate the heatmap from the other variables
                     targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(
-                        self.truePos[:, :2]
+                        self.truePos[:, :2]  # already batched
                     )
                     logits_hw = myoutputPos[
-                        :,
+                        :,  # all batch
                         : self.params.GaussianGridSize[0]
-                        * self.params.GaussianGridSize[1],
+                        * self.params.GaussianGridSize[1],  # only the heatmap part
                     ]
-                    batch_size = tf.shape(logits_hw)[0]
                     logits_hw = tf.reshape(
                         logits_hw,
                         (
-                            batch_size,  # batch size
+                            self.params.batchSize,
                             self.params.GaussianGridSize[0],
                             self.params.GaussianGridSize[1],
                         ),
@@ -606,7 +605,6 @@ class LSTMandSpikeNetwork:
 
             if self.params.denseweight:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
-
             if self.params.transform_w_log:
                 posLoss = tf.identity(
                     tf.math.log(tf.math.reduce_mean(tempPosLoss)),
@@ -624,6 +622,44 @@ class LSTMandSpikeNetwork:
                 )
 
         return myoutputPos, posLoss
+
+    def _parse_loss_function_from_params(self):
+        # TODO: change
+        ### Multi-column loss configuration
+        column_losses = getattr(
+            self.params,
+            "column_losses",
+            {str(i): self.params.loss for i in range(myoutputPos.shape[-1])},
+        )
+        column_weights = getattr(self.params, "column_weights", {})
+        merge_columns = getattr(self.params, "merge_columns", [])
+        merge_losses = getattr(self.params, "merge_losses", [])
+        merge_weights = getattr(self.params, "merge_weights", [])
+
+        # Create the loss instance
+        if len(column_weights) > 1 or any("," in spec for spec in column_losses.keys()):
+            print("Using multi-column loss")
+            loss_function = MultiColumnLossLayer(
+                column_losses=column_losses,
+                column_weights=column_weights,
+                merge_columns=merge_columns,
+                merge_losses=merge_losses,
+                merge_weights=merge_weights,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_layer=getattr(self, "GaussianHeatmap", None),
+            )  # actually it's more of a layer than a function
+
+        else:
+            # Single loss case
+            loss_function = _get_loss_function(
+                self.params.loss,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_layer=getattr(self, "GaussianHeatmap", None),
+            )
+
+        return loss_function
 
     def compile_model(
         self, outputs, modelName="FullModel.png", predLossOnly=False, **kwargs
@@ -860,6 +896,7 @@ class LSTMandSpikeNetwork:
         def _parse_function(*vals):
             return nnUtils.parse_serialized_spike(self.featDesc, *vals)
 
+        # Parse the record into tensors - simply attribute a name to every tensor from featDesc
         ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
         ndataset = ndataset.prefetch(tf.data.AUTOTUNE)
         # Manage masks
@@ -924,6 +961,7 @@ class LSTMandSpikeNetwork:
             )
 
         for key in totMask.keys():
+            # creates a lookup table to filter by pos index, and by totMask (speed + epoch)
             table = tf.lookup.StaticHashTable(
                 tf.lookup.KeyValueTensorInitializer(
                     tf.constant(np.arange(len(totMask[key])), dtype=tf.int64),
@@ -933,8 +971,6 @@ class LSTMandSpikeNetwork:
             )
             datasets[key] = ndataset.filter(filter_by_pos_index)
             # This is just max normalization to use if the behavioral data have not been normalized yet
-            # TODO: make a way to input 1D target, different 2D targets...
-            # coherent with the --target arg from main
             if onTheFlyCorrection:
                 maxPos = np.nanmax(
                     behaviorData["Positions"][
@@ -946,148 +982,16 @@ class LSTMandSpikeNetwork:
                 posFeature = behaviorData["Positions"] / maxPos
             else:
                 posFeature = behaviorData["Positions"]
+
+            # posFeature is already of shape (N,dimOutput) because we ran data_helper.get_true_target before.
             datasets[key] = datasets[key].map(nnUtils.import_true_pos(posFeature))
             datasets[key] = datasets[key].filter(filter_nan_pos)
 
             # now that we have clean positions, we can resample if needed
             if self.params.OversamplingResampling and key == "train":
-                print("Using oversampling resampling on the training set")
-
-                # FIX: make sure GaussianHeatmap is initialized - force it ?
-
-                GRID_H, GRID_W = (
-                    self.GaussianHeatmap.GRID_H,
-                    self.GaussianHeatmap.GRID_W,
+                datasets[key] = self._apply_oversampling_resampling(
+                    datasets[key], windowSizeMS=windowSizeMS
                 )
-                # instead of oversampling on such tiny grid, we take a coarser grid mesh
-                stride = 3
-                coarse_H, coarse_W = GRID_H // stride, GRID_W // stride
-
-                @tf.autograph.experimental.do_not_convert
-                def map_bin_class(ex):
-                    return nnUtils.bin_class(
-                        ex,
-                        GRID_H,
-                        GRID_W,
-                        stride,
-                        self.GaussianHeatmap.forbid_mask_tf,
-                    )
-
-                # should not be useful as true positions are already allowed!
-                datasets[key] = datasets[key].filter(
-                    lambda ex: tf.greater_equal(map_bin_class(ex), 0)
-                )
-
-                positions = self.GaussianHeatmap.training_positions
-                # filter position by map_bin_class
-                bins = self.GaussianHeatmap.positions_to_bins(positions)
-
-                # Convert fine bins → coarse bins
-                # Map to coarse bins
-                # Step 1: compute fine x,y indices
-                x_fine = bins % GRID_W
-                y_fine = bins // GRID_W
-
-                # Step 2: downscale to coarse grid
-                x_coarse = x_fine // stride
-                y_coarse = y_fine // stride
-
-                # Step 3: coarse bin index
-                coarse_bins = y_coarse * coarse_W + x_coarse  # shape same as positions
-                counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
-                    np.float32
-                )
-
-                # Flatten FORBID for easy masking
-                # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
-                FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
-                for y in range(coarse_H):
-                    for x in range(coarse_W):
-                        # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
-                        if np.any(
-                            self.GaussianHeatmap.forbid_mask_tf[
-                                y * stride : (y + 1) * stride,
-                                x * stride : (x + 1) * stride,
-                            ]
-                            > 0
-                        ):
-                            FORBID_coarse[y, x] = True
-                FORBID_flat = FORBID_coarse.flatten()
-                counts[FORBID_flat] = 0  # set forbidden bins to 0 count
-
-                allowed_bins = (counts > 0) & (~FORBID_flat)
-
-                # Normalize - empirical proba for each allowed bin
-                initial_dist = counts / np.maximum(1.0, counts.sum())
-                initial_dist = initial_dist[allowed_bins]
-                target_dist = np.ones(
-                    coarse_H * coarse_W,
-                    np.float32,
-                )
-                target_dist[FORBID_flat] = 0  # forbid forbidden bins
-                target_dist /= target_dist.sum()  # normalize to sum=1
-                target_dist = target_dist[allowed_bins]
-
-                # compute oversampling ratios
-                rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
-                rep_factors = np.minimum(
-                    rep_factors, 20.0
-                )  # clip to avoid extreme repeats
-                rep_factors_tf = tf.constant(rep_factors, tf.float32)
-
-                allowed_idx = np.where(allowed_bins)[0]
-                bin_to_allowed_idx = -np.ones_like(allowed_bins, dtype=int)
-                bin_to_allowed_idx[allowed_idx] = np.arange(len(allowed_idx))
-                # convert to tensor
-                allowed_bins = tf.constant(allowed_bins)
-                bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
-
-                # Map each example to repeated datasets
-                @tf.autograph.experimental.do_not_convert
-                def map_repeat(ex):
-                    mapped_cls = map_bin_class(ex)
-                    allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
-
-                    safe_idx = tf.maximum(allowed_idx_val, 0)  # -1 becomes 0
-                    # find idx in rep_factors (only allowed bins)
-                    repeats = tf.cast(
-                        tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
-                    )
-                    repeats = tf.where(allowed_idx_val >= 0, repeats, 0)
-                    return tf.cond(
-                        repeats > 0,
-                        lambda: tf.data.Dataset.from_tensors(ex).repeat(repeats),
-                        lambda: tf.data.Dataset.from_tensors(ex).take(0),
-                    )
-
-                datasets_before_oversampling = datasets[
-                    key
-                ]  # Save this before the oversampling block
-                datasets[key] = datasets[key].flat_map(map_repeat)
-                # shuffle after repeating to mix repeated samples
-                datasets[key] = datasets[key].shuffle(buffer_size=10000, seed=42)
-                datasets_after_oversampling = datasets[
-                    key
-                ]  # Save this before the oversampling block
-                from neuroencoders.importData.gui_elements import OversamplingVisualizer
-
-                if not os.path.exists(
-                    os.path.join(
-                        self.folderResult, str(windowSizeMS), "oversampling_effect.png"
-                    )
-                ):
-                    visualizer = OversamplingVisualizer(self.GaussianHeatmap)
-                    visualizer.visualize_oversampling_effect(
-                        datasets_before_oversampling,
-                        datasets_after_oversampling,
-                        stride=stride,  # Match your stride
-                        max_samples=20000,
-                        path=os.path.join(
-                            self.folderResult,
-                            str(windowSizeMS),
-                            "oversampling_effect.png",
-                        ),
-                    )
 
             datasets[key] = (
                 datasets[key].batch(self.params.batchSize, drop_remainder=True).cache()
@@ -1099,6 +1003,7 @@ class LSTMandSpikeNetwork:
                     map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
                 )  # self.featDesc, *
             else:
+                # this way the data augmentation is applied after resampling and batching.
                 print("Applying data augmentation to", key, "dataset")
                 datasets[key] = datasets[key].map(
                     map_parse_serialized_sequence_with_augmentation,
@@ -1118,6 +1023,7 @@ class LSTMandSpikeNetwork:
                 .map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
                 .cache()
             )
+            # now dataset is a tuple (inputsDict, outputsDict)
             # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
             # and each mini-batch contains a representative sample of the training set.
             # nSteps represent the buffer size of the shuffle operation - 10 seconds worth of buffer starting
@@ -1931,6 +1837,139 @@ class LSTMandSpikeNetwork:
                 predictions[key], folderName=folderName, sleep=True, sleepName=key
             )
 
+    def _apply_oversampling_resampling(self, dataset, windowSizeMS):
+        print("Using oversampling resampling on the training set")
+
+        # FIX: make sure GaussianHeatmap is initialized - force it ?
+
+        GRID_H, GRID_W = (
+            self.GaussianHeatmap.GRID_H,
+            self.GaussianHeatmap.GRID_W,
+        )
+        # instead of oversampling on such tiny grid, we take a coarser grid mesh
+        stride = 3
+        coarse_H, coarse_W = GRID_H // stride, GRID_W // stride
+
+        @tf.autograph.experimental.do_not_convert
+        def map_bin_class(ex):
+            return nnUtils.bin_class(
+                ex,
+                GRID_H,
+                GRID_W,
+                stride,
+                self.GaussianHeatmap.forbid_mask_tf,
+            )
+
+        # should not be useful as true positions are already allowed!
+        dataset = dataset.filter(lambda ex: tf.greater_equal(map_bin_class(ex), 0))
+
+        positions = self.GaussianHeatmap.training_positions
+        # filter position by map_bin_class
+        bins = self.GaussianHeatmap.positions_to_bins(positions)
+
+        # Convert fine bins → coarse bins
+        # Map to coarse bins
+        # Step 1: compute fine x,y indices
+        x_fine = bins % GRID_W
+        y_fine = bins // GRID_W
+
+        # Step 2: downscale to coarse grid
+        x_coarse = x_fine // stride
+        y_coarse = y_fine // stride
+
+        # Step 3: coarse bin index
+        coarse_bins = y_coarse * coarse_W + x_coarse  # shape same as positions
+        counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
+            np.float32
+        )
+
+        # Flatten FORBID for easy masking
+        # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
+        FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+        for y in range(coarse_H):
+            for x in range(coarse_W):
+                # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
+                if np.any(
+                    self.GaussianHeatmap.forbid_mask_tf[
+                        y * stride : (y + 1) * stride,
+                        x * stride : (x + 1) * stride,
+                    ]
+                    > 0
+                ):
+                    FORBID_coarse[y, x] = True
+        FORBID_flat = FORBID_coarse.flatten()
+        counts[FORBID_flat] = 0  # set forbidden bins to 0 count
+
+        allowed_bins = (counts > 0) & (~FORBID_flat)
+
+        # Normalize - empirical proba for each allowed bin
+        initial_dist = counts / np.maximum(1.0, counts.sum())
+        initial_dist = initial_dist[allowed_bins]
+        target_dist = np.ones(
+            coarse_H * coarse_W,
+            np.float32,
+        )
+        target_dist[FORBID_flat] = 0  # forbid forbidden bins
+        target_dist /= target_dist.sum()  # normalize to sum=1
+        target_dist = target_dist[allowed_bins]
+
+        # compute oversampling ratios
+        rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
+        rep_factors = np.minimum(rep_factors, 20.0)  # clip to avoid extreme repeats
+        rep_factors_tf = tf.constant(rep_factors, tf.float32)
+
+        allowed_idx = np.where(allowed_bins)[0]
+        bin_to_allowed_idx = -np.ones_like(allowed_bins, dtype=int)
+        bin_to_allowed_idx[allowed_idx] = np.arange(len(allowed_idx))
+        # convert to tensor
+        allowed_bins = tf.constant(allowed_bins)
+        bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
+
+        # Map each example to repeated dataset
+        @tf.autograph.experimental.do_not_convert
+        def map_repeat(ex):
+            mapped_cls = map_bin_class(ex)
+            allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
+
+            safe_idx = tf.maximum(allowed_idx_val, 0)  # -1 becomes 0
+            # find idx in rep_factors (only allowed bins)
+            repeats = tf.cast(
+                tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
+            )
+            repeats = tf.where(allowed_idx_val >= 0, repeats, 0)
+            return tf.cond(
+                repeats > 0,
+                lambda: tf.data.Dataset.from_tensors(ex).repeat(repeats),
+                lambda: tf.data.Dataset.from_tensors(ex).take(0),
+            )
+
+        dataset_before_oversampling = dataset
+        # Save this before the oversampling block
+        dataset = dataset.flat_map(map_repeat)
+        # shuffle after repeating to mix repeated samples
+        dataset = dataset.shuffle(buffer_size=10000, seed=42)
+        dataset_after_oversampling = dataset  # Save this before the oversampling block
+        from neuroencoders.importData.gui_elements import OversamplingVisualizer
+
+        if not os.path.exists(
+            os.path.join(
+                self.folderResult, str(windowSizeMS), "oversampling_effect.png"
+            )
+        ):
+            visualizer = OversamplingVisualizer(self.GaussianHeatmap)
+            visualizer.visualize_oversampling_effect(
+                dataset_before_oversampling,
+                dataset_after_oversampling,
+                stride=stride,  # Match your stride
+                max_samples=20000,
+                path=os.path.join(
+                    self.folderResult,
+                    str(windowSizeMS),
+                    "oversampling_effect.png",
+                ),
+            )
+        return dataset
+
     def get_artificial_spikes(
         self,
         behaviorData,
@@ -2114,6 +2153,15 @@ class LSTMandSpikeNetwork:
     def create_indices(self, vals, addLinearizationTensor=False):
         """
         Create indices for gathering spikes from each group.
+        The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
+
+        Args:
+            vals (dict): A dictionary containing the input tensors, including "groups" and "group{n}" for each group.
+            addLinearizationTensor (bool): Whether to add linearization tensors to the output.
+        Returns:
+            dict: Updated dictionary with indices for each group and optional linearization tensors. The indices are stored under the keys "indices{n}" for each group and represent the positions to gather spikes from each group.
+
+        See self.indices in the model definition for more details on usage.
         """
         for group in range(self.params.nGroups):
             spikePosition = tf.where(tf.equal(vals["groups"], group))
@@ -2655,7 +2703,10 @@ class LSTMandSpikeNetwork:
 
 
 def _get_loss_function(
-    loss_name: str, alpha: float, gaussian_layer: tf.keras.layers.Layer = None
+    loss_name: str,
+    alpha: float,
+    delta: float,
+    gaussian_layer: tf.keras.layers.Layer = None,
 ) -> tf.keras.losses.Loss:
     """Helper function to get loss function by name with reduction='none'"""
     if loss_name == "mse":
@@ -2663,7 +2714,7 @@ def _get_loss_function(
     elif loss_name == "mae":
         return tf.keras.losses.MeanAbsoluteError(reduction="none")
     elif loss_name == "huber":
-        return tf.keras.losses.Huber(delta=alpha, reduction="none")
+        return tf.keras.losses.Huber(delta=delta, reduction="none")
     elif loss_name == "msle":
         return tf.keras.losses.MeanSquaredLogarithmicError(reduction="none")
     elif loss_name == "logcosh":
@@ -2714,6 +2765,7 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
         column_losses: Optional[Dict[str, str]] = None,
         column_weights: Optional[Dict[str, float]] = None,
         alpha: float = 1.0,
+        delta: float = 1.0,
         name: str = "multi_output_loss_layer",
         gaussian_layer=None,
         target_hw=None,
@@ -2771,7 +2823,7 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
         self.merged_loss_functions = []
         for loss_name in self.merge_losses:
             self.merged_loss_functions.append(
-                _get_loss_function(loss_name, self.alpha, gaussian_layer)
+                _get_loss_function(loss_name, self.alpha, self.delta, gaussian_layer)
             )
 
         # Create individual column loss functions (for backwards compatibility)
@@ -2780,7 +2832,7 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
 
         for col_spec, loss_name in self.column_losses.items():
             self.individual_losses[col_spec] = _get_loss_function(
-                loss_name, self.alpha, gaussian_layer
+                loss_name, self.alpha, self.delta, gaussian_layer
             )
             self.individual_weights[col_spec] = self.column_weights.get(col_spec, 1.0)
         print(

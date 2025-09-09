@@ -520,6 +520,19 @@ def serialize_single_spike(clu, spike):
 
 # @tf.function
 def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_proto,
+    """
+    Parse a serialized spike sequence example.
+    Args:
+        params: parameters of the network
+        tensors: parsed tensors from the TFRecord example
+        batched: Whether data is batched
+
+    Returns:
+        Parsed tensors with reshaped spike data.
+        In particular, each "group" tensor is reshaped to [num_spikes, nChannelsPerGroup[g], 32].
+        If batched, the shape should be [batchSize, num_spikes_per_batch, nChannelsPerGroup[g], 32] but is then reshaped to merge batch and spikes, giving:
+        [batchSize * num_spikes_per_batch, nChannelsPerGroup[g], 32].
+    """
     tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
     # Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
     # Probably because he wanted a variable length <> inputs sequences
@@ -566,6 +579,16 @@ def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_p
 
 
 def parse_serialized_spike(featDesc, ex_proto, batched=False):
+    """
+    Parse a serialized spike example.
+    Args:
+        featDesc: Feature description for parsing
+        ex_proto: Serialized TFRecord example
+        batched: Whether data is batched
+
+    Returns:
+        Parsed tensors
+    """
     if batched:
         tensors = tf.io.parse_example(serialized=ex_proto, features=featDesc)
     else:
@@ -577,6 +600,10 @@ def parse_serialized_spike(featDesc, ex_proto, batched=False):
 
 
 def import_true_pos(feature):
+    """
+    Returns a function that adds true position (the feature array) to the parsed tensors.
+    """
+
     def change_feature(vals):
         vals["pos"] = tf.gather(feature, vals["pos_index"])
         return vals
