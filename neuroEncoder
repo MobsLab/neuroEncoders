@@ -343,6 +343,7 @@ def main(args):
                     training_data=TrainerBayes.training_data,
                     useSpeedMask=False,
                     l_function=l_function,
+                    force=args.redo,
                 )
 
             if (
@@ -390,6 +391,7 @@ def main(args):
                     training_data=TrainerBayes.training_data,
                     useSpeedMask=False,
                     l_function=l_function,
+                    force=args.redo,
                 )
 
             if (
@@ -437,6 +439,7 @@ def main(args):
                     training_data=TrainerBayes.training_data,
                     useSpeedMask=False,
                     l_function=l_function,
+                    force=args.redo,
                 )
         except FileNotFoundError:
             raise ValueError(
@@ -546,6 +549,53 @@ def main(args):
         # check if windowStride is an integer, if not raise an error
         if not strideFactor.is_integer():
             raise ValueError("The window size is not compatible with the 36ms stride.")
+
+        # if the tfrec file is older than yesterday, we delete it and redo the spike filtering
+        if os.path.exists(
+            os.path.join(
+                ProjectPath.folder,
+                "dataset",
+                "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
+            )
+        ):
+            print("Checking if the tfrec file is up to date...")
+            file_time = os.path.getmtime(
+                os.path.join(
+                    ProjectPath.folder,
+                    "dataset",
+                    "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
+                )
+            )
+            import time
+            from datetime import datetime, timedelta
+
+            file_datetime = datetime.fromtimestamp(file_time)
+            yesterday_midnight = (datetime.now() - timedelta(days=5)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+            if file_datetime < yesterday_midnight:
+                print(
+                    "The tfrec file is older than yesterday, redoing spike filtering..."
+                )
+                # delete the tfrec file
+                os.remove(
+                    os.path.join(
+                        ProjectPath.folder,
+                        "dataset",
+                        "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
+                    )
+                )
+                os.remove(
+                    os.path.join(
+                        ProjectPath.folder,
+                        "dataset",
+                        "datasetSleep_stride"
+                        + str(round(args.window * 1000))
+                        + ".tfrec",
+                    )
+                )
+
         julia_spike_filter(
             ProjectPath,
             folderCode,
@@ -587,20 +637,29 @@ def main(args):
                 load_model=True,
                 fine_tune=True,
                 l_function=l_function,
-                num_augmentations=6 if args.window < 0.252 else 3,
+                num_augmentations=11 if args.window < 0.252 else 6,
             )
             T = None
 
         if Parameters.GaussianHeatmap:
             print("Will now run temperature scaling for gaussian heatmap")
-            T = NNTrainer.test(
+            T_test = NNTrainer.test(
                 DataHelper.fullBehavior,
                 fit_temperature=True,
-                epochKey="lossPredSetEpochs",
+                epochKey="testEpochs",
                 windowSizeMS=windowSizeMS,
                 useSpeedFilter=True,
                 isPredLoss=isPL,
             )
+            T = NNTrainer.test(
+                DataHelper.fullBehavior,
+                fit_temperature=True,
+                epochKey="trainEpochs",
+                windowSizeMS=windowSizeMS,
+                useSpeedFilter=True,
+                isPredLoss=isPL,
+            )
+            print(f"Found T={T}, T_test={T_test}. Diff is {T - T_test}")
         # now run the fancy inference
         if (
             not os.path.exists(
@@ -634,6 +693,7 @@ def main(args):
                 phase="training",
                 useSpeedMask=True,
                 training_data=NNTrainer.training_data,
+                force=args.redo,
                 l_function=l_function,
             )
 
@@ -665,10 +725,11 @@ def main(args):
                 show=show_figures,
                 lossSelection=0.5,
                 euclidean=False,
+                force=args.redo,
                 target=args.target,
                 phase=args.phase,
                 training_data=NNTrainer.training_data,
-                useSpeedMask=False,
+                useSpeedMask=True,
                 l_function=l_function,
             )
 
@@ -703,8 +764,9 @@ def main(args):
                 target=args.target,
                 phase="cond",
                 training_data=NNTrainer.training_data,
-                useSpeedMask=False,
+                useSpeedMask=True,
                 l_function=l_function,
+                force=args.redo,
             )
 
         if (
@@ -738,8 +800,9 @@ def main(args):
                 target=args.target,
                 phase="post",
                 training_data=NNTrainer.training_data,
-                useSpeedMask=False,
+                useSpeedMask=True,
                 l_function=l_function,
+                force=args.redo,
             )
 
         if args.test_sleep and (
@@ -759,7 +822,7 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 T_scaling=T,
-                # TODO: add windowSizeDecoder
+                # TODO: add windowSizeDecoder --> decode small windows with big window trained model
             )
 
         NNTrainer.clear_session()

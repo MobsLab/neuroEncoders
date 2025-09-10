@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from matplotlib.collections import LineCollection
-from matplotlib.colors import LinearSegmentedColormap, NoNorm
+from matplotlib.colors import LinearSegmentedColormap, NoNorm, Normalize
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -38,10 +38,9 @@ from neuroencoders.utils.viz_params import (
     CURRENT_POINT_COLOR,
     CURRENT_PREDICTED_POINT_COLOR,
     DELTA_COLOR,
-    DELTA_COLOR_CONCORDANT,
-    DELTA_COLOR_DISCORDANT,
+    DELTA_COLOR_FORWARD,
+    DELTA_COLOR_REVERSE,
     FREEZING_LINE_COLOR,
-    FREEZING_POINTS_COLOR,
     HLINES,
     MAX_NUM_STARS,
     PREDICTED_CMAP,
@@ -76,7 +75,7 @@ class AnimatedPositionPlotter:
     def __init__(
         self,
         data_helper,
-        trail_length: int = 20,
+        trail_length: int = 30,
         lin_movie_duration: int = 500,
         figsize: Tuple[float, float] = (16, 9),
         fourD_analysis_mode: bool = False,
@@ -96,7 +95,7 @@ class AnimatedPositionPlotter:
             linear_position_mode: Whether to use and plot linearized positions around the maze (default: False)
             with_posMat: Whether to use position matrix for the Stimulation times (otherwise will use StimEpoch, but seems less trustworthy) (default: True)
             **kwargs: Additional keyword arguments for customization
-                speedMask : Speed mask for the trajectory (default: False)
+                speedMask : Boolean, use speed mask for the trajectory (default: False)
                 speedMaskArray: Pre-computed speed mask array instead of simple boolean (optional)
                 predicted : Pre-computed predicted positions (optional)
                 /!\ when using predicted positions, you must provide a posIndex and a prediction time to match the positions with the predictions.
@@ -156,13 +155,17 @@ class AnimatedPositionPlotter:
             self.positions_from_NN = None
             self.prediction_positionTime = None
 
+        if kwargs.get("predicted_heatmap", None) is not None:
+            self.predicted_heatmap = np.array(kwargs["predicted_heatmap"])
+        else:
+            self.predicted_heatmap = None
+
         self.positions = np.array(self.data_helper.fullBehavior["Positions"])
         self.plot_all_stims = kwargs.get("plot_all_stims", False)
         self.true_posIndex = np.arange(len(self.positions))  # will be used with masking
         self.og_positions = self.positions.copy()
-        self.positionTime = self.data_helper.fullBehavior["positionTime"][
-            :, 0
-        ]  # we setup a "true" positionTime to use for precise plotting such as stims...
+        self.positionTime = self.data_helper.fullBehavior["positionTime"][:, 0]
+        # we setup a "true" positionTime to use for precise plotting such as stims...
         # same for "true" positions, which are the original positions for each and every timepoint
 
         # compute the nyquist frequency from positionTime
@@ -195,7 +198,7 @@ class AnimatedPositionPlotter:
                 raise ValueError(
                     "Linear position mode requires either a linearization function (l_function) or linearized_true data."
                 )
-            _, self.linpositions = self.l_function(self.positions)
+            _, self.linpositions = self.l_function(self.positions[:, :2])
         else:
             self.linpositions = None
 
@@ -206,18 +209,9 @@ class AnimatedPositionPlotter:
                 raise ValueError(
                     "Linear position mode requires either a linearization function (l_function) or linearized_pred data."
                 )
-            _, self.linpredicted = self.l_function(self.predicted)
+            _, self.linpredicted = self.l_function(self.predicted[:, :2])
         else:
             self.linpredicted = None
-
-        if kwargs.get("predLossMask", None) is None:
-            if self.predicted is None:
-                print("skipping prediction and predloss")
-                self.predLossMask = None
-            else:
-                self.predLossMask = np.ones(len(self.predicted), dtype=bool)
-        else:
-            self.predLossMask = np.array(kwargs["predLossMask"])
 
         if self.plot_stims:
             self.start_stim = self.data_helper.fullBehavior["Times"]["start_stim"]
@@ -254,6 +248,15 @@ class AnimatedPositionPlotter:
     def _apply_masks(self, **kwargs):
         """Apply epoch and speed masks to filter data."""
 
+        if kwargs.get("predLossMask", None) is None:
+            if self.predicted is None:
+                print("skipping prediction and predloss")
+                self.predLossMask = None
+            else:
+                self.predLossMask = np.ones(len(self.predicted), dtype=bool)
+        else:
+            self.predLossMask = np.array(kwargs["predLossMask"])
+
         if self.predicted is None:
             epochMask = ep.inEpochsMask(
                 self.positionTime,
@@ -264,10 +267,11 @@ class AnimatedPositionPlotter:
             )
             # restrict to best epochs no prediction given
         else:
-            epochMask = (self.positionTime >= self.prediction_positionTime[0] - 1) & (
-                self.positionTime <= self.prediction_positionTime[-1] + 1
+            epochMask = (self.positionTime >= self.prediction_positionTime[0]) & (
+                self.positionTime <= self.prediction_positionTime[-1]
             )
             # restrict to rough prediction time range
+
         try:
             self.positions[epochMask]
             # should work if there is no prediction - totMask is very long
@@ -300,6 +304,7 @@ class AnimatedPositionPlotter:
             self.posIndex_in_true_posIndex[self.posIndex] = 1
 
         if kwargs.get("speedMaskArray", None) is not None:
+            print("Using provided speed mask array.")
             self.speed_mask = np.array(kwargs["speedMaskArray"])
             # size of prediction_positionTime, not positionTime
             self.speed_mask = self.deduplicate_and_merge(
@@ -309,6 +314,7 @@ class AnimatedPositionPlotter:
                 reduce_fn=np.max,
             )
         elif kwargs.get("speedMask", False):
+            print("Using speed mask from data_helper.")
             try:
                 self.speed_mask = np.array(
                     self.data_helper.fullBehavior["Times"]["speedFilter"]
@@ -323,6 +329,7 @@ class AnimatedPositionPlotter:
             # size of prediction_positionTime
 
         if self.predLossMask is not None:
+            print("Applying deduplication and merging to predLossMask.")
             self.predLossMask = self.deduplicate_and_merge(
                 self.predLossMask,
                 self.unique_indices,
@@ -434,8 +441,10 @@ class AnimatedPositionPlotter:
                 self.predLossMask = self.predLossMask[self.totMask]
             except IndexError:
                 self.predLossMask = self.predLossMask[self.predictionMask]
+
         if self.predicted is not None:
             self.predicted = self.predicted[self.predictionMask]
+
         if self.prediction_positionTime is not None:
             self.prediction_positionTime = self.deduplicate_and_merge(
                 self.prediction_positionTime,
@@ -454,6 +463,14 @@ class AnimatedPositionPlotter:
                 self.inverse_indices,
             )
             self.linpredicted = self.linpredicted[self.predictionMask]
+
+        if self.predicted_heatmap is not None:
+            self.predicted_heatmap = self.deduplicate_and_merge(
+                self.predicted_heatmap,
+                self.unique_indices,
+                self.inverse_indices,
+            )
+            self.predicted_heatmap = self.predicted_heatmap[self.predictionMask]
 
         # Remove NaN values
         # WARNING: I'm afraid this will remove too much data, and would prefer plotting NaN values instead of removing them.
@@ -488,6 +505,13 @@ class AnimatedPositionPlotter:
             if self.speed_mask is not None:
                 # give NaN values to positions where speed_mask is False
                 self.linpredicted[~self.speed_mask] = np.nan
+        if self.predicted_heatmap is not None:
+            self.predicted_heatmap = self.predicted_heatmap[
+                self.prediction_valid_indices
+            ]
+            self.predicted_heatmap[~self.predLossMask] = np.nan
+            if self.speed_mask is not None:
+                self.predicted_heatmap[~self.speed_mask] = np.nan
 
     def _extract_dim_data(self, **kwargs):
         """Extract dimension data for color coding (from original class)."""
@@ -511,6 +535,12 @@ class AnimatedPositionPlotter:
             elif self.data_helper.target.lower() == "posandheaddirectionandspeed":
                 dim = "PosHDSpeed"
                 self.dim_name = "PosHDSpeed"
+            elif (
+                self.data_helper.target.lower() == "posandheaddirectionandthigmo"
+                and self.positions.shape[1] > 2
+            ):
+                dim = "Head Direction"
+                self.dim_name = "Head Direction"
             elif self.data_helper.target.lower() == "direction":
                 dim = "direction"
                 self.dim_name = "Direction"
@@ -536,6 +566,13 @@ class AnimatedPositionPlotter:
                 self.dim = np.array(self.data_helper.positions)
                 self.dim_name = "PosHDSpeed"
                 self.dim = self.dim[self.totMask][self.true_valid_indices]
+            elif dim == "Head Direction":
+                self.dim = np.array(self.data_helper.positions[:, 3])
+                self.dim_name = "Head Direction"
+                # self.lin_dim = self.data_helper.positions[:, 2]
+                self.dim = self.dim[self.totMask][self.true_valid_indices]
+                # self.lin_dim = self.lin_dim[self.totMask][self.true_valid_indices]
+                self.positions = self.positions[:, :2]
         elif isinstance(dim, np.ndarray):
             self.dim = dim
             try:
@@ -566,6 +603,8 @@ class AnimatedPositionPlotter:
                         predicted_dim = "direction"
                     elif self.predicted_dim_name == "PosHDSpeed":
                         predicted_dim = "PosHDSpeed"
+                    elif self.predicted_dim_name == "Head Direction":
+                        predicted_dim = "Head Direction"
                     else:
                         predicted_dim = np.ones_like(self.predicted)
 
@@ -592,6 +631,18 @@ class AnimatedPositionPlotter:
                     elif predicted_dim == "PosHDSpeed":
                         self.predicted_dim = self.predicted.copy()
                         self.predicted_dim_name = "PosHDSpeed"
+                    elif predicted_dim == "Head Direction":
+                        if self.predicted.shape[1] < 4:
+                            raise ValueError(
+                                "Predicted positions must have at least 4 dimensions for head direction."
+                            )
+                        self.predicted_dim = self.predicted[:, 3]
+                        # self.lin_dim_pred = self.predicted[:, 2]
+                        self.predicted_dim_name = "Head Direction"
+                        self.predicted = self.predicted[:, :2]
+                        self.predicted_dim = self.predicted_dim[
+                            self.prediction_valid_indices
+                        ]
                 elif isinstance(predicted_dim, np.ndarray):
                     self.predicted_dim = predicted_dim
 
@@ -698,7 +749,7 @@ class AnimatedPositionPlotter:
                 return self._setup_simple_plot(**kwargs)
             else:
                 print(
-                    "Setting up multipanel plot (trajectory, concordant/discordant, and linear position movie)..."
+                    "Setting up multipanel plot (trajectory, forward/reverse, and linear position movie)..."
                 )
                 self.very_simple_plot = False
                 return self._setup_multipanel_plot(**kwargs)
@@ -731,7 +782,7 @@ class AnimatedPositionPlotter:
 
     def _setup_multipanel_plot(self, **kwargs):
         """
-        Setup the matplotlib figure and axes for multipanel viewing mode (1 panel for Shock/Safe; 1 for concordant/discordant prediction, 1 for a movie of linear position).
+        Setup the matplotlib figure and axes for multipanel viewing mode (1 panel for Shock/Safe; 1 for forward/reverse prediction, 1 for a movie of linear position).
         """
         usedark = kwargs.get("dark_theme", False)
         plt.style.use("dark_background") if usedark else plt.style.use("default")
@@ -872,6 +923,8 @@ class AnimatedPositionPlotter:
 
         if kwargs.get("dark_theme", False):
             ax.set_facecolor("#0f0f23")
+        else:
+            ax.set_facecolor("grey")
         ax.tick_params(colors="white" if kwargs.get("dark_theme", False) else "black")
         self.artists["linpos_line"] = ax.plot(
             [],
@@ -884,9 +937,10 @@ class AnimatedPositionPlotter:
             [],
             [],
             c=CURRENT_POINT_COLOR,
-            s=100,
+            s=200,
             marker="o",
             edgecolor="black",
+            linewidth=2.5,
             zorder=10,
         )
 
@@ -895,14 +949,40 @@ class AnimatedPositionPlotter:
             # TODO: possibility to add a cmap with predLoss values
             # and one line artist to link the dots between the predicted positions
             self.scatterpoints = []
+            if hasattr(self, "lin_dim_pred") and self.lin_dim_pred is not None:
+                # create a cmap for the predict lin dim (either predLoss, head direction, thigmo, speed, etc)
+                if self.predicted_dim_name == "Head Direction":
+                    # means lin_pred_dim is actually head direction !
+                    self.predicted_lin_cmap = plt.get_cmap("hsv")
+                    self.predicted_lin_norm = Normalize(
+                        vmin=np.nanmin(self.lin_dim_pred),
+                        vmax=np.nanmax(self.lin_dim_pred),
+                    )
             self.artists["linpos_pred_points"] = ax.scatter(
                 [],
                 [],
+                cmap=self.predicted_lin_cmap
+                if hasattr(self, "predicted_lin_cmap")
+                else None,
                 c=predicted_color,
                 s=100,
                 marker="o",
-                label="Predicted points",
+                label=f"Predicted points (colored by {self.dim_name})"
+                if hasattr(self, "lin_dim_pred")
+                else "Predicted points",
             )
+            # add the colorbar for the predicted points
+            if hasattr(self, "predicted_lin_cmap"):
+                cbar = self.fig.colorbar(
+                    plt.cm.ScalarMappable(
+                        norm=self.predicted_lin_norm, cmap=self.predicted_lin_cmap
+                    ),
+                    ax=ax,
+                    orientation="vertical",
+                    fraction=0.046,
+                    pad=0.04,
+                )
+                cbar.set_label(self.predicted_dim_name)
             self.artists["linpos_pred_line"] = ax.plot(
                 [],
                 [],
@@ -1141,11 +1221,11 @@ class AnimatedPositionPlotter:
             "predicted_line_color", PREDICTED_LINE_COLOR
         )
         self.delta_color = kwargs.get("delta_color", DELTA_COLOR)
-        self.delta_color_concordant = kwargs.get(
-            "delta_color_concordant", DELTA_COLOR_CONCORDANT
+        self.delta_color_forward = kwargs.get(
+            "delta_color_forward", DELTA_COLOR_FORWARD
         )
-        self.delta_color_discordant = kwargs.get(
-            "delta_color_discordant", DELTA_COLOR_DISCORDANT
+        self.delta_color_reverse = kwargs.get(
+            "delta_color_reverse", DELTA_COLOR_REVERSE
         )
         self.max_num_stars = kwargs.get(
             "max_num_stars", MAX_NUM_STARS
@@ -1279,6 +1359,11 @@ class AnimatedPositionPlotter:
                 )
                 self.colormap[name_axis] = colormap
                 self.predicted_colormap[name_axis] = predicted_colormap
+            if self.dim_name == "Head Direction":
+                colormap = cm.get_cmap("hsv")
+                predicted_colormap = cm.get_cmap("hsv")
+                self.colormap[name_axis] = colormap
+                self.predicted_colormap[name_axis] = predicted_colormap
             # self.norm = Normalize(vmin=np.min(dim_to_use), vmax=np.max(dim_to_use))
 
         if name_axis not in self.artists:
@@ -1288,10 +1373,8 @@ class AnimatedPositionPlotter:
             self.xypoints[name_axis] = {}
             self.xytimes[name_axis] = {}
             self.xypoints[name_axis]["stims_stars"] = []
-            self.xypoints[name_axis]["freezing_stars"] = []
             self.xypoints[name_axis]["ripples_stars"] = []
             self.xytimes[name_axis]["stims_stars"] = []
-            self.xytimes[name_axis]["freezing_stars"] = []
             self.xytimes[name_axis]["ripples_stars"] = []
 
         if name_axis not in self.handles_labels:
@@ -1307,28 +1390,29 @@ class AnimatedPositionPlotter:
                 [],
                 [],
                 c=kwargs.get("shock_color", SHOCK_COLOR),
-                s=200,
+                s=400,
                 marker="*",
                 label="Stimulation",
-                zorder=10,
-            )
-            self.artists[name_axis]["freezing_stars"] = ax.scatter(
-                [],
-                [],
-                c=kwargs.get("freezing_color", FREEZING_POINTS_COLOR),
-                s=200,
-                marker="*",
-                label="Freezing",
                 zorder=10,
             )
             self.artists[name_axis]["ripples_stars"] = ax.scatter(
                 [],
                 [],
                 c=kwargs.get("ripples_color", RIPPLES_COLOR),
-                s=200,
+                s=300,
                 marker="*",
                 label="Ripples",
                 zorder=10,
+            )
+        if self.predicted_heatmap is not None:
+            self.artists[name_axis]["predicted_heatmap"] = ax.imshow(
+                np.zeros_like(self.predicted_heatmap[0]),
+                extent=(0, 1, 0, 1),
+                origin="lower",
+                # cmap=cm.get_cmap("Reds"),
+                cmap="Greys" if not self.with_ref_bg else "Greys_r",
+                alpha=0.7,
+                zorder=1,
             )
 
         (self.artists[name_axis]["line"],) = ax.plot(
@@ -1364,8 +1448,11 @@ class AnimatedPositionPlotter:
             self.linear_path = np.array(
                 [
                     [-0.05, 0],
+                    [-0.05, 0.55],
                     [-0.05, 1.05],
+                    [0.55, 1.05],
                     [1.05, 1.05],
+                    [1.05, 0.55],
                     [1.05, 0],
                 ]
             )
@@ -1497,6 +1584,7 @@ class AnimatedPositionPlotter:
                     [],
                     [],
                     s=50,
+                    c=[],
                     alpha=alpha_trail_points,
                     cmap=self.predicted_colormap[name_axis],
                     norm=self.norm[name_axis],
@@ -1509,10 +1597,10 @@ class AnimatedPositionPlotter:
             [],
             [],
             c=CURRENT_POINT_COLOR,
-            s=100,
+            s=200,
             marker="o",
             edgecolors="black",
-            linewidth=5,
+            linewidth=2.5,
             zorder=10,
         )
         if self.predicted is not None:
@@ -1520,9 +1608,8 @@ class AnimatedPositionPlotter:
                 [],
                 [],
                 c=CURRENT_PREDICTED_POINT_COLOR,
-                s=100,
+                s=200,
                 marker="x",
-                edgecolors="black",
                 linewidth=5,
                 zorder=10,
             )
@@ -1598,22 +1685,22 @@ class AnimatedPositionPlotter:
                 labels_for_legend.append(delta_label)
             else:
                 # add pair points legend with direction info
-                delta_concordant_handle = Line2D(
+                delta_forward_handle = Line2D(
                     [0],
                     [0],
-                    color=self.delta_color_concordant,
+                    color=self.delta_color_forward,
                     linewidth=4,
                 )
-                delta_concordant_label = "Concordant Direction"
-                handles_for_legend.append(delta_concordant_handle)
-                labels_for_legend.append(delta_concordant_label)
+                delta_forward_label = "Forward Direction"
+                handles_for_legend.append(delta_forward_handle)
+                labels_for_legend.append(delta_forward_label)
                 delta_discordant_handle = Line2D(
                     [0],
                     [0],
-                    color=self.delta_color_discordant,
+                    color=self.delta_color_reverse,
                     linewidth=4,
                 )
-                delta_discordant_label = "Discordant Direction"
+                delta_discordant_label = "Reverse Direction"
                 handles_for_legend.append(delta_discordant_handle)
                 labels_for_legend.append(delta_discordant_label)
 
@@ -1623,7 +1710,6 @@ class AnimatedPositionPlotter:
 
         if self.plot_stims and self.very_simple_plot:
             stims_handle = self.artists[name_axis]["stims_stars"]
-            freezing_handle = self.artists[name_axis]["freezing_stars"]
             ripples_handle = self.artists[name_axis]["ripples_stars"]
             handles_for_legend.append(stims_handle)
             labels_for_legend.append("Stimulation")
@@ -1839,7 +1925,10 @@ class AnimatedPositionPlotter:
     def init_animation(self):
         # Clear all artists
         for artist in self.flatten_artists():
-            if hasattr(artist, "set_data"):
+            # check it's not an imshow artist
+            from matplotlib.image import AxesImage
+
+            if hasattr(artist, "set_data") and not isinstance(artist, AxesImage):
                 artist.set_data([], [])
             elif hasattr(artist, "set_offsets"):
                 artist.set_offsets(np.column_stack(([], [])))
@@ -1902,6 +1991,10 @@ class AnimatedPositionPlotter:
                     marker="*",
                     label="All stimulations",
                     zorder=2,
+                )
+            if self.predicted_heatmap is not None:
+                self.artists[name_axis]["predicted_heatmap"].set_data(
+                    self.predicted_heatmap[0]
                 )
             ax.grid(True, alpha=0.3)
             ax.set_aspect("equal")
@@ -2141,27 +2234,30 @@ class AnimatedPositionPlotter:
                         [trail_positions[common_mask], trail_predicted], axis=1
                     )
 
-                    if (
-                        self.velocity_true is not None
-                        and self.velocity_predicted is not None
+                    if self.velocity_true is not None and (
+                        self.speed_mask is None
+                        or np.logical_not(
+                            np.isnan(self.speed_mask[start_idx:end_idx])
+                        ).sum()
+                        >= 0
                     ):
-                        velocity_true = self.velocity_true[start_idx:end_idx]
+                        velocity_true = self.velocity_true[start_idx:end_idx][
+                            common_mask
+                        ]
                         mask = (self.posIndex >= self.true_posIndex[start_idx]) & (
                             self.posIndex < self.true_posIndex[end_idx]
                         )
-                        velocity_predicted = self.velocity_predicted[mask]
 
-                        # Create a mask for concordant and discordant directions by using dot product
-                        mask = (
-                            np.sum(
-                                velocity_true[common_mask] * velocity_predicted, axis=1
-                            )
-                            >= 0
+                        position_diff = (
+                            self.predicted[mask]
+                            - self.positions[start_idx:end_idx][common_mask]
                         )
+                        # Create a mask for concordant and discordant directions by using dot product
+                        mask = np.sum(velocity_true * position_diff, axis=1) >= 0
                         colors = np.where(
                             mask,
-                            self.delta_color_concordant,
-                            self.delta_color_discordant,
+                            self.delta_color_forward,
+                            self.delta_color_reverse,
                         )
                     else:
                         colors = np.full(segments.shape[0], self.delta_color)
@@ -2169,6 +2265,25 @@ class AnimatedPositionPlotter:
                         segments
                     )
                     self.artists[name_axis]["delta_predicted_true"].set_color(colors)
+
+            if (
+                self.predicted_heatmap is not None
+                and self.posIndex_in_true_posIndex[frame]
+            ):
+                current_heatmap = self.predicted_heatmap[
+                    np.where(self.posIndex == self.true_posIndex[frame])[0][0]
+                ]
+                masked = np.ma.masked_where(
+                    current_heatmap <= current_heatmap.mean(), current_heatmap
+                )
+                self.artists[name_axis]["predicted_heatmap"].set_data(masked)
+                vmin = masked.min()
+                vmax = masked.max()
+                if vmin == vmax:
+                    vmax = vmin + 1e-10
+                self.artists[name_axis]["predicted_heatmap"].set_clim(
+                    vmin=vmin, vmax=vmax
+                )
 
             if self.binary_colors[name_axis]:
                 current_color = self.colormap[name_axis][int(current_dir)]
@@ -2201,7 +2316,6 @@ class AnimatedPositionPlotter:
                 # update stims, freezing, and ripples markers
                 for name, indices in [
                     ("stims_stars", self.stim_indices),
-                    ("freezing_stars", self.freezing_indices),
                     ("ripples_stars", self.ripples_indices),
                 ]:
                     if name not in self.artists[name_axis]:
@@ -2426,6 +2540,10 @@ class AnimatedPositionPlotter:
             self.artists["current_predicted_point"].set_data(
                 self.positionTime[frame], self.linpredicted[idx]
             )
+            if hasattr(self, "lin_dim_pred"):
+                values = self.lin_dim_pred[mask]
+                color = self.predicted_lin_cmap(self.predicted_lin_norm(values))
+                self.artists["linpos_pred_points"].set_facecolors(color)
 
         self.axes["linpos_movie"].set_xlim(
             self.positionTime[start_idx],

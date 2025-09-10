@@ -342,7 +342,7 @@ def get_behavior(
 
 def speed_filter(
     folder: str,
-    overWrite: bool = True,
+    overWrite: bool = False,
     phase=None,
     template=None,
     force: bool = False,
@@ -734,8 +734,10 @@ def speed_filter(
                 mngr1.resize(*mngr1.window.maxsize())
                 mngr2.window.wm_geometry("+2560+0")
                 mngr2.resize(*mngr2.window.maxsize())
-            plt.show(block=not force)
+            plt.show(block=True)
             speedThreshold = slider.val
+        else:
+            plt.close("all")
         fig2d.savefig(
             os.path.join(folder, f"speed_filter_2d_{phase}.png"),
             dpi=300,
@@ -769,7 +771,7 @@ def speed_filter(
 
 def select_epochs(
     folder: str,
-    overWrite: bool = True,
+    overWrite: bool = False,
     phase=None,
     force: bool = False,
     find_best_sets: bool = False,
@@ -984,92 +986,184 @@ def select_epochs(
             assert st.shape[0] % 2 == 0
             showtimes = tuple(zip(st[::2], st[1::2]))
 
-        # Default train and test sets
-        sizeTest = (
-            timeToShow.shape[0] // 10
-            if phase == "all"
-            else timeToShowPRE.shape[0] // 10
-        )
-        testSetId = (
-            timeToShow.shape[0] - timeToShow.shape[0] // 10
-            if phase == "all"
-            else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 10
-        )
-
-        useLossPredTrainSet = False  # whether to use a loss prediction training set
-        lossPredSetId = 0  # the loss prediction set id
-        sizelossPredSet = (
-            timeToShow.shape[0] // 10
-            if phase == "all"
-            else timeToShowPRE.shape[0] // 10
-        )
-
-        if find_best_sets:
-            from tqdm import tqdm
-
-            print("Evaluating the entropy of each possible test set")
-            entropiesPositions = []
-            entropiesSpeeds = []
-            nb_points = []
-            epsilon = 10 ** (-9)
-            # TODO: This iterates over the full behavior, which is not ideal (we would prefere to iterate over speedMasked behavior)
-            for idx_testSet in tqdm(
-                np.arange(
-                    0,
-                    stop=timeToShowPRE.shape[0] - sizeTest,
-                    step=sizeTest,
-                )
-            ):
-                # we want to select only the idx that are in the speedMask
-                idx = np.arange(idx_testSet, idx_testSet + sizeTest)
-                idx_valid = np.where(speedMaskToShowPRE[idx])[0]
-                # The environmental variable are discretized by equally space bins
-                # such that there is 45*...*45 bins per dimension
-                # we then fit over the test set a kernel estimation of the probability distribution
-                # and evaluate it over the bins
-                _, probaFeatures = kdenD(behToShow[idx_valid, :], bandwidth=1.0)
-                # We then compute the entropy of the obtained distribution:
-                entropiesPositions += [
-                    -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
-                ]
-                _, probaFeatures = kdenD(speedsToShow[idx_valid, :], bandwidth=1.0)
-                # We then compute the entropy of the obtained distribution:
-                entropiesSpeeds += [
-                    -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
-                ]
-                nb_points += [idx_valid.shape[0]]
-            totEntropy = (
-                np.array(entropiesSpeeds)
-                + np.array(entropiesPositions)
-                - np.exp(-1 / 80 * np.array(nb_points))
-            )  # penalize small sets
-            bestTestSet = np.argmax(totEntropy)
-            testSetId = bestTestSet * sizeTest + idx_cut
-            print(
-                "Found best test set at index",
-                bestTestSet,
-                "with real (speedMasked) size",
-                nb_points[bestTestSet],
+        try:
+            # Default train and test sets
+            sizeTest = (
+                timeToShow.shape[0] // 20
+                if phase == "all"
+                else timeToShowPRE.shape[0] // 20
             )
-            if isPredLoss:
-                useLossPredTrainSet = True
-                bestPLSet = np.argsort(totEntropy)[-2]
+            testSetId = (
+                timeToShow.shape[0] - timeToShow.shape[0] // 20
+                if phase == "all"
+                else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 20
+            )
+
+            useLossPredTrainSet = False  # whether to use a loss prediction training set
+            lossPredSetId = 0  # the loss prediction set id
+            sizelossPredSet = (
+                timeToShow.shape[0] // 20
+                if phase == "all"
+                else timeToShowPRE.shape[0] // 20
+            )
+
+            if find_best_sets:
+                from tqdm import tqdm
+
+                print("Evaluating the entropy of each possible test set")
+                entropiesPositions = []
+                entropiesSpeeds = []
+                nb_points = []
+                epsilon = 10 ** (-9)
+                # TODO: This iterates over the full behavior, which is not ideal (we would prefere to iterate over speedMasked behavior)
+                for idx_testSet in tqdm(
+                    np.arange(
+                        0,
+                        stop=timeToShowPRE.shape[0] - sizeTest,
+                        step=sizeTest,
+                    )
+                ):
+                    # we want to select only the idx that are in the speedMask
+                    idx = np.arange(idx_testSet, idx_testSet + sizeTest)
+                    idx_valid = np.where(speedMaskToShowPRE[idx])[0]
+                    # The environmental variable are discretized by equally space bins
+                    # such that there is 45*...*45 bins per dimension
+                    # we then fit over the test set a kernel estimation of the probability distribution
+                    # and evaluate it over the bins
+                    _, probaFeatures = kdenD(behToShow[idx_valid, :], bandwidth=1.0)
+                    # We then compute the entropy of the obtained distribution:
+                    entropiesPositions += [
+                        -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                    ]
+                    _, probaFeatures = kdenD(speedsToShow[idx_valid, :], bandwidth=1.0)
+                    # We then compute the entropy of the obtained distribution:
+                    entropiesSpeeds += [
+                        -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                    ]
+                    nb_points += [idx_valid.shape[0]]
+                totEntropy = (
+                    np.array(entropiesSpeeds)
+                    + np.array(entropiesPositions)
+                    - np.exp(-1 / 80 * np.array(nb_points))
+                )  # penalize small sets
+                bestTestSet = np.argmax(totEntropy)
+                testSetId = bestTestSet * sizeTest + idx_cut
                 print(
-                    "Found best loss pred set at index",
-                    bestPLSet,
+                    "Found best test set at index",
+                    bestTestSet,
                     "with real (speedMasked) size",
-                    nb_points[bestPLSet],
+                    nb_points[bestTestSet],
+                    "(20% of total epochs)",
                 )
-                lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
+                if isPredLoss:
+                    useLossPredTrainSet = True
+                    bestPLSet = np.argsort(totEntropy)[-2]
+                    print(
+                        "Found best loss pred set at index",
+                        bestPLSet,
+                        "with real (speedMasked) size",
+                        nb_points[bestPLSet],
+                        "(20% of total epochs)",
+                    )
+                    lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
+                else:
+                    bestPLSet = 0
+                    lossPredSetId = (
+                        0 if testSetId != 0 else 3 * bestTestSet * sizeTest + idx_cut
+                    )
             else:
-                bestPLSet = 0
-                lossPredSetId = (
-                    0 if testSetId != 0 else 3 * bestTestSet * sizeTest + idx_cut
+                bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
+                bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
+                lossPredSetId = 0
+        except:
+            # Default train and test sets
+            sizeTest = (
+                timeToShow.shape[0] // 10
+                if phase == "all"
+                else timeToShowPRE.shape[0] // 10
+            )
+            testSetId = (
+                timeToShow.shape[0] - timeToShow.shape[0] // 10
+                if phase == "all"
+                else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 10
+            )
+
+            useLossPredTrainSet = False  # whether to use a loss prediction training set
+            lossPredSetId = 0  # the loss prediction set id
+            sizelossPredSet = (
+                timeToShow.shape[0] // 10
+                if phase == "all"
+                else timeToShowPRE.shape[0] // 10
+            )
+
+            if find_best_sets:
+                from tqdm import tqdm
+
+                print("Evaluating the entropy of each possible test set")
+                entropiesPositions = []
+                entropiesSpeeds = []
+                nb_points = []
+                epsilon = 10 ** (-9)
+                # TODO: This iterates over the full behavior, which is not ideal (we would prefere to iterate over speedMasked behavior)
+                for idx_testSet in tqdm(
+                    np.arange(
+                        0,
+                        stop=timeToShowPRE.shape[0] - sizeTest,
+                        step=sizeTest,
+                    )
+                ):
+                    # we want to select only the idx that are in the speedMask
+                    idx = np.arange(idx_testSet, idx_testSet + sizeTest)
+                    idx_valid = np.where(speedMaskToShowPRE[idx])[0]
+                    # The environmental variable are discretized by equally space bins
+                    # such that there is 45*...*45 bins per dimension
+                    # we then fit over the test set a kernel estimation of the probability distribution
+                    # and evaluate it over the bins
+                    _, probaFeatures = kdenD(behToShow[idx_valid, :], bandwidth=1.0)
+                    # We then compute the entropy of the obtained distribution:
+                    entropiesPositions += [
+                        -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                    ]
+                    _, probaFeatures = kdenD(speedsToShow[idx_valid, :], bandwidth=1.0)
+                    # We then compute the entropy of the obtained distribution:
+                    entropiesSpeeds += [
+                        -np.sum(probaFeatures * np.log(probaFeatures + epsilon))
+                    ]
+                    nb_points += [idx_valid.shape[0]]
+                totEntropy = (
+                    np.array(entropiesSpeeds)
+                    + np.array(entropiesPositions)
+                    - np.exp(-1 / 80 * np.array(nb_points))
+                )  # penalize small sets
+                bestTestSet = np.argmax(totEntropy)
+                testSetId = bestTestSet * sizeTest + idx_cut
+                print(
+                    "Found best test set at index",
+                    bestTestSet,
+                    "with real (speedMasked) size",
+                    nb_points[bestTestSet],
+                    "(10% of total epochs)",
                 )
-        else:
-            bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
-            bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
-            lossPredSetId = 0
+                if isPredLoss:
+                    useLossPredTrainSet = True
+                    bestPLSet = np.argsort(totEntropy)[-2]
+                    print(
+                        "Found best loss pred set at index",
+                        bestPLSet,
+                        "with real (speedMasked) size",
+                        nb_points[bestPLSet],
+                        "(10% of total epochs)",
+                    )
+                    lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
+                else:
+                    bestPLSet = 0
+                    lossPredSetId = (
+                        0 if testSetId != 0 else 3 * bestTestSet * sizeTest + idx_cut
+                    )
+            else:
+                bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
+                bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
+                lossPredSetId = 0
 
         # TODO: implement this best test set.
         SetData = {
@@ -1790,7 +1884,7 @@ def select_epochs(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
                 # plt.get_current_fig_manager().window.state('zoomed') # on windows
-            plt.show(block=not force)
+            plt.show(block=True)
             fig.savefig(os.path.join(folder, f"epochs_{phase}.png"))
 
             if IsMultiSessions:
@@ -1806,6 +1900,7 @@ def select_epochs(
                     timeToShow, SetData, keptSession
                 )
 
+        plt.close("all")
         if "testEpochs" in children:
             f.remove_node("/behavior", "testEpochs")
         f.create_array("/behavior", "testEpochs", testEpochs)
@@ -1856,3 +1951,5 @@ def select_epochs(
                     c="orange",
                 )
             plt.show(block=True)
+        else:
+            plt.close("all")

@@ -13,6 +13,7 @@ from warnings import warn
 import dill as pickle
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.resultAnalysis import print_results
@@ -1463,6 +1464,18 @@ class Mouse_Results(Params, PaperFigures):
             posIndex = self.resultsNN_phase[phase]["posIndex"][idWindow]
 
         blit = kwargs.pop("blit", True)
+        if (
+            self.ann[str(win)].params.GaussianHeatmap
+            and kwargs.get("predicted_heatmap", None) is None
+        ):
+            predicted_logits = self.resultsNN_phase_pkl[phase][idWindow]["logits_hw"]
+            predicted_probs = (
+                self.ann[str(win)]
+                .GaussianHeatmap.decode_and_uncertainty(
+                    predicted_logits, return_probs=True
+                )[-1]
+                .numpy()
+            )
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
@@ -1471,7 +1484,11 @@ class Mouse_Results(Params, PaperFigures):
             speedMaskArray=speedMaskArray,
             prediction_time=prediction_time,
             posIndex=posIndex,
+            predicted_heatmap=kwargs.pop("predicted_heatmap", predicted_probs)
+            if self.ann[str(win)].params.GaussianHeatmap
+            else None,
             blit=blit,
+            l_function=kwargs.pop("l_function", self.l_function),
             **kwargs,
         )
         return plotter
@@ -1794,6 +1811,124 @@ class Mouse_Results(Params, PaperFigures):
                     self.bayes, self.l_function, winValue
                 )
 
+    def convert_to_df(self, redo=False):
+        if (
+            hasattr(self, "results_df")
+            and not redo
+            and isinstance(self.results_df, pd.DataFrame)
+        ):
+            print("Results DataFrame already exists. Use redo=True to recreate it.")
+            return self.results_df
+
+        data = []
+        for suffix in self.suffixes:
+            for id, win in enumerate(self.windows_values):
+                posIndex = (
+                    self.resultsNN_phase[suffix]["posIndex"][id].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None
+                )
+                if posIndex is None:
+                    raise ValueError(
+                        f"posIndex not found in results for {self.mouse_name} for phase {suffix.strip('_') if suffix else 'all'} and window {win}."
+                    )
+                time_behavior = self.data_helper[str(win)].fullBehavior["positionTime"][
+                    posIndex
+                ]
+
+                speed = self.data_helper[str(win)].fullBehavior["Speed"].flatten()
+                aligned_speed = speed[posIndex] if posIndex is not None else None
+
+                asymmetry_index = self.data_helper[str(win)].get_training_imbalance()
+
+                full_truePos_from_behavior = self.data_helper[str(win)].fullBehavior[
+                    "Positions"
+                ]
+                aligned_truePos_from_behavior = (
+                    full_truePos_from_behavior[posIndex]
+                    if posIndex is not None
+                    else None
+                )
+                full_trueLinPos_from_behavior = self.l_function(
+                    self.data_helper[str(win)].fullBehavior["Positions"][:, :2]
+                )[1]
+                aligned_trueLinPos_from_behavior = (
+                    full_trueLinPos_from_behavior[posIndex]
+                    if posIndex is not None
+                    else None
+                )
+                direction_from_behavior = (
+                    self.data_helper[str(win)]._get_traveling_direction(
+                        full_trueLinPos_from_behavior
+                    )[posIndex]
+                    if posIndex is not None
+                    else None
+                )
+                direction_fromNN = self.data_helper[str(win)]._get_traveling_direction(
+                    self.resultsNN_phase[suffix]["linTruePos"][id]
+                )
+                row = {
+                    "nameExp": self.nameExp,
+                    "mouse": self.mouse_name,  # if you need to split again
+                    "manipe": self.manipe,
+                    "phase": suffix.strip("_") if suffix else "all",
+                    "winMS": win,
+                    "asymmetry_index": asymmetry_index,
+                    "fullTruePos_fromBehavior": full_truePos_from_behavior,
+                    "alignedTruePos_fromBehavior": aligned_truePos_from_behavior,
+                    "fullTrueLinPos_from_behavior": full_trueLinPos_from_behavior,
+                    "alignedTrueLinPos_from_behavior": aligned_trueLinPos_from_behavior,
+                    "fullTimeBehavior": self.data_helper[str(win)]
+                    .fullBehavior["positionTime"]
+                    .flatten(),
+                    "alignedTimeBehavior": time_behavior,
+                    "timeNN": self.resultsNN_phase[suffix]["time"][id].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "fullSpeed": speed,
+                    "alignedSpeed": aligned_speed,
+                    "posIndex_NN": self.resultsNN_phase[suffix]["posIndex"][
+                        id
+                    ].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "speedMask": self.resultsNN_phase[suffix]["speedMask"][id].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "linPred": self.resultsNN_phase[suffix]["linPred"][id].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "fullPred": self.resultsNN_phase[suffix]["fullPred"][id]
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "truePos": self.resultsNN_phase[suffix]["truePos"][id]
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "linTruePos": self.resultsNN_phase[suffix]["linTruePos"][
+                        id
+                    ].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "predLoss": self.resultsNN_phase[suffix]["predLoss"][id].flatten()
+                    if hasattr(self, "resultsNN_phase")
+                    else None,
+                    "resultsNN": self.resultsNN if hasattr(self, "resultsNN") else None,
+                    "direction_fromBehavior": direction_from_behavior,
+                    "direction_fromNN": direction_fromNN,
+                }
+                # if bayesian results are loaded, add them to the dataframe
+                if hasattr(self, "resultsBayes") and "fullPred" in self.resultsBayes:
+                    row["bayesPred"] = self.resultsBayes_phase[suffix]["fullPred"][id]
+                    row["bayesLinPred"] = self.resultsBayes_phase[suffix]["linPred"][
+                        id
+                    ].flatten()
+                    row["bayesProba"] = self.resultsBayes_phase[suffix]["probaBayes"][
+                        id
+                    ].flatten()
+
+                data.append(row)
+        self.results_df = pd.DataFrame(data)
+
 
 class Results_Loader:
     """
@@ -2036,158 +2171,21 @@ class Results_Loader:
         Convert the results_dict to a pandas DataFrame.
         This method will create a DataFrame with the mouse names, manipes, phases, and results.
         """
-        data = []
+        data = pd.DataFrame()
         for nameExp, mice in self.results_dict.items():
             for mouse_name, phases in mice.items():
                 for phase, results in phases.items():
-                    if isinstance(results, Mouse_Results):
-                        for id, win in enumerate(results.windows_values):
-                            prefix = "_" + phase
+                    if phase != self.phases[0]:
+                        continue
+                    results_df = results.convert_to_df()
+                    # simply add "results" to the results_df
+                    results_df["results"] = results
+                    results_df["nameExp"] = nameExp
+                    results_df["mouse_name"] = mouse_name
+                    # concat dataframes
+                    data = pd.concat([data, results_df], ignore_index=True)
 
-                            id = results.windows_values.index(win)
-                            posIndex = (
-                                results.resultsNN_phase[prefix]["posIndex"][
-                                    id
-                                ].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None
-                            )
-                            if posIndex is None:
-                                raise ValueError(
-                                    f"posIndex not found in resultss for {mouse_manipe} in {ann_mode} for phase {phase} and window {win}."
-                                )
-                            time_behavior = results.data_helper[str(win)].fullBehavior[
-                                "positionTime"
-                            ][posIndex]
-
-                            speed = (
-                                results.data_helper[str(win)]
-                                .fullBehavior["Speed"]
-                                .flatten()
-                            )
-                            aligned_speed = (
-                                speed[posIndex] if posIndex is not None else None
-                            )
-
-                            asymmetry_index = results.data_helper[
-                                str(win)
-                            ].get_training_imbalance()
-
-                            full_truePos_from_behavior = results.data_helper[
-                                str(win)
-                            ].fullBehavior["Positions"]
-                            aligned_truePos_from_behavior = (
-                                full_truePos_from_behavior[posIndex]
-                                if posIndex is not None
-                                else None
-                            )
-                            full_trueLinPos_from_behavior = results.l_function(
-                                results.data_helper[str(win)].fullBehavior["Positions"]
-                            )[1]
-                            aligned_trueLinPos_from_behavior = (
-                                full_trueLinPos_from_behavior[posIndex]
-                                if posIndex is not None
-                                else None
-                            )
-                            direction_from_behavior = (
-                                results.data_helper[str(win)]._get_traveling_direction(
-                                    full_trueLinPos_from_behavior
-                                )[posIndex]
-                                if posIndex is not None
-                                else None
-                            )
-                            direction_fromNN = results.data_helper[
-                                str(win)
-                            ]._get_traveling_direction(
-                                results.resultsNN_phase[prefix]["linTruePos"][id]
-                            )
-                            row = {
-                                "nameExp": nameExp,
-                                "mouse": mouse_name,  # if you need to split again
-                                "manipe": results.manipe,
-                                "phase": phase,
-                                "results": results,
-                                "winMS": win,
-                                "asymmetry_index": asymmetry_index,
-                                "fullTruePos_fromBehavior": full_truePos_from_behavior,
-                                "alignedTruePos_fromBehavior": aligned_truePos_from_behavior,
-                                "fullTrueLinPos_from_behavior": full_trueLinPos_from_behavior,
-                                "alignedTrueLinPos_from_behavior": aligned_trueLinPos_from_behavior,
-                                "fullTimeBehavior": results.data_helper[str(win)]
-                                .fullBehavior["positionTime"]
-                                .flatten(),
-                                "alignedTimeBehavior": time_behavior,
-                                "timeNN": results.resultsNN_phase[prefix]["time"][
-                                    id
-                                ].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "fullSpeed": speed,
-                                "alignedSpeed": aligned_speed,
-                                "posIndex_NN": results.resultsNN_phase[prefix][
-                                    "posIndex"
-                                ][id].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "speedMask": results.resultsNN_phase[prefix][
-                                    "speedMask"
-                                ][id].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "linPred": results.resultsNN_phase[prefix]["linPred"][
-                                    id
-                                ].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "fullPred": results.resultsNN_phase[prefix]["fullPred"][
-                                    id
-                                ]
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "truePos": results.resultsNN_phase[prefix]["truePos"][
-                                    id
-                                ]
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "linTruePos": results.resultsNN_phase[prefix][
-                                    "linTruePos"
-                                ][id].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "predLoss": results.resultsNN_phase[prefix]["predLoss"][
-                                    id
-                                ].flatten()
-                                if hasattr(results, "resultsNN_phase")
-                                else None,
-                                "resultsNN": results.resultsNN
-                                if hasattr(results, "resultsNN")
-                                else None,
-                                "direction_fromBehavior": direction_from_behavior,
-                                "direction_fromNN": direction_fromNN,
-                            }
-                            # if bayesian results are loaded, add them to the dataframe
-                            if (
-                                hasattr(results, "bayes")
-                                and "fullPred" in results.resultsBayes
-                            ):
-                                row["bayesPred"] = results.resultsBayes_phase[prefix][
-                                    "fullPred"
-                                ][id]
-                                row["bayesLinPred"] = results.resultsBayes_phase[
-                                    prefix
-                                ]["linPred"][id].flatten()
-                                row["bayesProba"] = results.resultsBayes_phase[prefix][
-                                    "probaBayes"
-                                ][id].flatten()
-
-                            data.append(row)
-                    else:
-                        raise TypeError(
-                            f"Expected Mouse_Results object, got {type(results)} for mouse {mouse_name} and phase {phase}."
-                        )
-        self.results_df = (
-            pd.DataFrame(data).sort_values(by=["mouse", "phase"]).reset_index(drop=True)
-        )
+        self.results_df = data.sort_values(by=["mouse", "phase"]).reset_index(drop=True)
 
         return self.results_df
 
