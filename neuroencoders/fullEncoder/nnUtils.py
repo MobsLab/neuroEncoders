@@ -644,15 +644,15 @@ class NeuralDataAugmentation:
 
         kwargs:
             num_augmentations: Number of augmented copies per trial (4-20 range)
-            white_noise_std: Standard deviation for white noise (default: 1.2)
-            offset_noise_std: Standard deviation for constant offset (default: 0.6)
-            offset_scale_factor: Scale factor for threshold crossings (default: 0.67)
+            white_noise_std: Standard deviation for white noise (default: 5.0)
+            offset_noise_std: Standard deviation for constant offset (default: 1.6)
+            offset_scale_factor: Scale factor for threshold crossings offset (default: 0.67)
             cumulative_noise_std: Standard deviation for cumulative noise (default: 0.02)
             spike_band_channels: List of spike-band channel indices (if None, assumes all channels)
         """
         self.num_augmentations = kwargs.get("num_augmentations", 11)
-        self.white_noise_std = kwargs.get("white_noise_std", 5.0)
-        self.offset_noise_std = kwargs.get("offset_noise_std", 1.6)
+        self.white_noise_std = kwargs.get("white_noise_std", 2.0)
+        self.offset_noise_std = kwargs.get("offset_noise_std", 1.0)
         self.offset_scale_factor = kwargs.get("offset_scale_factor", 0.67)
         self.cumulative_noise_std = kwargs.get("cumulative_noise_std", 0.02)
         spike_band_channels = kwargs.get("spike_band_channels", None)

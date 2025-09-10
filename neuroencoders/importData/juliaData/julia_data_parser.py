@@ -3,8 +3,10 @@ import subprocess
 
 # Load custom code
 from neuroencoders.utils.global_classes import Project
+from neuroencoders.utils.func_wrappers import timing
 
 
+@timing
 def julia_spike_filter(
     projectPath: Project,
     folderCode,
