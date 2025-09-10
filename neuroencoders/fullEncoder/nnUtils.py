@@ -1719,7 +1719,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         return loss
 
-    def decode_and_uncertainty(self, logits_hw, mode="argmax"):
+    def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
         """
         Decode predicted heatmap into expected [x, y] position,
         computing confidence/uncertainty metrics while excluding forbidden bins.
@@ -1797,7 +1797,10 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         xy = tf.stack([ex, ey], axis=-1)
         # xy = self.project_out_of_forbid(xy)
 
-        return xy, maxp, Hn, var
+        if return_probs:
+            return xy, maxp, Hn, var, probs_allowed
+        else:
+            return xy, maxp, Hn, var
 
     def project_out_of_forbid(self, xy, forbid_box=None):
         """

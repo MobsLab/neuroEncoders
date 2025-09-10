@@ -214,6 +214,7 @@ class LSTMandSpikeNetwork:
                     device=self.deviceName,
                     nFeatures=self.params.nFeatures,
                     number=str(group),
+                    batch_normalization=False,
                 )
                 for group in range(self.params.nGroups)
             ]
@@ -406,6 +407,7 @@ class LSTMandSpikeNetwork:
                 outputSeq = outputSeq + prevSeq
 
         # 4. Pooling and final dense layers
+        # size [batch, max_nspikes, nFeatures]
         output = self.lstmsNets[-3](output, mask=mymask)  # pooling
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
@@ -477,6 +479,9 @@ class LSTMandSpikeNetwork:
             allFeatures = []  # store the result of the CNN computation for each group
             self.params.batchSize = kwargs.get("batchSize", self.params.batchSize)
             for group in range(self.params.nGroups):
+                # FIX: otherwise just use TimeDistributed layer
+                # keep sekf.inputsToSpikeNets[group] in [batch, nSpikes, nChannels, 32] and then
+                # x = TimeDistributed(self.spikeNets[group])(x)  # [batch, max_nSpikes, cnn_dim] --> get rid of the gather, reshape...
                 x = self.inputsToSpikeNets[group]
                 # --> [NbKeptSpike = batchSize * maxNbOfSpikes,nbChannels,31] tensors, created my nnUtils.parse_serialized_sequence(batched = True) in train/test calls.
                 x = self.spikeNets[group].apply(x)
@@ -494,7 +499,7 @@ class LSTMandSpikeNetwork:
                         group
                     ],  # self.indices[group] contains the indices where to put the spikes of the group in the final tensor - created by self.create_indices in train/test calls.
                     axis=0,
-                )
+                )  # give time sense
                 # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
                 # where we have filled lines corresponding to spike time of the group
                 # with the feature computed by the spike net; and let other time with a value of 0:
@@ -522,19 +527,23 @@ class LSTMandSpikeNetwork:
                     -1,
                 ],  # self.inputGroups has shape (BatchSize * NbTotalSpikes) and is filled with group indices or -1
             )
-            mymask = tf.not_equal(batchedInputGroups, -1)
+            mymask = tf.not_equal(
+                batchedInputGroups, -1
+            )  # [batch, max_n_spikes] (True for real spikes, False for padded values)
 
             masked_features = tf.where(
                 tf.expand_dims(mymask, axis=-1),
                 allFeatures,
                 tf.zeros_like(allFeatures, dtype=allFeatures.dtype),
             )
+            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
             sumFeatures = tf.math.reduce_sum(
                 masked_features, axis=1
             )  # This var will be used in the predLoss loss
 
             allFeatures_raw = allFeatures
             allFeatures = self.dropoutLayer(allFeatures)
+            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
 
             # LSTM
             # TODO: at some point, analyse the output of lstm/transformer ?
@@ -546,9 +555,9 @@ class LSTMandSpikeNetwork:
                 # Use shared transformer logic
                 myoutputPos, output, sumFeatures = self.apply_transformer_architecture(
                     allFeatures, allFeatures_raw, mymask, **kwargs
-                )
+                )  # shape (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
 
-            loss_function = self._parse_loss_function_from_params()
+            loss_function = self._parse_loss_function_from_params(myoutputPos)
 
             #### note
             # bayesian loss function  = sum ((y_true - y_pred)^2 / sigma^2 + log(sigma^2))
@@ -623,7 +632,7 @@ class LSTMandSpikeNetwork:
 
         return myoutputPos, posLoss
 
-    def _parse_loss_function_from_params(self):
+    def _parse_loss_function_from_params(self, myoutputPos):
         # TODO: change
         ### Multi-column loss configuration
         column_losses = getattr(
@@ -1097,21 +1106,31 @@ class LSTMandSpikeNetwork:
                         )
 
             if loaded:
-                if os.path.exists(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeMS),
-                        "full",
-                        "fullModelLosses.png",
+                print(
+                    "loaded weights for",
+                    key,
+                    "model. Fine tune is set to",
+                    kwargs.get("fine_tune", False),
+                )
+                if (
+                    os.path.exists(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "full",
+                            "fullModelLosses.png",
+                        )
                     )
-                ) or os.path.exists(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeMS),
-                        "predLoss",
-                        "predLossModelLosses.png",
+                    or os.path.exists(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "predLoss",
+                            "predLossModelLosses.png",
+                        )
                     )
-                ):
+                ) and not kwargs.get("fine_tune", False):
+                    print(kwargs.get("fine_tune", False))
                     print(
                         "Loading previous losses from",
                         os.path.join(self.folderModels, str(windowSizeMS)),
@@ -1127,10 +1146,10 @@ class LSTMandSpikeNetwork:
             )
             # Manage learning rates schedule
             if loaded and kwargs.get("fine_tune", False):
-                print("Fine-tuning the model with a lower learning rate, set to 0.0001")
-                self.optimizer.learning_rate.assign(0.0001)
-                self.model.optimizer.learning_rate.assign(0.0001)
-                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0001)
+                print("Fine-tuning the model with a lower learning rate, set to 0.001")
+                self.optimizer.learning_rate.assign(0.001)
+                self.model.optimizer.learning_rate.assign(0.001)
+                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.001)
                 # according to some sources we need to recompile the model after changing the learning rate
                 self.model.compile(
                     optimizer=self.optimizer,
@@ -1200,7 +1219,9 @@ class LSTMandSpikeNetwork:
                         min_delta=0.05,
                         verbose=1,
                         restore_best_weights=True,
-                        start_from_epoch=50 - nb_epochs_already_trained,
+                        start_from_epoch=max(
+                            self.params.earlyStop_start - nb_epochs_already_trained, 1
+                        ),
                     )
                     callbacks = [
                         csvLogger[key],
@@ -1298,15 +1319,6 @@ class LSTMandSpikeNetwork:
             Template for the data, by default None.
 
         """
-        # l_function=[],
-        # windowSizeMS=36,
-        # useSpeedFilter=False,
-        # useTrain=False,
-        # onTheFlyCorrection=False,
-        # isPredLoss=False,
-        # speedValue=None,
-        # phase=None,
-        # template=None,
 
         # Unpack kwargs
         l_function = kwargs.get("l_function", [])
@@ -1535,9 +1547,19 @@ class LSTMandSpikeNetwork:
         def map_time(x, y):
             return x["time"]
 
+        @tf.autograph.experimental.do_not_convert
+        def map_time_behavior(x, y):
+            return x["time_behavior"]
+
         datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
         times = np.reshape(times, [outputTest[0].shape[0]])
+
+        datasetTimesBehavior = dataset.map(
+            map_time_behavior, num_parallel_calls=tf.data.AUTOTUNE
+        )
+        times_behavior = list(datasetTimesBehavior.as_numpy_iterator())
+        times_behavior = np.reshape(times_behavior, [outputTest[0].shape[0]])
         print("gathering indices of spikes relative to coordinates")
 
         @tf.autograph.experimental.do_not_convert
@@ -1561,6 +1583,7 @@ class LSTMandSpikeNetwork:
         windowmaskSpeed = speedMask[
             posIndex
         ]  # the speedMask used in the table lookup call
+
         posLoss = (
             outputTest[1].numpy() if hasattr(outputTest[1], "numpy") else outputTest[1]
         )
@@ -1571,6 +1594,7 @@ class LSTMandSpikeNetwork:
             else outputTest[0],
             "featureTrue": featureTrue,
             "times": times,
+            "times_behavior": times_behavior,
             "posLoss": posLoss,
             "posIndex": posIndex,
             "speedMask": windowmaskSpeed,
@@ -2795,6 +2819,7 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
         self.column_losses = column_losses or {}
         self.column_weights = column_weights or {}
         self.alpha = alpha
+        self.delta = delta
         self.merge_columns = merge_columns or []
         self.merge_losses = merge_losses or []
         self.merge_weights = merge_weights or []

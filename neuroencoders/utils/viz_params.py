@@ -26,7 +26,7 @@ EC = np.array([45, 39])  # range of x and y in cm
 TRUE_COLOR = "xkcd:royal blue"
 CURRENT_POINT_COLOR = "red"
 TRUE_LINE_COLOR = "xkcd:royal blue"
-PREDICTED_COLOR = "xkcd:peach"
+PREDICTED_COLOR = "xkcd:dandelion"
 CURRENT_PREDICTED_POINT_COLOR = "xkcd:peach"
 PREDICTED_LINE_COLOR = "xkcd:bluey grey"
 
@@ -38,7 +38,7 @@ MIDDLE_COLOR = "xkcd:lavender"
 
 FREEZING_POINTS_COLOR = "xkcd:light blue"
 FREEZING_LINE_COLOR = "xkcd:light blue"
-RIPPLES_COLOR = "xkcd:rusty orange"
+RIPPLES_COLOR = "xkcd:greenish turquoise"
 ALL_STIMS_COLOR = "xkcd:pale pink"
 
 COLORMAP = cmc.buda
@@ -53,6 +53,6 @@ VLINES = None
 REMOVE_TICKS = True
 WITH_REF_BG = True
 DELTA_COLOR = "xkcd:vivid purple"
-DELTA_COLOR_CONCORDANT = "xkcd:electric green"
-DELTA_COLOR_DISCORDANT = "xkcd:red orange"
+DELTA_COLOR_FORWARD = "xkcd:electric green"
+DELTA_COLOR_REVERSE = "xkcd:red orange"
 MAX_NUM_STARS = 5

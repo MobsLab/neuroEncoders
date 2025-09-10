@@ -1353,6 +1353,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 5)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1425,27 +1426,27 @@ class Params:
         self.ff_dim1 = kwargs.pop(
             "ff_dim1",
             self.nFeatures * 2
-            if not self.project_transformer
+            if self.project_transformer
             else self.nFeatures * self.nGroups * 2,
         )  # first fully connected layer in Transformer arch dimension
         self.ff_dim2 = (
             self.nFeatures
-            if not self.project_transformer
-            else self.nFeatures * self.nGroups
+            if self.project_transformer
+            else self.nFeatures * self.nGroups  # ie PositionalEncoding dimension!!!!
         )  # second fully connected layer in Transformer arch dimension
 
         # if using transformer, we need to set 2 other dense layers output (after the multihead attention blocks)
         self.TransformerDenseSize1 = kwargs.pop(
             "TransformerDense1",
             self.nFeatures * 8
-            if not self.project_transformer
-            else self.nFeatures * self.nGroups * 4,
+            if self.project_transformer
+            else self.nFeatures * self.nGroups * 8,
         )
         self.TransformerDenseSize2 = kwargs.pop(
             "TransformerDense2",
             self.nFeatures * 4
-            if not self.project_transformer
-            else self.nFeatures * self.nGroups * 2,
+            if self.project_transformer
+            else self.nFeatures * self.nGroups * 4,
         )
 
         self.nDenseLayers = kwargs.pop(
@@ -1490,7 +1491,7 @@ class Params:
         self.others_weight = kwargs.pop("other_weight", 0.5)
 
         self.column_weights = (
-            {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
+            {"0": 0.5, "1": 0.5} if "direction" in self.target.lower() else {}
         )
         self.merge_columns = []
         self.merge_losses = []

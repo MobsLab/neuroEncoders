@@ -9,6 +9,8 @@ import tqdm
 from scipy import stats
 from scipy.stats import sem
 from statannotations.Annotator import Annotator
+import dill as pickle
+import seaborn as sns
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
@@ -57,6 +59,8 @@ class PaperFigures:
         self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
         self.resultsNN_phase = dict()
         self.resultsBayes_phase = dict()
+        self.resultsNN_phase_pkl = dict()
+        self.resultsBayes_phase_pkl = dict()
         if sleep:
             from resultAnalysis.paper_figures_sleep import PaperFiguresSleep
 
@@ -100,6 +104,7 @@ class PaperFigures:
             lossPred = []
             speedMask = []
             posIndex = []
+            resultsNN_phase_pkl = []
             for ws in self.timeWindows:
                 lPredPos.append(
                     np.squeeze(
@@ -236,6 +241,24 @@ class PaperFigures:
                     ).flatten()
                 )
 
+                try:  # load pkl files if they exist
+                    with open(
+                        os.path.join(
+                            self.projectPath.experimentPath,
+                            "results",
+                            str(ws),
+                            f"decoding_results{suffix}.pkl",
+                        ),
+                        "rb",
+                    ) as f:
+                        results = pickle.load(f)
+                        resultsNN_phase_pkl.append(results)
+                except FileNotFoundError:
+                    print(
+                        f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
+                    )
+                    resultsNN_phase_pkl.append(None)
+
             speedMask = [ws.astype(bool) for ws in speedMask]
 
             # Output
@@ -260,6 +283,7 @@ class PaperFigures:
                 "predLoss": lossPred,
                 "posIndex": posIndex,
             }
+            self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
     def load_bayes(self, suffixes=None, **kwargs):
         """
@@ -314,6 +338,7 @@ class PaperFigures:
             fTruePosBayes = []
             posLossBayes = []
             timesBayes = []
+            resultsBayes_phase_pkl = []
             for i, ws in enumerate(self.timeWindows):
                 try:
                     lPredPosBayes.append(
@@ -464,6 +489,23 @@ class PaperFigures:
                     lTruePosBayes.append(outputsBayes["linearTrue"].flatten())
                     timesBayes.append(outputsBayes["times"].flatten())
 
+                try:  # load pkl files if they exist
+                    with open(
+                        os.path.join(
+                            self.trainerBayes.folderResult,
+                            str(ws),
+                            f"bayes_decoding_results{suffix}.pkl",
+                        ),
+                        "rb",
+                    ) as f:
+                        results = pickle.load(f)
+                        resultsBayes_phase_pkl.append(results)
+                except FileNotFoundError:
+                    print(
+                        f"No pkl file found for resultsBayes_phase{suffix} and window {str(ws)}, skipping loading it."
+                    )
+                    resultsBayes_phase_pkl.append(None)
+
             # Output
             if suffix == self.suffix or len(self.suffixes) == 1:
                 self.resultsBayes = {
@@ -488,6 +530,7 @@ class PaperFigures:
                 "time": timesBayes,  # should be exactly the same as timeNN
                 "speedMask": self.resultsNN_phase[suffix]["speedMask"],
             }
+            self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=True):
         idWindow = self.timeWindows.index(timeWindow)
@@ -2277,6 +2320,234 @@ class PaperFigures:
         )
 
         return predLoss_ticks[0], errors_filtered
+
+    def plot_boxplot_error(self, results_df, logscale=True):
+        # for every phase, plot the whisker plot of fast_filtered_error, with a hue on winMS
+        if "fast_filtered_se_error" not in results_df.columns:
+            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+            results_df["fast_filtered_se_error"] = results_df.apply(
+                lambda row: np.linalg.norm(
+                    row["fullPred"][(row["speedMask"]), :2]
+                    - row["truePos"][(row["speedMask"]), :2],
+                    axis=1,
+                )
+                ** 2,
+                axis=1,
+            )
+            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+            results_df["slow_filtered_se_error"] = results_df.apply(
+                lambda row: np.linalg.norm(
+                    row["fullPred"][~(row["speedMask"]), :2]
+                    - row["truePos"][~(row["speedMask"]), :2],
+                    axis=1,
+                )
+                ** 2,
+                axis=1,
+            )
+        plt.figure()
+        sns.boxplot(
+            data=results_df.explode("fast_filtered_se_error"),
+            x="phase",
+            y="fast_filtered_se_error",
+            hue="winMS",
+            order=["training", "pre", "cond", "post"],
+        )
+        plt.title(
+            f"Fast epochs squared error by phase and window size, for mouse {self.mouse_name}"
+        )
+        if logscale:
+            plt.yscale("log")
+            plt.ylabel("Squared Error (log)")
+        else:
+            plt.ylabel("Squared Error")
+        plt.xlabel("Phase")
+        plt.legend(title="Window Size (ms)")
+        plt.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"boxplot_fast_filtered_se_error_{self.mouse_name}.png",
+            )
+        )
+        plt.show()
+        return results_df
+
+    def fig_proba_heatmap_error(
+        self,
+        winMS,
+        normalized_by="true",
+        plot_bias=False,
+        plot_surprise=False,
+        show=True,
+    ):
+        phases = ["training", "pre", "cond", "post"]
+        speeds = ["all", "slow", "fast"]
+        fig, axs = plt.subplots(
+            len(phases),
+            len(speeds) * (3 if plot_bias else 2),
+            figsize=(20 if plot_bias else 15, 10),
+        )
+        idWindow = self.timeWindows.index(winMS)
+        for i, phase in enumerate(phases):
+            phase = "_" + phase
+            for j, speed in enumerate(speeds):
+                if speed == "all":
+                    speedMask = np.ones_like(
+                        self.resultsNN_phase[phase]["speedMask"][idWindow],
+                        dtype=bool,
+                    )
+                elif speed == "slow":
+                    speedMask = np.logical_not(
+                        self.resultsNN_phase[phase]["speedMask"][idWindow]
+                    )
+                elif speed == "fast":
+                    speedMask = self.resultsNN_phase[phase]["speedMask"][idWindow]
+                else:
+                    raise ValueError("Speed must be 'all', 'slow' or 'fast'")
+
+                logits_hw = self.resultsNN_phase_pkl[phase][idWindow]["logits_hw"][
+                    speedMask
+                ]
+                truePos = self.resultsNN_phase[phase]["truePos"][idWindow][speedMask]
+                predPos = self.resultsNN_phase[phase]["fullPred"][idWindow][speedMask]
+                target_hw = self.ann[
+                    str(winMS)
+                ].GaussianHeatmap.gaussian_heatmap_targets(truePos)
+                probs = (
+                    self.ann[str(winMS)]
+                    .GaussianHeatmap.decode_and_uncertainty(
+                        logits_hw, return_probs=True
+                    )[-1]
+                    .numpy()
+                )
+                error = np.linalg.norm(truePos[:, :2] - predPos[:, :2], axis=1)
+                mean_probs = np.mean(probs, axis=0)
+                hist2d, xedges, yedges = np.histogram2d(
+                    truePos[:, 0], truePos[:, 1], bins=50, weights=error
+                )
+                if normalized_by == "true":
+                    hist2d_counts, _, _ = np.histogram2d(
+                        truePos[:, 0], truePos[:, 1], bins=50
+                    )
+                elif normalized_by == "pred":
+                    hist2d_counts, _, _ = np.histogram2d(
+                        predPos[:, 0], predPos[:, 1], bins=50
+                    )
+                else:
+                    raise ValueError("normalized_by must be 'true', or 'pred'")
+
+                hist2d_mean_error = np.divide(
+                    hist2d,
+                    hist2d_counts,
+                    out=np.zeros_like(hist2d),
+                    where=hist2d_counts != 0,
+                )  # avoid division by zero
+                extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+                if plot_surprise:
+                    # probs: [N, H, W], truePos: [N, 2]
+                    bin_indices_x = np.digitize(truePos[:, 1], yedges) - 1
+                    bin_indices_y = np.digitize(truePos[:, 0], xedges) - 1
+                    # Clip indices to valid range
+                    bin_indices_x = np.clip(bin_indices_x, 0, probs.shape[1] - 1)
+                    bin_indices_y = np.clip(bin_indices_y, 0, probs.shape[2] - 1)
+                    surprise = -np.log(
+                        probs[np.arange(len(truePos)), bin_indices_x, bin_indices_y]
+                    )
+                    hist2d_surprise, _, _ = np.histogram2d(
+                        truePos[:, 0],
+                        truePos[:, 1],
+                        bins=[xedges, yedges],
+                        weights=surprise,
+                    )
+                    hist2d_mean_error = np.divide(
+                        hist2d_surprise,
+                        hist2d_counts,
+                        out=np.zeros_like(hist2d_surprise),
+                        where=hist2d_counts != 0,
+                    )
+
+                ax1 = axs[i, j * (3 if plot_bias else 2)]
+                im1 = ax1.imshow(
+                    mean_probs,
+                    origin="lower",
+                    extent=extent,
+                    vmin=0,
+                    vmax=mean_probs.max(),
+                )
+                ax1.set_title(f"{phase[1:]}-{speed}-Proba")
+                plt.colorbar(im1, ax=ax1)
+                ax2 = axs[i, j * (3 if plot_bias else 2) + 1]
+                im2 = ax2.imshow(
+                    hist2d_mean_error.T,
+                    origin="lower",
+                    extent=extent,
+                    vmin=0,
+                    vmax=np.nanmax(hist2d_mean_error),
+                )
+                ax2.set_title(f"{phase[1:]}-{speed}-Error")
+                plt.colorbar(im2, ax=ax2)
+
+                # --- Bias heatmap ---
+                if plot_bias:
+                    # Compute mean bias vector in each bin
+                    bias_x = np.zeros((50, 50))
+                    bias_y = np.zeros((50, 50))
+                    for xi in range(50):
+                        for yi in range(50):
+                            mask_bin = (
+                                (truePos[:, 0] >= xedges[xi])
+                                & (truePos[:, 0] < xedges[xi + 1])
+                                & (truePos[:, 1] >= yedges[yi])
+                                & (truePos[:, 1] < yedges[yi + 1])
+                            )
+                            if np.any(mask_bin):
+                                bias_vec = np.mean(
+                                    predPos[mask_bin, :2] - truePos[mask_bin, :2],
+                                    axis=0,
+                                )
+                                bias_x[xi, yi] = bias_vec[0]
+                                bias_y[xi, yi] = bias_vec[1]
+                            else:
+                                bias_x[xi, yi] = np.nan
+                                bias_y[xi, yi] = np.nan
+                    ax3 = axs[i, j * (3 if plot_bias else 2) + 2]
+                    bias_mag = np.sqrt(bias_x.T**2 + bias_y.T**2)
+                    im3 = ax3.imshow(
+                        bias_mag,
+                        origin="lower",
+                        extent=extent,
+                        vmin=0,
+                        vmax=np.nanmax(bias_mag),
+                    )
+                    ax3.set_title(f"{phase[1:]}-{speed}-Bias")
+                    plt.colorbar(im3, ax=ax3)
+                    # Optionally, overlay quiver arrows for direction
+                    skip = 5  # reduce arrow density
+                    X, Y = np.meshgrid(xedges[:-1], yedges[:-1])
+                    ax3.quiver(
+                        X[::skip, ::skip],
+                        Y[::skip, ::skip],
+                        bias_x.T[::skip, ::skip],
+                        bias_y.T[::skip, ::skip],
+                        scale=0.05,
+                        color="black",
+                        alpha=0.7,
+                    )
+        plt.suptitle(
+            f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms\n normalized by {normalized_by} position. Surprise: {plot_surprise}. Bias: {plot_bias}",
+            y=1.02,
+        )
+        plt.tight_layout()
+        fig.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"heatmap_proba_error_{normalized_by}_surprise_{plot_surprise}_bias_{plot_bias}_{winMS}.png",
+            ),
+            bbox_inches="tight",
+        )
+        if show:
+            plt.show(block=True)
+        plt.close(fig)
 
     def fig_example_linear_filtered(
         self, suffix=None, phase=None, fprop=0.3, block=True
