@@ -1479,10 +1479,13 @@ class LSTMandSpikeNetwork:
         def map_index_in_dat(x, y):
             return x["indexInDat"]
 
-        if not os.path.exists(
-            os.path.join(
-                self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+        if (
+            not os.path.exists(
+                os.path.join(
+                    self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+                )
             )
+            and not useSpeedFilter
         ):
             unbatched_dataset = dataset.map(
                 map_parse_serialized_sequence_not_batched,
