@@ -1,9 +1,10 @@
 import os
 import subprocess
 
+from neuroencoders.utils.func_wrappers import timing
+
 # Load custom code
 from neuroencoders.utils.global_classes import Project
-from neuroencoders.utils.func_wrappers import timing
 
 
 @timing
@@ -32,20 +33,35 @@ def julia_spike_filter(
     redo : bool, if True, the function will redo the extraction even if the tfrec file already exists (default = False)
 
     """
+    strideFactor = int(windowSize / windowStride)
     if singleSpike:
         test1 = os.path.isfile(
             (os.path.join(projectPath.folder, "dataset", "dataset_singleSpike.tfrec"))
         )
     else:
-        test1 = os.path.isfile(
-            (
-                os.path.join(
-                    projectPath.folder,
-                    "dataset",
-                    "dataset_stride" + str(round(windowSize * 1000)) + ".tfrec",
-                )
+        if strideFactor == 1:
+            filename = os.path.join(
+                projectPath.folder,
+                "dataset",
+                f"dataset_stride{str(round(windowSize * 1000))}.tfrec",
             )
-        )
+            sleepFilename = os.path.join(
+                projectPath.folder,
+                "dataset",
+                f"datasetSleep_stride{str(round(windowSize * 1000))}.tfrec",
+            )
+        else:
+            filename = os.path.join(
+                projectPath.folder,
+                "dataset",
+                f"dataset_stride{str(round(windowSize * 1000))}_factor{str(strideFactor)}.tfrec",
+            )
+            sleepFilename = os.path.join(
+                projectPath.folder,
+                "dataset",
+                f"datasetSleep_stride{str(round(windowSize * 1000))}_factor{str(strideFactor)}.tfrec",
+            )
+        test1 = os.path.isfile(filename) and os.path.isfile(sleepFilename)
     if redo:
         test1 = False
 
@@ -91,18 +107,8 @@ def julia_spike_filter(
                     projectPath.dat,
                     os.path.join(projectPath.folder, "nnBehavior.mat"),
                     os.path.join(projectPath.folder, "spikeData_fromJulia.csv"),
-                    os.path.join(
-                        projectPath.folder,
-                        "dataset",
-                        "dataset_stride" + str(round(windowSize * 1000)) + ".tfrec",
-                    ),
-                    os.path.join(
-                        projectPath.folder,
-                        "dataset",
-                        "datasetSleep_stride"
-                        + str(round(windowSize * 1000))
-                        + ".tfrec",
-                    ),
+                    filename,
+                    sleepFilename,
                     str(BUFFERSIZE),
                     str(windowSize),
                     str(windowStride),
@@ -132,18 +138,8 @@ def julia_spike_filter(
                     projectPath.dat,
                     os.path.join(projectPath.folder, "nnBehavior.mat"),
                     os.path.join(projectPath.folder, "spikeData_fromJulia.csv"),
-                    os.path.join(
-                        projectPath.folder,
-                        "dataset",
-                        "dataset_stride" + str(round(windowSize * 1000)) + ".tfrec",
-                    ),
-                    os.path.join(
-                        projectPath.folder,
-                        "dataset",
-                        "datasetSleep_stride"
-                        + str(round(windowSize * 1000))
-                        + ".tfrec",
-                    ),
+                    filename,
+                    sleepFilename,
                     str(BUFFERSIZE),
                     str(windowSize),
                     str(windowStride),

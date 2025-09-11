@@ -15,7 +15,7 @@ import warnings
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import gc
-from typing import List, Optional, Tuple, Dict
+from typing import Dict, List, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
@@ -24,17 +24,16 @@ import numpy as np
 import pandas as pd
 import psutil
 import tensorflow as tf
+import wandb
 from tensorflow import keras
 from tqdm import tqdm
-
-import wandb
+from wandb import keras as wandbkeras
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.nnUtils import UMazeProjectionLayer
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper, Params, Project
-from wandb import keras as wandbkeras
 
 WandbMetricsLogger = wandbkeras.WandbMetricsLogger
 
@@ -841,6 +840,7 @@ class LSTMandSpikeNetwork:
         scheduler = kwargs.get("scheduler", "decay")
         isPredLoss = kwargs.get("isPredLoss", True)
         earlyStop = kwargs.get("earlyStop", False)
+        strideFactor = kwargs.get("strideFactor", 1)
 
         load_model = kwargs.get("load_model", False)
         if not isinstance(windowSizeMS, int):
@@ -895,11 +895,14 @@ class LSTMandSpikeNetwork:
         speedMask = behaviorData["Times"]["speedFilter"]
 
         ## Get datasets
-        ndataset = tf.data.TFRecordDataset(
-            os.path.join(
-                self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
+        if strideFactor > 1:
+            filename = (
+                f"dataset_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
             )
+        else:
+            filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
+        ndataset = tf.data.TFRecordDataset(
+            os.path.join(self.projectPath.dataPath, filename)
         )
 
         def _parse_function(*vals):
@@ -1333,6 +1336,7 @@ class LSTMandSpikeNetwork:
         fit_temperature = kwargs.get("fit_temperature", False)
         T_scaling = kwargs.get("T_scaling", None)
         epochKey = kwargs.get("epochKey", "testEpochs")
+        strideFactor = kwargs.get("strideFactor", 1)
 
         # TODO: change speed filter with custom speed
         # Create the folder
@@ -1402,11 +1406,15 @@ class LSTMandSpikeNetwork:
             )
 
         # Load the and imfer dataset
-        dataset = tf.data.TFRecordDataset(
-            os.path.join(
-                self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
+        ## Get datasets
+        if strideFactor > 1:
+            filename = (
+                f"dataset_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
             )
+        else:
+            filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
+        dataset = tf.data.TFRecordDataset(
+            os.path.join(self.projectPath.dataPath, filename)
         )
 
         def _parse_function(*vals):
@@ -1438,6 +1446,10 @@ class LSTMandSpikeNetwork:
             return nnUtils.parse_serialized_sequence(self.params, *vals, batched=True)
 
         @tf.autograph.experimental.do_not_convert
+        def map_parse_serialized_sequence_not_batched(*vals):
+            return nnUtils.parse_serialized_sequence(self.params, *vals, batched=False)
+
+        @tf.autograph.experimental.do_not_convert
         def map_outputs(vals):
             return (
                 vals,
@@ -1458,6 +1470,71 @@ class LSTMandSpikeNetwork:
             posFeature = behaviorData["Positions"]
         dataset = dataset.map(nnUtils.import_true_pos(posFeature))
         dataset = dataset.filter(filter_nan_pos)
+
+        @tf.autograph.experimental.do_not_convert
+        def map_pos_index(x, y):
+            return x["pos_index"]
+
+        @tf.autograph.experimental.do_not_convert
+        def map_index_in_dat(x, y):
+            return x["indexInDat"]
+
+        if not os.path.exists(
+            os.path.join(
+                self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+            )
+        ):
+            unbatched_dataset = dataset.map(
+                map_parse_serialized_sequence_not_batched,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
+            unbatched_dataset = unbatched_dataset.map(
+                self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            unbatched_dataset = unbatched_dataset.map(
+                map_outputs, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            records = []
+
+            for i, (inputs, outputs) in enumerate(unbatched_dataset):
+                row = {}
+
+                # Count spikes for each group
+                for g in range(self.params.nGroups):
+                    row[f"group{g}_spikes_count"] = inputs[f"group{g}"].numpy().shape[0]
+
+                # Total across groups
+                row["total_spikes_count"] = sum(
+                    row[f"group{g}_spikes_count"] for g in range(self.params.nGroups)
+                )
+
+                # --- pos_index ---
+                pos_index = inputs["pos_index"].numpy()
+                if np.isscalar(pos_index) or pos_index.shape == ():
+                    row["posIndex"] = np.int64(pos_index).item()
+                else:
+                    raise ValueError(
+                        f"Expected scalar pos_index, got shape {pos_index.shape}"
+                    )
+
+                # --- indexInDat must be an array (one array per posIndex) ---
+                index_in_dat = inputs["indexInDat"].numpy()
+                if index_in_dat.ndim == 1:
+                    row["indexInDat"] = index_in_dat.copy()  # store array directly
+                else:
+                    raise ValueError(
+                        f"Expected 1D array for indexInDat, got shape {index_in_dat.shape}"
+                    )
+
+                records.append(row)
+
+            spikes_counts = pd.DataFrame.from_records(records)
+            spikes_counts.to_csv(
+                os.path.join(
+                    self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+                ),
+                index=False,
+            )
         dataset = dataset.batch(
             self.params.batchSize, drop_remainder=True
         )  # remove the last batch if it does not contain enough elements to form a batch.
@@ -1562,14 +1639,6 @@ class LSTMandSpikeNetwork:
         times_behavior = np.reshape(times_behavior, [outputTest[0].shape[0]])
         print("gathering indices of spikes relative to coordinates")
 
-        @tf.autograph.experimental.do_not_convert
-        def map_pos_index(x, y):
-            return x["pos_index"]
-
-        @tf.autograph.experimental.do_not_convert
-        def map_index_in_dat(x, y):
-            return x["indexInDat"]
-
         datasetPos_index = dataset.map(
             map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
         )
@@ -1633,10 +1702,6 @@ class LSTMandSpikeNetwork:
         return testOutput
 
     def testSleep(self, behaviorData, **kwargs):
-        # l_function = ([],)
-        # windowSizeDecoder = (None,)
-        # windowSizeMS = (36,)
-        # isPredLoss = (False,)
         """
         Test the network on sleep epochs.
 
@@ -1650,11 +1715,13 @@ class LSTMandSpikeNetwork:
         windowSizeMS : int
         isPredLoss : bool
         """
+        # TODO: add option for windowSizeMS vs windowSizeDecoder consistency check, with striding as well
         # Unpack kwargs
         l_function = kwargs.get("l_function", [])
         windowSizeDecoder = kwargs.get("windowSizeDecoder", None)
         windowSizeMS = kwargs.get("windowSizeMS", 36)
         isPredLoss = kwargs.get("isPredLoss", False)
+        strideFactor = kwargs.get("strideFactor", 1)
         T_scaling = kwargs.get("T_scaling", None)
 
         # Create the folder
@@ -1716,12 +1783,13 @@ class LSTMandSpikeNetwork:
             timeSleepStart = behaviorData["Times"]["sleepEpochs"][2 * idsleep][0]
             timeSleepStop = behaviorData["Times"]["sleepEpochs"][2 * idsleep + 1][0]
 
+            if strideFactor > 1:
+                sleepFilename = f"datasetSleep_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
+            else:
+                sleepFilename = f"datasetSleep_stride{str(windowSizeMS)}.tfrec"
             # Get the dataset
             dataset = tf.data.TFRecordDataset(
-                os.path.join(
-                    self.projectPath.dataPath,
-                    ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
-                )
+                os.path.join(self.projectPath.dataPath, sleepFilename)
             )
 
             def _parse_function(*vals):
@@ -2001,7 +2069,30 @@ class LSTMandSpikeNetwork:
         useSpeedFilter=False,
         useTrain=False,
         isPredLoss=False,
+        strideFactor=1,
     ):
+        """
+        Get artificial spikes from the trained network. Loads the appropriate dataset, infers the spikes and
+        returns them.
+
+        parameters:
+        ______________________________________________________
+        behaviorData : dict
+            dictionary containing the behavioral data. In particular, it needs to contain the following keys:
+            - Times : dict with trainEpochs and testEpochs keys
+            - positionTime : np.array with the time of each position sample
+            - Positions : np.array with the positions_to_bins
+        windowSizeMS : int
+        useSpeedFilter : bool
+        useTrain : bool
+        isPredLoss : bool
+        strideFactor : int
+
+        returns
+        ______________________________________________________
+        aSpikes : np.array
+            artificial spikes generated by the network
+        """
         # Create the folder
         if not os.path.isdir(os.path.join(self.folderResult, str(windowSizeMS))):
             os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)))
@@ -2033,12 +2124,16 @@ class LSTMandSpikeNetwork:
             )
         totMask = speedMask * epochMask
 
+        if strideFactor > 1:
+            filename = (
+                f"dataset_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
+            )
+        else:
+            filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
+
         # Load the and imfer dataset
         dataset = tf.data.TFRecordDataset(
-            os.path.join(
-                self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
-            )
+            os.path.join(self.projectPath.dataPath, filename)
         )
 
         def _parse_function(*vals):
