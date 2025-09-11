@@ -1223,7 +1223,7 @@ class LSTMandSpikeNetwork:
                         verbose=1,
                         restore_best_weights=True,
                         start_from_epoch=max(
-                            self.params.earlyStop_start - nb_epochs_already_trained, 1
+                            self.params.earlyStop_start - nb_epochs_already_trained, 2
                         ),
                     )
                     callbacks = [
