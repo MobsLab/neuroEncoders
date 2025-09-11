@@ -643,6 +643,7 @@ class NeuralDataAugmentation:
         Initialize augmentation parameters.
 
         kwargs:
+            keep_original: Whether to keep the original trial (default: True)
             num_augmentations: Number of augmented copies per trial (4-20 range)
             white_noise_std: Standard deviation for white noise (default: 5.0)
             offset_noise_std: Standard deviation for constant offset (default: 1.6)
@@ -667,7 +668,7 @@ class NeuralDataAugmentation:
         Add white noise to all time points of all channels independently.
 
         Args:
-            neural_data: Tensor of shape [time_steps, channels] or [batch, time_steps, channels]
+            neural_data: Tensor of any shape
 
         Returns:
             Augmented neural data with white noise
@@ -681,26 +682,30 @@ class NeuralDataAugmentation:
             )
         return neural_data + noise
 
-    def add_constant_offset(self, neural_data: tf.Tensor) -> tf.Tensor:
+    def add_constant_offset(self, neural_data: tf.Tensor, axis: int = -2) -> tf.Tensor:
         """
-        Add constant offset to spike-band channels and scaled version to threshold crossings.
+        Add constant offset to channels along specified axis.
 
         Args:
-            neural_data: Tensor of shape [time_steps, channels] or [batch, time_steps, channels]
-            threshold_crossings: Optional threshold crossing data for scaled offset
+            neural_data: Input tensor
+            axis: Axis along which to apply offset (default: -2, second-to-last dimension)
 
         Returns:
             Augmented neural data with constant offset
         """
-        # Generate constant offset for each channel
         with tf.device(self.device):
-            if len(neural_data.shape) == 3:  # Batched data
-                batch_size = tf.shape(neural_data)[0]
-                num_channels = tf.shape(neural_data)[2]
-                offset_shape = [batch_size, 1, num_channels]
-            else:  # Single sample
-                num_channels = tf.shape(neural_data)[1]
-                offset_shape = [1, num_channels]
+            # Create offset shape - same as neural_data but with 1 along time dimension
+            shape = tf.shape(neural_data)
+            offset_shape = tf.concat(
+                [
+                    shape[
+                        : axis + 1
+                    ],  # Keep dimensions up to and including channel axis
+                    [1],  # Make time dimension 1 for broadcasting
+                    shape[axis + 2 :],  # Keep remaining dimensions
+                ],
+                axis=0,
+            )
 
             # Generate offset noise
             offset = tf.random.normal(
@@ -715,76 +720,80 @@ class NeuralDataAugmentation:
 
         return augmented_data
 
-    def add_cumulative_noise(self, neural_data: tf.Tensor) -> tf.Tensor:
+    def add_cumulative_noise(
+        self, neural_data: tf.Tensor, time_axis: int = -1
+    ) -> tf.Tensor:
         """
-        Add cumulative (random walk) noise to all channels along the time course.
+        Add cumulative (random walk) noise along the specified time axis.
 
         Args:
-            neural_data: Tensor of shape [time_steps, channels] or [batch, time_steps, channels]
+            neural_data: Input tensor
+            time_axis: Axis along which to apply cumulative noise (default: -1, last dimension)
 
         Returns:
             Augmented neural data with cumulative noise
         """
         with tf.device(self.device):
-            if len(neural_data.shape) == 3:  # Batched data
-                batch_size = tf.shape(neural_data)[0]
-                time_steps = tf.shape(neural_data)[1]
-                num_channels = tf.shape(neural_data)[2]
-                noise_shape = [batch_size, time_steps, num_channels]
-            else:  # Single sample
-                time_steps = tf.shape(neural_data)[0]
-                num_channels = tf.shape(neural_data)[1]
-                noise_shape = [time_steps, num_channels]
-
             # Generate random noise for each time step
             noise_increments = tf.random.normal(
-                shape=noise_shape,
+                shape=tf.shape(neural_data),
                 mean=0.0,
                 stddev=self.cumulative_noise_std,
                 dtype=neural_data.dtype,
             )
 
             # Compute cumulative sum along time axis to create random walk
-            axis = 1 if len(neural_data.shape) == 3 else 0
-            cumulative_noise = tf.cumsum(noise_increments, axis=axis)
+            cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
 
         return neural_data + cumulative_noise
 
     def augment_sample(
-        self, neural_data: tf.Tensor, threshold_crossings: Optional[tf.Tensor] = None
-    ) -> Tuple[tf.Tensor, Optional[tf.Tensor]]:
+        self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
+    ) -> tf.Tensor:
         """
-        Apply all augmentation strategies to a single sample.
+        Apply all augmentation strategies to a sample.
 
         Args:
             neural_data: Neural features tensor
-            threshold_crossings: Optional threshold crossings tensor
+            time_axis: Axis representing time dimension
+            channel_axis: Axis representing channel dimension
 
         Returns:
-            Augmented neural data and threshold crossings (if provided)
+            Augmented neural data
         """
         # Apply white noise
         augmented_data = self.add_white_noise(neural_data)
 
         # Apply constant offset
-        augmented_data = self.add_constant_offset(augmented_data)
+        augmented_data = self.add_constant_offset(augmented_data, axis=channel_axis)
 
         # Apply cumulative noise
-        augmented_data = self.add_cumulative_noise(augmented_data)
+        augmented_data = self.add_cumulative_noise(augmented_data, time_axis=time_axis)
 
         return augmented_data
 
+    def augment_spike_group(self, group_data: tf.Tensor) -> tf.Tensor:
+        """
+        Apply augmentation to spike group data with shape [num_spikes, channels, time_bins].
+
+        Args:
+            group_data: Tensor of shape [num_spikes, channels, time_bins]
+
+        Returns:
+            Augmented group data
+        """
+        return self.augment_sample(group_data, time_axis=2, channel_axis=1)
+
     def create_augmented_copies(
-        self,
-        neural_data: tf.Tensor,
+        self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
     ) -> Dict[str, tf.Tensor]:
         """
         Create multiple augmented copies of a single trial.
 
         Args:
             neural_data: Neural features tensor
-            threshold_crossings: Optional threshold crossings tensor
-            labels: Optional labels tensor
+            time_axis: Axis representing time dimension
+            channel_axis: Axis representing channel dimension
 
         Returns:
             Dictionary containing stacked augmented data
@@ -792,7 +801,7 @@ class NeuralDataAugmentation:
         augmented_samples = []
 
         for _ in range(self.num_augmentations):
-            aug_data = self.augment_sample(neural_data)
+            aug_data = self.augment_sample(neural_data, time_axis, channel_axis)
             augmented_samples.append(aug_data)
 
         # Stack all augmented samples
@@ -811,42 +820,10 @@ class NeuralDataAugmentation:
             f"spike_band_channels={self.spike_band_channels})"
         )
 
-    def __call__(self, neural_data: tf.Tensor):
-        return self.augment_sample(neural_data)
-
-
-def parse_tfrecord_with_augmentation(
-    example_proto: tf.Tensor,
-    feature_description: Dict[str, tf.io.FixedLenFeature],
-    augmentation_config: NeuralDataAugmentation,
-) -> Dict[str, tf.Tensor]:
-    """
-    Parse TFRecord example and apply data augmentation.
-
-    Args:
-        example_proto: Serialized TFRecord example
-        feature_description: Feature description for parsing
-        augmentation_config: Augmentation configuration object
-
-    Returns:
-        Dictionary of parsed and augmented features
-    """
-    # Parse the example
-    parsed_features = tf.io.parse_single_example(example_proto, feature_description)
-
-    # Extract neural data (reshape as needed based on your data format)
-    neural_data = parsed_features["neural_data"]  # Adjust key name as needed
-    neural_data = tf.reshape(
-        neural_data, [-1, tf.shape(neural_data)[-1]]
-    )  # [time_steps, channels]
-
-    # Extract labels
-    labels = parsed_features.get("labels", None)
-
-    # Apply augmentation
-    augmented_data = augmentation_config.create_augmented_copies(neural_data)
-
-    return augmented_data
+    def __call__(
+        self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
+    ):
+        return self.augment_sample(neural_data, time_axis, channel_axis)
 
 
 def parse_serialized_sequence_with_augmentation(
@@ -931,7 +908,7 @@ def apply_group_augmentation(
     augmentation_config: NeuralDataAugmentation,
 ) -> Dict[str, tf.Tensor]:
     """
-    Apply augmentation to group-based neural data.
+    Apply augmentation to group-based neural data using the augmentation_config methods.
 
     Args:
         tensors: Original parsed tensors
@@ -965,7 +942,8 @@ def apply_group_augmentation(
             group_key = f"group{g}"
             if group_key in original_groups:
                 group_data = original_groups[group_key]
-                augmented_group = augment_spike_group(group_data, augmentation_config)
+                # Use the augmentation_config's method directly
+                augmented_group = augmentation_config.augment_spike_group(group_data)
                 aug_tensors[group_key] = augmented_group
         aug_tensors["groups"] = tensors["groups"]
         aug_tensors["pos"] = tensors["pos"]
@@ -1001,51 +979,6 @@ def apply_group_augmentation(
     )
 
     return result_tensors
-
-
-def augment_spike_group(
-    group_data: tf.Tensor, augmentation_config: NeuralDataAugmentation
-) -> tf.Tensor:
-    """
-    Apply augmentation to a single spike group.
-
-    Args:
-        group_data: Tensor of shape [num_spikes, channels, time_bins]
-        augmentation_config: Augmentation configuration
-
-    Returns:
-        Augmented group data
-    """
-    # Apply white noise to all time points and channels
-    augmented_data = augmentation_config.add_white_noise(group_data)
-
-    # Apply constant offset per channel
-    num_spikes = tf.shape(group_data)[0]
-    num_channels = tf.shape(group_data)[1]
-
-    # Generate offset for each spike and channel
-    offset = tf.random.normal(
-        shape=[num_spikes, num_channels, 1],  # Broadcast across time bins
-        mean=0.0,
-        stddev=augmentation_config.offset_noise_std,
-        dtype=group_data.dtype,
-    )
-
-    augmented_data = augmented_data + offset
-
-    # Apply cumulative noise along time dimension (axis=2)
-    time_bins = tf.shape(group_data)[2]
-    noise_increments = tf.random.normal(
-        shape=[num_spikes, num_channels, time_bins],
-        mean=0.0,
-        stddev=augmentation_config.cumulative_noise_std,
-        dtype=group_data.dtype,
-    )
-
-    cumulative_noise = tf.cumsum(noise_increments, axis=2)
-    augmented_data = augmented_data + cumulative_noise
-
-    return augmented_data
 
 
 def create_flatten_augmented_groups_fn(params, num_augmentations):
@@ -1105,6 +1038,40 @@ def flatten_augmented_groups(data_dict, params, num_augmentations):
     flattened_dict["pos"] = data_dict["pos"]
 
     return tf.data.Dataset.from_tensor_slices(flattened_dict)
+
+
+def parse_tfrecord_with_augmentation(
+    example_proto: tf.Tensor,
+    feature_description: Dict[str, tf.io.FixedLenFeature],
+    augmentation_config: NeuralDataAugmentation,
+) -> Dict[str, tf.Tensor]:
+    """
+    Parse TFRecord example and apply data augmentation.
+
+    Args:
+        example_proto: Serialized TFRecord example
+        feature_description: Feature description for parsing
+        augmentation_config: Augmentation configuration object
+
+    Returns:
+        Dictionary of parsed and augmented features
+    """
+    # Parse the example
+    parsed_features = tf.io.parse_single_example(example_proto, feature_description)
+
+    # Extract neural data (reshape as needed based on your data format)
+    neural_data = parsed_features["neural_data"]  # Adjust key name as needed
+    neural_data = tf.reshape(
+        neural_data, [-1, tf.shape(neural_data)[-1]]
+    )  # [time_steps, channels]
+
+    # Extract labels
+    labels = parsed_features.get("labels", None)
+
+    # Apply augmentation
+    augmented_data = augmentation_config.create_augmented_copies(neural_data)
+
+    return augmented_data
 
 
 class LinearizationLayer(tf.keras.layers.Layer):
