@@ -100,9 +100,9 @@ class LSTMandSpikeNetwork:
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
         ):
-            assert (
-                not params.denseweight
-            ), "Cannot use both GaussianHeatmap and DenseWeight"
+            assert not params.denseweight, (
+                "Cannot use both GaussianHeatmap and DenseWeight"
+            )
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
@@ -1016,7 +1016,8 @@ class LSTMandSpikeNetwork:
                 )  # self.featDesc, *
             else:
                 # this way the data augmentation is applied after resampling and batching.
-                print("Applying data augmentation to", key, "dataset")
+                print("Applying data augmentation to", key, "dataset with config:")
+                print(augmentation_config)
                 datasets[key] = datasets[key].map(
                     map_parse_serialized_sequence_with_augmentation,
                     num_parallel_calls=tf.data.AUTOTUNE,
