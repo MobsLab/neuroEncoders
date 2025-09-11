@@ -631,7 +631,7 @@ def main(args):
                 load_model=True,
                 fine_tune=True,
                 l_function=l_function,
-                num_augmentations=11 if args.window < 0.252 else 6,
+                num_augmentations=11 if args.window < 0.504 else 6,
                 strideFactor=strideFactor,
             )
             T = None

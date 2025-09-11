@@ -800,6 +800,20 @@ class NeuralDataAugmentation:
 
         return result
 
+    def __repr__(self):
+        return (
+            f"NeuralDataAugmentation(num_augmentations={self.num_augmentations}, "
+            f"keep_original={self.keep_original}, "
+            f"white_noise_std={self.white_noise_std}, "
+            f"offset_noise_std={self.offset_noise_std}, "
+            f"offset_scale_factor={self.offset_scale_factor}, "
+            f"cumulative_noise_std={self.cumulative_noise_std}, "
+            f"spike_band_channels={self.spike_band_channels})"
+        )
+
+    def __call__(self, neural_data: tf.Tensor):
+        return self.augment_sample(neural_data)
+
 
 def parse_tfrecord_with_augmentation(
     example_proto: tf.Tensor,
@@ -830,7 +844,7 @@ def parse_tfrecord_with_augmentation(
     labels = parsed_features.get("labels", None)
 
     # Apply augmentation
-    augmented_data = augmentation_config.create_augmented_copies(neural_data, labels)
+    augmented_data = augmentation_config.create_augmented_copies(neural_data)
 
     return augmented_data
 
