@@ -435,12 +435,12 @@ class DataHelper(Project):
                 (positions.reshape(-1, 2), self.head_direction.reshape(-1, 1)), axis=1
             )
         elif self.target.lower() == "posanddirectionandthigmo":
-            positions = self.positions
-            self.direction = self._get_traveling_direction(self.positions)
+            _, positions = l_function(self.positions)
+            self.direction = self._get_traveling_direction(positions)
             thigmo = self.dist2wall(self.positions, show=show)
             positions = np.concatenate(
                 (
-                    positions.reshape(-1, 2),
+                    self.positions.reshape(-1, 2),
                     self.direction.reshape(-1, 1),
                     thigmo.reshape(-1, 1),
                 ),
