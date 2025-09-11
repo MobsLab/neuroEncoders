@@ -100,9 +100,9 @@ class LSTMandSpikeNetwork:
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
         ):
-            assert not params.denseweight, (
-                "Cannot use both GaussianHeatmap and DenseWeight"
-            )
+            assert (
+                not params.denseweight
+            ), "Cannot use both GaussianHeatmap and DenseWeight"
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
