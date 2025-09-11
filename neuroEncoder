@@ -22,7 +22,7 @@ from neuroencoders.utils.global_classes import Params, Project, save_project_to_
 # Meta parameters
 show_figures = False
 debug = True
-overWrite_speed_filter = False
+overWrite_speed_filter_and_linearization = False
 
 
 def main(args):
@@ -83,7 +83,7 @@ def main(args):
         try:
             rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                overWrite=args.redo and overWrite_speed_filter,
+                overWrite=args.redo and overWrite_speed_filter_and_linearization,
                 phase=args.phase,
                 window_range=2000,
                 force=True
@@ -96,7 +96,7 @@ def main(args):
             args.phase = None
             rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                overWrite=args.redo and overWrite_speed_filter,
+                overWrite=args.redo and overWrite_speed_filter_and_linearization,
                 phase=args.phase,
                 force=False,
             )
@@ -125,7 +125,7 @@ def main(args):
     if args.phase != "cond":
         rawdata_parser.speed_filter(
             ProjectPath.folder,
-            overWrite=args.redo and overWrite_speed_filter,
+            overWrite=args.redo and overWrite_speed_filter_and_linearization,
             phase="cond",
             template=args.phase,
             window_range=2000,
@@ -153,7 +153,7 @@ def main(args):
         # adding post test helper
         rawdata_parser.speed_filter(
             ProjectPath.folder,
-            overWrite=args.redo and overWrite_speed_filter,
+            overWrite=args.redo and overWrite_speed_filter_and_linearization,
             phase="post",
             template=args.phase,
             window_range=2000,
@@ -185,14 +185,14 @@ def main(args):
             ProjectPath.folder,
             phase=helper.phase,
             data_helper=helper,
-            redo=(True if args.redo else False),
+            redo=args.redo and overWrite_speed_filter_and_linearization,
         )
         Linearizer.verify_linearization(
             # WARNING: should we use the helper.maxPos() here?
             # as positions are already Aligned/Normalized --> only for viz
             helper.positions / helper.maxPos(),
             ProjectPath.folder,
-            overwrite=(True if args.redo else False),
+            overwrite=args.redo and overWrite_speed_filter_and_linearization,
         )
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
