@@ -221,7 +221,9 @@ def main(args):
         windowSize=args.window,
         nEpochs=args.epochs,
         phase=args.phase,
-        batchSize=256 if args.window < 0.252 else 128,
+        batchSize=(256 if args.window < 0.252 else 128)
+        if "1230" not in ProjectPath.xml
+        else 64,
         save_json=True,
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
