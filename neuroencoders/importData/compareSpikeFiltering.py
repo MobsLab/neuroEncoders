@@ -109,17 +109,22 @@ class WaveFormComparator:
                     behavior_data["Times"]["testEpochs"],
                 )
 
+        strideFactor = kwargs.get("strideFactor", 1)
         # Load dataset
         if bool(self.sleepName):
-            dataset_name = os.path.join(
-                self.projectPath.dataPath,
-                ("datasetSleep" + "_stride" + str(windowSizeMS) + ".tfrec"),
-            )
+            if strideFactor > 1:
+                filename = (
+                    f"datasetSleep_stride{windowSizeMS}_factor{strideFactor}.tfrec"
+                )
+            else:
+                filename = f"datasetSleep_stride{windowSizeMS}.tfrec"
+            dataset_name = os.path.join(self.projectPath.dataPath, filename)
         else:
-            dataset_name = os.path.join(
-                self.projectPath.dataPath,
-                ("dataset" + "_stride" + str(windowSizeMS) + ".tfrec"),
-            )
+            if strideFactor > 1:
+                filename = f"dataset_stride{windowSizeMS}_factor{strideFactor}.tfrec"
+            else:
+                filename = f"dataset_stride{windowSizeMS}.tfrec"
+            dataset_name = os.path.join(self.projectPath.dataPath, filename)
 
         # Verify that the dataset is not empty
         if not tf.io.gfile.exists(dataset_name) or not tf.io.gfile.glob(dataset_name):

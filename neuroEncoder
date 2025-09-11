@@ -472,6 +472,15 @@ def main(args):
         # Save and create alignment tools
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
+        if args.striding is None and args.striding_factor is None:
+            raise ValueError(
+                "You must provide either a striding (-s) or a striding factor (-sfact) argument."
+            )
+        strideFactor = (
+            int(args.striding_factor)
+            if args.striding_factor is not None
+            else int(round(args.window / args.striding, 4))
+        )
         ### Compare and align trainset waveforms
         WFCTrain = WaveFormComparator(
             ProjectPath,
@@ -480,6 +489,7 @@ def main(args):
             useTrain=True,
             windowSizeMS=windowSizeMS,
             phase=args.phase,
+            strideFactor=strideFactor,
         )
         WFCTrain.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -493,6 +503,7 @@ def main(args):
             useAll=True,
             windowSizeMS=windowSizeMS,
             phase="training",
+            strideFactor=strideFactor,
         )
         WFCTrainTest.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -504,6 +515,7 @@ def main(args):
             useTrain=False,
             windowSizeMS=windowSizeMS,
             phase=args.phase,
+            strideFactor=strideFactor,
         )
         WFCTest.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -518,6 +530,7 @@ def main(args):
             useAll=True,
             windowSizeMS=windowSizeMS,
             phase=args.phase,
+            strideFactor=strideFactor,
         )
         WFCCond.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -532,6 +545,7 @@ def main(args):
             useAll=True,
             windowSizeMS=windowSizeMS,
             phase=args.phase,
+            strideFactor=strideFactor,
         )
         WFCPost.save_alignment_tools(
             TrainerBayes, l_function, windowSizeMS=windowSizeMS
@@ -546,11 +560,34 @@ def main(args):
         from neuroencoders.openEphysExport.generate_json import generate_json
 
         folderCode = os.path.dirname(jD.__file__) + os.path.sep
-        windowStride = args.striding
-        strideFactor = round(args.window / windowStride, 4)
-        # check if windowStride is an integer, if not raise an error
-        if not strideFactor.is_integer():
-            raise ValueError("The window size is not compatible with the 36ms stride.")
+
+        if args.striding is None and args.striding_factor is None:
+            raise ValueError(
+                "You must provide either a striding (-s) or a striding factor (-sfact) argument."
+            )
+
+        if args.striding_factor is None:
+            windowStride = args.striding
+            strideFactor = round(args.window / windowStride, 4)
+            # check if windowStride is an integer, if not raise an error
+            if not strideFactor.is_integer():
+                raise ValueError(
+                    f"The {args.windows}ms window size is not compatible with the {args.striding}ms stride."
+                )
+        else:
+            strideFactor = args.striding_factor
+            windowStride = round(args.window / strideFactor, 4)
+            if windowStride < 0.036:
+                warn(
+                    f"The selected striding factor of {strideFactor} is too high for the selected window size of {windowStride}ms. Setting striding to 36ms."
+                )
+                windowStride = 0.036
+            # check if windowStride is a valid ms value, if not raise an error
+            if not (1000 * windowStride).is_integer():
+                raise ValueError(
+                    f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
+                )
+        strideFactor = int(strideFactor)
 
         julia_spike_filter(
             ProjectPath,
@@ -558,7 +595,7 @@ def main(args):
             windowSize=args.window,
             windowStride=windowStride,  # This way the striding is always 36ms-based
             redo=False,
-            BUFFERSIZE=144000,
+            BUFFERSIZE=216000,
         )
 
         # Network
@@ -594,6 +631,7 @@ def main(args):
                 fine_tune=True,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.252 else 6,
+                strideFactor=strideFactor,
             )
             T = None
 
@@ -606,6 +644,8 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 useSpeedFilter=True,
                 isPredLoss=isPL,
+                strideFactor=strideFactor,
+                phase=args.phase,
             )
             T = NNTrainer.test(
                 DataHelper.fullBehavior,
@@ -614,6 +654,7 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 useSpeedFilter=True,
                 isPredLoss=isPL,
+                strideFactor=strideFactor,
             )
             print(f"Found T={T}, T_test={T_test}. Diff is {T - T_test}")
         # now run the fancy inference
@@ -638,6 +679,7 @@ def main(args):
                 useTrain=True,
                 template=args.phase,
                 T_scaling=T,
+                strideFactor=strideFactor,
             )
             print_results.print_results(
                 NNTrainer.folderResult,
@@ -674,6 +716,7 @@ def main(args):
                 useTrain=False,
                 template=args.phase,
                 T_scaling=T,
+                strideFactor=strideFactor,
             )
             print_results.print_results(
                 NNTrainer.folderResult,
@@ -709,6 +752,7 @@ def main(args):
                 phase="cond",
                 useTrain=True,
                 T_scaling=T,
+                strideFactor=strideFactor,
             )
 
             print_results.print_results(
@@ -745,6 +789,7 @@ def main(args):
                 phase="post",
                 useTrain=True,
                 T_scaling=T,
+                strideFactor=strideFactor,
             )
 
             print_results.print_results(
@@ -777,6 +822,7 @@ def main(args):
                 l_function=l_function,
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
+                strideFactor=strideFactor,
                 T_scaling=T,
                 # TODO: add windowSizeDecoder --> decode small windows with big window trained model
             )
@@ -1085,14 +1131,24 @@ if __name__ == "__main__":
                 "-s",
                 "--striding",
                 type=float,
-                help="defines the striding of the window, in seconds. Defaults to 0.036",
-                default=0.036,
+                help="defines the striding of the window, in seconds. Defaults to None",
+                default=None,
             )
             p.add_argument(
                 "-es",
                 "--early_stop",
                 action="store_true",
                 help="defines whether to use early stopping during training",
+            )
+            # add optional argument to select striding factor instead of striding and override striding
+            p.add_argument(
+                "-sfact",
+                "--striding_factor",
+                type=int,
+                help="defines the striding factor of the window. "
+                + "If selected, overrides the striding argument. "
+                + "Defaults to None",
+                default=None,
             )
 
     args = Parser.parse_args()

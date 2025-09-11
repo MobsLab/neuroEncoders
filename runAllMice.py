@@ -36,6 +36,8 @@ nbEpochs = str(200)
 run_ann = True
 target = "pos"
 phase = "pre"
+useStridingFactor = True
+stridingFactor = 4
 
 
 def check_memory_usage():
@@ -201,6 +203,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--name", nameExp + "_Transformer"]
         if sleep:
             cmd_ann += ["--test_sleep"]
+        if useStridingFactor:
+            cmd_ann += ["--striding_factor", str(stridingFactor)]
 
         cmd_bayes = [
             "/usr/bin/env",
