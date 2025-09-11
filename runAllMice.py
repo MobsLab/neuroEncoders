@@ -36,8 +36,10 @@ nbEpochs = str(200)
 run_ann = True
 target = "pos"
 phase = "pre"
-useStridingFactor = True
+useStridingFactor = False
 stridingFactor = 4
+if useStridingFactor:
+    nameExp = f"STRIDE_{stridingFactor}_{nameExp}"
 
 
 def check_memory_usage():
@@ -281,7 +283,7 @@ if __name__ == "__main__":
     redo = "--redo" in sys.argv
     rsync = "--rsync" in sys.argv
     sleep = "--sleep" in sys.argv
-    force = "--force" in sys.argv
+    force = "--force" in sys.argv or "--redo" in sys.argv
     lstm = "--lstm" in sys.argv
     run_bayes = "--bayes" in sys.argv
 
