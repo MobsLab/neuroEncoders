@@ -552,52 +552,6 @@ def main(args):
         if not strideFactor.is_integer():
             raise ValueError("The window size is not compatible with the 36ms stride.")
 
-        # if the tfrec file is older than yesterday, we delete it and redo the spike filtering
-        if os.path.exists(
-            os.path.join(
-                ProjectPath.folder,
-                "dataset",
-                "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
-            )
-        ):
-            print("Checking if the tfrec file is up to date...")
-            file_time = os.path.getmtime(
-                os.path.join(
-                    ProjectPath.folder,
-                    "dataset",
-                    "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
-                )
-            )
-            import time
-            from datetime import datetime, timedelta
-
-            file_datetime = datetime.fromtimestamp(file_time)
-            yesterday_midnight = (datetime.now() - timedelta(days=5)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-
-            if file_datetime < yesterday_midnight:
-                print(
-                    "The tfrec file is older than yesterday, redoing spike filtering..."
-                )
-                # delete the tfrec file
-                os.remove(
-                    os.path.join(
-                        ProjectPath.folder,
-                        "dataset",
-                        "dataset_stride" + str(round(args.window * 1000)) + ".tfrec",
-                    )
-                )
-                os.remove(
-                    os.path.join(
-                        ProjectPath.folder,
-                        "dataset",
-                        "datasetSleep_stride"
-                        + str(round(args.window * 1000))
-                        + ".tfrec",
-                    )
-                )
-
         julia_spike_filter(
             ProjectPath,
             folderCode,
