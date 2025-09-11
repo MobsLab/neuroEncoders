@@ -32,8 +32,8 @@ class spikeNet(tf.keras.layers.Layer):
     The convolutional layers are followed by 3 dense layers with a ReLU activation function. The dense layers have a size of nFeatures and the
         last dense layer has a size of nFeatures and is named "outputCNN{number}".
 
-    One filter of size (2,3) would roughly mean that the first filters "see" 2 channels at a time and 3 bins of 32-ms timesteps,
-        i.e. (3*32/20000) ~= 4.8 ms for a sampling rate of 20 000Hz.
+    One filter of size (2,3) would roughly mean that the first filters "see" 2 channels at a time and 3 bins of a 32 timesteps sampling,
+        i.e. (3/20000) ~= 0.15 ms for a sampling rate of 20 000Hz. The whole 32 window corresponds to 1.6ms of data.
     """
 
     def __init__(
