@@ -25,16 +25,16 @@ mice_nb = []
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
-    "M1239_MFB",
-    "M1230_Novel",
-    "M1230_Known",
-    "M1162_MFB",
+    # "M1239_MFB",
+    # "M1230_Novel",
+    # "M1230_Known",
+    # "M1162_MFB",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "NO_PREDLOSS_GaussianHeatMap_LinearLoss"
+nameExp = "new_4d_GaussianHeatMap_LinearLoss_Transformer"
 nbEpochs = str(200)
 run_ann = True
-target = "pos"
+target = "PosAndHeadDirectionAndThigmo"
 phase = "pre"
 
 
@@ -177,8 +177,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
     if xml_file:
         cmd_ann = [
             "/usr/bin/env",
-            "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
-            "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
+            "/home/theodechrn/Documents/Cours/phd/neuroEncoders/.venv/bin/python",
+            "/home/theodechrn/Documents/Cours/phd/neuroEncoders/neuroEncoder",
             "ann",
             xml_file,
             "--window",
@@ -187,7 +187,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             str(win),
             "-e",
             nbEpochs,
-            "--gpu",
+            # "--gpu",
             "--target",
             target,
             # "--predicted_loss",
@@ -204,8 +204,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
 
         cmd_bayes = [
             "/usr/bin/env",
-            "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
-            "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
+            "/home/theodechrn/Documents/Cours/phd/neuroEncoders/.venv/bin/python",
+            "/home/theodechrn/Documents/Cours/phd/neuroEncoders/neuroEncoder",
             "bayes",
             xml_file,
             "--window",

@@ -1,16 +1,16 @@
 # Load libs
 import os
 
+import dill as pickle
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import tqdm
 from scipy import stats
-from scipy.stats import sem
+from scipy.stats import sem, zscore
 from statannotations.Annotator import Annotator
-import dill as pickle
-import seaborn as sns
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
@@ -2321,40 +2321,74 @@ class PaperFigures:
 
         return predLoss_ticks[0], errors_filtered
 
-    def plot_boxplot_error(self, results_df, logscale=True):
+    def plot_boxplot_error(
+        self, results_df, logscale=True, speed="fast", confidence=False, threshold=0.6
+    ):
         # for every phase, plot the whisker plot of fast_filtered_error, with a hue on winMS
-        if "fast_filtered_se_error" not in results_df.columns:
-            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+        if "all_se_error" not in results_df.columns:
+            results_df["all_se_error"] = results_df.apply(
+                lambda row: np.array(
+                    [
+                        np.linalg.norm(
+                            row["fullPred"][i, :2] - row["truePos"][i, :2],
+                        )
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
+                axis=1,
+            )
+            # Now get the filtered MSE error (ie apply nan on no speedMask from the full all_se_error array)
             results_df["fast_filtered_se_error"] = results_df.apply(
-                lambda row: np.linalg.norm(
-                    row["fullPred"][(row["speedMask"]), :2]
-                    - row["truePos"][(row["speedMask"]), :2],
-                    axis=1,
-                )
-                ** 2,
+                lambda row: np.array(
+                    [
+                        row["all_se_error"][i] if row["speedMask"][i] else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
                 axis=1,
             )
-            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
             results_df["slow_filtered_se_error"] = results_df.apply(
-                lambda row: np.linalg.norm(
-                    row["fullPred"][~(row["speedMask"]), :2]
-                    - row["truePos"][~(row["speedMask"]), :2],
-                    axis=1,
-                )
-                ** 2,
+                lambda row: np.array(
+                    [
+                        row["all_se_error"][i] if not row["speedMask"][i] else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
                 axis=1,
             )
+
+            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+        if speed == "fast":
+            column = "fast_filtered_se_error"
+        elif speed == "slow":
+            column = "slow_filtered_se_error"
+        elif speed == "all":
+            column = "all_se_error"
+        else:
+            raise ValueError("Speed value must be fast, slow, or all.i")
+
+        if confidence:
+            results_df[f"confidence_{column}"] = results_df.apply(
+                lambda row: np.array(
+                    [
+                        row[column][i] if row["predLoss"][i] < threshold else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
+                axis=1,
+            )
+            column = f"confidence_{column}"
+
         plt.figure()
+        results_exploded = results_df.explode(column).reset_index(drop=True)
         sns.boxplot(
-            data=results_df.explode("fast_filtered_se_error"),
+            data=results_exploded,
             x="phase",
-            y="fast_filtered_se_error",
+            y=column,
             hue="winMS",
             order=["training", "pre", "cond", "post"],
         )
-        plt.title(
-            f"Fast epochs squared error by phase and window size, for mouse {self.mouse_name}"
-        )
+        plt.title(f"{speed.capitalize()} epochs squared error by phase and window size")
         if logscale:
             plt.yscale("log")
             plt.ylabel("Squared Error (log)")
@@ -2365,7 +2399,85 @@ class PaperFigures:
         plt.savefig(
             os.path.join(
                 self.folderFigures,
-                f"boxplot_fast_filtered_se_error_{self.mouse_name}.png",
+                f"boxplot_{speed}_filtered_se_error.png",
+            )
+        )
+        plt.show()
+        return results_df
+
+    def lin_boxplot_error(
+        self, results_df, logscale=True, speed="fast", confidence=False, threshold=0.6
+    ):
+        # for every phase, plot the whisker plot of fast_filtered_error, with a hue on winMS
+        if "lin_all_se_error" not in results_df.columns:
+            results_df["lin_all_se_error"] = results_df.apply(
+                lambda row: np.abs(row["linPred"] - row["linTruePos"]),
+                axis=1,
+            )
+            # Now get the filtered MSE error (ie apply nan on no speedMask from the full all_se_error array)
+            results_df["lin_fast_filtered_se_error"] = results_df.apply(
+                lambda row: np.array(
+                    [
+                        row["lin_all_se_error"][i] if row["speedMask"][i] else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
+                axis=1,
+            )
+            results_df["lin_slow_filtered_se_error"] = results_df.apply(
+                lambda row: np.array(
+                    [
+                        row["lin_all_se_error"][i]
+                        if not row["speedMask"][i]
+                        else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
+                axis=1,
+            )
+
+            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+        if speed == "fast":
+            column = "lin_fast_filtered_se_error"
+        elif speed == "slow":
+            column = "lin_slow_filtered_se_error"
+        elif speed == "all":
+            column = "lin_all_se_error"
+        else:
+            raise ValueError("Speed value must be fast, slow, or all.i")
+
+        if confidence:
+            results_df[f"confidence_{column}"] = results_df.apply(
+                lambda row: np.array(
+                    [
+                        row[column][i] if row["predLoss"][i] < threshold else np.nan
+                        for i in range(row["truePos"].shape[0])
+                    ]
+                ),
+                axis=1,
+            )
+            column = f"confidence_{column}"
+
+        plt.figure()
+        sns.boxplot(
+            data=results_df.explode(column).reset_index(drop=True),
+            x="phase",
+            y=column,
+            hue="winMS",
+            order=["training", "pre", "cond", "post"],
+        )
+        plt.title(f"{speed.capitalize()} epochs linear error by phase and window size")
+        if logscale:
+            plt.yscale("log")
+            plt.ylabel("Absolute Lin Error (log)")
+        else:
+            plt.ylabel("Absolute Lin Error")
+        plt.xlabel("Phase")
+        plt.legend(title="Window Size (ms)")
+        plt.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"linboxplot_{speed}_filtered_se_error_{confidence=}_{threshold=}.png",
             )
         )
         plt.show()
@@ -2385,6 +2497,8 @@ class PaperFigures:
             len(phases),
             len(speeds) * (3 if plot_bias else 2),
             figsize=(20 if plot_bias else 15, 10),
+            sharex=True,
+            sharey=True,
         )
         idWindow = self.timeWindows.index(winMS)
         for i, phase in enumerate(phases):
@@ -2534,14 +2648,127 @@ class PaperFigures:
                         alpha=0.7,
                     )
         plt.suptitle(
-            f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms\n normalized by {normalized_by} position. Surprise: {plot_surprise}. Bias: {plot_bias}",
-            y=1.02,
+            f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms\n normalized by {normalized_by} position. Surprise: {plot_surprise}. Bias: {plot_bias}"
         )
         plt.tight_layout()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
                 f"heatmap_proba_error_{normalized_by}_surprise_{plot_surprise}_bias_{plot_bias}_{winMS}.png",
+            ),
+            bbox_inches="tight",
+        )
+        if show:
+            plt.show(block=True)
+        plt.close(fig)
+
+    def fig_proba_heatmap_vs_true(
+        self, winMS, plot_kl=False, per_trial=True, show=True
+    ):
+        phases = ["training", "pre", "cond", "post"]
+        speeds = ["all", "slow", "fast"]
+        fig, axs = plt.subplots(
+            len(phases),
+            len(speeds) * (3 if plot_kl else 2),
+            figsize=(20 if plot_kl else 15, 10),
+            sharex=True,
+            sharey=True,
+        )
+        idWindow = self.timeWindows.index(winMS)
+        for i, phase in enumerate(phases):
+            phase = "_" + phase
+            for j, speed in enumerate(speeds):
+                if speed == "all":
+                    speedMask = np.ones_like(
+                        self.resultsNN_phase[phase]["speedMask"][idWindow],
+                        dtype=bool,
+                    )
+                elif speed == "slow":
+                    speedMask = np.logical_not(
+                        self.resultsNN_phase[phase]["speedMask"][idWindow]
+                    )
+                elif speed == "fast":
+                    speedMask = self.resultsNN_phase[phase]["speedMask"][idWindow]
+                else:
+                    raise ValueError("Speed must be 'all', 'slow' or 'fast'")
+
+                logits_hw = self.resultsNN_phase_pkl[phase][idWindow]["logits_hw"][
+                    speedMask
+                ]
+                truePos = self.resultsNN_phase[phase]["truePos"][idWindow][speedMask]
+                target_hw = (
+                    self.ann[str(winMS)]
+                    .GaussianHeatmap.gaussian_heatmap_targets(truePos)
+                    .numpy()
+                )
+                probs = (
+                    self.ann[str(winMS)]
+                    .GaussianHeatmap.decode_and_uncertainty(
+                        logits_hw, return_probs=True
+                    )[-1]
+                    .numpy()
+                )
+                mean_probs = np.mean(probs, axis=0)
+                target_mean = np.mean(target_hw, axis=0)
+                if per_trial:
+                    flat_err = (probs - target_hw).flatten()
+                    zmap = zscore(flat_err).reshape(probs.shape).mean(axis=0)
+                else:
+                    flat_err = (mean_probs - target_mean).flatten()
+                    zmap = zscore(flat_err).reshape(mean_probs.shape)
+
+                extent = (0, 1, 0, 1)
+                ax1 = axs[i, j * (3 if plot_kl else 2)]
+                im1 = ax1.imshow(
+                    mean_probs,
+                    origin="lower",
+                    extent=extent,
+                    vmin=0,
+                    vmax=mean_probs.max(),
+                )
+                ax1.set_title(f"{phase[1:]}-{speed}-Proba")
+                # plt.colorbar(im1, ax=ax1)
+                ax2 = axs[i, j * (3 if plot_kl else 2) + 1]
+                im2 = ax2.imshow(
+                    zmap,
+                    origin="lower",
+                    cmap="coolwarm",
+                    extent=extent,
+                )
+                ax2.set_title(f"{speed}-Error (z-scored)")
+                # plt.colorbar(im2, ax=ax2)
+
+                if plot_kl:
+                    ax3 = axs[i, j * (3 if plot_kl else 2) + 2]
+                    if per_trial:
+                        P = np.divide(target_hw, target_mean.sum() + 1e-12, axis=0)
+                        Q = np.divide(mean_probs, mean_probs.sum() + 1e-12, axis=0)
+                        kl_map = np.where(
+                            Q > 0, Q * np.log((Q + 1e-12) / (P + 1e-12)), 0
+                        ).mean(axis=0)
+                    else:
+                        P = target_mean / (target_mean.sum() + 1e-12)
+                        Q = mean_probs / (mean_probs.sum() + 1e-12)
+                        kl_map = np.where(
+                            Q > 0, Q * np.log((Q + 1e-12) / (P + 1e-12)), 0
+                        )
+                    # Compute mean bias vector in each bin
+                    im3 = ax3.imshow(
+                        kl_map,
+                        cmap="magma",
+                        origin="lower",
+                        extent=extent,
+                    )
+                    ax3.set_title(f"{speed}-KL Divergence")
+                    # plt.colorbar(im3, ax=ax3)
+        plt.suptitle(
+            f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms.\n Abs: {plot_kl}"
+        )
+        plt.tight_layout()
+        fig.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"heatmap_vs_target_abs_{plot_kl}_{winMS}.png",
             ),
             bbox_inches="tight",
         )
