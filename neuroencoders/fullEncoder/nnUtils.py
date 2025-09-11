@@ -650,6 +650,7 @@ class NeuralDataAugmentation:
             cumulative_noise_std: Standard deviation for cumulative noise (default: 0.02)
             spike_band_channels: List of spike-band channel indices (if None, assumes all channels)
         """
+        self.keep_original = kwargs.get("keep_original", True)
         self.num_augmentations = kwargs.get("num_augmentations", 11)
         self.white_noise_std = kwargs.get("white_noise_std", 2.0)
         self.offset_noise_std = kwargs.get("offset_noise_std", 1.0)
@@ -927,36 +928,41 @@ def apply_group_augmentation(
     Returns:
         Dictionary with augmented data
     """
+
+    # Option to keep original tensor as first in stack
+    keep_original = getattr(augmentation_config, "keep_original", False)
     augmented_copies = []
 
-    for aug_idx in range(augmentation_config.num_augmentations):
-        aug_tensors = tensors.copy()
-
+    if keep_original:
+        # Add original tensors as first copy
+        orig_tensors = tensors.copy()
         for g in range(params.nGroups):
             group_key = f"group{g}"
             if group_key in original_groups:
-                # Get original group data: [num_spikes, channels, time_bins]
+                orig_tensors[group_key] = original_groups[group_key]
+        orig_tensors["groups"] = tensors["groups"]
+        orig_tensors["pos"] = tensors["pos"]
+        orig_tensors["indexInDat"] = tensors["indexInDat"]
+        augmented_copies.append(orig_tensors)
+
+    for aug_idx in range(augmentation_config.num_augmentations):
+        aug_tensors = tensors.copy()
+        for g in range(params.nGroups):
+            group_key = f"group{g}"
+            if group_key in original_groups:
                 group_data = original_groups[group_key]
-
-                # Apply augmentation to each spike in the group
                 augmented_group = augment_spike_group(group_data, augmentation_config)
-
-                # Update the augmented tensor
-                aug_tensors["group" + str(g)] = augmented_group
-
-        # Replicate metadata for each augmentation
+                aug_tensors[group_key] = augmented_group
         aug_tensors["groups"] = tensors["groups"]
         aug_tensors["pos"] = tensors["pos"]
         aug_tensors["indexInDat"] = tensors["indexInDat"]
-
         augmented_copies.append(aug_tensors)
 
     # Stack augmented copies
     result_tensors = {}
-
-    # Stack group data
+    n_total = len(augmented_copies)
     for g in range(params.nGroups):
-        group_key = "group" + str(g)
+        group_key = f"group{g}"
         if group_key in tensors:
             stacked_groups = tf.stack(
                 [aug[group_key] for aug in augmented_copies], axis=0
@@ -966,17 +972,17 @@ def apply_group_augmentation(
     # Replicate metadata
     result_tensors["groups"] = tf.repeat(
         tf.expand_dims(tensors["groups"], 0),
-        augmentation_config.num_augmentations,
+        n_total,
         axis=0,
     )
     result_tensors["indexInDat"] = tf.repeat(
         tf.expand_dims(tensors["indexInDat"], 0),
-        augmentation_config.num_augmentations,
+        n_total,
         axis=0,
     )
     result_tensors["pos"] = tf.repeat(
         tf.expand_dims(tensors["pos"], 0),
-        augmentation_config.num_augmentations,
+        n_total,
         axis=0,
     )
 
