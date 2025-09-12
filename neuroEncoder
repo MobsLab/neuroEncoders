@@ -12,6 +12,10 @@ import sys
 from warnings import warn
 
 from numpy import max as np_max
+import numpy as np
+import pandas as pd
+import shutil
+
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 
@@ -239,17 +243,87 @@ def main(args):
         from neuroencoders.simpleBayes import decode_bayes as BayesTraining
 
         try:
-            import numpy as np
-            import pandas as pd
-
             TrainerBayes = BayesTraining.Trainer(
                 ProjectPath, phase=args.phase, grid_size=Parameters.GaussianGridSize
             )
+            if not os.path.exists(
+                os.path.join(TrainerBayes.folderResult, "bayesMatrices.pkl")
+            ):
+                # Resolve all paths with abspath
+                experiment_parent = os.path.abspath(
+                    os.path.join(TrainerBayes.projectPath.experimentPath, "..")
+                )
+
+                # Source folder path
+                source_folder = os.path.abspath(
+                    os.path.join(
+                        experiment_parent,
+                        "bigSigma_GaussianHeatMap_LinearLoss_Transformer",
+                    )
+                )
+
+                # Target symlink folder path
+                last_bayes_folder = os.path.abspath(
+                    os.path.join(experiment_parent, "last_bayes")
+                )
+
+                # Source file path
+                source_file = os.path.join(
+                    source_folder, "results", "bayesMatrices.pkl"
+                )
+
+                # Target file path
+                target_file = os.path.abspath(
+                    os.path.join(TrainerBayes.folderResult, "bayesMatrices.pkl")
+                )
+
+                if os.path.exists(source_file):
+                    # Task 1: Create symlink folder "last_bayes" pointing to the bigSigma folder
+                    if not os.path.exists(last_bayes_folder):
+                        try:
+                            os.symlink(source_folder, last_bayes_folder)
+                            print(
+                                f"Created symlink folder: {last_bayes_folder} -> {source_folder}"
+                            )
+                        except OSError as e:
+                            print(f"Failed to create symlink folder: {e}")
+
+                    # Task 2: Copy bayesMatrices.pkl from last_bayes/results/ to folderResults/
+                    last_bayes_file = os.path.join(
+                        last_bayes_folder, "results", "bayesMatrices.pkl"
+                    )
+
+                    try:
+                        # Ensure target directory exists
+                        os.makedirs(os.path.dirname(target_file), exist_ok=True)
+
+                        # Copy the file
+                        shutil.copy2(last_bayes_file, target_file)
+                        print(
+                            f"Copied bayesMatrices.pkl from {last_bayes_file} to {target_file}"
+                        )
+
+                    except (OSError, IOError) as e:
+                        print(f"Failed to copy file: {e}")
+                        # Fallback: try copying directly from source
+                        try:
+                            shutil.copy2(source_file, target_file)
+                            print(
+                                f"Fallback: Copied bayesMatrices.pkl directly from {source_file} to {target_file}"
+                            )
+                        except (OSError, IOError) as e2:
+                            print(f"Fallback copy also failed: {e2}")
+                else:
+                    print(f"Source file not found: {source_file}")
+
             # Load or create bayesMatrices
             bayesMatrices = TrainerBayes.train_order_by_pos(
                 DataHelper.fullBehavior,
                 l_function=l_function,
                 mutual_info_method=Parameters.mutual_info_method,
+                load_last_bayes=False,
+                redo=args.redo,
+                flat_prior=args.flat_prior,
             )
 
             # now run the fancy inference
@@ -263,7 +337,7 @@ def main(args):
                 )
                 or args.redo
             ):
-                print("Testing training set")
+                print("\nTesting training set")
                 timeStepPred = np.squeeze(
                     np.array(
                         pd.read_csv(
@@ -284,6 +358,7 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="training",
+                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -332,6 +407,7 @@ def main(args):
                     useTrain=False,
                     l_function=l_function,
                     phase=args.phase,
+                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -344,7 +420,7 @@ def main(args):
                     target=args.target,
                     phase=args.phase,
                     training_data=TrainerBayes.training_data,
-                    useSpeedMask=False,
+                    useSpeedMask=True,
                     l_function=l_function,
                     force=args.redo,
                 )
@@ -380,6 +456,7 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="cond",
+                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -392,7 +469,7 @@ def main(args):
                     target=args.target,
                     phase="cond",
                     training_data=TrainerBayes.training_data,
-                    useSpeedMask=False,
+                    useSpeedMask=True,
                     l_function=l_function,
                     force=args.redo,
                 )
@@ -428,6 +505,7 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="post",
+                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -440,7 +518,7 @@ def main(args):
                     target=args.target,
                     phase="post",
                     training_data=TrainerBayes.training_data,
-                    useSpeedMask=False,
+                    useSpeedMask=True,
                     l_function=l_function,
                     force=args.redo,
                 )
@@ -1102,6 +1180,29 @@ if __name__ == "__main__":
             action="store_true",
             help="defines whether to test the decoder on the Pre and Post sleep phases",
         )
+        p.add_argument(
+            "-s",
+            "--striding",
+            type=float,
+            help="defines the striding of the window, in seconds. Defaults to None",
+            default=None,
+        )
+        # add optional argument to select striding factor instead of striding and override striding
+        p.add_argument(
+            "-sfact",
+            "--striding_factor",
+            type=int,
+            help="defines the striding factor of the window. "
+            + "If selected, overrides the striding argument. "
+            + "Defaults to None",
+            default=None,
+        )
+        p.add_argument(
+            "-fp",
+            "--flat_prior",
+            action="store_true",
+            help="defines whether to use a flat prior for bayesian decoding",
+        )
 
         if cmd != "bayes":
             p.add_argument(
@@ -1118,27 +1219,10 @@ if __name__ == "__main__":
                 + "network will be trained on the piece of data",
             )
             p.add_argument(
-                "-s",
-                "--striding",
-                type=float,
-                help="defines the striding of the window, in seconds. Defaults to None",
-                default=None,
-            )
-            p.add_argument(
                 "-es",
                 "--early_stop",
                 action="store_true",
                 help="defines whether to use early stopping during training",
-            )
-            # add optional argument to select striding factor instead of striding and override striding
-            p.add_argument(
-                "-sfact",
-                "--striding_factor",
-                type=int,
-                help="defines the striding factor of the window. "
-                + "If selected, overrides the striding argument. "
-                + "Defaults to None",
-                default=None,
             )
 
     args = Parser.parse_args()

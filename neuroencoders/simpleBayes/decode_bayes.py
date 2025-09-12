@@ -43,12 +43,12 @@ class DecoderConfig:
     """
 
     bandwidth: Optional[float] = None
-    kernel: str = "epanechnikov"  # 'gaussian', 'epanechnikov'
+    kernel: str = "gaussian"  # 'gaussian', 'epanechnikov'
     masking_factor: float = 10.0
     min_spikes_threshold: int = 5
-    regularization_factor: float = 0.1  # for numerical stability.
+    regularization_factor: float = 1  # for numerical stability.e-8
     empty_unit_value: float = 1e-5  # value for empty units in rate functions
-    sigma: float = 0.25  # for smoother masking transition
+    sigma: float = 0.5  # for smoother masking transition
     maxPos: Optional[Tuple[float, float]] = None
     fullBehaviorBandwidth: Optional[float] = None
 
@@ -204,7 +204,7 @@ class Trainer(SpatialConstraintsMixin):
 
         ### Build global occupation map
         final_occupation, occupation, gridFeature = self._build_occupation_map(
-            positions
+            positions, flat_prior=kwargs.get("flat_prior", False)
         )
 
         ### Align the positions time with the spike_times so we can speed filter each spike time (long step)
@@ -461,7 +461,7 @@ class Trainer(SpatialConstraintsMixin):
         return np.array(preferred_pos)
 
     def _build_occupation_map(
-        self, positions: np.ndarray
+        self, positions: np.ndarray, flat_prior: bool = False
     ) -> Tuple[np.ndarray, np.ndarray, List]:
         """
         Build occupation map with improved masking and unified constraints with ANN.
@@ -506,36 +506,51 @@ class Trainer(SpatialConstraintsMixin):
             kernel=self.config.kernel,
             edges=fixed_gridFeature,
         )
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
+        if not flat_prior:
+            occupation = occupation * allowed_mask
 
-        # Improved masking strategy - logistic thresholding
-        # before :
-        # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
-        occupation_threshold = np.max(occupation) / self.config.masking_factor
-        sigma = (
-            self.config.sigma * occupation_threshold
-        )  # Adjust sigma for smoother transition
-        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+            # Improved masking strategy - logistic thresholding
+            # before :
+            # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
+            occupation_threshold = np.max(occupation) / self.config.masking_factor
+            sigma = (
+                self.config.sigma * occupation_threshold
+            )  # Adjust sigma for smoother transition
+            mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+            combined_mask = allowed_mask * mask
 
-        # Add regularization instead of just replacing zeros
-        self.logger.info(
-            f"Occupation map regularization factor: {self.config.regularization_factor / occupation.size:.4e}. before would have been changed by {np.min(occupation[occupation != 0])}"
-        )
-        eps = self.config.regularization_factor / occupation.size
-        occupation_reg = occupation + eps  # regularize only where mask>0
-        occupation_reg /= np.sum(occupation_reg)  # renormalize to sum to 1
+            # Add regularization instead of just replacing zeros
+            self.logger.info(
+                f"Occupation map regularization factor: {self.config.regularization_factor / occupation.size:.4e}. before would have been changed by {np.min(occupation[occupation != 0])}"
+            )
+            eps = self.config.regularization_factor / occupation.size
+            occupation_reg = (
+                occupation + eps * allowed_mask
+            )  # regularize only where mask>0
+            occupation_reg /= np.sum(occupation_reg)  # renormalize to sum to 1
+        else:
+            occupation_reg = np.zeros_like(occupation)
+            occupation_reg[allowed_mask] = 1.0 / np.sum(allowed_mask)
 
-        # Compute inverse with combined masking
-        occupation_inverse = np.divide(
-            1.0,
-            occupation_reg,
-            out=np.zeros_like(occupation_reg),
-            where=(occupation_reg > 0),
-        )
-        occupation_inverse = occupation_inverse * mask
-        # clip occupation_inverse to avoid extreme values
-        occupation_inverse = np.clip(occupation_inverse, 0, 3e3)
+        if flat_prior:
+            print("Using flat prior for occupation inverse")
+            occupation_inverse = np.zeros_like(occupation_reg)
+            n_valid = np.sum(allowed_mask)
+            occupation_inverse[allowed_mask] = n_valid
+        else:
+            # Compute inverse with combined masking
+            occupation_inverse = np.divide(
+                1.0,
+                occupation_reg,
+                out=np.zeros_like(occupation_reg),
+                where=(occupation_reg > 0) & allowed_mask,
+            )
+            occupation_inverse = occupation_inverse * combined_mask
+            # clip occupation_inverse to avoid extreme values
+            occupation_inverse = np.clip(occupation_inverse, 0, 3e3)
 
-        if self.verbose:
+        if self.verbose and not flat_prior:
             self._log_masking_stats(mask, occupation_threshold, occupation)
 
         return occupation_inverse, occupation_reg, gridFeature
@@ -1392,7 +1407,9 @@ class Trainer(SpatialConstraintsMixin):
         )
 
         # Extract and preprocess Bayesian matrices
-        log_terms = self._prepare_bayesian_terms(bayesMatrices, windowSize)
+        log_terms = self._prepare_bayesian_terms(
+            bayesMatrices, windowSize, flat_prior=kwargs.get("flat_prior", False)
+        )
 
         # Main decoding using the efficient PyKeOps implementation
         self.logger.info("Running parallel PyKeOps Bayesian decoding...")
@@ -1541,7 +1558,9 @@ class Trainer(SpatialConstraintsMixin):
 
         return clusters_time, clusters
 
-    def _prepare_bayesian_terms(self, bayesMatrices: Dict, windowSize: float) -> Dict:
+    def _prepare_bayesian_terms(
+        self, bayesMatrices: Dict, windowSize: float, flat_prior: bool = False
+    ) -> Dict:
         """
         Prepare and validate Bayesian terms for decoding
         Args:
@@ -1552,22 +1571,30 @@ class Trainer(SpatialConstraintsMixin):
         """
 
         self.logger.info("BUILDING POSITION PROBAS")
+        if flat_prior:
+            self.logger.info("Using flat prior for occupancy")
 
         occupation = bayesMatrices["occupation"]
         marginal_rate_functions = bayesMatrices["marginalRateFunctions"]
         rate_functions = bayesMatrices["rateFunctions"]
-
-        # Improved masking strategy - logistic thresholding
-        occupation_threshold = np.max(occupation) / self.config.masking_factor
-        sigma = (
-            self.config.sigma * occupation_threshold
-        )  # Adjust sigma for smoother transition
-        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
-
-        # Log occupation with regularization
-        log_occupation = np.log(
-            occupation + np.min(np.multiply(occupation, mask)) * 1e-2
-        )
+        if flat_prior:
+            mask = (occupation > 0).astype(float)
+            valid_regions = mask.astype(bool)
+            uniform_prob = occupation[valid_regions][0]
+            log_occupation = np.zeros_like(occupation)
+            log_occupation[valid_regions] = np.log(uniform_prob)
+            log_occupation[~valid_regions] = -np.inf
+        else:
+            # Improved masking strategy - logistic thresholding
+            occupation_threshold = np.max(occupation) / self.config.masking_factor
+            sigma = (
+                self.config.sigma * occupation_threshold
+            )  # Adjust sigma for smoother transition
+            mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+            # Log occupation with regularization
+            log_occupation = np.log(
+                occupation + np.min(np.multiply(occupation, mask)) * 1e-2
+            )
 
         # Poisson terms (probability of no spikes)
         all_poisson = []
@@ -1592,12 +1619,17 @@ class Trainer(SpatialConstraintsMixin):
             for cluster in range(len(rate_functions[tetrode])):
                 rate_map = rate_functions[tetrode][cluster]
 
-                # Use percentile-based regularization instead of minimum for allowed only
-                nonzero_rates = rate_map[rate_map > 0]
-                if len(nonzero_rates) > 0:
-                    regularization = np.percentile(nonzero_rates, 1)  # 1st percentile
+                if not flat_prior:
+                    # Use percentile-based regularization instead of minimum for allowed only
+                    nonzero_rates = rate_map[rate_map > 0]
+                    if len(nonzero_rates) > 0:
+                        regularization = np.percentile(
+                            nonzero_rates, 1
+                        )  # 1st percentile
+                    else:
+                        regularization = self.config.regularization_factor
                 else:
-                    regularization = self.config.regularization_factor
+                    regularization = 1e-8
 
                 # ensure regularization is not zero
                 regularization = max(regularization, 1e-10)
@@ -2647,26 +2679,7 @@ class Trainer(SpatialConstraintsMixin):
             df = pd.DataFrame(test_output["posLoss"])
             df.to_csv(os.path.join(folderToSave, f"bayes_posLoss{suffix}.csv"))
 
-        # Full posterior distribution
-        if "probaMaps" in test_output:
-            """
-            save as a table with colums: time_step, x_pos, y_pos, proba
-            """
-            n_time_steps, n_x, n_y = np.shape(test_output["probaMaps"])
-            # Create coordinate grids
-            time_steps, x_coords, y_coords = np.meshgrid(
-                np.arange(n_time_steps), np.arange(n_x), np.arange(n_y), indexing="ij"
-            )
-            data = {
-                "time_step": time_steps.flatten(),
-                "x_pos": x_coords.flatten(),
-                "y_pos": y_coords.flatten(),
-                "proba": test_output["probaMaps"].flatten(),
-            }
-            df = pd.DataFrame(data)
-            df.to_csv(
-                os.path.join(folderToSave, f"bayes_probaMaps{suffix}.csv"), index=False
-            )
+        # Full posterior distribution will be saved in pickle
 
         # Times of prediction
         df = pd.DataFrame(test_output["times"])
