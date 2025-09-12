@@ -35,6 +35,7 @@ nameExp = "NO_PREDLOSS_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_ann = True
 target = "pos"
+target_bayes = "pos"
 phase = "pre"
 useStridingFactor = False
 stridingFactor = 4
@@ -219,7 +220,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "-e",
             nbEpochs,
             "--target",
-            target,
+            target_bayes,
         ]
         if lstmAndTransfo:
             cmd_bayes += ["--name", nameExp + "_LSTM"]
@@ -236,8 +237,14 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--phase", phase]
         if run_bayes and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
-        else:
+        elif run_ann and not run_bayes:
             return cmd_ann, None
+        elif run_ann and run_bayes:
+            return cmd_ann, cmd_bayes
+        elif run_bayes and not run_ann:
+            return None, cmd_bayes
+        else:
+            return None, None
     else:
         print(f"No .xml file found in {dir}")
         return None, None
