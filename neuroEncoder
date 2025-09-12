@@ -109,7 +109,8 @@ def main(args):
             )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            overWrite=(True if (args.redo and args.phase is not None) else False),
+            # overWrite=(True if (args.redo and args.phase is not None) else False),
+            overWrite=False,
             phase=args.phase,
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
@@ -139,7 +140,8 @@ def main(args):
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            overWrite=(True if (args.redo and args.phase is not None) else False),
+            # overWrite=(True if (args.redo and args.phase is not None) else False),
+            overWrite=False,
             phase="cond",
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
@@ -167,7 +169,8 @@ def main(args):
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            overWrite=(True if (args.redo and args.phase is not None) else False),
+            # overWrite=(True if (args.redo and args.phase is not None) else False),
+            overWrite=False,
             phase="post",
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
@@ -317,12 +320,14 @@ def main(args):
                     print(f"Source file not found: {source_file}")
 
             # Load or create bayesMatrices
+            if args.redo and windowSizeMS == 108:
+                print("Recomputing bayes matrices")
             bayesMatrices = TrainerBayes.train_order_by_pos(
                 DataHelper.fullBehavior,
                 l_function=l_function,
                 mutual_info_method=Parameters.mutual_info_method,
                 load_last_bayes=False,
-                redo=args.redo,
+                redo=args.redo and windowSizeMS == 108,
                 flat_prior=args.flat_prior,
             )
 
@@ -386,7 +391,7 @@ def main(args):
                 )
                 or args.redo
             ):
-                print("Testing inference set")
+                print("\nTesting inference set")
                 timeStepPred = np.squeeze(
                     np.array(
                         pd.read_csv(
@@ -435,7 +440,7 @@ def main(args):
                 )
                 or args.redo
             ):
-                print("Testing conditioning set")
+                print("\nTesting conditioning set")
                 timeStepPred = np.squeeze(
                     np.array(
                         pd.read_csv(
@@ -484,7 +489,7 @@ def main(args):
                 )
                 or args.redo
             ):
-                print("Testing post set")
+                print("\nTesting post set")
                 timeStepPred = np.squeeze(
                     np.array(
                         pd.read_csv(
@@ -552,9 +557,10 @@ def main(args):
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
         if args.striding is None and args.striding_factor is None:
-            raise ValueError(
+            warn(
                 "You must provide either a striding (-s) or a striding factor (-sfact) argument."
             )
+            strideFactor = 1
         strideFactor = (
             int(args.striding_factor)
             if args.striding_factor is not None
