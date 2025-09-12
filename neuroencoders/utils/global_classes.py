@@ -1401,10 +1401,6 @@ class Params:
         ### from units encoder params
         # MOVED TO DECODE CONFIG
         self.validCluWindow = 0.0005
-        self.kernel = "epanechnikov"  # is not connected
-        self.bandwidth = 0.1
-        self.masking = 20
-
         ### full encoder params
         self.nFeatures = kwargs.pop("nFeatures", 64)
         self.isTransformer = (

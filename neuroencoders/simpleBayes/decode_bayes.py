@@ -44,9 +44,9 @@ class DecoderConfig:
 
     bandwidth: Optional[float] = None
     kernel: str = "epanechnikov"  # 'gaussian', 'epanechnikov'
-    masking_factor: float = 15.0
+    masking_factor: float = 10.0
     min_spikes_threshold: int = 5
-    regularization_factor: float = 1e-2  # for numerical stability.
+    regularization_factor: float = 0.1  # for numerical stability.
     empty_unit_value: float = 1e-5  # value for empty units in rate functions
     sigma: float = 0.25  # for smoother masking transition
     maxPos: Optional[Tuple[float, float]] = None
@@ -248,6 +248,7 @@ class Trainer(SpatialConstraintsMixin):
 
         bayesMatrices = {
             "occupation": occupation,
+            "occupation_inverse": final_occupation,
             "marginalRateFunctions": marginal_rates,
             "rateFunctions": local_rates,
             "bins": [np.unique(gridFeature[i]) for i in range(len(gridFeature))],
@@ -460,7 +461,7 @@ class Trainer(SpatialConstraintsMixin):
         return np.array(preferred_pos)
 
     def _build_occupation_map(
-        self, positions: np.ndarray, remove_isolated_zeros: bool = True
+        self, positions: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, List]:
         """
         Build occupation map with improved masking and unified constraints with ANN.
@@ -506,18 +507,6 @@ class Trainer(SpatialConstraintsMixin):
             edges=fixed_gridFeature,
         )
 
-        # Apply unified spatial constraints FIRST
-        allowed_mask = self.get_allowed_mask(
-            use_tensorflow=False
-        )  # WARN: ij because butils.kdenD returns meshgrid in 'ij' indexing - ann returns the other way around
-        occupation = occupation * allowed_mask
-
-        if remove_isolated_zeros:
-            forbid_mask_final, occupation = self.remove_isolated_zeros(
-                ~(allowed_mask.astype(bool)), occupation
-            )
-            allowed_mask = ~forbid_mask_final
-
         # Improved masking strategy - logistic thresholding
         # before :
         # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
@@ -525,15 +514,14 @@ class Trainer(SpatialConstraintsMixin):
         sigma = (
             self.config.sigma * occupation_threshold
         )  # Adjust sigma for smoother transition
-        density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
-        combined_mask = density_mask * allowed_mask
+        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
 
         # Add regularization instead of just replacing zeros
         self.logger.info(
             f"Occupation map regularization factor: {self.config.regularization_factor / occupation.size:.4e}. before would have been changed by {np.min(occupation[occupation != 0])}"
         )
-        eps = self.config.regularization_factor / np.sum(allowed_mask)
-        occupation_reg = occupation + eps * allowed_mask
+        eps = self.config.regularization_factor / occupation.size
+        occupation_reg = occupation + eps  # regularize only where mask>0
         occupation_reg /= np.sum(occupation_reg)  # renormalize to sum to 1
 
         # Compute inverse with combined masking
@@ -543,27 +531,24 @@ class Trainer(SpatialConstraintsMixin):
             out=np.zeros_like(occupation_reg),
             where=(occupation_reg > 0),
         )
-        occupation_inverse = occupation_inverse * combined_mask
+        occupation_inverse = occupation_inverse * mask
+        # clip occupation_inverse to avoid extreme values
+        occupation_inverse = np.clip(occupation_inverse, 0, 3e3)
 
         if self.verbose:
-            self._log_masking_stats(
-                allowed_mask, density_mask, combined_mask, occupation
-            )
+            self._log_masking_stats(mask, occupation_threshold, occupation)
 
         return occupation_inverse, occupation_reg, gridFeature
 
-    def _log_masking_stats(self, spatial_mask, density_mask, combined_mask, occupation):
+    def _log_masking_stats(self, density_mask, occupation_threshold, occupation):
         """Log masking statistics"""
-        spatial_allowed_fraction = np.mean(spatial_mask)
         density_allowed_fraction = np.mean(density_mask)
-        total_allowed_fraction = np.mean(combined_mask)
 
         self.logger.info(
             f"Occupation map stats:\n"
             f"  - Max occupation: {np.max(occupation):.4f}\n"
-            f"  - Spatial constraint allows: {100 * spatial_allowed_fraction:.2f}% of space\n"
+            f"  - Threshold for masking: {occupation_threshold:.4f}\n"
             f"  - Density masking allows: {100 * density_allowed_fraction:.2f}% of space\n"
-            f"  - Total effective space: {100 * total_allowed_fraction:.2f}%"
         )
 
     def _compute_rate_function(
@@ -596,11 +581,8 @@ class Trainer(SpatialConstraintsMixin):
             edges=gridFeature,  # already same grid as occupation map
             kernel=self.config.kernel,
         )
-        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
-        rate_map = rate_map * allowed_mask
-
         # Normalize and apply occupation correction
-        eps = self.config.empty_unit_value / np.sum(allowed_mask)
+        eps = self.config.empty_unit_value / rate_map.size
         rate_map = rate_map + eps
         rate_map = rate_map / np.sum(rate_map)
         rate_map = (n_spikes * np.multiply(rate_map, final_occupation)) / learning_time
@@ -760,6 +742,7 @@ class Trainer(SpatialConstraintsMixin):
         occupation: np.ndarray,
         mutual_info_method: str = "skaggs",
         n_rate_bins=5,
+        **kwargs,
     ) -> float:
         """
         Compute mutual information between rate and position
@@ -1574,35 +1557,25 @@ class Trainer(SpatialConstraintsMixin):
         marginal_rate_functions = bayesMatrices["marginalRateFunctions"]
         rate_functions = bayesMatrices["rateFunctions"]
 
-        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
-        occupation = occupation * allowed_mask
-
         # Improved masking strategy - logistic thresholding
         occupation_threshold = np.max(occupation) / self.config.masking_factor
         sigma = (
             self.config.sigma * occupation_threshold
         )  # Adjust sigma for smoother transition
-        density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
-        combined_mask = allowed_mask * density_mask
+        mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
 
-        # safer log occupation with regularization and avoiding log(0)
-        masked_occupation = occupation * combined_mask
-        positive_occupations = masked_occupation[masked_occupation > 0]
-        if len(positive_occupations) > 0:
-            min_positive = np.min(positive_occupations)
-            regularization = min_positive * 1e-4
-        else:
-            regularization = 1e-10
-
-        safe_occupation = np.maximum(occupation, regularization)
         # Log occupation with regularization
-        log_occupation = np.log(safe_occupation)
+        log_occupation = np.log(
+            occupation + np.min(np.multiply(occupation, mask)) * 1e-2
+        )
 
         # Poisson terms (probability of no spikes)
         all_poisson = []
         for tetrode in range(len(marginal_rate_functions)):
             # Clip very high rates to prevent numerical issues
-            clipped_rates = np.clip(marginal_rate_functions[tetrode], 1e-10, 500)
+            clipped_rates = np.clip(
+                marginal_rate_functions[tetrode], 1e-10, 400
+            )  # some FR go up to 300Hz
             poisson_term = np.exp(-windowSize * clipped_rates)
             safe_poisson = np.maximum(poisson_term, 1e-15)
             all_poisson.append(safe_poisson)
@@ -1620,8 +1593,7 @@ class Trainer(SpatialConstraintsMixin):
                 rate_map = rate_functions[tetrode][cluster]
 
                 # Use percentile-based regularization instead of minimum for allowed only
-                allowed_rates = rate_map[allowed_mask > 0]
-                nonzero_rates = allowed_rates[allowed_rates > 0]
+                nonzero_rates = rate_map[rate_map > 0]
                 if len(nonzero_rates) > 0:
                     regularization = np.percentile(nonzero_rates, 1)  # 1st percentile
                 else:
@@ -1632,9 +1604,9 @@ class Trainer(SpatialConstraintsMixin):
 
                 # Apply mask to regularization - don't regularize masked areas
                 regularized_rates = np.where(
-                    allowed_mask > 0,
-                    combined_mask * np.maximum(rate_map, regularization * 0.1)
-                    + (1 - combined_mask) * (regularization * 0.1),
+                    mask > 0,
+                    mask * np.maximum(rate_map, regularization * 0.1)
+                    + (1 - mask) * (regularization * 0.1),
                     1e-12,
                 )
                 log_rate = np.log(regularized_rates)
@@ -1645,7 +1617,7 @@ class Trainer(SpatialConstraintsMixin):
             "all_poisson": all_poisson,
             "log_rf": log_rf,
             "log_occupation": log_occupation,
-            "mask": combined_mask,
+            "mask": mask,
         }
 
     def _run_parallel_decoding(
