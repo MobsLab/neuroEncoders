@@ -328,7 +328,6 @@ def main(args):
                 mutual_info_method=Parameters.mutual_info_method,
                 load_last_bayes=False,
                 redo=args.redo and windowSizeMS == 108,
-                flat_prior=args.flat_prior,
             )
 
             # now run the fancy inference
@@ -363,7 +362,6 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="training",
-                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -412,7 +410,6 @@ def main(args):
                     useTrain=False,
                     l_function=l_function,
                     phase=args.phase,
-                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -461,7 +458,6 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="cond",
-                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -510,7 +506,6 @@ def main(args):
                     useTrain=True,
                     l_function=l_function,
                     phase="post",
-                    flat_prior=args.flat_prior,
                 )
                 print_results.print_results(
                     TrainerBayes.folderResult,
@@ -566,11 +561,15 @@ def main(args):
             if args.striding_factor is not None
             else int(round(args.window / args.striding, 4))
         )
+
+        print(
+            f"saving alignment tools with striding factor {strideFactor} for window {windowSizeMS}ms"
+        )
         ### Compare and align trainset waveforms
         WFCTrain = WaveFormComparator(
-            ProjectPath,
-            Parameters,
-            DataHelper.fullBehavior,
+            projectPath=ProjectPath,
+            params=Parameters,
+            behavior_data=DataHelper.fullBehavior,
             useTrain=True,
             windowSizeMS=windowSizeMS,
             phase=args.phase,
@@ -614,7 +613,7 @@ def main(args):
             useTrain=True,
             useAll=True,
             windowSizeMS=windowSizeMS,
-            phase=args.phase,
+            phase="cond",
             strideFactor=strideFactor,
         )
         WFCCond.save_alignment_tools(
@@ -629,7 +628,7 @@ def main(args):
             useTrain=True,
             useAll=True,
             windowSizeMS=windowSizeMS,
-            phase=args.phase,
+            phase="post",
             strideFactor=strideFactor,
         )
         WFCPost.save_alignment_tools(
