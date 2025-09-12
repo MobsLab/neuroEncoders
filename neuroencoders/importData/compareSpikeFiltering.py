@@ -43,6 +43,21 @@ class WaveFormComparator:
         sleepName=[],
         **kwargs,
     ):  # todo allow for speed filtering
+        """
+        Class to compare spike waveforms from different electrode groups.
+        Args:
+            projectPath: Project object with paths to data files
+            params: Params object with model parameters
+            behavior_data: Dictionary with behavioral data and epochs
+            windowSizeMS: Size of the time window in milliseconds (default=36)
+            useTrain: If True, use training epochs; else use test epochs (default=True)
+            useAll: If True, use both training and test epochs (default=False)
+            sleepName: Name of the sleep epoch to filter on (default=[])
+            **kwargs: Additional arguments, including:
+                - phase: 'train' or 'test' to specify dataset phase
+                - strideFactor: Factor for striding the dataset (default=1)
+
+        """
         self.projectPath = projectPath
         self.params = params
         self.behavior_data = behavior_data
@@ -67,16 +82,19 @@ class WaveFormComparator:
                 tf.int64
             ),  # the index of the groups having spike sequences in the window
             "time": tf.io.FixedLenFeature([], tf.float32),
+            "time_behavior": tf.io.FixedLenFeature([], tf.float32),
             "indexInDat": tf.io.VarLenFeature(tf.int64),
         }
         for g in range(self.params.nGroups):
             self.feat_desc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)})
 
+        strideFactor = kwargs.get("strideFactor", 1)
         useAll_suffix = "_all" if useAll else ""
+        strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
         # Manage folder
         self.alignedDataPath = os.path.join(
             self.projectPath.dataPath,
-            f"aligned_{phase}{useAll_suffix}",
+            f"aligned_{phase}{useAll_suffix}{strideFactor_suffix}",
             str(windowSizeMS),
         )
         if not os.path.isdir(self.alignedDataPath):
@@ -109,7 +127,6 @@ class WaveFormComparator:
                     behavior_data["Times"]["testEpochs"],
                 )
 
-        strideFactor = kwargs.get("strideFactor", 1)
         # Load dataset
         if bool(self.sleepName):
             if strideFactor > 1:
@@ -171,6 +188,10 @@ class WaveFormComparator:
             ),
             num_parallel_calls=tf.data.AUTOTUNE,
         )
+        print(f"Dataset {dataset_name} loaded: {self}")
+
+    def __repr__(self):
+        return f"WaveFormComparator(projectPath={self.projectPath}, params={self.params}, behavior_data=Dict with keys {list(self.behavior_data.keys())}, windowSizeMS={self.windowSizeMS}, useTrain={self.useTrain}, useAll={self.useAll}, sleepName={self.sleepName}, phase={self.phase})"
 
     def save_alignment_tools(
         self, trainerBayes, linearizationFunction, windowSizeMS=36, redo=False

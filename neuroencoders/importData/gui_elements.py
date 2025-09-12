@@ -328,6 +328,10 @@ class AnimatedPositionPlotter:
             self.speed_mask = None
             # size of prediction_positionTime
 
+        print(
+            f"Speed mask applied: {self.speed_mask is not None}. {self.speed_mask.sum() / len(self.speed_mask) * 100:.2f}% of positions kept."
+        )
+
         if self.predLossMask is not None:
             print("Applying deduplication and merging to predLossMask.")
             self.predLossMask = self.deduplicate_and_merge(
@@ -492,11 +496,12 @@ class AnimatedPositionPlotter:
                 np.nan
             )  # Set positions with predLossMask to NaN
             if self.speed_mask is not None:
-                self.predicted[~self.speed_mask] = (
-                    np.nan
-                )  # Set positions with speed_mask to NaN - this way we still get to see the whole true trajectory, but with no predictions plotted where the speed is NaN
+                # Set positions with speed_mask to NaN - this way we still get to see the whole true trajectory, but with no predictions plotted where the speed is NaN
+                self.predicted[~self.speed_mask] = np.nan
+
         if self.linpositions is not None:
             self.linpositions = self.linpositions[self.true_valid_indices]
+
         if self.linpredicted is not None:
             self.linpredicted = self.linpredicted[self.prediction_valid_indices]
             self.linpredicted[~self.predLossMask] = (
@@ -505,6 +510,7 @@ class AnimatedPositionPlotter:
             if self.speed_mask is not None:
                 # give NaN values to positions where speed_mask is False
                 self.linpredicted[~self.speed_mask] = np.nan
+
         if self.predicted_heatmap is not None:
             self.predicted_heatmap = self.predicted_heatmap[
                 self.prediction_valid_indices
