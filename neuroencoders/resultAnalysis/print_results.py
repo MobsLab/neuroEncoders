@@ -79,13 +79,24 @@ def print_results(
         raise ValueError(f"The directory {dir} does not exist")
 
     outdir = os.path.join(dir, str(windowSizeMS))
+    suffix = f"_{phase}" if phase is not None else ""
+
     # Manage arguments
     if typeDec == "bayes" and not results:
-        raise ValueError("You should provide results from BayesTrainer.test() function")
+        try:
+            import dill as pickle
+
+            with open(
+                os.path.join(outdir, f"bayes_decoding_results{suffix}.pkl"), "rb"
+            ) as f:
+                results = pickle.load(f)
+        except Exception as e:
+            raise ValueError(
+                f"You should provide results from BayesTrainer.test() function: {e}"
+            )
 
     block = show
     maxPos = 1
-    suffix = f"_{phase}" if phase is not None else ""
     # Get data
     if typeDec == "NN":
         predLossName = "entropy"
