@@ -239,15 +239,16 @@ class UMazeLinearizer:
         if keops:
             return self.pykeops_linearization(euclideanData)
         else:
-            projectedPos = np.zeros([euclideanData.shape[0], 2])
-            linearFeature = np.zeros([euclideanData.shape[0]])
+            projectedPos = np.full([euclideanData.shape[0], 2], np.nan)
+            linearFeature = np.full([euclideanData.shape[0]], np.nan)
             for idp in range(euclideanData.shape[0]):
+                point = euclideanData[idp, :]
+                if np.any(np.isnan(point)):
+                    continue
                 bestPoint = np.argmin(
                     np.sum(
                         np.square(
-                            np.reshape(
-                                euclideanData[idp, :], [1, euclideanData.shape[1]]
-                            )
+                            np.reshape(point, [1, euclideanData.shape[1]])
                             - self.mazePoints
                         ),
                         axis=1,
@@ -273,14 +274,26 @@ class UMazeLinearizer:
         if euclideanData.dtype != self.mazePoints.dtype:
             euclideanData = euclideanData.astype(self.mazePoints.dtype)
 
-        euclidData_lazy = LazyTensor_np(euclideanData[None, :, :])
-        mazePoint_lazy = LazyTensor_np(self.mazePoints[:, None, :])
+        N = euclideanData.shape[0]
 
-        distance_matrix_lazy = (mazePoint_lazy - euclidData_lazy).square().sum(axis=-1)
-        # find the argmin
-        bestPoints = distance_matrix_lazy.argmin_reduction(axis=0)
-        projectedPos = self.mazePoints[bestPoints[:, 0], :]
-        linearPos = self.linear_values[bestPoints[:, 0]]
+        # prefill with nan
+        projectedPos = np.full([N, 2], np.nan, dtype=self.mazePoints.dtype)
+        linearPos = np.full([N], np.nan, dtype=self.mazePoints.dtype)
+        valid_mask = np.logical_not(np.any(np.isnan(euclideanData), axis=1))
+        valid_indices = np.where(valid_mask)[0]
+
+        if valid_indices.size > 0:
+            valid_points = euclideanData[valid_mask]
+            euclidData_lazy = LazyTensor_np(valid_points[None, :, :])
+            mazePoint_lazy = LazyTensor_np(self.mazePoints[:, None, :])
+
+            distance_matrix_lazy = (
+                (mazePoint_lazy - euclidData_lazy).square().sum(axis=-1)
+            )
+            # find the argmin
+            bestPoints = distance_matrix_lazy.argmin_reduction(axis=0)
+            projectedPos[valid_indices, :] = self.mazePoints[bestPoints[:, 0], :]
+            linearPos[valid_indices] = self.linear_values[bestPoints[:, 0]]
 
         return projectedPos, linearPos
 
