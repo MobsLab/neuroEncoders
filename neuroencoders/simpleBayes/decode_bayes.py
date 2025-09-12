@@ -578,17 +578,21 @@ class Trainer(SpatialConstraintsMixin):
         Compute rate function with better numerical stability
         """
         if n_spikes < self.config.min_spikes_threshold:
+            allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
             if n_spikes == 0:
                 warnings.warn("No spikes found, using uniform rate")
                 rate_map = np.zeros_like(final_occupation)
                 eps = self.config.regularization_factor / final_occupation.size
                 rate_map += eps  # almost zero
+                rate_map = rate_map * allowed_mask
                 rate_map /= np.sum(rate_map)
                 return rate_map
             else:
                 warnings.warn(f"Only {len(spike_positions)} spikes, using uniform rate")
                 # stronger uniform rate than above
-                return np.ones_like(final_occupation) * self.config.empty_unit_value
+                uniform = np.ones_like(final_occupation) * self.config.empty_unit_value
+                uniform = uniform * allowed_mask
+                return uniform
 
         _, rate_map = butils.kdenD(
             spike_positions,
@@ -732,14 +736,17 @@ class Trainer(SpatialConstraintsMixin):
             self.logger.warning(
                 f"Cluster {cluster_idx} in tetrode {tetrode_idx} has only {len(cluster_positions)} spikes, using uniform rate."
             )
+            allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
             if len(cluster_positions) != 0:
                 rate_function = (
                     np.ones_like(final_occupation) * self.config.empty_unit_value
                 )
+                rate_function = rate_function * allowed_mask
             else:
                 rate_function = np.zeros_like(final_occupation)
                 eps = self.config.regularization_factor / final_occupation.size
                 rate_function += eps
+                rate_function = rate_function * allowed_mask
                 rate_function /= np.sum(rate_function)
 
         # Compute mutual information
@@ -1689,6 +1696,136 @@ class Trainer(SpatialConstraintsMixin):
         )
         # TODO: add error handling and non-parallel fallback
         return output_pos
+
+    def compute_firing_rate_with_bins(
+        self, time_points=None, spike_matrix=None, mask=None, bin_size=None
+    ):
+        """
+        Alternative method using time bins for more accurate rate estimation.
+
+        Parameters:
+        -----------
+        time_points : array-like, shape (N,)
+            Array of time points
+        spike_matrix : array-like, shape (N, nb_neurons)
+            Boolean spike matrix
+        bin_size : float, optional
+            Time bin size. If None, uses average time step
+
+        Returns:
+        --------
+        firing_rates : ndarray, shape (nb_neurons,)
+            Firing rate for each neuron
+        mean_firing_rate : float
+            Mean firing rate across all neurons
+        """
+        if time_points is None:
+            time_points = self.spikeMatTimes
+        if spike_matrix is None:
+            spike_matrix = self.spikeMatLabels
+
+        if mask is not None:
+            spike_matrix = spike_matrix[:, mask]
+            time_points = time_points[mask]
+        time_points = np.asarray(time_points).reshape(-1)
+        spike_matrix = np.asarray(spike_matrix, dtype=bool)
+
+        if bin_size is None:
+            # Use average time step as bin size
+            bin_size = np.mean(np.diff(time_points))
+
+        # Calculate firing rate as spikes per bin divided by bin size
+        spike_counts = np.sum(spike_matrix, axis=0)
+        n_bins = len(time_points)
+
+        # Rate = (total spikes) / (n_bins * bin_size)
+        firing_rates = spike_counts / (n_bins * bin_size)
+        mean_firing_rate = np.mean(firing_rates)
+
+        return firing_rates, mean_firing_rate
+
+    def compute_firing_rate_across_time(
+        self,
+        time_points=None,
+        spike_matrix=None,
+        mask=None,
+        window_size=None,
+        step_size=None,
+    ):
+        """
+        Compute firing rate across time using sliding windows.
+
+        Parameters:
+        -----------
+        time_points : array-like, shape (N,)
+            Array of time points
+        spike_matrix : array-like, shape (N, nb_neurons)
+            Boolean spike matrix
+        window_size : float, optional
+            Time window size for rate calculation. If None, uses 10x average time step
+        step_size : float, optional
+            Step size for sliding window. If None, uses average time step
+
+        Returns:
+        --------
+        time_centers : ndarray, shape (n_windows,)
+            Time points at center of each window
+        firing_rates : ndarray, shape (n_windows, nb_neurons)
+            Firing rate for each neuron at each time window
+        mean_firing_rate : ndarray, shape (n_windows,)
+            Mean firing rate across neurons at each time window
+        """
+        if time_points is None:
+            time_points = self.spikeMatTimes
+        if spike_matrix is None:
+            spike_matrix = self.spikeMatLabels
+
+        if mask is not None:
+            spike_matrix = spike_matrix[:, mask]
+            time_points = time_points[mask]
+
+        time_points = np.asarray(time_points).reshape(-1)
+        spike_matrix = np.asarray(spike_matrix, dtype=bool)
+
+        dt = np.mean(np.diff(time_points))
+
+        if window_size is None:
+            window_size = 10 * dt  # Default: 10 time steps
+
+        if step_size is None:
+            step_size = dt  # Default: slide by one time step
+
+        # Convert time sizes to indices
+        window_samples = int(window_size / dt)
+        step_samples = int(step_size / dt)
+
+        # Ensure minimum window size
+        window_samples = max(1, window_samples)
+        step_samples = max(1, step_samples)
+
+        n_windows = (len(time_points) - window_samples) // step_samples + 1
+        n_neurons = spike_matrix.shape[1]
+
+        firing_rates = np.zeros((n_windows, n_neurons))
+        time_centers = np.zeros(n_windows)
+
+        for i in range(n_windows):
+            start_idx = i * step_samples
+            end_idx = start_idx + window_samples
+
+            # Get spike counts in this window
+            window_spikes = np.sum(spike_matrix[start_idx:end_idx], axis=0)
+
+            # Calculate firing rate (spikes / window_duration)
+            firing_rates[i] = window_spikes / window_size
+
+            # Time center of window
+            time_centers[i] = time_points[start_idx + window_samples // 2]
+
+        # Mean firing rate across neurons at each time point
+        mean_firing_rate = np.mean(firing_rates, axis=1)
+
+        return time_centers, firing_rates, mean_firing_rate
 
     def _process_decoding_output(
         self,
