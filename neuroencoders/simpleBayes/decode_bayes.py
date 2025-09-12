@@ -333,11 +333,37 @@ class Trainer(SpatialConstraintsMixin):
         if kwargs.get("bayesMatrices", None) is None:
             try:
                 if not kwargs.get("redo", False):
-                    with open(
-                        os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
-                    ) as f:
-                        bayesMatrices = pickle.load(f)
-                    self.logger.info("Loaded existing Bayesian matrices.")
+                    try:
+                        with open(
+                            os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
+                        ) as f:
+                            bayesMatrices = pickle.load(f)
+                        self.logger.info("Loaded existing Bayesian matrices.")
+                    except FileNotFoundError:
+                        if kwargs.get("load_last_bayes", False):
+                            with open(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "..",
+                                    "last_bayes",
+                                    "results",
+                                    "bayesMatrices.pkl",
+                                ),
+                                "rb",
+                            ) as f:
+                                bayesMatrices = pickle.load(f)
+                            self.logger.info(
+                                "Loaded existing Bayesian matrices from last_bayes folder. Copying it to current results folder."
+                            )
+                            with open(
+                                os.path.join(self.folderResult, "bayesMatrices.pkl"),
+                                "wb",
+                            ) as f:
+                                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+                        else:
+                            raise FileNotFoundError(
+                                f"No existing Bayesian matrices found in {self.folderResult}."
+                            )
 
                     # Check if the matrices are already saved with linear ordering
                     if "orderedLinearPlaceFields" in bayesMatrices:
@@ -1484,6 +1510,9 @@ class Trainer(SpatialConstraintsMixin):
 
         # Log summary statistics
         self._log_decoding_summary(outputResults)
+        if kwargs.get("update_last_bayes_symlink", True):
+            print("Updating last bayes symlink...")
+            self._update_last_bayes_symlink()
 
         return outputResults
 
@@ -2700,6 +2729,56 @@ class Trainer(SpatialConstraintsMixin):
             filename = os.path.join(folderToSave, f"bayes_decoding_results{suffix}.pkl")
             with open(filename, "wb") as f:
                 pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
+
+    def _update_last_bayes_symlink(self):
+        # At the end of def test_bayes(self):
+
+        # Update last_bayes symlink to point to current experiment
+        experiment_parent = os.path.abspath(
+            os.path.join(self.projectPath.experimentPath, "..")
+        )
+
+        last_bayes_folder = os.path.abspath(
+            os.path.join(experiment_parent, "last_bayes")
+        )
+
+        current_experiment_path = os.path.abspath(self.projectPath.experimentPath)
+
+        # Check if last_bayes already points to current experiment
+        should_update_symlink = True
+
+        if os.path.exists(last_bayes_folder):
+            if os.path.islink(last_bayes_folder):
+                # Check if it points to the current experiment path
+                current_target = os.path.abspath(os.readlink(last_bayes_folder))
+                if current_target == current_experiment_path:
+                    print(
+                        f"last_bayes already points to current experiment: {current_experiment_path}"
+                    )
+                    should_update_symlink = False
+                else:
+                    # Remove existing symlink to replace it
+                    try:
+                        os.unlink(last_bayes_folder)
+                        print(
+                            f"Updating last_bayes symlink from {current_target} to {current_experiment_path}"
+                        )
+                    except OSError as e:
+                        print(f"Failed to remove existing symlink: {e}")
+                        should_update_symlink = False
+            else:
+                print(f"Warning: {last_bayes_folder} exists but is not a symlink")
+                should_update_symlink = False
+
+        # Create/update the symlink
+        if should_update_symlink:
+            try:
+                os.symlink(current_experiment_path, last_bayes_folder)
+                print(
+                    f"Created/updated last_bayes symlink: {last_bayes_folder} -> {current_experiment_path}"
+                )
+            except OSError as e:
+                print(f"Failed to create symlink: {e}")
 
 
 ############## Utils ##############

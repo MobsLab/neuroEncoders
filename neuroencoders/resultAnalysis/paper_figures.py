@@ -437,8 +437,8 @@ class PaperFigures:
                     )
 
                     if (
-                        fPredBayes[i].shape
-                        != self.resultsNN_phase[suffix]["fullPred"][i].shape
+                        fPredBayes[i].shape[0]
+                        != self.resultsNN_phase[suffix]["fullPred"][i].shape[0]
                     ):
                         raise ValueError(
                             f"""
