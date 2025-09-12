@@ -1150,10 +1150,10 @@ class LSTMandSpikeNetwork:
             )
             # Manage learning rates schedule
             if loaded and kwargs.get("fine_tune", False):
-                print("Fine-tuning the model with a lower learning rate, set to 0.001")
-                self.optimizer.learning_rate.assign(0.001)
-                self.model.optimizer.learning_rate.assign(0.001)
-                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.001)
+                print("Fine-tuning the model with a lower learning rate, set to 0.0005")
+                self.optimizer.learning_rate.assign(0.0005)
+                self.model.optimizer.learning_rate.assign(0.0005)
+                tf.keras.backend.set_value(self.model.optimizer.learning_rate, 0.0005)
                 # according to some sources we need to recompile the model after changing the learning rate
                 self.model.compile(
                     optimizer=self.optimizer,

@@ -638,16 +638,6 @@ def main(args):
 
         if Parameters.GaussianHeatmap:
             print("Will now run temperature scaling for gaussian heatmap")
-            T_test = NNTrainer.test(
-                DataHelper.fullBehavior,
-                fit_temperature=True,
-                epochKey="testEpochs",
-                windowSizeMS=windowSizeMS,
-                useSpeedFilter=True,
-                isPredLoss=isPL,
-                strideFactor=strideFactor,
-                phase=args.phase,
-            )
             T = NNTrainer.test(
                 DataHelper.fullBehavior,
                 fit_temperature=True,
@@ -657,7 +647,6 @@ def main(args):
                 isPredLoss=isPL,
                 strideFactor=strideFactor,
             )
-            print(f"Found T={T}, T_test={T_test}. Diff is {T - T_test}")
         # now run the fancy inference
         if (
             not os.path.exists(
