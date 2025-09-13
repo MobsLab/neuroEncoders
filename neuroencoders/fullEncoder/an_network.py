@@ -1219,7 +1219,7 @@ class LSTMandSpikeNetwork:
                 if earlyStop:
                     es_callback = tf.keras.callbacks.EarlyStopping(
                         monitor="val_loss",
-                        patience=10,
+                        patience=2,
                         min_delta=0.05,
                         verbose=1,
                         restore_best_weights=True,

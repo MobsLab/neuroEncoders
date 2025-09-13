@@ -1519,7 +1519,11 @@ class Trainer(SpatialConstraintsMixin):
         return outputResults
 
     def _prepare_spike_data(
-        self, behaviorData: Dict, useTrain: bool, sleepEpochs: List
+        self,
+        behaviorData: Dict,
+        useTrain: bool,
+        sleepEpochs: List,
+        save_as_pickle: bool = True,
     ) -> Tuple[List, List]:
         """Prepare spike data for decoding epochs.
         Args:
@@ -1557,6 +1561,22 @@ class Trainer(SpatialConstraintsMixin):
                 self.clusterData["Spike_times"][tetrode][combined_epochs]
             )
             clusters.append(self.clusterData["Spike_labels"][tetrode][combined_epochs])
+        if save_as_pickle:
+            with open(
+                os.path.join(
+                    self.folderResult,
+                    f"clusters_time{self.suffix}_wTrain_{useTrain}.pkl",
+                ),
+                "wb",
+            ) as f:
+                pickle.dump(clusters_time, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(
+                os.path.join(
+                    self.folderResult, f"clusters{self.suffix}_wTrain_{useTrain}.pkl"
+                ),
+                "wb",
+            ) as f:
+                pickle.dump(clusters, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         return clusters_time, clusters
 
@@ -2894,6 +2914,156 @@ def find_next_bin(times, clusters, start, stop, start_time, stop_time):
         newStopId += 1
     newStopId = newStopId - 1
     return newStartID, newStopId, clusters[newStartID : newStopId + 1]
+
+
+def extract_spike_counts(firstSpikeNNTime, spikeMatTimes, window_size_s):
+    """
+    Extract spike times and counts for bins defined by `time_array` and `window_size`.
+
+    Args:
+    --------
+        firstSpikeNNTime: array of shape (N,), bin start times.
+        spikeMatTimes: array of shape (M,), spike timestamps (sorted, float).
+        window_size_s: float, size of each window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N,), number of spikes in each bin.
+        spike_times: list of arrays, each entry contains the spikes in that bin.
+    """
+    firstSpikeNNTime = np.asarray(firstSpikeNNTime).reshape(-1)
+    spikeMatTimes = np.asarray(spikeMatTimes).reshape(-1)
+
+    bin_start = firstSpikeNNTime
+    bin_stop = bin_start + window_size_s
+
+    spike_counts = np.zeros(len(firstSpikeNNTime), dtype=int)
+    spike_times = []
+
+    for start, stop in zip(bin_start, bin_stop):
+        # select spikes within window
+        in_bin = spikeMatTimes[(spikeMatTimes >= start) & (spikeMatTimes < stop)]
+        spike_counts[len(spike_times)] = len(in_bin)
+        spike_times.append(in_bin)
+
+    return spike_counts, spike_times
+
+
+def extract_spike_counts_keops(firstSpikeNNTime, spikeMatTimes, window_size_s):
+    """
+    Extract spike counts for bins defined by `firstSpikeNNTime` and `window_size_s`
+    using PyKeOps (fast on large arrays).
+
+    Args:
+    --------
+        firstSpikeNNTime: array of shape (N,), bin start times.
+        spikeMatTimes: array of shape (M,), spike timestamps (sorted, float).
+        window_size_s: float, size of each window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N,), number of spikes in each bin.
+    """
+    firstSpikeNNTime = np.asarray(firstSpikeNNTime).reshape(-1).astype(np.float64)
+    spikeMatTimes = np.asarray(spikeMatTimes).reshape(-1).astype(np.float64)
+
+    bin_start = LazyTensor_np(firstSpikeNNTime[:, None, None])  # (N,1,1)
+    bin_stop = bin_start + window_size_s
+    spikes = LazyTensor_np(spikeMatTimes[None, :, None])  # (1,M,1)
+
+    good_start = (spikes - bin_start).relu().sign()  # spike >= start
+    good_stop = (bin_stop - spikes).relu().sign()  # spike < stop
+    in_bin = good_start * good_stop  # (N,M,1)
+
+    spike_counts = in_bin.sum(axis=1).squeeze()  # (N,)
+
+    return spike_counts
+
+
+def extract_spike_counts_from_matrix(
+    time_array, spike_matrix, spike_times, window_size
+):
+    """
+    Extract spike counts per bin from a [num_timepoints, n_neurons] spike matrix.
+
+    Args:
+    --------
+        time_array: array of shape (N,), bin start times.
+        spike_matrix: array of shape (T, M), 0/1 (or counts), where T=num_timepoints, M=n_neurons.
+        spike_times: array of shape (T,), time associated with each row of spike_matrix.
+        window_size: float, size of the window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N, M), spike counts for each (bin, neuron).
+        spike_times_per_bin: list of lists of arrays,
+                             spike_times_per_bin[bin][neuron] = spike times in that bin.
+    """
+    time_array = np.asarray(time_array).reshape(-1)
+    spike_times = np.asarray(spike_times).reshape(-1)
+    spike_matrix = np.asarray(spike_matrix)
+
+    N_bins = len(time_array)
+    T, M = spike_matrix.shape
+
+    spike_counts = np.zeros((N_bins, M), dtype=int)
+    spike_times_per_bin = [[None] * M for _ in range(N_bins)]
+
+    for i, start in enumerate(time_array):
+        stop = start + window_size
+
+        # mask rows belonging to this bin
+        in_bin_mask = (spike_times >= start) & (spike_times < stop)
+
+        if not np.any(in_bin_mask):
+            continue  # no spikes in this bin
+
+        # sum along rows for counts
+        spike_counts[i, :] = spike_matrix[in_bin_mask, :].sum(axis=0)
+
+        # extract actual spike times per neuron
+        for m in range(M):
+            spikes_here = spike_times[in_bin_mask & (spike_matrix[:, m] > 0)]
+            spike_times_per_bin[i][m] = spikes_here
+
+    return spike_counts, spike_times_per_bin
+
+
+def extract_spike_counts_matrix_keops(
+    time_array, spike_matrix, spike_times, window_size
+):
+    """
+    Extract spike counts per bin from a [T, M] spike matrix using PyKeOps.
+
+    Args:
+    --------
+        time_array: array of shape (N,), bin start times.
+        spike_matrix: array of shape (T, M), 0/1 (or counts).
+        spike_times: array of shape (T,), time associated with each row of spike_matrix.
+        window_size: float, size of the window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N, M), spike counts for each (bin, neuron).
+    """
+    time_array = np.asarray(time_array).reshape(-1).astype(np.float64)
+    spike_times = np.asarray(spike_times).reshape(-1).astype(np.float64)
+    spike_matrix = np.asarray(spike_matrix).astype(np.float64)
+
+    # Lazy tensors
+    bin_start = LazyTensor_np(time_array[:, None, None])  # (N,1,1)
+    bin_stop = bin_start + window_size
+    st_lazy = LazyTensor_np(spike_times[None, :, None])  # (1,T,1)
+
+    good_start = (st_lazy - bin_start).relu().sign()
+    good_stop = (bin_stop - st_lazy).relu().sign()
+    in_bin = good_start * good_stop  # (N,T,1)
+
+    # Weight by spike_matrix and sum over timepoints
+    spike_counts = in_bin * spike_matrix[None, :, :]  # (N,T,M)
+    spike_counts = spike_counts.sum(axis=1)  # (N,M)
+
+    return spike_counts
 
 
 # TODO: le passer en test_parallel??
