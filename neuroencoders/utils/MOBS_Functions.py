@@ -1922,12 +1922,13 @@ class Mouse_Results(Params, PaperFigures):
                     row["bayesLinPred"] = self.resultsBayes_phase[suffix]["linPred"][
                         id
                     ].flatten()
-                    row["bayesProba"] = self.resultsBayes_phase[suffix]["probaBayes"][
+                    row["bayesProba"] = self.resultsBayes_phase[suffix]["predLoss"][
                         id
                     ].flatten()
 
                 data.append(row)
         self.results_df = pd.DataFrame(data)
+        return self.results_df
 
 
 class Results_Loader:
@@ -2156,18 +2157,31 @@ class Results_Loader:
             self.suffixes.append("_training")
 
         if kwargs.get("df", None) is None:
-            self.convert_to_df()
+            try:
+                self.convert_to_df()
+            except Exception as e:
+                print(f"Issues converting to DataFrame: {e}")
 
-    def convert_to_df(self):
+    def convert_to_df(self, redo=False):
         """
         Convert the results_dict to a pandas DataFrame.
         This method will create a DataFrame with the mouse names, manipes, phases, and results.
         """
+        if (
+            hasattr(self, "results_df")
+            and not redo
+            and isinstance(self.results_df, pd.DataFrame)
+            and self.results_df.shape[0] > 0
+        ):
+            print(
+                "Results DataFrame for Results_Loader already exists. Use redo=True to recreate it."
+            )
+            return self.results_df
         data = pd.DataFrame()
         for nameExp, mice in self.results_dict.items():
             for mouse_name, phases in mice.items():
                 for phase, results in phases.items():
-                    if phase != self.phases[0]:
+                    if phase == "training":
                         continue
                     results_df = results.convert_to_df()
                     # simply add "results" to the results_df
