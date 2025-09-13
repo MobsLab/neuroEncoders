@@ -2121,43 +2121,35 @@ class Results_Loader:
                         denseweight=denseweight,
                         **kwargs,
                     )
-                    if phase == kwargs.get("template", "pre"):
-                        self.results_dict[nameExp][mouse_full_name]["training"] = (
-                            self.results_dict[nameExp][mouse_full_name][phase]
-                        )
-                        self.results_dict[nameExp][mouse_full_name][
-                            "training"
-                        ].load_data(
-                            suffixes=["_training", "_" + kwargs.get("template", "pre")]
-                        )
-
-                        if kwargs.get("load_bayes", False):
-                            self.results_dict[nameExp][mouse_full_name][
-                                "training"
-                            ].load_bayes(
-                                suffixes=[
-                                    "_training",
-                                    "_" + kwargs.get("template", "pre"),
-                                ]
-                            )
 
                     try:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=["_training", suffix]
+                            if phase == kwargs.get("template", "pre")
+                            else [suffix]
                         )
                         found_training = True
-                        if kwargs.get("load_bayes", False):
+                        if kwargs.get("load_bayes", False) or kwargs.get(
+                            "which", "ann"
+                        ) in ["both", "bayes"]:
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
-                            ].load_bayes(suffixes=["_training", suffix])
+                            ].load_bayes(
+                                suffixes=["_training", suffix]
+                                if phase == kwargs.get("template", "pre")
+                                else [suffix],
+                                **kwargs,
+                            )
                     except FileNotFoundError:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=[suffix]
                         )
-                        if kwargs.get("load_bayes", False):
+                        if kwargs.get("load_bayes", False) or kwargs.get(
+                            "which", "ann"
+                        ) in ["both", "bayes"]:
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
-                            ].load_bayes(suffixes=[suffix])
+                            ].load_bayes(suffixes=[suffix], **kwargs)
 
         if found_training:
             self.phases.append("training")
