@@ -14,8 +14,8 @@ from statannotations.Annotator import Annotator
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
 from neuroencoders.simpleBayes.decode_bayes import (
-    Trainer as TrainerBayes,
     extract_spike_counts,
     extract_spike_counts_from_matrix,
 )
@@ -77,7 +77,7 @@ class PaperFigures:
                 timeWindows=timeWindows,
             )
 
-    def load_data(self, suffixes=None):
+    def load_data(self, suffixes=None, **kwargs):
         """
         Method to load the results of the neural network prediction.
         It loads the results from the csv files saved in the results folder of the experiment path.
@@ -87,6 +87,8 @@ class PaperFigures:
         ----------
         suffix : str, optional
             Suffix to add to the file names, by default None. If None, it uses the class attribute self.suffix.
+        **kwargs : dict, optional such as:
+                extract_spike_counts: bool, whether to extract spike counts from csv files if they exist.
 
         Returns
         -------
@@ -248,39 +250,41 @@ class PaperFigures:
                     ).flatten()
                 )
 
-                try:  # load pkl files if they exist
-                    with open(
-                        os.path.join(
-                            self.projectPath.experimentPath,
-                            "results",
-                            str(ws),
-                            f"decoding_results{suffix}.pkl",
-                        ),
-                        "rb",
-                    ) as f:
-                        results = pickle.load(f)
-                        resultsNN_phase_pkl.append(results)
-                except FileNotFoundError:
-                    print(
-                        f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
-                    )
-                    resultsNN_phase_pkl.append(None)
-                try:
-                    spikes_count.append(
-                        pd.read_csv(
+                if kwargs.get("load_pickle", False):
+                    try:  # load pkl files if they exist
+                        with open(
                             os.path.join(
                                 self.projectPath.experimentPath,
                                 "results",
                                 str(ws),
-                                f"spikes_count{suffix}.csv",
+                                f"decoding_results{suffix}.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            results = pickle.load(f)
+                            resultsNN_phase_pkl.append(results)
+                    except FileNotFoundError:
+                        print(
+                            f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
+                        )
+                        resultsNN_phase_pkl.append(None)
+                if kwargs.get("extract_spikes_count", False):
+                    try:
+                        spikes_count.append(
+                            pd.read_csv(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(ws),
+                                    f"spikes_count{suffix}.csv",
+                                )
                             )
                         )
-                    )
-                except FileNotFoundError:
-                    print(
-                        f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
-                    )
-                    spikes_count.append(None)
+                    except FileNotFoundError:
+                        print(
+                            f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
+                        )
+                        spikes_count.append(None)
 
             speedMask = [ws.astype(bool) for ws in speedMask]
 
@@ -295,8 +299,10 @@ class PaperFigures:
                     "linTruePos": lTruePos,
                     "predLoss": lossPred,
                     "posIndex": posIndex,
-                    "spikes_count": spikes_count,
                 }
+                if kwargs.get("extract_spikes_count", False):
+                    self.resultsNN["spikes_count"] = spikes_count
+
             self.resultsNN_phase[suffix] = {
                 "time": time,
                 "speedMask": speedMask,
@@ -308,7 +314,10 @@ class PaperFigures:
                 "posIndex": posIndex,
                 "spikes_count": spikes_count,
             }
-            self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
+            if kwargs.get("extract_spikes_count", False):
+                self.resultsNN_phase[suffix]["spikes_count"] = spikes_count
+            if kwargs.get("load_pickle", False):
+                self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
     def load_bayes(self, suffixes=None, **kwargs):
         """
@@ -334,7 +343,9 @@ class PaperFigures:
                 - probaBayes: list of probabilities for each time window
                 - time: list of time arrays for each time window
         """
-        if not hasattr(self.trainerBayes, "linearPreferredPos"):
+        if not hasattr(self.trainerBayes, "linearPreferredPos") and kwargs.get(
+            "load_bayesMatrices", False
+        ):
             self.bayesMatrices = self.trainerBayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
@@ -528,22 +539,23 @@ class PaperFigures:
                     lTruePosBayes.append(outputsBayes["linearTrue"].flatten())
                     timesBayes.append(outputsBayes["times"].flatten())
 
-                try:  # load pkl files if they exist
-                    with open(
-                        os.path.join(
-                            self.trainerBayes.folderResult,
-                            str(ws),
-                            f"bayes_decoding_results{suffix}.pkl",
-                        ),
-                        "rb",
-                    ) as f:
-                        results = pickle.load(f)
-                        resultsBayes_phase_pkl.append(results)
-                except FileNotFoundError:
-                    print(
-                        f"No pkl file found for resultsBayes_phase{suffix} and window {str(ws)}, skipping loading it."
-                    )
-                    resultsBayes_phase_pkl.append(None)
+                if kwargs.get("load_pickle", False):
+                    try:  # load pkl files if they exist
+                        with open(
+                            os.path.join(
+                                self.trainerBayes.folderResult,
+                                str(ws),
+                                f"bayes_decoding_results{suffix}.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            results = pickle.load(f)
+                            resultsBayes_phase_pkl.append(results)
+                    except FileNotFoundError:
+                        print(
+                            f"No pkl file found for resultsBayes_phase{suffix} and window {str(ws)}, skipping loading it."
+                        )
+                        resultsBayes_phase_pkl.append(None)
 
             # Output
             if suffix == self.suffix or len(self.suffixes) == 1:
@@ -583,7 +595,8 @@ class PaperFigures:
                         "matrix_spikes_count": matrix_spikes_count,
                     }
                 )
-            self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
+            if kwargs.get("load_pickle", False):
+                self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=True):
         idWindow = self.timeWindows.index(timeWindow)
@@ -3897,7 +3910,7 @@ class PaperFigures:
         )
         plt.close(fig)
 
-    def bayesian_neurons_summary(self, block=True):
+    def bayesian_neurons_summary(self, block=True, **kwargs):
         """
         Summary of the Bayesian neurons:
         - Identify interesting neurons based on mutual Information
@@ -3910,6 +3923,19 @@ class PaperFigures:
 
         self.trainerBayes must have been trained before calling this method.
         """
+        if getattr(self, "bayesMatrices", None) is None:
+            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+                self.behaviorData,
+                l_function=self.l_function,
+                bayesMatrices=self.bayesMatrices
+                if (
+                    (isinstance(self.bayesMatrices, dict))
+                    and ("Occupation" in self.bayesMatrices.keys())
+                )
+                else None,
+                **kwargs,
+            )
+
         ordered_mi = np.array(
             [mi for tetrode_mi in self.bayesMatrices["mutualInfo"] for mi in tetrode_mi]
         )[self.trainerBayes.linearPosArgSort]
