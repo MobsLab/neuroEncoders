@@ -3199,20 +3199,10 @@ def parallel_pred_as_NN(
         # posterior has shape (n_time_steps, n_position_bins)
         # Use argmax reduction to force evaluation, then reconstruct full array
         n_time_steps, n_position_bins = posterior.shape
-
-        # Create array to store results
-        posterior_array = np.zeros((n_time_steps, n_position_bins))
-
-        # Extract each position bin separately using indexing reduction
-        for pos_idx in range(n_position_bins):
-            # Create selector for this position
-            selector = np.zeros((n_position_bins, 1))
-            selector[pos_idx, 0] = 1.0
-            selector_vj = pykeops.numpy.Vj(selector)
-
-            # Extract values for this position across all time steps
-            pos_values = (posterior * selector_vj).sum(axis=1)  # Sum over position dim
-            posterior_array[:, pos_idx] = pos_values.squeeze()
+        eye = np.eye(n_position_bins, dtype=posterior.dtype)
+        eye_vj = pykeops.numpy.Vj(eye)  # shape (n_position_bins, n_position_bins)
+        # sum reduction on dummy axis to get full array
+        posterior_array = (posterior * eye_vj).sum(axis=1)
 
         # Reshape to original spatial dimensions
         full_posteriors = posterior_array.reshape((n_time_steps, *spatial_shape))
