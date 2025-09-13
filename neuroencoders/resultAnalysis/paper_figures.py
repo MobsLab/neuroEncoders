@@ -14,7 +14,11 @@ from statannotations.Annotator import Annotator
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
-from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
+from neuroencoders.simpleBayes.decode_bayes import (
+    Trainer as TrainerBayes,
+    extract_spike_counts,
+    extract_spike_counts_from_matrix,
+)
 from neuroencoders.utils.global_classes import Project
 from neuroencoders.utils.viz_params import (
     EC,
@@ -90,7 +94,9 @@ class PaperFigures:
         """
         ### Load the NN prediction without using noise:
         if suffixes is None:
-            self.suffixes = [self.suffix]
+            self.suffixes = (
+                [self.suffix] if not hasattr(self, "suffixes") else self.suffixes
+            )
         else:
             self.suffixes = suffixes
         if not isinstance(self.suffixes, list):
@@ -105,6 +111,7 @@ class PaperFigures:
             speedMask = []
             posIndex = []
             resultsNN_phase_pkl = []
+            spikes_count = []
             for ws in self.timeWindows:
                 lPredPos.append(
                     np.squeeze(
@@ -258,6 +265,22 @@ class PaperFigures:
                         f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
                     )
                     resultsNN_phase_pkl.append(None)
+                try:
+                    spikes_count.append(
+                        pd.read_csv(
+                            os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(ws),
+                                f"spikes_count{suffix}.csv",
+                            )
+                        )
+                    )
+                except FileNotFoundError:
+                    print(
+                        f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
+                    )
+                    spikes_count.append(None)
 
             speedMask = [ws.astype(bool) for ws in speedMask]
 
@@ -272,6 +295,7 @@ class PaperFigures:
                     "linTruePos": lTruePos,
                     "predLoss": lossPred,
                     "posIndex": posIndex,
+                    "spikes_count": spikes_count,
                 }
             self.resultsNN_phase[suffix] = {
                 "time": time,
@@ -282,6 +306,7 @@ class PaperFigures:
                 "linTruePos": lTruePos,
                 "predLoss": lossPred,
                 "posIndex": posIndex,
+                "spikes_count": spikes_count,
             }
             self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
@@ -339,6 +364,8 @@ class PaperFigures:
             posLossBayes = []
             timesBayes = []
             resultsBayes_phase_pkl = []
+            total_spikes_count = []
+            matrix_spikes_count = []
             for i, ws in enumerate(self.timeWindows):
                 try:
                     lPredPosBayes.append(
@@ -435,6 +462,18 @@ class PaperFigures:
                             )
                         ).flatten()
                     )
+                    if kwargs.get("extract_spikes_count", False):
+                        total_count, _ = extract_spike_counts(
+                            timesBayes[-1], self.trainerBayes.spikeMatTimes, ws / 1000
+                        )
+                        total_spikes_count.append(total_count)
+                        matrix_count, _ = extract_spike_counts_from_matrix(
+                            timesBayes[-1],
+                            self.trainerBayes.spikeMat,
+                            self.trainerBayes.spikeMatTimes,
+                            ws / 1000,
+                        )
+                        matrix_spikes_count.append(matrix_count)
 
                     if (
                         fPredBayes[i].shape[0]
@@ -519,6 +558,13 @@ class PaperFigures:
                     "time": timesBayes,  # should be exactly the same as timeNN
                     "speedMask": self.resultsNN_phase[suffix]["speedMask"],
                 }
+                if kwargs.get("extract_spikes_count", False):
+                    self.resultsBayes.update(
+                        {
+                            "total_spikes_count": total_spikes_count,
+                            "matrix_spikes_count": matrix_spikes_count,
+                        }
+                    )
             self.resultsBayes_phase[suffix] = {
                 "linPred": lPredPosBayes,
                 "linTruePos": lTruePosBayes,
@@ -530,6 +576,13 @@ class PaperFigures:
                 "time": timesBayes,  # should be exactly the same as timeNN
                 "speedMask": self.resultsNN_phase[suffix]["speedMask"],
             }
+            if kwargs.get("extract_spikes_count", False):
+                self.resultsBayes_phase[suffix].update(
+                    {
+                        "total_spikes_count": total_spikes_count,
+                        "matrix_spikes_count": matrix_spikes_count,
+                    }
+                )
             self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=True):
