@@ -13,6 +13,7 @@ def julia_spike_filter(
     folderCode,
     windowSize=0.036,
     windowStride=0.036,
+    strideFactor=1,
     singleSpike=False,
     BUFFERSIZE=72000,
     redo=False,
@@ -33,7 +34,6 @@ def julia_spike_filter(
     redo : bool, if True, the function will redo the extraction even if the tfrec file already exists (default = False)
 
     """
-    strideFactor = int(windowSize / windowStride)
     if singleSpike:
         test1 = os.path.isfile(
             (os.path.join(projectPath.folder, "dataset", "dataset_singleSpike.tfrec"))
@@ -99,6 +99,9 @@ def julia_spike_filter(
                 ]
             )
         else:
+            print(
+                f"Extracting spikes with window size {windowSize} and stride {windowStride}. This will create the files {filename} and {sleepFilename} and may take a while..."
+            )
             subprocess.run(
                 [
                     os.path.join(codepath, "executeFilter_stride.sh"),

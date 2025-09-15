@@ -663,21 +663,29 @@ def main(args):
             windowStride = round(args.window / strideFactor, 4)
             if windowStride < 0.036:
                 warn(
-                    f"The selected striding factor of {strideFactor} is too high for the selected window size of {windowStride}ms. Setting striding to 36ms."
+                    f"The selected striding factor of {strideFactor} is too high for the selected window size of {args.window}s (would make a windowStride of {windowStride}). Setting striding to 36ms."
                 )
                 windowStride = 0.036
+                if args.window == 0.036:
+                    # this way we dont have to recreate them.
+                    strideFactor = 1
             # check if windowStride is a valid ms value, if not raise an error
             if not (1000 * windowStride).is_integer():
                 raise ValueError(
                     f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
                 )
+        # WARN: only for now - maybe need to add another check for floats ?
         strideFactor = int(strideFactor)
 
+        print(
+            f"Starting julia spike filtering with striding {windowStride}s and window size {args.window}s (stride factor was fixed at {strideFactor})."
+        )
         julia_spike_filter(
             ProjectPath,
             folderCode,
             windowSize=args.window,
             windowStride=windowStride,  # This way the striding is always 36ms-based
+            strideFactor=strideFactor,
             redo=False,
             BUFFERSIZE=216000,
         )
@@ -711,8 +719,8 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=False,
-                fine_tune=False,
+                load_model=True,
+                fine_tune=True,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.504 else 6,
                 strideFactor=strideFactor,
