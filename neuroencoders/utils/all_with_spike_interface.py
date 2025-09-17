@@ -1,4 +1,4 @@
-#!/home/mickey/miniconda3/envs/neuroencoders/bin/python3.10
+#!/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python
 """
 Here is an example of opening viewers directly from spikeinterface objects : recording and sorting.
 

@@ -28,6 +28,7 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
             # set memory growth to True
             for device in device_phys:
                 config.experimental.set_memory_growth(device, True)
+                print(f"Memory growth set for device: {device}")
     # get the name of the device
     device = config.list_logical_devices(usedDevice)
     if device:

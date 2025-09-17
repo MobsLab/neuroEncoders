@@ -1,8 +1,10 @@
 # Load libs
+import gc
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
+import psutil
 from denseweight import DenseWeight
 from scipy.ndimage import gaussian_filter
 
@@ -10,7 +12,9 @@ from neuroencoders.utils.global_classes import SpatialConstraintsMixin
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf
-from tensorflow import keras
+from keras import ops as kops
+from keras.layers import Lambda
+import keras.utils as keras_utils
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
@@ -52,18 +56,18 @@ class spikeNet(tf.keras.layers.Layer):
         self.batch_normalization = kwargs.get("batch_normalization", True)
         self.number = number
         with tf.device(self.device):
-            self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="SAME")
-            self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="SAME")
-            self.convLayer3 = tf.keras.layers.Conv2D(32, [2, 3], padding="SAME")
+            self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="same")
+            self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="same")
+            self.convLayer3 = tf.keras.layers.Conv2D(32, [2, 3], padding="same")
 
             self.maxPoolLayer1 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="SAME"
+                [1, 2], [1, 2], padding="same"
             )
             self.maxPoolLayer2 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="SAME"
+                [1, 2], [1, 2], padding="same"
             )
             self.maxPoolLayer3 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="SAME"
+                [1, 2], [1, 2], padding="same"
             )
             if self.batch_normalization:
                 self.bn1 = tf.keras.layers.BatchNormalization()
@@ -113,7 +117,7 @@ class spikeNet(tf.keras.layers.Layer):
 
     def apply(self, input):
         with tf.device(self.device):
-            x = tf.expand_dims(input, axis=3)
+            x = kops.expand_dims(input, axis=3)
             x = self.convLayer1(x)
             if self.batch_normalization:
                 x = self.bn1(x)
@@ -128,14 +132,18 @@ class spikeNet(tf.keras.layers.Layer):
             x = self.maxPoolLayer3(x)
 
             # FIX:Dynamic reshape calculation instead of hardcoding
-            batch_size = tf.shape(x)[0]
-            flat_size = (
-                x.shape[1] * x.shape[2] * x.shape[3]
-            )  # this will be nChannels * time_bins/8 * 32 timsteps
-            x = tf.reshape(
-                x, [batch_size, flat_size]
-            )  # change from 32 to 16 and 4 to 8
+            # batch_size = kops.shape(x)[0]  # this is batch_size * nSpikes if batched
+            # flat_size = (
+            #     kops.shape(x)[1] * kops.shape(x)[2] * kops.shape(x)[3]
+            # )  # this will be nChannels * time_bins/8 * 32 timsteps
+            # flat_size = kops.cast(flat_size, tf.int32)
+            # flat_size = int(np.prod(x.shape[1:]))  # static product
+            # x = kops.reshape(x, (-1, flat_size))  # change from 32 to 16 and 4 to 8
+            # make sure the reshape is correct wrt flat_size:
             # by pooling we moved from 32 bins to 4. By convolution we generated 32 channels
+
+            # or we could simply tf.keras.layers.Flatten() the output of the conv layers - leaves batch size unchanged
+            x = tf.keras.layers.Flatten()(x)
             x = self.denseLayer1(x)
             x = self.dropoutLayer(x)
             x = self.denseLayer2(x)
@@ -198,32 +206,38 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     def __init__(self, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
+        self.supports_masking = True
 
     def call(self, inputs, mask=None):
         with tf.device(self.device):
             if mask is not None:
                 # Convert mask to float and add dimension for broadcasting
-                mask = tf.cast(mask, tf.float32)
-                mask = tf.expand_dims(mask, axis=-1)
+                mask_float = kops.cast(mask, tf.float32)
+                # expand mask to match input dimensions [batch, seq_len, 1]
+                mask_expanded = kops.expand_dims(mask_float, axis=-1)
 
                 # Apply mask to inputs
-                masked_inputs = inputs * mask
+                masked_inputs = inputs * mask_expanded
 
                 # Calculate sum and count of non-masked elements
-                sum_inputs = tf.reduce_sum(masked_inputs, axis=1)
-                count_inputs = tf.reduce_sum(mask, axis=1)
+                sum_inputs = kops.sum(masked_inputs, axis=1)  # [batch, features]
+                count_inputs = kops.sum(mask_expanded, axis=1)  # [batch, features]
 
                 # Avoid division by zero
-                count_inputs = tf.maximum(count_inputs, 1.0)
+                count_inputs = kops.maximum(count_inputs, 1.0)
 
                 # Calculate average
                 return sum_inputs / count_inputs
             else:
-                return tf.reduce_mean(inputs, axis=1)
+                return kops.mean(inputs, axis=1)
 
     def get_config(self):
         base_config = super().get_config()
         return {**base_config, "name": self.__class__.__name__, "device": self.device}
+
+    def compute_mask(self, inputs, mask=None):
+        # No mask to pass on after pooling
+        return None
 
     @classmethod
     def from_config(cls, config):
@@ -246,16 +260,17 @@ def create_attention_mask_from_padding_mask(padding_mask):
         return None
 
     # Convert to float (1.0 for valid, 0.0 for padded)
-    attention_mask = tf.cast(padding_mask, tf.float32)
+    attention_mask = kops.cast(padding_mask, tf.float32)
 
     # Create 4D mask for attention: [batch_size, 1, seq_len, seq_len]
-    seq_len = tf.shape(attention_mask)[1]
+    mask_shape = kops.shape(attention_mask)
+    seq_len = mask_shape[1]  # assuming shape is [batch_size, seq_len]
 
     # Expand to [batch_size, 1, 1, seq_len] for broadcasting
-    attention_mask = tf.expand_dims(tf.expand_dims(attention_mask, 1), 1)
+    attention_mask = kops.expand_dims(kops.expand_dims(attention_mask, 1), 1)
 
     # Create mask for key/value positions [batch_size, 1, seq_len, seq_len]
-    attention_mask = tf.tile(attention_mask, [1, 1, seq_len, 1])
+    attention_mask = kops.tile(attention_mask, [1, 1, seq_len, 1])
 
     return attention_mask
 
@@ -307,7 +322,38 @@ class PositionalEncoding(tf.keras.layers.Layer):
         )
 
 
+def safe_mask_creation(batchedInputGroups, pad_value=-1):
+    """
+    Safely create padding mask from batched input groups.
+
+    Args:
+        batchedInputGroups: Tensor of shape [batch, max_n_spikes] with pad_value for padding
+        pad_value: Value used for padding (default: -1)
+
+    Returns:
+        padding_mask: Boolean tensor [batch, max_n_spikes] where True = real data
+    """
+    # Create padding mask
+    padding_mask = kops.not_equal(batchedInputGroups, pad_value)
+    padding_mask = kops.cast(padding_mask, tf.float32)
+
+    # Verify shape
+    mask_shape = kops.shape(padding_mask)
+    if len(mask_shape) != 2:
+        raise ValueError(
+            f"Expected 2D mask from batchedInputGroups, got shape {mask_shape}"
+        )
+
+    return padding_mask
+
+
 class TransformerEncoderBlock(tf.keras.layers.Layer):
+    """
+        A custom Transformer Encoder Block layer with multi-head attention and feedforward network.
+        Adapted from
+    Wairagkar, M. et al. (2025) ‘An instantaneous voice-synthesis neuroprosthesis’, Nature, pp. 1–8. Available at: https://doi.org/10.1038/s41586-025-09127-3.
+    """
+
     def __init__(
         self,
         d_model=64,
@@ -316,8 +362,9 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         ff_dim2=64,
         dropout_rate=0.5,
         device="/cpu:0",
+        **kwargs,
     ):
-        super(TransformerEncoderBlock, self).__init__()
+        super().__init__(**kwargs)
         self.d_model = d_model
         self.num_heads = num_heads
         self.ff_dim1 = ff_dim1
@@ -338,11 +385,64 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
             self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
 
             # Feedforward network
-            self.ff_layer1 = tf.keras.layers.Dense(ff_dim1, activation="relu")
-            self.ff_layer2 = tf.keras.layers.Dense(ff_dim2, activation="relu")
+            self.ff_layer1 = tf.keras.layers.Dense(self.ff_dim1, activation="relu")
+            self.ff_layer2 = tf.keras.layers.Dense(self.ff_dim2, activation="relu")
 
             # Final layer normalization
             self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+        self.supports_masking = True  # To indicate that this layer supports masking
+
+    def build(self, input_shape):
+        """
+        Build all child layers with proper input shapes.
+
+        Args:
+            input_shape: Expected to be (batch_size, sequence_length, d_model)
+        """
+        # Validate input shape
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected 3D input shape (batch, seq, features), got {input_shape}"
+            )
+
+        batch_size, seq_length, feature_dim = input_shape
+
+        # Ensure feature dimension matches d_model
+        if feature_dim != self.d_model:
+            raise ValueError(
+                f"Input feature dimension {feature_dim} doesn't match d_model {self.d_model}"
+            )
+
+        with tf.device(self.device):
+            # Build layer normalization layers
+            self.norm1.build(input_shape)
+            self.norm2.build(input_shape)
+
+            # Build multi-head attention
+            # MHA expects (query_shape, key_shape, value_shape)
+            self.mha.build(input_shape, input_shape, input_shape)
+
+            # Build dropout (doesn't need explicit build but good practice)
+            self.dropout1.build(input_shape)
+
+            # Build feedforward layers
+            self.ff_layer1.build(input_shape)
+
+            # ff_layer2 input shape depends on ff_layer1 output
+            ff1_output_shape = (batch_size, seq_length, self.ff_dim1)
+            self.ff_layer2.build(ff1_output_shape)
+
+        # Mark this layer as built
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the transformer encoder block.
+        The output maintains the same shape as input but with ff_dim2 features.
+        """
+        batch_size, seq_length, _ = input_shape
+        return (batch_size, seq_length, self.ff_dim2)
 
     def call(self, x, mask=None, training=False):
         with tf.device(self.device):
@@ -370,23 +470,26 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
 
         return x
 
+    def compute_mask(self, inputs, mask=None):
+        """
+        Propagate the input mask to the output.
+        """
+        return mask
+
     def get_config(self):
-        base_config = super().get_config()
-        config = {
-            "norm1": tf.keras.saving.serialize_keras_object(self.norm1),
-            "mha": tf.keras.saving.serialize_keras_object(self.mha),
-            "dropout1": tf.keras.saving.serialize_keras_object(self.dropout1),
-            "ff_layer1": tf.keras.saving.serialize_keras_object(self.ff_layer1),
-            "ff_layer2": tf.keras.saving.serialize_keras_object(self.ff_layer2),
-            "norm2": tf.keras.saving.serialize_keras_object(self.norm2),
-            "d_model": self.d_model,
-            "num_heads": self.num_heads,
-            "ff_dim1": self.ff_dim1,
-            "ff_dim2": self.ff_dim2,
-            "dropout_rate": self.dropout_rate,
-            "device": self.device,
-        }
-        return {**base_config, **config}
+        """Return the config of the layer for serialization."""
+        config = super().get_config()
+        config.update(
+            {
+                "d_model": self.d_model,
+                "num_heads": self.num_heads,
+                "ff_dim1": self.ff_dim1,
+                "ff_dim2": self.ff_dim2,
+                "dropout_rate": self.dropout_rate,
+                "device": self.device,
+            }
+        )
+        return config
 
     @classmethod
     def from_config(cls, config):
@@ -1136,9 +1239,6 @@ class LinearizationLayer(tf.keras.layers.Layer):
         )
 
 
-@keras.saving.register_keras_serializable(
-    package="Custom_Layers", name="DynamicDenseWeightLayer"
-)
 class DynamicDenseWeightLayer(tf.keras.layers.Layer):
     """Layer that calls fitted DenseWeight for each batch dynamically"""
 
@@ -1479,7 +1579,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         """
         logits_flat = self.feature_to_logits_map(inputs)
         if not flatten:
-            logits_hw = tf.reshape(logits_flat, [-1, self.GRID_H, self.GRID_W])
+            logits_hw = kops.reshape(logits_flat, (-1, self.GRID_H, self.GRID_W))
             return logits_hw
         return logits_flat
 
@@ -1492,19 +1592,20 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         dx = pos_batch[:, 0][:, None, None] - X
         dy = pos_batch[:, 1][:, None, None] - Y
-        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+        gauss = kops.exp(-(dx**2 + dy**2) / (2 * sigma**2))
 
         # Apply forbidden mask here too
         allowed_mask = self.get_allowed_mask(use_tensorflow=True)
         gauss *= allowed_mask
 
         # Safer normalization
-        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
-        gauss = tf.where(
-            gauss_sum > self.EPS,
-            gauss / (gauss_sum + self.EPS),
-            allowed_mask / tf.reduce_sum(allowed_mask),
-        )
+        gauss_sum = kops.sum(gauss, axis=[1, 2], keepdims=True)
+        gauss = Lambda(
+            lambda t: tf.where(
+                t[0] > self.EPS, t[1] / (t[0] + self.EPS), t[2] / kops.sum(t[2])
+            )
+        )([gauss_sum, gauss, allowed_mask])
+
         return gauss
 
     def positions_to_bins(self, pos):
@@ -1574,137 +1675,6 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Forbidden + zero-count bins remain 0
         return tf.constant(inv, dtype=tf.float32)
-
-    def weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
-        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
-        logits_flat = tf.reshape(masked_logits, [B, H * W])
-        probs_flat = tf.nn.softmax(logits_flat, axis=-1)
-        probs = tf.reshape(probs_flat, [B, H, W])
-        if wmap is None:
-            wmap = self.WMAP
-        weights = wmap[None] * (1.0 - self.forbid_mask_tf[None])
-        se = tf.square(probs - target_hw)
-        # normalize by sum of weights to keep scale stable
-        return tf.reduce_sum(se * weights, [1, 2]) / (tf.reduce_sum(weights) + self.EPS)
-
-    def kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
-        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-
-        # Safety clipping to prevent extreme logits
-        logits_hw = tf.clip_by_value(logits_hw, -20.0, 20.0)
-
-        # Mask forbidden bins in logits
-        safe_neg = self.NEG
-        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, safe_neg, logits_hw)
-
-        # Get predicted probabilities (not log probabilities)
-        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
-        probs = tf.reshape(probs_flat, [B, H, W])
-
-        # Process targets with safety checks
-        P = target_hw * allowed_mask
-        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
-        safe_eps = tf.maximum(self.EPS, 1e-8)
-
-        P = tf.where(
-            P_sum > safe_eps,
-            P / (P_sum + safe_eps),
-            allowed_mask / tf.reduce_sum(allowed_mask),
-        )
-
-        # Ensure final normalization
-        P_sum_final = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
-        P = P / (P_sum_final + safe_eps)
-
-        # Define threshold for meaningful probability mass
-        threshold = safe_eps * 10
-
-        # CORRECTED KL FORMULA: Only compute KL where P has meaningful mass
-        # KL(P||Q) = sum P * log(P/Q) only where P > threshold
-        kl = tf.where(
-            P > threshold,
-            P * tf.math.log(P / tf.maximum(probs, safe_eps)),
-            0.0,  # Zero contribution where P is negligible
-        )
-
-        # Apply weighting
-        if wmap is not None:
-            weights = wmap[None]
-            valid_mask = tf.cast(weights > 0, tf.float32)
-            kl = kl * weights
-            loss_per_sample = tf.reduce_sum(kl, axis=[1, 1]) / (
-                tf.reduce_sum(weights * valid_mask) + safe_eps
-            )
-            final_loss = tf.reduce_mean(loss_per_sample)
-
-        else:
-            # Compute final loss with scaling to prevent gradient explosion
-            final_loss = tf.reduce_mean(tf.reduce_sum(kl, axis=[1, 2]))
-
-        if scale:
-            # Scale down the loss to prevent gradient explosion (divide by 100)
-            return final_loss / 100.0
-
-        return final_loss
-
-    def safe_kl_heatmap_loss(
-        self,
-        logits_hw,
-        target_hw,
-        wmap=None,
-        scale=False,
-        return_batch=False,
-        reduction=None,
-    ):
-        """
-        Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
-        Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
-        """
-        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-
-        # Clip logits for stability and apply forbid mask
-        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
-        logits_flat = tf.reshape(masked_logits, [B, H * W])
-
-        # Normalize target distribution P
-        P = target_hw * allowed_mask
-        P_sum = tf.reduce_sum(P, axis=[1, 2], keepdims=True)
-        P = tf.where(
-            P_sum > self.EPS,
-            P / (P_sum + self.EPS),
-            allowed_mask / tf.reduce_sum(allowed_mask),
-        )
-        P = P / (tf.reduce_sum(P, axis=[1, 2], keepdims=True) + self.EPS)
-        P_flat = tf.reshape(P, [B, H * W])
-
-        # --- KL(P||Q) = cross_entropy(P,Q) - entropy(P) ---
-        ce = tf.nn.softmax_cross_entropy_with_logits(
-            labels=P_flat, logits=logits_flat
-        )  # shape [B]
-        entropy = -tf.reduce_sum(
-            P_flat * tf.math.log(P_flat + self.EPS), axis=-1
-        )  # [B]
-        kl = ce - entropy
-
-        # Apply weighting map if provided
-        if wmap is not None:
-            weights = wmap[None]
-            valid_mask = tf.cast(weights > 0, tf.float32)
-            wsum = tf.reduce_sum(weights * valid_mask) + self.EPS
-            kl = kl * (tf.reduce_sum(weights) / wsum)
-
-        if return_batch or reduction == "none":
-            return kl  # [B]
-
-        loss = tf.reduce_mean(kl)
-
-        if scale:
-            loss /= 100.0
-
-        return loss
 
     def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
         """
@@ -1872,18 +1842,232 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     # inference: probs = softmax(mask_logits / T_cal)
 
 
+class GaussianHeatmapLosses(tf.keras.layers.Layer):
+    """
+    A simple wrapup class to hold various loss functions and handle keras symbols. Inherits from
+    GaussianHeatmapLayer to access masks and constants.
+    """
+
+    def __init__(self, heatmap_layer: GaussianHeatmapLayer, **kwargs):
+        """
+        Args:
+            heatmap_layer: An instance of GaussianHeatmapLayer to provide masks and constants.
+        """
+        super().__init__(**kwargs)
+        # Copy necessary properties from heatmap layer
+        self.GRID_H = heatmap_layer.GRID_H
+        self.GRID_W = heatmap_layer.GRID_W
+        self.EPS = heatmap_layer.EPS
+        self.NEG = heatmap_layer.NEG
+        self.WMAP = heatmap_layer.WMAP
+
+        # Convert numpy masks to TensorFlow constants
+        self.forbid_mask_tf = heatmap_layer.forbid_mask_tf
+        self.allowed_mask_tf = heatmap_layer.get_allowed_mask(use_tensorflow=True)
+
+    def call(self, inputs, loss_type="safe_kl", **kwargs):
+        """
+        Compute loss in a Keras symbolic-safe way.
+
+        Args:
+            inputs: Dictionary with keys 'logits' and 'targets'
+            loss_type: 'weighted' or 'kl' or 'safe_kl'
+
+        Returns:
+            loss: Scalar loss tensor
+        """
+        logits_hw = inputs["logits"]
+        target_hw = inputs["targets"]
+
+        if loss_type == "weighted":
+            return self._weighted_heatmap_loss(logits_hw, target_hw, **kwargs)
+        elif loss_type == "kl":
+            return self._kl_heatmap_loss(logits_hw, target_hw, **kwargs)
+        elif loss_type == "safe_kl":
+            return self._safe_kl_heatmap_loss(logits_hw, target_hw, **kwargs)
+        else:
+            raise ValueError(f"Unknown loss_type: {loss_type}")
+
+    def _weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
+        batch_size = kops.shape(logits_hw)[0]
+
+        masked_logits = kops.where(
+            kops.expand_dims(self.forbid_mask_tf, 0) > 0, self.NEG, logits_hw
+        )
+        # Flatten for softmax
+        logits_flat = kops.reshape(
+            masked_logits, (batch_size, self.GRID_H * self.GRID_W)
+        )
+        probs_flat = kops.softmax(logits_flat, axis=-1)
+        probs = kops.reshape(probs_flat, (batch_size, self.GRID_H, self.GRID_W))
+
+        # apply weights
+        if wmap is None:
+            wmap = self.WMAP
+        weights = kops.expand_dims(wmap, 0) * kops.expand_dims(self.allowed_mask_tf, 0)
+
+        se = kops.square(probs - target_hw)
+        # normalize by sum of weights to keep scale stable
+        # Compute weighted loss
+        weighted_se = se * weights
+        loss_per_sample = kops.sum(weighted_se, axis=[1, 2]) / (
+            kops.sum(weights) + self.EPS
+        )
+
+        return kops.mean(loss_per_sample)
+
+    def _kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
+        """
+        Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
+        """
+        batch_size = kops.shape(logits_hw)[0]
+
+        # Safety clipping to prevent extreme logits
+        logits_hw = tf.clip_by_value(logits_hw, -20.0, 20.0)
+
+        # Mask forbidden bins in logits
+        safe_neg = self.NEG
+        masked_logits = kops.where(
+            kops.expand_dims(self.forbid_mask_tf, 0) > 0, safe_neg, logits_hw
+        )
+
+        # Get predicted probabilities (not log probabilities)
+        probs_flat = kops.softmax(
+            kops.reshape(masked_logits, (batch_size, self.GRID_H * self.GRID_W)),
+            axis=-1,
+        )
+        probs = kops.reshape(probs_flat, (batch_size, self.GRID_H, self.GRID_W))
+
+        # Process targets with safety checks
+        allowed_mask = kops.expand_dims(self.allowed_mask_tf, 0)
+        P = target_hw * allowed_mask
+        P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
+        safe_eps = kops.maximum(self.EPS, 1e-8)
+
+        uniform_fallback = allowed_mask / kops.sum(self.allowed_mask_tf)
+        P = kops.where(
+            P_sum > safe_eps,
+            P / (P_sum + safe_eps),
+            uniform_fallback,
+        )
+
+        # Ensure final normalization
+        P_sum_final = kops.sum(P, axis=[1, 2], keepdims=True)
+        P = P / (P_sum_final + safe_eps)
+
+        # Define threshold for meaningful probability mass
+        threshold = safe_eps * 10
+        safe_probs = kops.maximum(probs, safe_eps)
+
+        # CORRECTED KL FORMULA: Only compute KL where P has meaningful mass
+        # KL(P(  )Q) = sum P * log(P/Q) only where P > threshold
+        kl = kops.where(
+            P > threshold,
+            P * kops.log(P / safe_probs),
+            0.0,  # Zero contribution where P is negligible
+        )
+
+        # Apply weighting
+        if wmap is not None:
+            weights = kops.expand_dims(wmap, 0)
+            valid_mask = kops.cast(weights > 0, tf.float32)
+            kl = kl * weights
+            loss_per_sample = kops.sum(kl, axis=[1, 1]) / (
+                kops.sum(weights * valid_mask) + safe_eps
+            )
+            final_loss = kops.mean(loss_per_sample)
+
+        else:
+            # Compute final loss with scaling to prevent gradient explosion
+            final_loss = kops.mean(kops.mean(kl, axis=[1, 2]))
+
+        if scale:
+            # Scale down the loss to prevent gradient explosion (divide by 100)
+            return final_loss / 100.0
+
+        return final_loss
+
+    def _safe_kl_heatmap_loss(
+        self,
+        logits_hw,
+        target_hw,
+        wmap=None,
+        scale=False,
+        return_batch=False,
+        reduction=None,
+    ):
+        """
+        Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
+        Equivalent to KL(P||Q), but implemented using TensorFlow cross-entropy ops.
+        """
+        batch_size = tf.shape(logits_hw)[0]
+        allowed_mask = self.allowed_mask_tf
+
+        # Clip logits for stability and apply forbid mask
+        masked_logits = kops.where(
+            kops.expand_dims(self.forbid_mask_tf, 0) > 0, self.NEG, logits_hw
+        )
+        logits_flat = kops.reshape(
+            masked_logits, (batch_size, self.GRID_H * self.GRID_W)
+        )
+
+        # Normalize target distribution P
+        P = target_hw * allowed_mask
+        P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
+        P = kops.where(
+            P_sum > self.EPS,
+            P / (P_sum + self.EPS),
+            allowed_mask / kops.sum(allowed_mask),
+        )
+        P = P / (kops.sum(P, axis=[1, 2], keepdims=True) + self.EPS)
+        P_flat = kops.reshape(P, (batch_size, self.GRID_H * self.GRID_W))
+
+        # --- KL(P||Q) = cross_entropy(P,Q) - entropy(P) ---
+        q_probs = kops.softmax(logits_flat, axis=-1)  # Convert logits to probabilities
+        ce = -kops.sum(P_flat * kops.log(q_probs + self.EPS), axis=-1)  # [B]
+        entropy = -kops.sum(P_flat * tf.math.log(P_flat + self.EPS), axis=-1)  # [B]
+        kl = ce - entropy
+
+        # Apply weighting map if provided
+        if wmap is not None:
+            weights = wmap[None]
+            valid_mask = kops.cast(weights > 0, tf.float32)
+            wsum = kops.sum(weights * valid_mask) + self.EPS
+            kl = kl * (kops.sum(weights) / wsum)
+
+        if return_batch or reduction == "none":
+            return kl  # [B]
+        else:
+            loss = kops.mean(kl)
+            if scale:
+                loss /= 100.0
+            return loss
+
+
 class KLHeatmapLoss(tf.keras.losses.Loss):
-    def __init__(self, gaussian_layer, wmap=None, scale=False, **kwargs):
+    def __init__(
+        self,
+        gaussian_loss_layer: GaussianHeatmapLosses,
+        wmap=None,
+        scale=False,
+        **kwargs,
+    ):
+        self.loss_type = kwargs.pop("loss_type", "safe_kl")
         super().__init__(reduction="none", **kwargs)
-        self.gaussian_layer = gaussian_layer
+        self.gaussian_loss_layer = gaussian_loss_layer
         self.wmap = wmap
         self.scale = scale
 
     def call(self, y_true, y_pred):
         # y_pred should be logits in shape [B, H, W]
         # y_true should be target heatmap in shape [B, H, W]
-        return self.gaussian_layer.safe_kl_heatmap_loss(
-            y_pred, y_true, wmap=self.wmap, scale=self.scale, return_batch=True
+        loss_inputs = {"logits": y_pred, "targets": y_true}
+        return self.gaussian_loss_layer(
+            loss_inputs,
+            loss_type=self.loss_type,
+            wmap=self.wmap,
+            scale=self.scale,
+            return_batch=True,
         )
 
 
@@ -1964,7 +2148,7 @@ class DenseLossProcessor:
 
             if self.verbose:
                 print(f"✓ DenseWeight model fitted on {len(training_pos_np)} samples")
-                print(f"✓ Ready for dynamic weight computation during training")
+                print("✓ Ready for dynamic weight computation during training")
 
         return self.fitted_dw
 
@@ -2006,3 +2190,30 @@ class DenseLossProcessor:
         processor.verbose = config.pop("verbose", False)
         processor.device = config.pop("device", "/cpu:0")
         return processor
+
+
+# memory garbage collection class
+class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
+    """Monitor memory usage during training, collect garbage."""
+
+    def __init__(self, log_every_n_epochs=1):
+        super().__init__()
+        self.log_every_n_epochs = log_every_n_epochs
+
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch % self.log_every_n_epochs == 0:
+            print("**Epoch {}**".format(epoch))
+            print(
+                f"Memory usage on epoch begin: {psutil.Process(os.getpid()).memory_info().rss / 1e9:.1f}GB"
+            )
+
+    def on_epoch_end(self, epoch, logs=None):
+        print(
+            f"Memory usage on epoch end: {psutil.Process(os.getpid()).memory_info().rss / 1e9:.1f}GB"
+        )
+        if epoch % self.log_every_n_epochs == 0:
+            gc.collect()
+        # deleted the clear_session() call to avoid issues with custom layers
+
+
+keras_utils.get_custom_objects()["DynamicDenseWeightLayer"] = DynamicDenseWeightLayer
