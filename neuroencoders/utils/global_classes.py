@@ -27,6 +27,7 @@ from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
+from neuroencoders.utils.management import get_git_info
 
 MAZE_COORDS = np.array(
     [
@@ -1375,6 +1376,7 @@ class Params:
         Initialize all parameters from the helper object and set default values.
         This is where you want to modify or add any additional parameters.
         """
+        self.git_info = get_git_info()
         self.nGroups = helper.nGroups()  # number of anatomical spiking groups
         self.dimOutput = helper.dim_output()  # dimension of what needs to be predicted
         self.originalDimOutput = (

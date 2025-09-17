@@ -1,8 +1,5 @@
 # Get libs
-import os
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-from tensorflow import config
+from pathlib import Path
 
 
 def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
@@ -19,6 +16,11 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     devicename : str
         The name of the device being used (in TF nomenclature).
     """
+    import os
+
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+    from tensorflow import config
+
     # if gpu set memory growth
     if usedDevice == "GPU":
         device_phys = config.list_physical_devices(usedDevice)
@@ -41,3 +43,36 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
 
 def convert_normalized_to_euclidian(normalized, maxPos):
     return normalized * maxPos
+
+
+def get_git_info():
+    import subprocess
+
+    repo_dir = Path(__file__).resolve().parent
+
+    try:
+        commit_hash = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir)
+            .decode("utf-8")
+            .strip()
+        )
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        try:
+            tag = (
+                subprocess.check_output(
+                    ["git", "describe", "--tags", "--abbrev=0"], cwd=repo_dir
+                )
+                .decode("utf-8")
+                .strip()
+            )
+        except subprocess.CalledProcessError:
+            tag = None  # No tags found
+        return {"commit": commit_hash, "branch": branch, "tag": tag}
+    except subprocess.CalledProcessError:
+        return {"commit": "unknown", "branch": "unknown", "tag": None}
