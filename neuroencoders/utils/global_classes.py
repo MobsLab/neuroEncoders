@@ -1353,7 +1353,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 2)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1413,7 +1413,9 @@ class Params:
         )  # number of attention heads in the transformer if used
         self.project_transformer = kwargs.pop("project_transformer", False)
 
-        default_lstm_layers = 2 if not self.isTransformer else 4
+        default_lstm_layers = (
+            2 if not self.isTransformer else 1
+        )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
         self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
         self.lstmSize = kwargs.pop("lstmSize", 64)
@@ -1436,13 +1438,13 @@ class Params:
             "TransformerDense1",
             self.nFeatures * 8
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 8,
+            else self.nFeatures * self.nGroups * 4,
         )
         self.TransformerDenseSize2 = kwargs.pop(
             "TransformerDense2",
             self.nFeatures * 4
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 4,
+            else self.nFeatures * self.nGroups * 2,
         )
 
         self.nDenseLayers = kwargs.pop(
@@ -1452,7 +1454,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0004]
+            "learningRates", [0.0003]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet

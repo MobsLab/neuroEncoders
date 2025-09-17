@@ -20,6 +20,7 @@ win_values = [0.504]  # only kept for new dataset
 win_values = [0.108, 0.252]
 win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
+win_values = [0.252, 0.108, 0.036]  # only kept for new dataset
 # Mice name
 mice_nb = []
 mice_nb = [
@@ -29,15 +30,15 @@ mice_nb = [
     "M1230_Novel",
     "M1230_Known",
     "M1162_MFB",
+    "M905",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "NO_PREDLOSS_GaussianHeatMap_LinearLoss"
+nameExp = "1Transformer_GaussianHeatmap_HeadAndDirection"
 nbEpochs = str(200)
 run_ann = True
-target = "pos"
-target_bayes = "pos"
+target = "PosAndHeadDirectionAndThigmo"
 phase = "pre"
-useStridingFactor = False
+useStridingFactor = True
 stridingFactor = 4
 if useStridingFactor:
     nameExp = f"STRIDE_{stridingFactor}_{nameExp}"
@@ -220,7 +221,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "-e",
             nbEpochs,
             "--target",
-            target_bayes,
+            target,
         ]
         if lstmAndTransfo:
             cmd_bayes += ["--name", nameExp + "_LSTM"]
@@ -237,14 +238,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--phase", phase]
         if run_bayes and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
-        elif run_ann and not run_bayes:
-            return cmd_ann, None
-        elif run_ann and run_bayes:
-            return cmd_ann, cmd_bayes
-        elif run_bayes and not run_ann:
-            return None, cmd_bayes
         else:
-            return None, None
+            return cmd_ann, None
     else:
         print(f"No .xml file found in {dir}")
         return None, None
