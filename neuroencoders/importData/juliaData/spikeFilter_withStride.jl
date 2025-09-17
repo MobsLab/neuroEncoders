@@ -212,7 +212,7 @@ function extract_spike_with_buffer(xmlPath, datPath, behavePath, fileName, datas
     buffer_mmap = zeros(Float32, BUFFERSIZE + 15 + 16, size(mmapFile, 2))
     #15 at the beginning to complete early spikes of the buffer
     #16 at the end to complete final spike of the buffer
-    # why these numbers? it would seem that behavior Data has a ~14.4Hz sampling frequency
+    # why these numbers? it would seem that behavior Data has a ~14.4Hz sampling frequency + 32 timepoints waveforms is what we want to capture
     state = zeros(Float32, size(channel_focus, 1))
     old_possibleSpike_sum = map(id -> zeros(Int64, 14), 1:1:nGroups)
     α = Float32(exp(-2π * 350.0 / samplingRate))

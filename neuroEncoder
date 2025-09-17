@@ -720,7 +720,7 @@ def main(args):
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
                 load_model=True,
-                fine_tune=True,
+                fine_tune=False,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.504 else 6,
                 strideFactor=strideFactor,
