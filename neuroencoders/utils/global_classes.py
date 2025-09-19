@@ -19,6 +19,7 @@ import dill as pickle
 # import matplotlib as mplt
 # mplt.use("TkAgg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import tables
@@ -1120,6 +1121,118 @@ class DataHelper(Project):
 
         return fig
 
+    def plot_maze_and_zones(self, savepath=None):
+        """Plot maze boundaries and forbidden zones"""
+        maze = np.array(MAZE_COORDS)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        ax.plot(maze[:, 0], maze[:, 1], "k", alpha=0.5)
+
+        for i, zone in enumerate(ZONEDEF):
+            zone = np.array(zone)
+            poly = Rectangle(
+                (zone[0, 0], zone[1, 0]),
+                width=zone[0, 1] - zone[0, 0],
+                height=zone[1, 1] - zone[1, 0],
+                alpha=0.2,
+                color=ZONE_COLORS[i],
+                label=ZONELABELS[i],
+            )
+            ax.add_patch(poly)
+
+        # add a red line that goes from the start to the end of the maze in the center of the arms, with regular points plotted
+        linearized = np.array(
+            [
+                [0.17, 0],
+                [0.17, 0.4],
+                [0.17, 0.87],
+                [0.5, 0.87],
+                [0.83, 0.87],
+                [0.83, 0.4],
+                [0.83, 0],
+            ]
+        )
+        ax.plot(
+            linearized[:, 0],
+            linearized[:, 1],
+            "_-",
+            color="r",
+            alpha=0.5,
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+        )
+        # make the last marker an arrow pointing downards
+        ax.plot(
+            linearized[-1, 0],
+            linearized[-1, 1],
+            "v",
+            color="r",
+            alpha=0.8,
+            markersize=10,
+            markeredgewidth=10,
+        )
+
+        # make the ticks bigger
+        ax.tick_params(axis="both", which="major", labelsize=20)
+        # make the legend bigger
+        ax.legend(fontsize=20, loc="best", bbox_to_anchor=(0.3, 0.34), frameon=True)
+        if savepath is not None:
+            plt.savefig(savepath, dpi=300)
+        plt.show()
+        return fig
+
+    def plot_linearized_maze(self, savepath=None):
+        # now plot the maze all flattened, ie zone after the other on a flat line
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        old_start = (0, 0)
+        for i, zone in enumerate(ZONEDEF):
+            zone = np.array(zone)
+            poly = Rectangle(
+                old_start,
+                width=0.2,
+                height=0.35,
+                alpha=0.2,
+                color=ZONE_COLORS[i],
+                label=ZONELABELS[i],
+            )
+            old_start = (old_start[0] + 0.2, 0)
+            ax.add_patch(poly)
+
+        # plot the red line
+        linearized = np.linspace(0, 1, 7)
+        ax.plot(
+            linearized,
+            np.zeros_like(linearized) + 0.17,
+            "|-",
+            color="r",
+            alpha=0.5,
+            label="Linearization",
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+        )
+        ax.plot(
+            linearized[-1],
+            0.17,
+            ">",
+            color="r",
+            alpha=0.8,
+            markersize=10,
+            markeredgewidth=10,
+        )
+        ax.tick_params(axis="both", which="major", labelsize=20)
+
+        # make the y axis invisible
+        ax.set_yticks([])
+        # make the x ticks bigger
+        ax.tick_params(axis="x", which="major", labelsize=20)
+        ax.set_xlabel("Maze Linearized position", fontsize=20)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 0.35)
+        if savepath is not None:
+            plt.savefig(savepath, dpi=300)
+        return fig
+
     def _get_traveling_direction(
         self,
         linearized_positions: np.ndarray,
@@ -1376,6 +1489,10 @@ class Params:
         Initialize all parameters from the helper object and set default values.
         This is where you want to modify or add any additional parameters.
         """
+        self.all_args = kwargs.get("all_args", None)
+        print(self.all_args)
+
+        self.mixed_loss = kwargs.get("mixed_loss", False)
         self.git_info = get_git_info()
         self.nGroups = helper.nGroups()  # number of anatomical spiking groups
         self.dimOutput = helper.dim_output()  # dimension of what needs to be predicted
@@ -1416,10 +1533,10 @@ class Params:
         self.project_transformer = kwargs.pop("project_transformer", False)
 
         default_lstm_layers = (
-            2 if not self.isTransformer else 1
+            2 if not self.isTransformer else 2
         )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
-        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.4)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)

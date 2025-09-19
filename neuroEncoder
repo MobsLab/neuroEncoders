@@ -236,6 +236,9 @@ def main(args):
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=not args.no_dense,
+        mixed_loss=args.mixed_loss,
+        GaussianHeatmap=not args.no_gaussian,
+        all_args=vars(args),
     )
 
     # Save ProjectPath object
@@ -1169,31 +1172,6 @@ if __name__ == "__main__":
             ],
         )
         p.add_argument(
-            "-lstm",
-            "--lstm",
-            action="store_true",
-            help="defines whether to use a lstm network instead of transformer",
-        )
-        p.add_argument(
-            "-log",
-            "--transform_w_log",
-            action="store_true",
-            help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
-        )
-        p.add_argument(
-            "-nod",
-            "--no-dense",
-            action="store_true",
-            help="defines whether the dense weight loss should be used or not",
-        )
-
-        p.add_argument(
-            "-sleep",
-            "--test_sleep",
-            action="store_true",
-            help="defines whether to test the decoder on the Pre and Post sleep phases",
-        )
-        p.add_argument(
             "-s",
             "--striding",
             type=float,
@@ -1211,11 +1189,19 @@ if __name__ == "__main__":
             default=None,
         )
         p.add_argument(
-            "-fp",
-            "--flat_prior",
+            "-sleep",
+            "--test_sleep",
             action="store_true",
-            help="defines whether to use a flat prior for bayesian decoding",
+            help="defines whether to test the decoder on the Pre and Post sleep phases",
         )
+
+        if cmd == "bayes":
+            p.add_argument(
+                "-fp",
+                "--flat_prior",
+                action="store_true",
+                help="defines whether to use a flat prior for bayesian decoding",
+            )
 
         if cmd != "bayes":
             p.add_argument(
@@ -1223,6 +1209,25 @@ if __name__ == "__main__":
                 "--gpu",
                 action="store_true",
                 help="run computations on gpu. Requires specific installation.",
+            )
+
+            p.add_argument(
+                "-lstm",
+                "--lstm",
+                action="store_true",
+                help="defines whether to use a lstm network instead of transformer",
+            )
+            p.add_argument(
+                "-log",
+                "--transform_w_log",
+                action="store_true",
+                help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
+            )
+            p.add_argument(
+                "-nod",
+                "--no-dense",
+                action="store_true",
+                help="defines whether the dense weight loss should be used or not",
             )
             p.add_argument(
                 "-pl",
@@ -1236,6 +1241,18 @@ if __name__ == "__main__":
                 "--early_stop",
                 action="store_true",
                 help="defines whether to use early stopping during training",
+            )
+            p.add_argument(
+                "-ml",
+                "--mixed_loss",
+                action="store_true",
+                help="defines whether the loss is full euclidean loss, or is weighted by linear distance (to deal with corner issues)",
+            )
+            p.add_argument(
+                "-ng",
+                "--no_gaussian",
+                action="store_true",
+                help="defines whether we train on gaussian heatmaps or on simple (x,y) positions",
             )
 
     args = Parser.parse_args()
