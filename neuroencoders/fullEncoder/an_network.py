@@ -33,6 +33,8 @@ from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.nnUtils import (
     GaussianHeatmapLayer,
     GaussianHeatmapLosses,
+    LinearPosWeighting,
+    LinearizationLayer,
     MemoryUsageCallbackExtended,
     MultiColumnLossLayer,
     NeuralDataAugmentation,
@@ -307,6 +309,14 @@ class LSTMandSpikeNetwork:
                 kernel_regularizer="l2",
             )
 
+            if getattr(self.params, "mixed_loss", False):
+                self.l_function_layer = LinearizationLayer(
+                    maze_points=self.maze_points,
+                    ts_proj=self.ts_proj,
+                    device=self.deviceName,
+                    name="l_function",
+                )
+
             if getattr(self.params, "project_transformer", True):
                 self.transformer_projection_layer = tf.keras.layers.Dense(
                     self.params.nFeatures,
@@ -388,6 +398,9 @@ class LSTMandSpikeNetwork:
 
         Returns:
             tuple: (myoutputPos, output, sumFeatures)
+            myoutputPos: Final output positions or heatmaps (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
+            output: Output before final dense layers (batch_size, TransformerDenseSize2)
+            sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
 
         print("Using Transformer architecture !")
@@ -434,21 +447,29 @@ class LSTMandSpikeNetwork:
         # 4. Pooling and final dense layers
         # size [batch, max_nspikes, nFeatures]
         mymask = kops.cast(mymask, dtype=tf.float32)
-        output = self.lstmsNets[-3](output, mask=mymask)  # pooling
-        x = self.lstmsNets[-2](output)  # dense layer after pooling
-        x = self.lstmsNets[-1](x)  # another dense layer after pooling
+        output = self.lstmsNets[-3](
+            output, mask=mymask
+        )  # pooling (size [batch, nFeatures*nGroups])
+        x = self.lstmsNets[-2](
+            output
+        )  # dense layer after pooling (size [batch, TransformerDenseSize1])
+        x = self.lstmsNets[-1](
+            x
+        )  # another dense layer after pooling (size [batch, TransformerDenseSize2])
 
         if not getattr(self.params, "GaussianHeatmap", False):
             x = kops.cast(x, dtype=tf.float32)
             myoutputPos = self.denseFeatureOutput(x)
-            myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
+            myoutputPos = self.ProjectionInMazeLayer(
+                myoutputPos
+            )  # size [batch, dimOutput]
         else:
             if self.params.dimOutput > 2:
                 myoutputPos = self.GaussianHeatmap(
                     x
                 )  # outputs a flattened heatmap for better concatenation afterwards
-                x = kops.cast(x, dtype=tf.float32)
-                others = self.denseFeatureOutput(x)
+                x = kops.cast(x, dtype=tf.float32)  # size [batch, GRID_H * GRID_W]
+                others = self.denseFeatureOutput(x)  # size [batch, dimOutput - 2]
                 # this way we have 2 different outputs in the model: a heatmap and some scalars
                 myoutputPos = tf.keras.layers.Concatenate(name="heatmap_cat_others")(
                     [myoutputPos, others]
@@ -458,7 +479,9 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.GaussianHeatmap(
                     x, flatten=False
                 )  # we dont need to worry about flattening, it's the only output
-                myoutputPos = kops.cast(myoutputPos, dtype=tf.float32)
+                myoutputPos = kops.cast(
+                    myoutputPos, dtype=tf.float32
+                )  # size [batch, GRID_H, GRID_W]
 
         return myoutputPos, output, sumFeatures
 
@@ -646,7 +669,21 @@ class LSTMandSpikeNetwork:
                 tempPosLoss = kops.cast(tempPosLoss, tf.float32)
 
             else:
-                tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
+                if getattr(self.params, "mixed_loss", False):
+                    proj, lin_truePos = self.l_function_layer(self.truePos[:, :2])
+                    # weight the first 2 dimensions (x,y positions)  by linPos before computing the loss
+
+                    myoutputPos_weighted = LinearPosWeighting()(
+                        [myoutputPos, lin_truePos]
+                    )
+                    truePos_weighted = LinearPosWeighting()([self.truePos, lin_truePos])
+                else:
+                    myoutputPos_weighted = myoutputPos
+                    truePos_weighted = self.truePos
+
+                tempPosLoss = loss_function(myoutputPos_weighted, truePos_weighted)[
+                    :, tf.newaxis
+                ]
                 tempPosLoss = kops.cast(tempPosLoss, tf.float32)
             # for main loss functions:
             # if loss function is mse

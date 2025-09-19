@@ -33,7 +33,7 @@ mice_nb = [
     "M905",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "1Transformer_GaussianHeatmap_HeadAndDirection"
+nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -200,6 +200,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--early_stop",
             # "--transform_w_log",
             "--no-dense",
+            "--mixed_loss",
+            "--no_gaussian",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

@@ -1216,41 +1216,63 @@ def parse_tfrecord_with_augmentation(
 
 class LinearizationLayer(tf.keras.layers.Layer):
     """
-    A simple layer to linearize Euclidean data into a maze-like structure.
+    A simple layer to linearize Euclidean data into a maze-like linear track.
     Follows the same logic as the linearizer pykeops code.
     """
 
     def __init__(self, maze_points, ts_proj, **kwargs):
+        """
+        Args:
+            maze_points : numpy array of shape (J,2) that represents some (x,y) anchor coordinates in the maze, that the euclidean data will be projected to. J is the number os spatial bins (default = 100)
+            ts_proj : numpy array of shape (J,) that represents the linear position corresponding to each maze point.
+            device : device to run the layer on, default is "/cpu:0"
+        """
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         # Convert to TensorFlow constants
+        maze_points = np.array(maze_points, dtype=np.float32).reshape(-1, 2)
+        ts_proj = np.array(ts_proj, dtype=np.float32).reshape(-1)
         self.maze_points = tf.constant(maze_points, dtype=tf.float32)
         self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
+        print("maze_points shape:", self.maze_points.shape)
+        print("ts_proj shape:", self.ts_proj.shape)
 
     def call(self, euclidean_data):
+        """
+        Project euclidean_data to the closest maze point and return the corresponding linear position.
+
+        Args:
+        euclidean_data : tensor of shape (batch, 2) that represents (x,y) coordinates in the Aligned maze (0,1)^2 coordinates.
+
+        Returns a list of two tensors:
+        projected_pos : the maze_points the euclidean_data was projected to, i.e. the closest anchor for linearization shape (batch_size, 2).
+        linear_pos : a tensor of shape (N,) that represents linear position.
+
+        """
         with tf.device(self.device):
             # Ensure consistent dtype
-            euclidean_data = tf.cast(euclidean_data, tf.float32)
+            euclidean_data = kops.cast(euclidean_data, tf.float32)
 
             # Expand dimensions for broadcasting
             # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
             # maze_points: [num_points, features] -> [1, num_points, features]
-            euclidean_expanded = tf.expand_dims(euclidean_data, axis=1)
-            maze_expanded = tf.expand_dims(self.maze_points, axis=0)
+            euclidean_expanded = kops.expand_dims(euclidean_data, axis=1)
+            maze_expanded = kops.expand_dims(self.maze_points, axis=0)
 
             # Calculate squared distances
-            distance_matrix = tf.reduce_sum(
-                tf.square(maze_expanded - euclidean_expanded), axis=-1
+            distance_matrix = kops.sum(
+                kops.square(maze_expanded - euclidean_expanded), axis=-1
             )
 
             # Find argmin
-            best_points = tf.argmin(distance_matrix, axis=1)
+            best_points = kops.cast(kops.argmin(distance_matrix, axis=1), tf.int32)
 
             # Gather results
-            projected_pos = tf.gather(self.maze_points, best_points)
-            linear_pos = tf.gather(self.ts_proj, best_points)
+            projected_pos = kops.take(self.maze_points, best_points)
+            linear_pos = kops.take(self.ts_proj, best_points)
+            linear_pos = kops.cast(linear_pos, tf.float32)
 
-        return projected_pos, linear_pos
+        return [projected_pos, linear_pos]
 
     def get_config(self):
         base_config = super().get_config()
@@ -1283,14 +1305,57 @@ class LinearizationLayer(tf.keras.layers.Layer):
         Create a new instance of the layer from its config.
         This is necessary for serialization/deserialization.
         """
-        maze_points = tf.constant(config.get("maze_points"), dtype=tf.float32)
-        ts_proj = tf.constant(config.get("ts_proj"), dtype=tf.float32)
+        maze_points = config.get("maze_points")
+        ts_proj = config.get("ts_proj")
         device = config.get("device", "/cpu:0")
         return cls(
             maze_points=maze_points,
             ts_proj=ts_proj,
             device=device,
         )
+
+    def build(self, input_shape):
+        """
+        Build is called the first time the layer is used.
+        No trainable weights are needed here, but we check input shape.
+        """
+        # input_shape: (batch_size, 2)
+        if len(input_shape) != 2 or input_shape[-1] != 2:
+            raise ValueError(
+                f"Input to LinearizationLayer must be of shape (batch, 2), got {input_shape}"
+            )
+        super().build(input_shape)
+
+
+class LinearPosWeighting(tf.keras.layers.Layer):
+    """
+    A layer to weight the first 2 dimensions of position outputs by
+    the linearized positions before computing the loss.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def call(self, inputs):
+        """
+        Args:
+            inputs: list or tuple of two tensors
+                - myoutputPos: shape (batch_size, D)
+                - lin_truePos: shape (batch_size,)  (linearized position)
+
+        Returns:
+            Weighted myoutputPos: shape (batch_size, D)
+        """
+        myoutputPos, lin_truePos = inputs
+
+        # Expand lin_truePos to match first 2 dims of myoutputPos
+        lin_truePos_exp = tf.expand_dims(lin_truePos, axis=-1)  # (batch_size, 1)
+
+        # Weight first 2 dimensions
+        weighted_output = tf.concat(
+            [myoutputPos[:, :2] * lin_truePos_exp, myoutputPos[:, 2:]], axis=-1
+        )
+        return weighted_output
 
 
 class DynamicDenseWeightLayer(tf.keras.layers.Layer):
@@ -2715,6 +2780,92 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
             "merge_weights": config.get("merge_weights", []),
         }
         return cls(**layer_config)
+
+    def build(self, input_shape):
+        """
+        Build the layer. This method is called once the input shape is known.
+
+        Args:
+            input_shape: Can be a single shape tuple or a list of two shape tuples
+                        [y_true_shape, y_pred_shape] if called with two inputs,
+                        or a single shape if called with one input (assuming both have same shape)
+        """
+        # Handle both single input shape and list of input shapes
+        if isinstance(input_shape, list) and len(input_shape) == 2:
+            # Two inputs: y_true and y_pred
+            y_true_shape, y_pred_shape = input_shape
+
+            # Validate that both inputs have the same shape
+            if y_true_shape != y_pred_shape:
+                raise ValueError(
+                    f"y_true and y_pred must have the same shape. "
+                    f"Got y_true: {y_true_shape}, y_pred: {y_pred_shape}"
+                )
+
+            self.input_shape_value = y_true_shape
+        else:
+            # Single input shape (both inputs assumed to have same shape)
+            self.input_shape_value = input_shape
+
+        # Validate input shape
+        if len(self.input_shape_value) < 2:
+            raise ValueError(
+                f"Input must be at least 2D (batch_size, num_columns). "
+                f"Got shape: {self.input_shape_value}"
+            )
+
+        self.num_columns = self.input_shape_value[-1]
+
+        # Validate column indices in merge_columns
+        for i, col_group in enumerate(self.merge_columns):
+            for col_idx in col_group:
+                if col_idx >= self.num_columns or col_idx < 0:
+                    raise ValueError(
+                        f"Column index {col_idx} in merge_columns[{i}] is out of range. "
+                        f"Input has {self.num_columns} columns (indices 0-{self.num_columns - 1})"
+                    )
+
+        # Validate column indices in individual losses
+        for col_spec in self.column_losses.keys():
+            columns = self._parse_column_spec(col_spec)
+            for col_idx in columns:
+                if col_idx >= self.num_columns or col_idx < 0:
+                    raise ValueError(
+                        f"Column index {col_idx} in column_losses['{col_spec}'] is out of range. "
+                        f"Input has {self.num_columns} columns (indices 0-{self.num_columns - 1})"
+                    )
+
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the layer.
+
+        Args:
+            input_shape: Can be a single shape tuple or a list of two shape tuples
+                        [y_true_shape, y_pred_shape] if called with two inputs,
+                        or a single shape if called with one input
+
+        Returns:
+            tuple: Output shape (batch_size,) - returns a scalar loss per sample
+        """
+        # Handle both single input shape and list of input shapes
+        if isinstance(input_shape, list) and len(input_shape) == 2:
+            # Two inputs: y_true and y_pred
+            batch_size = input_shape[0][0]  # Get batch size from first input
+        else:
+            # Single input shape
+            batch_size = input_shape[0]  # Get batch size
+
+        # Return shape: (batch_size,) - one scalar loss per sample in the batch
+        return (batch_size,)
+
+
+def get_output_shape_for(self, input_shape):
+    """
+    Alternative method name used by some Keras versions.
+    """
+    return self.compute_output_shape(input_shape)
 
 
 # Register custom layers and losses for Keras serialization
