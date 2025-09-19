@@ -24,6 +24,18 @@ import spikeinterface.full as si
 # filename is the first argument
 
 filename = sys.argv[1]
+# if filename ends with .fil - create a symbolic link to a {filename}_filtered.dat file and open it instead
+if filename.endswith(".fil"):
+    filtered_filename = filename.replace(".fil", "_filtered.dat")
+    if not os.path.exists(filtered_filename):
+        os.symlink(filename, filtered_filename)
+        # also symlink the .xml file if it exists
+        if os.path.exists(filename.replace(".fil", ".xml")):
+            os.symlink(
+                filename.replace(".fil", ".xml"),
+                filtered_filename.replace(".dat", ".xml"),
+            )
+    filename = filtered_filename
 
 recording = se.extractor_classes.NeuroScopeRecordingExtractor(file_path=filename)
 recording._set_neuroscope_groups()
