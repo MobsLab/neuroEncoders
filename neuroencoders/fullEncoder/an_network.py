@@ -14,7 +14,7 @@ import os
 import warnings
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 # Get common libraries
 import dill as pickle
@@ -25,6 +25,7 @@ import tensorflow as tf
 from keras import ops as kops
 from keras.layers import Lambda
 from tqdm import tqdm
+
 import wandb
 
 # Get utility functions
@@ -33,8 +34,10 @@ from neuroencoders.fullEncoder.nnUtils import (
     GaussianHeatmapLayer,
     GaussianHeatmapLosses,
     MemoryUsageCallbackExtended,
+    MultiColumnLossLayer,
     NeuralDataAugmentation,
     UMazeProjectionLayer,
+    _get_loss_function,
     create_flatten_augmented_groups_fn,
 )
 from neuroencoders.importData.epochs_management import inEpochsMask
@@ -82,7 +85,7 @@ class LSTMandSpikeNetwork:
         self.debug = debug
         self.target = params.target
         self.phase = phase
-        self.suffix = f"_{phase}" if phase is not None else ""
+        self.suffix = "_" + str(phase) if phase is not None else ""
         self._setup_folders()
         self._setup_feature_description()
 
@@ -268,7 +271,9 @@ class LSTMandSpikeNetwork:
                         for _ in range(self.params.lstmLayers)
                     ]
                     + [
-                        MaskedGlobalAveragePooling1D(device=self.deviceName),
+                        MaskedGlobalAveragePooling1D(
+                            device=self.deviceName, name="masking_pooling"
+                        ),
                         # removed the activations in dense layers for better scaleability
                         tf.keras.layers.Dense(
                             self.params.TransformerDenseSize1,
@@ -319,14 +324,14 @@ class LSTMandSpikeNetwork:
             # One just described, with two objective functions corresponding
             # to both position and predicted losses
             self.model = self.compile_model(
-                outputs, modelName="FullModel.png", **kwargs
+                outputs, modelName="FullModel.pdf", **kwargs
             )
             # TODO: add option to add independent losses to the model ?
 
             # In theory, the predicted loss could be not learning enough in the first network (optional)
             # Second only with loss corresponding to predicted loss
             self.predLossModel = self.compile_model(
-                outputs, predLossOnly=True, modelName="predLossModel.png", **kwargs
+                outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
             )
 
     def convert_checkpoint_to_keras3(
@@ -428,11 +433,13 @@ class LSTMandSpikeNetwork:
 
         # 4. Pooling and final dense layers
         # size [batch, max_nspikes, nFeatures]
+        mymask = kops.cast(mymask, dtype=tf.float32)
         output = self.lstmsNets[-3](output, mask=mymask)  # pooling
         x = self.lstmsNets[-2](output)  # dense layer after pooling
         x = self.lstmsNets[-1](x)  # another dense layer after pooling
 
         if not getattr(self.params, "GaussianHeatmap", False):
+            x = kops.cast(x, dtype=tf.float32)
             myoutputPos = self.denseFeatureOutput(x)
             myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
         else:
@@ -440,15 +447,18 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.GaussianHeatmap(
                     x
                 )  # outputs a flattened heatmap for better concatenation afterwards
+                x = kops.cast(x, dtype=tf.float32)
                 others = self.denseFeatureOutput(x)
                 # this way we have 2 different outputs in the model: a heatmap and some scalars
                 myoutputPos = tf.keras.layers.Concatenate(name="heatmap_cat_others")(
                     [myoutputPos, others]
                 )
+                myoutputPos = kops.cast(myoutputPos, dtype=tf.float32)
             else:
                 myoutputPos = self.GaussianHeatmap(
                     x, flatten=False
                 )  # we dont need to worry about flattening, it's the only output
+                myoutputPos = kops.cast(myoutputPos, dtype=tf.float32)
 
         return myoutputPos, output, sumFeatures
 
@@ -550,7 +560,6 @@ class LSTMandSpikeNetwork:
             mymask = nnUtils.safe_mask_creation(
                 batchedInputGroups
             )  # [batch, max_n_spikes] (True for real spikes, False for padded values)
-            print("Attention Mask shape:", kops.shape(mymask))
 
             masked_features = Lambda(
                 lambda t: kops.where(
@@ -634,9 +643,11 @@ class LSTMandSpikeNetwork:
                     tempPosLoss = self.GaussianLoss_layer(
                         loss_inputs, loss_type="safe_kl"
                     )
+                tempPosLoss = kops.cast(tempPosLoss, tf.float32)
 
             else:
                 tempPosLoss = loss_function(myoutputPos, self.truePos)[:, tf.newaxis]
+                tempPosLoss = kops.cast(tempPosLoss, tf.float32)
             # for main loss functions:
             # if loss function is mse
             # tempPosLoss is in cm2
@@ -645,27 +656,18 @@ class LSTMandSpikeNetwork:
 
             if self.params.denseweight:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
-            print(f"tempPosLoss shape: {tempPosLoss.shape}")
             if self.params.transform_w_log:
-                posLoss = Lambda(
-                    lambda t: kops.identity(kops.log(t)),
-                    name="posLoss",  # log cm2 or ~ 2 * log cm
-                )(tempPosLoss)
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
             elif not getattr(self.params, "GaussianHeatmap", False):
-                posLoss = Lambda(
-                    lambda t: kops.identity(kops.sqrt(t)),
-                    name="posLoss",  # cm
-                )(tempPosLoss)
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
             else:
-                posLoss = Lambda(
-                    lambda t: t,
-                    name="posLoss",  # unitless
-                )(tempPosLoss)
-            myoutputPos = Lambda(lambda t: t, name="myoutputPos")(myoutputPos)
-            print(f"myoutputPos shape: {myoutputPos.shape}")
-            print(f"posLoss shape: {posLoss.shape}")
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
 
-        return myoutputPos, posLoss
+            myoutputPos_named = tf.keras.layers.Identity(name="myoutputPos")(
+                myoutputPos
+            )
+
+        return myoutputPos_named, posLoss
 
     def _parse_loss_function_from_params(self, myoutputPos):
         # TODO: change
@@ -706,7 +708,7 @@ class LSTMandSpikeNetwork:
         return self.loss_function
 
     def compile_model(
-        self, outputs, modelName="FullModel.png", predLossOnly=False, **kwargs
+        self, outputs, modelName="FullModel.pdf", predLossOnly=False, **kwargs
     ):
         """
         Compile the model with the desired losses and optimizer.
@@ -728,11 +730,6 @@ class LSTMandSpikeNetwork:
             + self.indices
             + [self.truePos, self.inputGroups, self.zeroForGather],
             outputs=outputs,
-        )
-        tf.keras.utils.plot_model(
-            model,
-            to_file=(os.path.join(self.projectPath.experimentPath, modelName)),
-            show_shapes=True,
         )
 
         def pos_loss(x, y):
@@ -763,6 +760,14 @@ class LSTMandSpikeNetwork:
                 # steps_per_execution=4,
             )
             # Get internal names of losses
+        try:
+            tf.keras.utils.plot_model(
+                model,
+                to_file=(os.path.join(self.projectPath.experimentPath, modelName)),
+                show_shapes=True,
+            )
+        except Exception as e:
+            print("Could not plot the model:", e)
         return model
 
     def generate_model_Cplusplus(self):
@@ -1084,26 +1089,26 @@ class LSTMandSpikeNetwork:
                     ann_config["loaded"] = loaded
 
                     prefix = "LOADED_" if loaded else ""
-                    wandb.tensorboard.patch(
-                        root_logdir=os.path.join(self.folderResult, "logs")
-                    )
-                    print(f"starting tensorboard at {self.folderResult}/logs ")
+                    # wandb.tensorboard.patch(
+                    #     root_logdir=os.path.join(self.folderResult, "logs")
+                    # )
+                    # print(f"starting tensorboard at {self.folderResult}/logs ")
                     run = wandb.init(
                         entity="touseul",
                         project="encore",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
-                        sync_tensorboard=True,
+                        # sync_tensorboard=True,
                         config=ann_config,
                     )
-                    tf.profiler.experimental.start(
-                        os.path.join(self.folderResult, "logs")
-                    )
-                    tb_callbacks = tf.keras.callbacks.TensorBoard(
-                        log_dir=os.path.join(self.folderResult, "logs"),
-                        histogram_freq=1,
-                        profile_batch=(2, 4) if is_tbcallback else 0,
-                    )
+                    # tf.profiler.experimental.start(
+                    #     os.path.join(self.folderResult, "logs")
+                    # )
+                    # tb_callbacks = tf.keras.callbacks.TensorBoard(
+                    #     log_dir=os.path.join(self.folderResult, "logs"),
+                    #     histogram_freq=1,
+                    #     profile_batch=(2, 4) if is_tbcallback else 0,
+                    # )
 
                     wandb_callback = WandbMetricsLogger()
             if key != "predLoss":
@@ -1146,7 +1151,6 @@ class LSTMandSpikeNetwork:
                 if self.debug:
                     # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
-                    callbacks.append(tb_callbacks)
 
                 hist = self.model.fit(
                     datasets["train"],
@@ -1179,12 +1183,22 @@ class LSTMandSpikeNetwork:
                         self.folderModels,
                         str(windowSizeMS),
                         "savedModels",
-                        "full",
-                        "cp.weights.h5",
+                        "full_cp.weights.h5",
                     ),
                 )
+                try:
+                    self.model.save(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "savedModels",
+                            "full_model.keras",
+                        )
+                    )
+                except Exception as e:
+                    print("Could not save the full model:", e)
                 if self.debug:
-                    wandb.tensorboard.unpatch()
+                    # wandb.tensorboard.unpatch()
                     run.finish()
 
     def _dataset_loading_pipeline(
@@ -1293,7 +1307,10 @@ class LSTMandSpikeNetwork:
                     and not useSpeedFilter
                 ):
                     self._extract_spikes_counts_from_dataset(
-                        dataset, map_outputs=map_outputs, **kwargs
+                        dataset,
+                        map_outputs=map_outputs,
+                        windowSizeMS=windowSizeMS,
+                        **kwargs,
                     )
 
             # now that we have clean positions, we can resample if needed
@@ -1515,7 +1532,7 @@ class LSTMandSpikeNetwork:
 
         # Unpack kwargs
         l_function = kwargs.get("l_function", [])
-        windowSizeMS = kwargs.get("windowSizeMS", 36)
+        windowSizeMS = kwargs.pop("windowSizeMS", 36)
         useSpeedFilter = kwargs.get("useSpeedFilter", False)
         useTrain = kwargs.get("useTrain", False)
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
@@ -1546,8 +1563,7 @@ class LSTMandSpikeNetwork:
                         self.folderModels,
                         str(windowSizeMS),
                         "savedModels",
-                        "full",
-                        "cp.weights.h5",
+                        "full_cp.weights.h5",
                     ),
                 )
             except:
@@ -1625,6 +1641,7 @@ class LSTMandSpikeNetwork:
             inference_mode=True,
             onTheFlyCorrection=onTheFlyCorrection,
             extract_spikes_counts=True,
+            **kwargs,
         )["test"]
 
         print("INFERRING")
@@ -2343,6 +2360,7 @@ class LSTMandSpikeNetwork:
                 return lr
             else:
                 new_lr = lr * tf.math.exp(-0.01)
+                new_lr = float(new_lr.numpy())
                 print(f"learning rate is {new_lr}")
                 return new_lr
 
@@ -2635,7 +2653,12 @@ class LSTMandSpikeNetwork:
             name=name,
         )
         self.GaussianLoss_layer = GaussianHeatmapLosses(
-            heatmap_layer=self.GaussianHeatmap, name="gaussianLoss"
+            training_positions=full_training_true_positions,
+            grid_size=grid_size,
+            eps=eps,
+            sigma=sigma,
+            neg=neg,
+            name="gaussianLoss",
         )
 
     def extract_cnn_model(self):
@@ -2909,239 +2932,4 @@ class LSTMandSpikeNetwork:
         tf.keras.backend.clear_session()
 
 
-def _get_loss_function(
-    loss_name: str,
-    alpha: float,
-    delta: float,
-    gaussian_loss_layer: Optional[GaussianHeatmapLayer] = None,
-) -> tf.keras.losses.Loss:
-    """Helper function to get loss function by name with reduction='none'"""
-    if loss_name == "mse":
-        return tf.keras.losses.MeanSquaredError(reduction="none")
-    elif loss_name == "mae":
-        return tf.keras.losses.MeanAbsoluteError(reduction="none")
-    elif loss_name == "huber":
-        return tf.keras.losses.Huber(delta=delta, reduction="none")
-    elif loss_name == "msle":
-        return tf.keras.losses.MeanSquaredLogarithmicError(reduction="none")
-    elif loss_name == "logcosh":
-        return tf.keras.losses.LogCosh(reduction="none")
-    elif loss_name == "binary_crossentropy":
-        return tf.keras.losses.BinaryCrossentropy(reduction="none")
-    elif loss_name == "categorical_crossentropy":
-        return tf.keras.losses.SparseCategoricalCrossentropy(reduction="none")
-    elif loss_name == "mse_plus_msle":
-
-        def combined_loss_mse(y_true, y_pred):
-            mse = tf.keras.losses.MeanSquaredError(reduction="none")(y_true, y_pred)
-            msle = tf.keras.losses.MeanSquaredLogarithmicError(reduction="none")(
-                y_true, y_pred
-            )
-            return mse + alpha * msle
-
-        return combined_loss_mse
-    elif loss_name == "cyclic_mae":  # for head direction in radians
-
-        def cyclical_mae_rad(y_true, y_pred):
-            return tf.keras.backend.minimum(
-                tf.keras.backend.abs(y_pred - y_true),
-                tf.keras.backend.minimum(
-                    tf.keras.backend.abs(y_pred - y_true + 2 * np.pi),
-                    tf.keras.backend.abs(y_pred - y_true - 2 * np.pi),
-                ),
-            )
-
-        return cyclical_mae_rad
-    elif loss_name == "kl_heatmap":
-        if gaussian_loss_layer is None:
-            raise ValueError("gaussian_layer must be provided for kl_heatmap loss")
-        return nnUtils.KLHeatmapLoss(gaussian_loss_layer, scale=False)
-        # reduction is already none
-
-    else:
-        raise ValueError(f"Loss function {loss_name} not recognized")
-
-
 ########### END OF HELPING LSTMandSpikeNetwork FUNCTIONS#####################
-
-
-class MultiColumnLossLayer(tf.keras.layers.Layer):
-    def __init__(
-        self,
-        column_losses: Optional[Dict[str, str]] = None,
-        column_weights: Optional[Dict[str, float]] = None,
-        alpha: float = 1.0,
-        delta: float = 1.0,
-        name: str = "multi_output_loss_layer",
-        gaussian_layer=None,
-        target_hw=None,
-        merge_columns: Optional[List[List[int]]] = None,
-        merge_losses: Optional[List[str]] = None,
-        merge_weights: Optional[List[float]] = None,
-        **kwargs,
-    ):
-        """
-        Args:
-            column_losses (dict): Dictionary mapping column specifications to loss names.
-                Example: {"0": "mse", "1,2": "huber"} means column 0 uses MSE and columns 1 and 2 use Huber loss.
-            column_weights (dict): Dictionary mapping column specifications to weights.
-                Example: {"0": 1.0, "1,2": 0.5} means column 0 has weight 1.0 and columns 1 and 2 have weight 0.5.
-            alpha (float): Hyperparameter for losses like Huber or MSLE.
-            name (str): Name of the layer.
-            gaussian_layer: Optional Gaussian layer for certain loss functions.
-            merge_columns (List[List[int]]): List of column groups to process together.
-                Example: [[0, 1], [2, 3]] means columns 0,1 are processed together and columns 2,3 are processed together.
-            merge_losses (List[str]): Loss function names for each merged column group.
-                Must have same length as merge_columns if provided.
-            merge_weights (List[float]): Weights for each merged column group.
-                Must have same length as merge_columns if provided.
-            **kwargs: Additional keyword arguments for the Layer constructor.
-        """
-        super().__init__(name=name, **kwargs)
-        self.column_losses = column_losses or {}
-        self.column_weights = column_weights or {}
-        self.alpha = alpha
-        self.delta = delta
-        self.merge_columns = merge_columns or []
-        self.merge_losses = merge_losses or []
-        self.merge_weights = merge_weights or []
-        self.gaussian_layer = gaussian_layer
-
-        # Validate merge parameters
-        if self.merge_columns:
-            if self.merge_losses and len(self.merge_losses) != len(self.merge_columns):
-                raise ValueError("merge_losses must have same length as merge_columns")
-            if self.merge_weights and len(self.merge_weights) != len(
-                self.merge_columns
-            ):
-                raise ValueError("merge_weights must have same length as merge_columns")
-
-            # Fill in defaults for merge_losses and merge_weights if not provided
-            if not self.merge_losses:
-                self.merge_losses = ["mse"] * len(self.merge_columns)
-            if not self.merge_weights:
-                self.merge_weights = [1.0] * len(self.merge_columns)
-
-            print(
-                f"Configured to merge columns: {self.merge_columns} with losses {self.merge_losses} and weights {self.merge_weights}."
-            )
-
-        # Create loss functions for merged columns
-        self.merged_loss_functions = []
-        for loss_name in self.merge_losses:
-            self.merged_loss_functions.append(
-                _get_loss_function(loss_name, self.alpha, self.delta, gaussian_layer)
-            )
-
-        # Create individual column loss functions (for backwards compatibility)
-        self.individual_losses = {}
-        self.individual_weights = {}
-
-        for col_spec, loss_name in self.column_losses.items():
-            self.individual_losses[col_spec] = _get_loss_function(
-                loss_name, self.alpha, self.delta, gaussian_layer
-            )
-            self.individual_weights[col_spec] = self.column_weights.get(col_spec, 1.0)
-        print(
-            f"Configured individual column losses: {self.column_losses} with weights: {self.column_weights}."
-        )
-
-    def _add_losses_to_model(self, model):
-        """
-        Utility to add all individual losses to model for tracking.
-        """
-        for col_spec, loss_fn in self.individual_losses.items():
-            loss_name = f"loss_col_{col_spec}"
-            model.add_loss(
-                lambda y_true, y_pred: loss_fn(y_true, y_pred), name=loss_name
-            )
-
-    def _parse_column_spec(self, col_spec: str) -> List[int]:
-        """Parse column specification like '0' or '1,2' into list of integers."""
-        if "," in col_spec:
-            return [int(x.strip()) for x in col_spec.split(",")]
-        else:
-            return [int(col_spec)]
-
-    def call(self, y_true, y_pred):
-        """
-        Compute the combined loss.
-        Args:
-            y_true: True values with shape (batch_size, num_columns)
-            y_pred: Predicted values with shape (batch_size, num_columns)
-        Returns:
-            Combined loss tensor with shape (batch_size,)
-        """
-        total_loss = tf.zeros(tf.shape(y_true)[0], dtype=y_true.dtype)
-
-        # Track which columns have been processed to avoid double-counting
-        processed_columns = set()
-
-        # Process merged columns first
-        for i, (col_group, loss_fn, weight) in enumerate(
-            zip(self.merge_columns, self.merged_loss_functions, self.merge_weights)
-        ):
-            # Extract the merged columns
-            y_true_merged = tf.gather(
-                y_true, col_group, axis=1
-            )  # Shape: (batch_size, len(col_group))
-            y_pred_merged = tf.gather(
-                y_pred, col_group, axis=1
-            )  # Shape: (batch_size, len(col_group))
-
-            # Compute loss for merged columns
-            merged_loss = loss_fn(y_true_merged, y_pred_merged)
-            total_loss += weight * merged_loss
-
-            # Mark these columns as processed
-            processed_columns.update(col_group)
-
-        # Process individual columns that weren't part of any merged group
-        for col_spec, loss_fn in self.individual_losses.items():
-            columns = self._parse_column_spec(col_spec)
-
-            # Skip if any of these columns were already processed in merged groups
-            if any(col in processed_columns for col in columns):
-                continue
-
-            if len(columns) == 1:
-                # Single column
-                col_idx = columns[0]
-                y_true_col = y_true[:, col_idx]
-                y_pred_col = y_pred[:, col_idx]
-                loss_val = loss_fn(y_true_col, y_pred_col)
-            else:
-                # Multiple columns (legacy support for comma-separated specs)
-                y_true_cols = tf.gather(y_true, columns, axis=1)
-                y_pred_cols = tf.gather(y_pred, columns, axis=1)
-                loss_val = loss_fn(y_true_cols, y_pred_cols)
-
-            weight = self.individual_weights[col_spec]
-            total_loss += weight * loss_val
-
-            # Mark these columns as processed
-            processed_columns.update(columns)
-
-        return total_loss
-
-    def get_config(self):
-        """Return the config of the layer for serialization."""
-        config = super().get_config()
-        config.update(
-            {
-                "column_losses": self.column_losses,
-                "column_weights": self.column_weights,
-                "alpha": self.alpha,
-                "merge_columns": self.merge_columns,
-                "merge_losses": self.merge_losses,
-                "merge_weights": self.merge_weights,
-            }
-        )
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
-
-
-tf.keras.utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer

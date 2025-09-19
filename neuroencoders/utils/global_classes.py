@@ -1652,6 +1652,24 @@ class SpatialConstraintsMixin:
         y_cent_tf = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
         self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
 
+    def get_spatial_config(self):
+        """Return spatial config for serialization"""
+        return {
+            "grid_size": self.grid_size,
+            "maze_params": self.maze_params,
+        }
+
+    def get_config(self):
+        """Return config for serialization"""
+        return self.get_spatial_config()
+
+    @classmethod
+    def from_config(self, config):
+        """Create instance from config"""
+        grid_size = config.get("grid_size", (45, 45))
+        maze_params = config.get("maze_params", None)
+        return self.__class__(grid_size=grid_size, maze_params=maze_params)
+
     def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
         """
         Extract maze boundaries from provided parameters or default coordinates.
@@ -1720,9 +1738,6 @@ class SpatialConstraintsMixin:
         )
 
         # identiy problematic zones
-        print(
-            f"Occupation map: {np.sum(occ == 0)} zero-occupation bins, {np.sum(occ[allowed_mask.astype(bool)] < zero_threshold)} low-density bins (below {zero_threshold:.4e}) in allowed zones."
-        )
         low_density = (occ < zero_threshold) & allowed_mask
 
         # Expand forbidden zones by 1 pixel
@@ -1737,10 +1752,6 @@ class SpatialConstraintsMixin:
         problematic_bins = low_density & expanded_forbidden
         forbid_mask = forbid_mask | problematic_bins  # Update forbidden mask
         occ[problematic_bins] = 0.0
-
-        print(
-            f"Weight map: Removed {np.sum(problematic_bins)} low-density bins adjacent to forbidden zones"
-        )
 
         self.update_allowed_mask(forbid_mask)
         return forbid_mask, occ
