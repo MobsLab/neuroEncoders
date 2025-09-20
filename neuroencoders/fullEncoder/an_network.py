@@ -460,9 +460,10 @@ class LSTMandSpikeNetwork:
         if not getattr(self.params, "GaussianHeatmap", False):
             x = kops.cast(x, dtype=tf.float32)
             myoutputPos = self.denseFeatureOutput(x)
-            myoutputPos = self.ProjectionInMazeLayer(
-                myoutputPos
-            )  # size [batch, dimOutput]
+            if "pos" in self.params.target.lower():
+                myoutputPos = self.ProjectionInMazeLayer(
+                    myoutputPos
+                )  # size [batch, dimOutput]
         else:
             if self.params.dimOutput > 2:
                 myoutputPos = self.GaussianHeatmap(
@@ -1885,42 +1886,38 @@ class LSTMandSpikeNetwork:
         # Loading the weights
         print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
-            try:
-                self.model.load_weights(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeDecoder),
-                        "savedModels",
-                        "predLoss",
-                    )
-                )
-            except:
-                print(
-                    "loading from predLoss savedModels failed, trying checkpoint for sleep epochs"
-                )
-                self.model.load_weights(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeDecoder),
-                        "predLoss" + "/cp.ckpt",
-                    )
-                )
+            self.model.load_weights(
+                os.path.join(
+                    self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
+                ),
+            )
         else:
             try:
                 self.model.load_weights(
                     os.path.join(
-                        self.folderModels, str(windowSizeDecoder), "savedModels", "full"
-                    )
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "full_cp.weights.h5",
+                    ),
                 )
             except:
-                print(
-                    "loading from full savedModels failed, trying checkpoint for sleep epochs"
-                )
-                self.model.load_weights(
-                    os.path.join(
-                        self.folderModels, str(windowSizeDecoder), "full" + "/cp.ckpt"
+                print("loading from savedModels failed, trying full checkpoint ")
+                try:
+                    self.model.load_weights(
+                        os.path.join(
+                            self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
+                        ),
                     )
-                )
+                except:
+                    self.model.load_weights(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "full",
+                            "cp.weights.h5",
+                        ),
+                    )
 
         print("decoding sleep epochs")
         predictions = {}
