@@ -33,13 +33,14 @@ mice_nb = [
     "M905",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
+# nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
+nameExp = "new_4d_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
 phase = "pre"
 useStridingFactor = True
-stridingFactor = 4
+stridingFactor = 2
 if useStridingFactor:
     nameExp = f"STRIDE_{stridingFactor}_{nameExp}"
 
@@ -200,8 +201,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--early_stop",
             # "--transform_w_log",
             "--no-dense",
-            "--mixed_loss",
-            "--no_gaussian",
+            # "--mixed_loss",
+            # "--no_gaussian",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
