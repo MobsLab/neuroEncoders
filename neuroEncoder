@@ -722,7 +722,7 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=True,
+                load_model=False,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=11 if args.window < 0.504 else 6,
@@ -765,19 +765,22 @@ def main(args):
                 T_scaling=T,
                 strideFactor=strideFactor,
             )
-            print_results.print_results(
-                NNTrainer.folderResult,
-                windowSizeMS=windowSizeMS,
-                show=show_figures,
-                lossSelection=0.5,
-                euclidean=False,
-                target=args.target,
-                phase="training",
-                useSpeedMask=True,
-                training_data=NNTrainer.training_data,
-                force=args.redo,
-                l_function=l_function,
-            )
+            try:
+                print_results.print_results(
+                    NNTrainer.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    show=show_figures,
+                    lossSelection=0.5,
+                    euclidean=False,
+                    target=args.target,
+                    phase="training",
+                    useSpeedMask=True,
+                    training_data=NNTrainer.training_data,
+                    force=args.redo,
+                    l_function=l_function,
+                )
+            except:
+                pass
 
         if (
             not os.path.exists(
@@ -802,19 +805,22 @@ def main(args):
                 T_scaling=T,
                 strideFactor=strideFactor,
             )
-            print_results.print_results(
-                NNTrainer.folderResult,
-                windowSizeMS=windowSizeMS,
-                show=show_figures,
-                lossSelection=0.5,
-                euclidean=False,
-                force=args.redo,
-                target=args.target,
-                phase=args.phase,
-                training_data=NNTrainer.training_data,
-                useSpeedMask=True,
-                l_function=l_function,
-            )
+            try:
+                print_results.print_results(
+                    NNTrainer.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    show=show_figures,
+                    lossSelection=0.5,
+                    euclidean=False,
+                    force=args.redo,
+                    target=args.target,
+                    phase=args.phase,
+                    training_data=NNTrainer.training_data,
+                    useSpeedMask=True,
+                    l_function=l_function,
+                )
+            except:
+                pass
 
         if (
             not os.path.exists(
@@ -839,19 +845,22 @@ def main(args):
                 strideFactor=strideFactor,
             )
 
-            print_results.print_results(
-                NNTrainer.folderResult,
-                windowSizeMS=windowSizeMS,
-                show=show_figures,
-                lossSelection=0.5,
-                euclidean=False,
-                target=args.target,
-                phase="cond",
-                training_data=NNTrainer.training_data,
-                useSpeedMask=True,
-                l_function=l_function,
-                force=args.redo,
-            )
+            try:
+                print_results.print_results(
+                    NNTrainer.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    show=show_figures,
+                    lossSelection=0.5,
+                    euclidean=False,
+                    target=args.target,
+                    phase="cond",
+                    training_data=NNTrainer.training_data,
+                    useSpeedMask=True,
+                    l_function=l_function,
+                    force=args.redo,
+                )
+            except:
+                pass
 
         if (
             not os.path.exists(
@@ -876,19 +885,22 @@ def main(args):
                 strideFactor=strideFactor,
             )
 
-            print_results.print_results(
-                NNTrainer.folderResult,
-                windowSizeMS=windowSizeMS,
-                show=show_figures,
-                lossSelection=0.5,
-                euclidean=False,
-                target=args.target,
-                phase="post",
-                training_data=NNTrainer.training_data,
-                useSpeedMask=True,
-                l_function=l_function,
-                force=args.redo,
-            )
+            try:
+                print_results.print_results(
+                    NNTrainer.folderResult,
+                    windowSizeMS=windowSizeMS,
+                    show=show_figures,
+                    lossSelection=0.5,
+                    euclidean=False,
+                    target=args.target,
+                    phase="post",
+                    training_data=NNTrainer.training_data,
+                    useSpeedMask=True,
+                    l_function=l_function,
+                    force=args.redo,
+                )
+            except:
+                pass
 
         if args.test_sleep and (
             not os.path.exists(

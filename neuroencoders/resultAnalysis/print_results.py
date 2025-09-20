@@ -138,13 +138,16 @@ def print_results(
             .values[:, 1]
             .astype(int)
         )
-        qControl = np.squeeze(
-            pd.read_csv(
-                os.path.expanduser(
-                    os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
-                )
-            ).values[:, 1:]
-        )
+        try:
+            qControl = np.squeeze(
+                pd.read_csv(
+                    os.path.expanduser(
+                        os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
+                    )
+                ).values[:, 1:]
+            )
+        except FileNotFoundError:
+            qControl = np.random.uniform(0, 1, size=pos.shape[0])
         if os.path.isfile(
             os.path.expanduser(
                 os.path.join(dir, str(windowSizeMS), f"linearPred{suffix}.csv")

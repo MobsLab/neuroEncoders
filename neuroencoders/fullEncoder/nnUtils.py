@@ -1456,7 +1456,11 @@ class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def call(self, inputs):
         x, y = inputs[..., 0], inputs[..., 1]
         x_proj, y_proj = self._project_points(x, y)
-        return tf.stack([x_proj, y_proj], axis=1)
+
+        proj = kops.stack([x_proj, y_proj], axis=-1)  # (batch, ..., 2)
+
+        rest = inputs[..., 2:]  # if no extra dims, this is shape (..., 0)
+        return kops.concatenate([proj, rest], axis=-1)
 
     def _project_points(self, x, y):
         dtype = x.dtype
