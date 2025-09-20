@@ -1533,10 +1533,10 @@ class Params:
         self.project_transformer = kwargs.pop("project_transformer", False)
 
         default_lstm_layers = (
-            2 if not self.isTransformer else 2
+            2 if not self.isTransformer else 4
         )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
-        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.4)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
@@ -1557,13 +1557,13 @@ class Params:
             "TransformerDense1",
             self.nFeatures * 8
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 4,
+            else self.nFeatures * self.nGroups * 8,
         )
         self.TransformerDenseSize2 = kwargs.pop(
             "TransformerDense2",
             self.nFeatures * 4
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 2,
+            else self.nFeatures * self.nGroups * 4,
         )
 
         self.nDenseLayers = kwargs.pop(
