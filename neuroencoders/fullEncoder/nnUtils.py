@@ -1074,6 +1074,7 @@ def apply_group_augmentation(
         orig_tensors["groups"] = tensors["groups"]
         orig_tensors["pos"] = tensors["pos"]
         orig_tensors["indexInDat"] = tensors["indexInDat"]
+        orig_tensors["time"] = tensors["time"]
         augmented_copies.append(orig_tensors)
 
     for aug_idx in range(augmentation_config.num_augmentations):
@@ -1088,6 +1089,7 @@ def apply_group_augmentation(
         aug_tensors["groups"] = tensors["groups"]
         aug_tensors["pos"] = tensors["pos"]
         aug_tensors["indexInDat"] = tensors["indexInDat"]
+        aug_tensors["time"] = tensors["time"]
         augmented_copies.append(aug_tensors)
 
     # Stack augmented copies
@@ -1117,6 +1119,12 @@ def apply_group_augmentation(
         n_total,
         axis=0,
     )
+    result_tensors["time"] = tf.repeat(
+        tf.expand_dims(tensors["time"], 0),
+        n_total,
+        axis=0,
+    )
+    print("result_tensors keys:", result_tensors.keys())
 
     return result_tensors
 
@@ -1176,6 +1184,7 @@ def flatten_augmented_groups(data_dict, params, num_augmentations):
     flattened_dict["groups"] = data_dict["groups"]
     flattened_dict["indexInDat"] = data_dict["indexInDat"]
     flattened_dict["pos"] = data_dict["pos"]
+    flattened_dict["time"] = data_dict["time"]
 
     return tf.data.Dataset.from_tensor_slices(flattened_dict)
 
