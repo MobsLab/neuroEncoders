@@ -5,6 +5,7 @@ It also provides methods to compute the true target of interest, the distance to
 """
 
 # Load libs
+import copy
 import json
 
 # Load custom code
@@ -365,6 +366,8 @@ class DataHelper(Project):
 
         if not hasattr(self, "l_function") and l_function is None:
             self.l_function = l_function
+        if hasattr(self, "l_function") and l_function is None:
+            l_function = self.l_function
 
         self.get_maze_limits(show=False)
 
@@ -486,8 +489,14 @@ class DataHelper(Project):
         if show:
             from neuroencoders.importData.gui_elements import AnimatedPositionPlotter
 
+            data_helper = copy.deepcopy(self)
+            data_helper.old_positions = data_helper.positions
+            data_helper.positions = positions
+            data_helper.fullBehavior["old_positions"] = data_helper.old_positions
+            data_helper.fullBehavior["Positions"] = positions
+
             plotter = AnimatedPositionPlotter(
-                data_helper=self,
+                data_helper=data_helper,
                 trail_length=40,
                 l_function=l_function,
                 linear_position_mode=True,
@@ -566,7 +575,7 @@ class DataHelper(Project):
             plt.ylim(0, 1)
             plt.tight_layout()
             plt.title(f"Maze limits for {self.folder}")
-            plt.show()
+            plt.show(block=True)
         return (
             self.lower_x,
             self.upper_x,
