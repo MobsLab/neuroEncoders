@@ -278,7 +278,8 @@ def create_attention_mask_from_padding_mask(padding_mask):
 
 
 class PositionalEncoding(tf.keras.layers.Layer):
-    def __init__(self, max_len=1000, d_model=128, **kwargs):
+    # increase max_len if you have longer sequences
+    def __init__(self, max_len=10000, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -1728,6 +1729,16 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.NEG = tf.constant(self.neg, tf.float32)
         self.occ = self.occupancy_map(self.training_positions)
         self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        self.gaussian_kernel = self._create_gaussian_kernel(self.sigma)
+
+    def _create_gaussian_kernel(self, sigma):
+        """Create a 2D Gaussian kernel for smoothing logits"""
+        kernel_size = int(2 * np.ceil(2 * sigma) + 1)
+        ax = np.arange(-kernel_size // 2 + 1, kernel_size // 2 + 1)
+        xx, yy = np.meshgrid(ax, ax)
+        kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        kernel = kernel / np.sum(kernel)
+        return tf.constant(kernel, dtype=tf.float32)
 
     def _validate_training_positions(self):
         """Validate that training positions don't fall in forbidden regions"""
@@ -1751,9 +1762,17 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             logits_hw: Tensor of shape [B, H*W] representing unnormalized logits
         """
         logits_flat = self.feature_to_logits_map(inputs)
+        logits_hw = kops.reshape(logits_flat, (-1, self.GRID_H, self.GRID_W))
+        # smooth logits with a gaussian kernel to avoid spiky predictions
+        logits_hw = tf.nn.conv2d(
+            logits_hw[:, :, :, None],
+            self.gaussian_kernel[:, :, None, None],
+            strides=[1, 1, 1, 1],
+            padding="SAME",
+        )[:, :, :, 0]
         if not flatten:
-            logits_hw = kops.reshape(logits_flat, (-1, self.GRID_H, self.GRID_W))
             return logits_hw
+        logits_flat = kops.reshape(logits_hw, (-1, self.GRID_H * self.GRID_W))
         return logits_flat
 
     def gaussian_heatmap_targets(self, pos_batch, sigma=None):
@@ -2082,6 +2101,8 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         sigma=0.03,
         neg=-100,
         maze_params=None,
+        l_function_layer=None,
+        sinkhorn_eps=1e-2,
         **kwargs,
     ):
         """
@@ -2109,6 +2130,9 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.eps = float(eps)
         self.neg = float(neg)
         self.maze_params = maze_params
+        self.l_function_layer = l_function_layer
+        self.sinkhorn_eps = sinkhorn_eps
+        self._precompute_cost_matrix()
 
     def call(self, inputs, loss_type="safe_kl", **kwargs):
         """
@@ -2121,8 +2145,15 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         Returns:
             loss: Scalar loss tensor
         """
-        logits_hw = inputs["logits"]
-        target_hw = inputs["targets"]
+        if not isinstance(inputs, dict):
+            # assume (logits, targets) or [logits, targets]
+            if isinstance(inputs, (list, tuple)) and len(inputs) >= 2:
+                logits_hw, target_hw = inputs[0], inputs[1]
+            else:
+                raise ValueError("Expected dict or (logits, targets) pair")
+        else:
+            logits_hw = inputs["logits"]
+            target_hw = inputs["targets"]
 
         if loss_type == "weighted":
             return self._weighted_heatmap_loss(logits_hw, target_hw, **kwargs)
@@ -2130,6 +2161,10 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             return self._kl_heatmap_loss(logits_hw, target_hw, **kwargs)
         elif loss_type == "safe_kl":
             return self._safe_kl_heatmap_loss(logits_hw, target_hw, **kwargs)
+        elif loss_type == "wasserstein":
+            return self._safe_kl_wasserstein_heatmap_loss(
+                logits_hw, target_hw, **kwargs
+            )
         else:
             raise ValueError("Unknown loss_type:" + str(loss_type))
 
@@ -2349,6 +2384,201 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             if scale:
                 loss /= 100.0
             return loss
+
+    def _precompute_cost_matrix(self):
+        """
+        Precompute cost matrix using only keras.ops so it works symbolically
+        across backends (TF, JAX, Torch).
+        """
+
+        # Build coordinate grid [H, W, 2] in symbolic form
+        xs = kops.linspace(0.0, 1.0, self.GRID_W)  # [W]
+        ys = kops.linspace(0.0, 1.0, self.GRID_H)  # [H]
+
+        # Create meshgrid in [H, W] form
+        xs = kops.tile(xs[None, :], [self.GRID_H, 1])  # [H, W]
+        ys = kops.tile(ys[:, None], [1, self.GRID_W])  # [H, W]
+
+        coords = kops.stack([xs, ys], axis=-1)  # [H, W, 2]
+        coords = kops.reshape(coords, (-1, 2))  # [N, 2]
+
+        # Apply your linearization function (kept symbolic)
+        _, lin_coords = self.l_function_layer(coords)  # [N, 1]
+        lin_coords = kops.reshape(lin_coords, (-1,))  # [N]
+
+        # Build cost matrix |li - lj|
+        li = kops.expand_dims(lin_coords, 0)  # [1, N]
+        lj = kops.expand_dims(lin_coords, 1)  # [N, 1]
+        diff = li - lj  # [N, N]
+        C = kops.abs(diff)
+
+        # --- Make sure cost_matrix and lin_coords are stored as eager tensors
+        # Try to evaluate them to numpy (this will succeed when called eagerly during __init__).
+        # If that fails (rare), fall back to storing them as non-trainable tf.Variable
+        try:
+            C_np = tf.keras.backend.get_value(C)
+            lin_coords_np = tf.keras.backend.get_value(lin_coords)
+            # store as eager tf.constant so they won't be graph-captured later
+            self.cost_matrix = tf.constant(C_np, dtype=tf.float32)
+            self.lin_coords = tf.constant(lin_coords_np, dtype=tf.float32)
+        except Exception:
+            # Fallback: convert to a non-trainable Variable (still safe across functions)
+            # this avoids "tensor defined in different FuncGraph" errors
+            self.cost_matrix = tf.Variable(C, trainable=False, dtype=tf.float32)
+            self.lin_coords = tf.Variable(lin_coords, trainable=False, dtype=tf.float32)
+
+        # compute kernel once and store as CPU-side constant; don't keep gradient tracking
+        eps_tf = tf.cast(self.sinkhorn_eps, tf.float32)
+        with tf.device("/CPU:0"):
+            kernel_np = tf.keras.backend.get_value(
+                kops.exp(-tf.cast(self.cost_matrix, tf.float32) / eps_tf)
+            )
+            self.kernel = tf.constant(kernel_np, dtype=tf.float32)
+
+        # make sure these won't be part of gradients
+        self.cost_matrix = tf.stop_gradient(tf.cast(self.cost_matrix, tf.float32))
+        self.kernel = tf.stop_gradient(tf.cast(self.kernel, tf.float32))
+
+    def _safe_kl_wasserstein_heatmap_loss(
+        self,
+        logits_hw,
+        target_hw,
+        alpha=None,
+        sinkhorn_eps=1e-2,
+        sinkhorn_iters=20,
+        return_batch=False,
+        reduction=None,
+    ):
+        """
+        KL divergence + optional Wasserstein distance (Sinkhorn)
+        using precomputed linearized maze cost matrix.
+        """
+        if alpha is None:
+            alpha = 0.5  # default weight for Wasserstein penalty
+
+        batch_size = kops.shape(logits_hw)[0]
+        allowed_mask = kops.cast(self.allowed_mask_tf, tf.float32)
+
+        # Mask + logits flatten
+        masked_logits = kops.where(
+            kops.expand_dims(kops.cast(self.forbid_mask_tf, tf.float32), 0) > 0,
+            self.NEG,
+            logits_hw,
+        )
+        logits_flat = kops.reshape(
+            masked_logits, (batch_size, self.GRID_H * self.GRID_W)
+        )
+
+        # Normalize target P
+        P = target_hw * allowed_mask
+        P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
+        P = kops.where(
+            P_sum > self.EPS,
+            P / (P_sum + self.EPS),
+            allowed_mask / kops.sum(allowed_mask),
+        )
+        P = P / (kops.sum(P, axis=[1, 2], keepdims=True) + self.EPS)
+        P_flat = kops.reshape(P, (batch_size, self.GRID_H * self.GRID_W))
+
+        # --- KL(P||Q) ---
+        q_probs = kops.softmax(logits_flat, axis=-1)
+        ce = -kops.sum(P_flat * kops.log(q_probs + self.EPS), axis=-1)
+        entropy = -kops.sum(P_flat * tf.math.log(P_flat + self.EPS), axis=-1)
+        kl = ce - entropy  # [B]
+
+        # --- Wasserstein penalty ---
+        if alpha > 0.0:
+            # use precomputed CPU-side constants (self.kernel, self.cost_matrix)
+            # make sure they are float32 and stopped from gradients
+            kernel = tf.cast(self.kernel, tf.float32)  # [N, N]
+            C = tf.cast(self.cost_matrix, tf.float32)  # [N, N]
+
+            # Initialize sinkhorn scalings (shape [batch, N])
+            N = kops.shape(P_flat)[1]
+            u = kops.ones_like(P_flat) / kops.cast(N, tf.float32)
+            v = kops.ones_like(P_flat) / kops.cast(N, tf.float32)
+            for _ in range(sinkhorn_iters):
+                # K @ v^T -> for batch we compute v @ K
+                Kv = kops.matmul(v, kernel) + tiny  # [batch, N]
+                u = P_flat / Kv
+                Ku = kops.matmul(u, kernel) + tiny  # [batch, N]
+                v = q_probs / Ku
+
+            # compute Wasserstein without forming full batch*N*N transport T:
+            # W_b = sum_i u_i * ( sum_j ( v_j * K_ij * C_ij ) )
+            # Precompute M = K * C on CPU (N,N) to keep memory lower
+            M = kernel * C  # [N, N]  (this is not batch-sized)
+
+            # temp = v @ M -> [batch, N]
+            temp = kops.matmul(v, M)
+            # W = sum(u * temp, axis=1)
+            W = kops.sum(u * temp, axis=1)
+
+            loss = kl + alpha * W
+        else:
+            loss = kl
+
+        if return_batch or reduction == "none":
+            return loss
+        else:
+            return kops.mean(loss)
+
+    def compute_output_shape(self, input_shape):
+        """
+        Return output shape as a tuple (batch_size,).
+        Accepts input_shape as:
+          - dict: {'logits': shape, 'targets': shape}
+          - tuple/list: (shape1, shape2, ...)
+          - tf.TensorShape or tuple representing a single tensor shape
+        Always returns a 1-tuple (batch_dim,) where batch_dim may be None.
+        """
+
+        # Helper to read batch dim from a single shape representation
+        def _batch_from_shape(shp):
+            # tf.TensorShape -> tuple or list of dims
+            try:
+                # If it's a tf.TensorShape, convert to tuple
+                if hasattr(shp, "as_list"):
+                    dims = shp.as_list()
+                else:
+                    dims = tuple(shp)
+                # dims might be [] for scalar tensors; be safe
+                if len(dims) == 0:
+                    return None
+                return dims[0]
+            except Exception:
+                # Fallback: unknown shape -> None
+                return None
+
+        # If dict, pick first value (logits or targets)
+        if isinstance(input_shape, dict):
+            # Prefer 'logits' key if present
+            if "logits" in input_shape:
+                first_shape = input_shape["logits"]
+            else:
+                # fallback to first value
+                first_shape = next(iter(input_shape.values()))
+            batch = _batch_from_shape(first_shape)
+            return (batch,)
+
+        # If list/tuple, inspect first element
+        if isinstance(input_shape, (list, tuple)):
+            if len(input_shape) == 0:
+                return (None,)
+            first = input_shape[0]
+            # In some Keras usages the list element may itself be a dict
+            if isinstance(first, dict):
+                if "logits" in first:
+                    batch = _batch_from_shape(first["logits"])
+                else:
+                    batch = _batch_from_shape(next(iter(first.values())))
+                return (batch,)
+            batch = _batch_from_shape(first)
+            return (batch,)
+
+        # Otherwise assume a single shape-like object
+        batch = _batch_from_shape(input_shape)
+        return (batch,)
 
 
 class KLHeatmapLoss(tf.keras.losses.Loss):

@@ -30,17 +30,25 @@ mice_nb = [
     "M1230_Novel",
     "M1230_Known",
     "M1162_MFB",
+    "M1117_MFB",
+    "M1162_PAG",
+    "M1168_MFB",
+    "M1182_PAG",
+    "M1239_PAG",
+    "M1199_reversal",
     "M905",
 ]
 # mice_nb = ["M1199_PAG"]
 # nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
+nameExp = "CSI_new_4d_GaussianHeatMap_LinearLoss"
 nameExp = "new_4d_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
+target_bayes = "pos"
 phase = "pre"
 useStridingFactor = True
-stridingFactor = 2
+stridingFactor = 4
 if useStridingFactor:
     nameExp = f"STRIDE_{stridingFactor}_{nameExp}"
 
@@ -74,7 +82,9 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             (
                 os.path.join(dir, f)
                 for f in os.listdir(dir)
-                if f.endswith(".xml") and fnmatch.fnmatch(f, pattern)
+                if f.endswith(".xml")
+                and not (f.endswith("_fil.xml") or "filtered" in f)
+                and fnmatch.fnmatch(f, pattern)
             ),
             None,
         )
@@ -224,7 +234,10 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "-e",
             nbEpochs,
             "--target",
-            target,
+            target_bayes,
+            "--flat_prior",
+            "--striding",
+            str(win),
         ]
         if lstmAndTransfo:
             cmd_bayes += ["--name", nameExp + "_LSTM"]
@@ -232,6 +245,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_bayes += ["--name", nameExp + "_Transformer"]
         if sleep:
             cmd_bayes += ["--test_sleep"]
+        if useStridingFactor:
+            cmd_bayes += ["--striding_factor", str(stridingFactor)]
 
         if "_test" not in xml_file:
             cmd_bayes += ["--phase", phase]
@@ -239,10 +254,16 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
-        if run_bayes and not lstmAndTransfo:
+        if run_bayes and run_ann and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
-        else:
+        elif run_bayes and run_ann and lstmAndTransfo:
             return cmd_ann, None
+        elif run_bayes and not run_ann:
+            return None, cmd_bayes
+        elif run_ann and not run_bayes:
+            return cmd_ann, None
+        else:
+            return None, None
     else:
         print(f"No .xml file found in {dir}")
         return None, None
