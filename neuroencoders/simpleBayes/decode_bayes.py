@@ -2713,7 +2713,7 @@ class Trainer(SpatialConstraintsMixin):
             )
         )
         epochForField = np.array([minTime, maxTime])
-        _, linearTraj = linearization_function(behaviorData["Positions"])
+        _, linearTraj = linearization_function(behaviorData["Positions"][:, :2])
         timesMask = inEpochsMask(
             np.squeeze(behaviorData["positionTime"]), epochForField
         ).flatten()

@@ -117,6 +117,12 @@ class LSTMandSpikeNetwork:
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
                 )
             else:
+                self.l_function_layer = LinearizationLayer(
+                    maze_points=self.maze_points,
+                    ts_proj=self.ts_proj,
+                    device=self.deviceName,
+                    name="l_function",
+                )
                 self.setup_gaussian_heatmap(**kwargs)
 
         self._build_model(**kwargs)
@@ -308,14 +314,6 @@ class LSTMandSpikeNetwork:
                 name="feature_output",
                 kernel_regularizer="l2",
             )
-
-            if getattr(self.params, "mixed_loss", False):
-                self.l_function_layer = LinearizationLayer(
-                    maze_points=self.maze_points,
-                    ts_proj=self.ts_proj,
-                    device=self.deviceName,
-                    name="l_function",
-                )
 
             if getattr(self.params, "project_transformer", True):
                 self.transformer_projection_layer = tf.keras.layers.Dense(
@@ -665,7 +663,7 @@ class LSTMandSpikeNetwork:
                         "targets": targets_hw,
                     }
                     tempPosLoss = self.GaussianLoss_layer(
-                        loss_inputs, loss_type="safe_kl"
+                        loss_inputs, loss_type="safe_kl", return_batch=True
                     )
                 tempPosLoss = kops.cast(tempPosLoss, tf.float32)
 
@@ -2693,6 +2691,9 @@ class LSTMandSpikeNetwork:
             sigma=sigma,
             neg=neg,
             name="gaussianLoss",
+            l_function_layer=self.l_function_layer
+            if hasattr(self, "l_function_layer")
+            else None,
         )
 
     def extract_cnn_model(self):

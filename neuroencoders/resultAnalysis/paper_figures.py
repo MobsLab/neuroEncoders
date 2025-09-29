@@ -1029,7 +1029,9 @@ class PaperFigures:
             )
         )
 
-    def error_matrix_linerrors_by_speed(self, suffixes=None, nbins=40, normalized=True):
+    def error_matrix_linerrors_by_speed(
+        self, suffixes=None, nbins=40, normalized=True, show=False
+    ):
         if suffixes is None:
             suffixes = self.suffixes
 
@@ -1063,7 +1065,7 @@ class PaperFigures:
                 ax_all.set_xlim(0, 1)
                 ax_all.set_ylim(0, 1)
                 im = ax_all.imshow(
-                    H,
+                    H.T,
                     extent=extent,
                     cmap=white_viridis,
                     interpolation="none",
@@ -1154,6 +1156,8 @@ class PaperFigures:
                 (f"errorMatrix_{suffix}.svg"),
             )
         )
+        if show:
+            plt.show()
         return fig
 
     def mean_linerrors(
@@ -1745,6 +1749,7 @@ class PaperFigures:
         mask=None,
         use_mask=False,
         block=True,
+        normalized=True,
     ):
         if phase is not None:
             suffix = f"_{phase}"
@@ -1792,23 +1797,35 @@ class PaperFigures:
         if len(self.timeWindows) == 1:
             ax = [ax]  # compatibility move
         for iw in range(len(self.timeWindows)):
-            ax[iw].scatter(
+            # ax[iw].scatter(
+            #     self.resultsBayes_phase[suffix]["linPred"][iw][masks[iw]],
+            #     self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]],
+            #     s=1,
+            #     c="grey",
+            # )
+            H, xedges, yedges = np.histogram2d(
                 self.resultsBayes_phase[suffix]["linPred"][iw][masks[iw]],
                 self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]],
-                s=1,
-                c="grey",
-            )
-            ax[iw].hist2d(
-                self.resultsBayes_phase[suffix]["linPred"][iw][masks[iw]],
-                self.resultsNN_phase[suffix]["linPred"][iw][masks[iw]],
-                (45, 45),
-                cmap=white_viridis,
-                alpha=0.8,
+                bins=(40, 40),
                 density=True,
             )
+            if normalized:
+                with np.errstate(invalid="ignore"):
+                    H = H / H.max(axis=1, keepdims=True)
+            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+            im = ax[iw].imshow(
+                H.T,
+                extent=extent,
+                cmap="viridis",
+                interpolation="none",
+                origin="lower",
+                aspect="auto",
+            )
             ax[iw].set_yticks([])
+            fig.colorbar(im, ax=ax[iw], label="density")
             if iw < len(self.timeWindows):
                 ax[iw].set_xticks([])
+            ax[iw].set_aspect("equal")
         # Tune ticks
         [
             a.set_xlabel((str(self.timeWindows[iw]) + " ms"), fontsize="x-large")
@@ -1822,15 +1839,15 @@ class PaperFigures:
             fontsize="x-large",
         )
         [a.set_ylabel("NN decoding", fontsize="x-large") for a in ax]
-        [a.set_aspect("auto") for a in ax]
-        [
-            plt.colorbar(
-                plt.cm.ScalarMappable(plt.Normalize(0, 1), cmap=white_viridis),
-                ax=a,
-                label="density",
-            )
-            for a in ax
-        ]
+        # [a.set_aspect("auto") for a in ax]
+        # [
+        #     plt.colorbar(
+        #         plt.cm.ScalarMappable(plt.Normalize(0, 1), cmap=white_viridis),
+        #         ax=a,
+        #         label="density",
+        #     )
+        #     for a in ax
+        # ]
         plt.suptitle(
             (
                 f"Position decoded during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
@@ -2206,7 +2223,7 @@ class PaperFigures:
             )
         )
 
-        return predLoss_ticks[0], errors_filtered
+        return predLoss_ticks, errors_filtered
 
     def predLoss_euclError(
         self,
@@ -3351,6 +3368,7 @@ class PaperFigures:
         show=False,
         useTrain=False,
         useAll=True,
+        strideFactor=1,
     ):
         if phase is not None:
             suffix = f"_{phase}"
@@ -3386,13 +3404,17 @@ class PaperFigures:
             )
             placeFieldSort = self.trainerBayes.linearPosArgSort
 
+        useAll_suffix = "_all" if useAll else ""
+        strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
+
         loadName = os.path.join(
             self.projectPath.dataPath,
-            f"aligned{suffix}{'_all' if useAll else ''}",
+            f"aligned_{phase}{useAll_suffix}{strideFactor_suffix}",
             str(ws),
             "test" if not useTrain else "train",
-            f"spikeMat_window_popVector{self.suffix}.csv",
+            f"spikeMat_window_popVector{suffix}.csv",
         )
+
         try:
             spikePopAligned = np.array(
                 pd.read_csv(loadName).values[:, 1:], dtype=np.float32
@@ -3407,15 +3429,15 @@ class PaperFigures:
                 """
             )
         spikePopAligned = spikePopAligned[
-            : len(self.resultsNN_phase[suffix]["predLoss"]["linTruePos"][iwindow]), :
+            : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow]), :
         ]
-        predLoss = self.resultsNN_phase[suffix]["predLoss"]["predLoss"][iwindow]
+        predLoss = self.resultsNN_phase[suffix]["predLoss"][iwindow]
         normalize = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x))
 
         for icell, tuningCurve in enumerate(linearTuningCurves):
             pcId = np.where(np.equal(placeFieldSort, icell))[0][0]
             spikeHist = spikePopAligned[:, pcId + 1][
-                : len(self.resultsNN_phase[suffix]["predLoss"]["linTruePos"][iwindow])
+                : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow])
             ]
             spikeMask = np.greater(spikeHist, 0)
 
@@ -3423,9 +3445,7 @@ class PaperFigures:
                 cm = plt.get_cmap("gray")
                 fig, ax = plt.subplots()
                 ax.scatter(
-                    self.resultsNN_phase[suffix]["predLoss"]["linPred"][iwindow][
-                        spikeMask
-                    ],
+                    self.resultsNN_phase[suffix]["linPred"][iwindow][spikeMask],
                     (spikeHist / np.sum(spikePopAligned, axis=1))[spikeMask],
                     s=12,
                     c=cm(normalize(predLoss[spikeMask])),
@@ -3437,36 +3457,24 @@ class PaperFigures:
                 for i, linbin in enumerate(binEdges[:-1]):
                     errors[i] = np.mean(
                         np.abs(
-                            self.resultsNN_phase[suffix]["predLoss"]["linTruePos"][
-                                iwindow
-                            ][
+                            self.resultsNN_phase[suffix]["linTruePos"][iwindow][
                                 np.logical_and(
                                     spikeMask,
                                     np.logical_and(
-                                        self.resultsNN_phase[suffix]["predLoss"][
-                                            "linPred"
-                                        ][iwindow]
+                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
                                         >= linbin,
-                                        self.resultsNN_phase[suffix]["predLoss"][
-                                            "linPred"
-                                        ][iwindow]
+                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
                                         < binEdges[i + 1],
                                     ),
                                 )
                             ]
-                            - self.resultsNN_phase[suffix]["predLoss"]["linPred"][
-                                iwindow
-                            ][
+                            - self.resultsNN_phase[suffix]["linPred"][iwindow][
                                 np.logical_and(
                                     spikeMask,
                                     np.logical_and(
-                                        self.resultsNN_phase[suffix]["predLoss"][
-                                            "linPred"
-                                        ][iwindow]
+                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
                                         >= linbin,
-                                        self.resultsNN_phase[suffix]["predLoss"][
-                                            "linPred"
-                                        ][iwindow]
+                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
                                         < binEdges[i + 1],
                                     ),
                                 )
@@ -3548,10 +3556,10 @@ class PaperFigures:
         lErrorNN_mean = [
             np.mean(
                 np.abs(
-                    self.resultsNN_phase[suffix]["predLoss"]["linTruePos"][
+                    self.resultsNN_phase[suffix]["linTruePos"][
                         self.timeWindows.index(ws)
                     ]
-                    - self.resultsNN_phase[suffix]["predLoss"]["linPred"][
+                    - self.resultsNN_phase[suffix]["linPred"][
                         self.timeWindows.index(ws)
                     ]
                 )
@@ -3561,10 +3569,10 @@ class PaperFigures:
         lErrorBayes_mean = [
             np.mean(
                 np.abs(
-                    self.resultsNN_phase[suffix]["predLoss"]["linTruePos"][
+                    self.resultsNN_phase[suffix]["linTruePos"][
                         self.timeWindows.index(ws)
                     ]
-                    - self.resultsBayes_phase[suffix]["predLoss"]["linPred"][
+                    - self.resultsBayes_phase[suffix]["linPred"][
                         self.timeWindows.index(ws)
                     ]
                 )
@@ -3603,10 +3611,8 @@ class PaperFigures:
         euclErrorNN_mean = [
             np.mean(
                 np.abs(
-                    self.resultsNN_phase[suffix]["predLoss"]["truePos"][
-                        self.timeWindows.index(ws)
-                    ]
-                    - self.resultsNN_phase[suffix]["predLoss"]["fullPred"][
+                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)]
+                    - self.resultsNN_phase[suffix]["fullPred"][
                         self.timeWindows.index(ws)
                     ]
                 )
@@ -3616,10 +3622,8 @@ class PaperFigures:
         euclErrorBayes_mean = [
             np.mean(
                 np.linalg.norm(
-                    self.resultsNN_phase[suffix]["predLoss"]["truePos"][
-                        self.timeWindows.index(ws)
-                    ]
-                    - self.resultsBayes_phase[suffix]["predLoss"]["fullPred"][
+                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)]
+                    - self.resultsBayes_phase[suffix]["fullPred"][
                         self.timeWindows.index(ws)
                     ],
                     axis=1,
@@ -3959,7 +3963,7 @@ class PaperFigures:
         # Population place fields
         plt.subplot(2, 3, 1)
         plt.imshow(
-            self.trainerBayes.orderedPlaceFields[1].T, aspect="auto", origin="lower"
+            self.trainerBayes.orderedPlaceFields[1], aspect="auto", origin="lower"
         )
         plt.xticks([])
         plt.yticks([])
@@ -4026,7 +4030,7 @@ class PaperFigures:
         # Population place fields
         plt.subplot(2, 3, 6)
         plt.imshow(
-            self.trainerBayes.orderedPlaceFields[-1].T, aspect="auto", origin="lower"
+            self.trainerBayes.orderedPlaceFields[-1], aspect="auto", origin="lower"
         )
         plt.xticks([])
         plt.yticks([])

@@ -252,75 +252,6 @@ def main(args):
             TrainerBayes = BayesTraining.Trainer(
                 ProjectPath, phase=args.phase, grid_size=Parameters.GaussianGridSize
             )
-            if not os.path.exists(
-                os.path.join(TrainerBayes.folderResult, "bayesMatrices.pkl")
-            ):
-                # Resolve all paths with abspath
-                experiment_parent = os.path.abspath(
-                    os.path.join(TrainerBayes.projectPath.experimentPath, "..")
-                )
-
-                # Source folder path
-                source_folder = os.path.abspath(
-                    os.path.join(
-                        experiment_parent,
-                        "bigSigma_GaussianHeatMap_LinearLoss_Transformer",
-                    )
-                )
-
-                # Target symlink folder path
-                last_bayes_folder = os.path.abspath(
-                    os.path.join(experiment_parent, "last_bayes")
-                )
-
-                # Source file path
-                source_file = os.path.join(
-                    source_folder, "results", "bayesMatrices.pkl"
-                )
-
-                # Target file path
-                target_file = os.path.abspath(
-                    os.path.join(TrainerBayes.folderResult, "bayesMatrices.pkl")
-                )
-
-                if os.path.exists(source_file):
-                    # Task 1: Create symlink folder "last_bayes" pointing to the bigSigma folder
-                    if not os.path.exists(last_bayes_folder):
-                        try:
-                            os.symlink(source_folder, last_bayes_folder)
-                            print(
-                                f"Created symlink folder: {last_bayes_folder} -> {source_folder}"
-                            )
-                        except OSError as e:
-                            print(f"Failed to create symlink folder: {e}")
-
-                    # Task 2: Copy bayesMatrices.pkl from last_bayes/results/ to folderResults/
-                    last_bayes_file = os.path.join(
-                        last_bayes_folder, "results", "bayesMatrices.pkl"
-                    )
-
-                    try:
-                        # Ensure target directory exists
-                        os.makedirs(os.path.dirname(target_file), exist_ok=True)
-
-                        # Copy the file
-                        shutil.copy2(last_bayes_file, target_file)
-                        print(
-                            f"Copied bayesMatrices.pkl from {last_bayes_file} to {target_file}"
-                        )
-
-                    except (OSError, IOError) as e:
-                        print(f"Failed to copy file: {e}")
-                        # Fallback: try copying directly from source
-                        try:
-                            shutil.copy2(source_file, target_file)
-                            print(
-                                f"Fallback: Copied bayesMatrices.pkl directly from {source_file} to {target_file}"
-                            )
-                        except (OSError, IOError) as e2:
-                            print(f"Fallback copy also failed: {e2}")
-                else:
-                    print(f"Source file not found: {source_file}")
 
             # Load or create bayesMatrices
             if args.redo and windowSizeMS == 108:
@@ -329,7 +260,7 @@ def main(args):
                 DataHelper.fullBehavior,
                 l_function=l_function,
                 mutual_info_method=Parameters.mutual_info_method,
-                load_last_bayes=False,
+                load_last_bayes=True,
                 redo=args.redo and windowSizeMS == 108,
             )
 
@@ -725,7 +656,7 @@ def main(args):
                 load_model=False,
                 fine_tune=False,
                 l_function=l_function,
-                num_augmentations=11 if args.window < 0.504 else 6,
+                num_augmentations=5 if args.window < 0.504 else 3,
                 strideFactor=strideFactor,
             )
             T = None
@@ -1206,6 +1137,49 @@ if __name__ == "__main__":
             action="store_true",
             help="defines whether to test the decoder on the Pre and Post sleep phases",
         )
+        p.add_argument(
+            "-lstm",
+            "--lstm",
+            action="store_true",
+            help="defines whether to use a lstm network instead of transformer",
+        )
+        p.add_argument(
+            "-pl",
+            "--predicted_loss",
+            action="store_true",
+            help="defines whether another, predLoss only, "
+            + "network will be trained on the piece of data",
+        )
+        p.add_argument(
+            "-log",
+            "--transform_w_log",
+            action="store_true",
+            help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
+        )
+        p.add_argument(
+            "-nod",
+            "--no-dense",
+            action="store_true",
+            help="defines whether the dense weight loss should be used or not",
+        )
+        p.add_argument(
+            "-es",
+            "--early_stop",
+            action="store_true",
+            help="defines whether to use early stopping during training",
+        )
+        p.add_argument(
+            "-ml",
+            "--mixed_loss",
+            action="store_true",
+            help="defines whether the loss is full euclidean loss, or is weighted by linear distance (to deal with corner issues)",
+        )
+        p.add_argument(
+            "-ng",
+            "--no_gaussian",
+            action="store_true",
+            help="defines whether we train on gaussian heatmaps or on simple (x,y) positions",
+        )
 
         if cmd == "bayes":
             p.add_argument(
@@ -1221,50 +1195,6 @@ if __name__ == "__main__":
                 "--gpu",
                 action="store_true",
                 help="run computations on gpu. Requires specific installation.",
-            )
-
-            p.add_argument(
-                "-lstm",
-                "--lstm",
-                action="store_true",
-                help="defines whether to use a lstm network instead of transformer",
-            )
-            p.add_argument(
-                "-log",
-                "--transform_w_log",
-                action="store_true",
-                help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
-            )
-            p.add_argument(
-                "-nod",
-                "--no-dense",
-                action="store_true",
-                help="defines whether the dense weight loss should be used or not",
-            )
-            p.add_argument(
-                "-pl",
-                "--predicted_loss",
-                action="store_true",
-                help="defines whether another, predLoss only, "
-                + "network will be trained on the piece of data",
-            )
-            p.add_argument(
-                "-es",
-                "--early_stop",
-                action="store_true",
-                help="defines whether to use early stopping during training",
-            )
-            p.add_argument(
-                "-ml",
-                "--mixed_loss",
-                action="store_true",
-                help="defines whether the loss is full euclidean loss, or is weighted by linear distance (to deal with corner issues)",
-            )
-            p.add_argument(
-                "-ng",
-                "--no_gaussian",
-                action="store_true",
-                help="defines whether we train on gaussian heatmaps or on simple (x,y) positions",
             )
 
     args = Parser.parse_args()

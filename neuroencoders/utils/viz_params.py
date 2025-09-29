@@ -54,5 +54,5 @@ REMOVE_TICKS = True
 WITH_REF_BG = True
 DELTA_COLOR = "xkcd:vivid purple"
 DELTA_COLOR_FORWARD = "xkcd:electric green"
-DELTA_COLOR_REVERSE = "xkcd:red orange"
+DELTA_COLOR_REVERSE = "xkcd:gray"
 MAX_NUM_STARS = 5
