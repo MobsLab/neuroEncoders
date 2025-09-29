@@ -47,15 +47,15 @@ MAZE_COORDS = np.array(
 ZONEDEF = np.array(
     [
         [[0, 0.35], [0, 0.43]],  # shock
-        [[0.65, 1], [0, 0.43]],  # safe
-        [[0.35, 0.65], [0.75, 1]],  # center
         [[0, 0.35], [0.43, 1]],  # shock center
+        [[0.35, 0.65], [0.75, 1]],  # center
         [[0.65, 1], [0.43, 1]],  # safe center
+        [[0.65, 1], [0, 0.43]],  # safe
     ]
 )
-ZONELABELS = ["Shock", "Safe", "Center", "ShockCenter", "SafeCenter"]
+ZONELABELS = ["Shock", "ShockCenter", "Center", "SafeCenter", "Safe"]
 
-ZONE_COLORS = ["r", "b", "k", "m", "c"]
+ZONE_COLORS = ["r", "m", "k", "c", "b"]
 
 
 class Project:

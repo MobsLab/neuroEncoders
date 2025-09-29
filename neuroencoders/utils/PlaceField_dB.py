@@ -935,7 +935,7 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
         y_vals = np.array(pos_y)
 
     # Plot trajectory (epoch-restricted only)
-    axes[1, 1].plot(x_vals, y_vals, "lightgray", alpha=0.8, linewidth=1.0)
+    axes[1, 1].scatter(x_vals, y_vals, c="lightgray", alpha=0.8, linewidth=1.0)
 
     # Plot spikes (epoch-restricted only)
     if len(results["spike_coords"]["x"]) > 0:
@@ -1069,10 +1069,10 @@ def plot_poisson_comparison(
         x_vals = np.array(pos_x)
         y_vals = np.array(pos_y)
 
-    axes[0, 1].plot(x_vals, y_vals, "lightgray", alpha=0.7, linewidth=0.8)
+    axes[0, 1].scatter(x_vals, y_vals, "lightgray", alpha=0.7, linewidth=0.8)
 
     if len(results["spike_coords"]["x"]) > 0:
-        axes[0, 1].plot(
+        axes[0, 1].scatter(
             results["spike_coords"]["x"],
             results["spike_coords"]["y"],
             "r.",
