@@ -1476,7 +1476,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 5)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1539,7 +1539,9 @@ class Params:
         self.nHeads = kwargs.pop(
             "nHeads", 8
         )  # number of attention heads in the transformer if used
-        self.project_transformer = kwargs.pop("project_transformer", False)
+
+        # changed after CSI - better scaleability + transformer pretraining?
+        self.project_transformer = kwargs.pop("project_transformer", True)
 
         default_lstm_layers = (
             2 if not self.isTransformer else 4
