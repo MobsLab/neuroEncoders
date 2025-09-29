@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from matplotlib.collections import LineCollection
-from matplotlib.colors import LinearSegmentedColormap, NoNorm, Normalize
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, NoNorm, Normalize
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -328,9 +328,11 @@ class AnimatedPositionPlotter:
             self.speed_mask = None
             # size of prediction_positionTime
 
-        print(
-            f"Speed mask applied: {self.speed_mask is not None}. {self.speed_mask.sum() / len(self.speed_mask) * 100:.2f}% of positions kept."
-        )
+        print(f"Speed mask applied: {self.speed_mask is not None}.")
+        if self.speed_mask is not None:
+            print(
+                f"{self.speed_mask.sum() / len(self.speed_mask) * 100:.2f}% of positions kept."
+            )
 
         if self.predLossMask is not None:
             print("Applying deduplication and merging to predLossMask.")
@@ -655,12 +657,12 @@ class AnimatedPositionPlotter:
     def _calculate_derived_data(self, **kwargs):
         if self.l_function is not None:
             if self.linpositions is None:
-                _, lpositions = self.l_function(self.positions)
+                _, lpositions = self.l_function(self.positions[:, :2])
                 lpositions = lpositions.reshape(-1)
                 self.linpositions = lpositions
             if self.predicted is not None:
                 if self.linpredicted is None:
-                    _, lpredicted = self.l_function(self.predicted)
+                    _, lpredicted = self.l_function(self.predicted[:, :2])
                     lpredicted = lpredicted.reshape(-1)
                     self.linpredicted = lpredicted
 
@@ -753,11 +755,19 @@ class AnimatedPositionPlotter:
                 print("Setting up very simple plot (trajectory only)...")
                 self.very_simple_plot = True
                 return self._setup_simple_plot(**kwargs)
+            elif kwargs.get("simple_plot", True):
+                print(
+                    "Setting up multipanel plot (trajectory + linear position movie)..."
+                )
+                self.very_simple_plot = False
+                self.simple_plot = True
+                return self._setup_dual_plot(**kwargs)
             else:
                 print(
                     "Setting up multipanel plot (trajectory, forward/reverse, and linear position movie)..."
                 )
                 self.very_simple_plot = False
+                self.simple_plot = False
                 return self._setup_multipanel_plot(**kwargs)
 
     def _setup_fourD_plot(self, **kwargs):
@@ -783,6 +793,70 @@ class AnimatedPositionPlotter:
 
         # Setup speed histogram (bottom right)
         self._setup_speed_panel(gs, dark_theme=usedark, **kwargs)
+
+        return self.fig, self.axes
+
+    def _setup_dual_plot(self, **kwargs):
+        """
+        Setup the matplotlib figure and axes for multipanel viewing mode (1 panel for Shock/Safe; 1 for forward/reverse prediction, 1 for a movie of linear position).
+        """
+        usedark = kwargs.get("dark_theme", False)
+        plt.style.use("dark_background") if usedark else plt.style.use("default")
+
+        if self.linpositions is None:
+            raise ValueError(
+                "Linear positions are required for multipanel plot. Either use linear_position_mode=True or provide linearized_true data."
+            )
+
+        self.fig = plt.figure(figsize=self.figsize)
+        self.fig.patch.set_facecolor("#1a1a2e" if usedark else "white")
+
+        # Create grid layout
+        gs = self.fig.add_gridspec(2, 2, height_ratios=[1.5, 0.5])
+
+        # Setup trajectory plot (top side, spans both columns)
+        self._setup_trajectory_panel(
+            gs,
+            dark_theme=usedark,
+            loc_in_gs="top",
+            colors_style="speed",
+            **kwargs,
+        )
+
+        if self.predicted is not None:
+            # Setup trajectory plot (top side, spans both columns)
+            handles1, labels1 = (
+                self.handles_labels["top"]["handles"],
+                self.handles_labels["top"]["labels"],
+            )
+            # remove the axis legends
+            self.axes["top"].legend().remove()
+
+            all_handles = handles1
+            all_labels = labels1
+
+            label_to_handle = {}
+            for label, handle in zip(all_labels, all_handles):
+                if label not in label_to_handle:
+                    label_to_handle[label] = handle  # keep first occurrence
+            labels = list(label_to_handle.keys())
+            handles = list(label_to_handle.values())
+
+            self.fig.legend(
+                handles,
+                labels,
+                loc="center left",
+                ncol=1,
+                frameon=True,
+                fontsize=10,
+                framealpha=0.5,
+                handler_map={tuple: HandlerTuple(ndivide=None, pad=0)},
+            )
+
+        # Setup linearized position movie (bottom)
+        self._setup_linpos_movie(gs, dark_theme=usedark, colors_style="speed", **kwargs)
+
+        plt.tight_layout()
 
         return self.fig, self.axes
 
@@ -886,6 +960,26 @@ class AnimatedPositionPlotter:
             kwargs["alpha_delta_line"] = 0.9
             kwargs["alpha_trail_points"] = 1
             kwargs["delta_color"] = "xkcd:vivid purple"
+
+        elif kwargs.get("colors_style", None) == "speed":
+            self.dim_name = "speed_mask"
+            self.predicted_dim_name = "speed_mask"
+            print("Using speed for color coding!")
+
+            try:
+                dim = self.data_helper.fullBehavior["Times"]["speedFilter"]
+                dim = dim[self.totMask][self.true_valid_indices]
+            except:
+                dim = self.speed_mask
+            if self.predicted is not None:
+                predicted_dim = self.speed_mask
+            kwargs["pair_points"] = True
+            kwargs["alpha_trail_line"] = 0.9
+            kwargs["alpha_delta_line"] = 0.9
+            kwargs["alpha_trail_points"] = 1
+            kwargs["delta_color"] = "xkcd:vivid purple"
+            kwargs["binary_colors"] = True
+
         elif kwargs.get("colors_style", None) == "Concordant/Discordant":
             kwargs["pair_points"] = True  # force pairing for this panel
 
@@ -923,6 +1017,7 @@ class AnimatedPositionPlotter:
         true_line_color = kwargs.get("true_line_color", TRUE_LINE_COLOR)
         predicted_color = kwargs.get("predicted_color", PREDICTED_COLOR)
         predicted_line_color = kwargs.get("predicted_line_color", PREDICTED_LINE_COLOR)
+        colors_style = kwargs.get("colors_style", None)
 
         self.axes["linpos_movie"] = self.fig.add_subplot(gs[1, :])
         ax = self.axes["linpos_movie"]
@@ -963,6 +1058,11 @@ class AnimatedPositionPlotter:
                     self.predicted_lin_norm = Normalize(
                         vmin=np.nanmin(self.lin_dim_pred),
                         vmax=np.nanmax(self.lin_dim_pred),
+                    )
+                elif self.predicted_dim_name == "speed_mask":
+                    # means we dont really plot the predicted dim, but rather show whether the speed was below or above threshold
+                    self.predicted_lin_cmap = ListedColormap(
+                        [DELTA_COLOR_FORWARD, DELTA_COLOR_REVERSE]
                     )
             self.artists["linpos_pred_points"] = ax.scatter(
                 [],
@@ -1697,7 +1797,11 @@ class AnimatedPositionPlotter:
                     color=self.delta_color_forward,
                     linewidth=4,
                 )
-                delta_forward_label = "Forward Direction"
+                delta_forward_label = (
+                    "Forward Direction"
+                    if not self.dim_name == "speed_mask"
+                    else "Faster Speed"
+                )
                 handles_for_legend.append(delta_forward_handle)
                 labels_for_legend.append(delta_forward_label)
                 delta_discordant_handle = Line2D(
@@ -1706,7 +1810,11 @@ class AnimatedPositionPlotter:
                     color=self.delta_color_reverse,
                     linewidth=4,
                 )
-                delta_discordant_label = "Reverse Direction"
+                delta_discordant_label = (
+                    "Reverse Direction"
+                    if not self.dim_name == "speed_mask"
+                    else "Slower Speed"
+                )
                 handles_for_legend.append(delta_discordant_handle)
                 labels_for_legend.append(delta_discordant_label)
 
@@ -1730,7 +1838,7 @@ class AnimatedPositionPlotter:
         ax.legend(
             handles=handles_for_legend,
             labels=labels_for_legend,
-            loc=[0.32, 0.05],
+            loc=[0.32, 0.05] if not self.simple_plot else "upper left",
             handlelength=1.5,
             handleheight=1.2,
             handler_map={tuple: HandlerTuple(ndivide=None, pad=0)},
@@ -2232,7 +2340,7 @@ class AnimatedPositionPlotter:
                         [current_pos[0, 0], current_predicted_pos[0, 0]],
                         [current_pos[0, 1], current_predicted_pos[0, 1]],
                     )
-                else:
+                elif self.dim_name != "speed_mask":
                     # For paired points, we need to create segments
                     # first, we find common timepoints
                     common_mask = np.isin(trail_times, trail_predicted_times)
@@ -2260,6 +2368,7 @@ class AnimatedPositionPlotter:
                         )
                         # Create a mask for concordant and discordant directions by using dot product
                         mask = np.sum(velocity_true * position_diff, axis=1) >= 0
+                        mask = self.dims[name_axis][start_idx:end_idx].astype(bool)
                         colors = np.where(
                             mask,
                             self.delta_color_forward,
@@ -2271,6 +2380,24 @@ class AnimatedPositionPlotter:
                         segments
                     )
                     self.artists[name_axis]["delta_predicted_true"].set_color(colors)
+                elif self.dim_name == "speed_mask":
+                    common_mask = np.isin(trail_times, trail_predicted_times)
+                    segments = np.stack(
+                        [trail_positions[common_mask], trail_predicted], axis=1
+                    )
+                    self.artists[name_axis]["delta_predicted_true"].set_segments(
+                        segments
+                    )
+                    colors = np.where(
+                        trail_directions[common_mask],
+                        self.delta_color_forward,
+                        self.delta_color_reverse,
+                    )
+                    self.artists[name_axis]["delta_predicted_true"].set_color(colors)
+                else:
+                    raise ValueError(
+                        "Error: paired points logic only works for speed_mask or when velocity_true is provided."
+                    )
 
             if (
                 self.predicted_heatmap is not None
