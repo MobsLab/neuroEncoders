@@ -1473,34 +1473,36 @@ class Mouse_Results(Params, PaperFigures):
             self.ann[str(win)].params.GaussianHeatmap
             and kwargs.get("predicted_heatmap", None) is None
         ):
-            try:
-                predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                    "logits_hw"
-                ]
-            except (AttributeError, KeyError):
-                # create an empty list of size windows_values
-                self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
-                with open(
-                    os.path.join(
-                        self.projectPath.experimentPath,
-                        "results",
-                        str(winMS),
-                        f"decoding_results{phase}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    results = pickle.load(f)
-                self.resultsNN_phase_pkl[phase][idWindow] = results
-                predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                    "logits_hw"
-                ]
-            predicted_probs = (
-                self.ann[str(win)]
-                .GaussianHeatmap.decode_and_uncertainty(
-                    predicted_logits, return_probs=True
-                )[-1]
-                .numpy()
-            )
+            pass
+
+            # try:
+            #     predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+            #         "logits_hw"
+            #     ]
+            # except (AttributeError, KeyError):
+            #     # create an empty list of size windows_values
+            #     self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
+            #     with open(
+            #         os.path.join(
+            #             self.projectPath.experimentPath,
+            #             "results",
+            #             str(winMS),
+            #             f"decoding_results{phase}.pkl",
+            #         ),
+            #         "rb",
+            #     ) as f:
+            #         results = pickle.load(f)
+            #     self.resultsNN_phase_pkl[phase][idWindow] = results
+            #     predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+            #         "logits_hw"
+            #     ]
+            # predicted_probs = (
+            #     self.ann[str(win)]
+            #     .GaussianHeatmap.decode_and_uncertainty(
+            #         predicted_logits, return_probs=True
+            #     )[-1]
+            #     .numpy()
+            # )
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
@@ -1509,9 +1511,9 @@ class Mouse_Results(Params, PaperFigures):
             speedMaskArray=speedMaskArray,
             prediction_time=prediction_time,
             posIndex=posIndex,
-            predicted_heatmap=kwargs.pop("predicted_heatmap", predicted_probs)
-            if self.ann[str(win)].params.GaussianHeatmap
-            else None,
+            # predicted_heatmap=kwargs.pop("predicted_heatmap", predicted_probs)
+            # if self.ann[str(win)].params.GaussianHeatmap
+            # else None,
             blit=blit,
             l_function=kwargs.pop("l_function", self.l_function),
             **kwargs,
@@ -1580,7 +1582,7 @@ class Mouse_Results(Params, PaperFigures):
             winMS = self.windows_values[-1]
 
         if output_dir is None:
-            output_dir = os.path.join(self.folderResult, winMS, "video_frames")
+            output_dir = os.path.join(self.folderResult, str(winMS), "video_frames")
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -1589,18 +1591,32 @@ class Mouse_Results(Params, PaperFigures):
             True  # Ensure setup_plot is True for worker initialization
         )
         kwargs["init_animation"] = True  # Ensure animation is initialized
+        force = kwargs.get("force", False)
 
         init_plotter = self.init_plotter(winMS, **kwargs)
         total_frames = init_plotter.total_frames
 
-        if not kwargs.get("debug", False):
-            print("🚀 Using linear loop for rendering")
+        i = 5
+        save_path = os.path.join(init_plotter.output_dir, f"frame_{i:04d}.png")
+        if not os.path.exists(save_path):
+            try:
+                print("🚀 Using linear loop for rendering")
 
-            for i in tqdm(range(total_frames), desc="Rendering frames", unit="frame"):
-                if i > 10 and kwargs.get("debug", False):
-                    break  # DEBUG LIMIT TO 100 FRAMES
-                save_path = os.path.join(init_plotter.output_dir, f"frame_{i:04d}.png")
-                init_plotter.animate_frame(i, **kwargs, save_path=save_path)
+                for i in tqdm(
+                    range(total_frames), desc="Rendering frames", unit="frame"
+                ):
+                    if i > 10 and kwargs.get("debug", False):
+                        break  # DEBUG LIMIT TO 100 FRAMES
+                    save_path = os.path.join(
+                        init_plotter.output_dir, f"frame_{i:04d}.png"
+                    )
+                    init_plotter.animate_frame(i, **kwargs, save_path=save_path)
+            except Exception as e:
+                print("❌ Error during frame rendering:", e)
+                if not force:
+                    raise e
+                else:
+                    print("⚠️ Continuing despite the error due to force=True.")
 
         if kwargs.get("auto_encode", True):
             print("🎬 Encoding video with ffmpeg...")
@@ -1617,7 +1633,7 @@ class Mouse_Results(Params, PaperFigures):
                 else kwargs.get("video_path")
             )
 
-            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 20 -i "{input_pattern}" -c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
+            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 30 -i "{input_pattern}" -c:v libx264 -preset fast -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
 
             import subprocess
 
@@ -2619,7 +2635,15 @@ class Results_Loader:
         )
 
     def mean_error_matrix_linerrors_by_speed(
-        self, nbins=40, normalized=True, save=True, folder=None, show=False
+        self,
+        nbins=40,
+        normalized=True,
+        save=True,
+        folder=None,
+        show=False,
+        nameExp_list=None,
+        phase_list=None,
+        winMS_list=None,
     ):
         """
         Plot error matrices (2D histograms) of predicted vs. true linear position,
@@ -2634,44 +2658,67 @@ class Results_Loader:
 
         folder = folder or getattr(self, "folderFigures", None)
         grouped = self.results_df.groupby(["nameExp", "phase", "winMS"])
+        if nameExp_list is not None:
+            if not isinstance(nameExp_list, list):
+                nameExp_list = [nameExp_list]
+            grouped = grouped.filter(lambda x: x.name[0] in nameExp_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
+        if phase_list is not None:
+            if not isinstance(phase_list, list):
+                phase_list = [phase_list]
+            grouped = grouped.filter(lambda x: x.name[1] in phase_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
+        if winMS_list is not None:
+            if not isinstance(winMS_list, list):
+                winMS_list = [winMS_list]
+            # assert winMS_list is only int
+            winMS_list = [int(w) for w in winMS_list]
+
+            grouped = grouped.filter(lambda x: int(x.name[2]) in winMS_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
 
         for (nameExp, phase, winMS), df in grouped:
             fig, axes = plt.subplots(
                 ncols=2, nrows=1, figsize=(10, 5), sharex=True, sharey=True
             )
-
-            # -------- All speeds --------
-            H, xedges, yedges = np.histogram2d(
-                np.concatenate(df["linPred"].values).reshape(-1),
-                np.concatenate(df["linTruePos"].values).reshape(-1),
-                bins=(nbins, nbins),
-                density=True,
-            )
-            if normalized:
-                with np.errstate(invalid="ignore"):
-                    H = H / H.max(axis=1, keepdims=True)
-            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-
-            ax_all = axes[0]
-            ax_all.set_xlim(0, 1)
-            ax_all.set_ylim(0, 1)
-            im = ax_all.imshow(
-                H,
-                extent=extent,
-                cmap="viridis",
-                interpolation="none",
-                origin="lower",
-                aspect="auto",
-            )
-            fig.colorbar(im, ax=ax_all)
-            ax_all.set_title("All speeds")
-
             # -------- Fast speeds --------
             # Assumes "speedMask" is stored per row in the df
             linPred_fast = []
             linTrue_fast = []
             for _, row in df.iterrows():
-                mask = row["speedMask"]
+                # get speed_mask from training Mouse_Results object
+                mouse_val = row["mouse"]
+                mouse_manipe = row["manipe"]
+                speed_mask = (
+                    self.results_df.query(
+                        "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
+                    )["results"]
+                    .values[0]
+                    .data_helper[str(winMS)]
+                    .fullBehavior["Times"]["speedFilter"]
+                    .flatten()[row["posIndex_NN"]]
+                )
+
+                if phase == "training":
+                    # remove the last bit that is actually not training
+                    real_train = (
+                        self.results_df.query(
+                            "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
+                        )["results"]
+                        .values[0]
+                        .data_helper[str(winMS)]
+                        .fullBehavior["Times"]["trainEpochs"]
+                    )
+
+                    epochMask = inEpochsMask(row["timeNN"], real_train)
+                else:
+                    epochMask = np.ones_like(row["timeNN"], dtype=bool)
+
+                mask = speed_mask & epochMask
+
                 linPred_fast.append(row["linPred"][mask])
                 linTrue_fast.append(row["linTruePos"][mask])
 
@@ -2687,11 +2734,11 @@ class Results_Loader:
                         H = H / H.max(axis=1, keepdims=True)
                 extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
 
-                ax_fast = axes[1]
+                ax_fast = axes[0]
                 ax_fast.set_xlim(0, 1)
                 ax_fast.set_ylim(0, 1)
                 im = ax_fast.imshow(
-                    H,
+                    H.T,
                     extent=extent,
                     cmap="viridis",
                     interpolation="none",
@@ -2699,7 +2746,70 @@ class Results_Loader:
                     aspect="auto",
                 )
                 fig.colorbar(im, ax=ax_fast)
-                ax_fast.set_title("Fast speeds")
+                ax_fast.set_title("Fast speeds only")
+
+            # -------- Slow speeds --------
+            # Assumes "speedMask" is stored per row in the df
+            linPred = []
+            linTrue = []
+            for _, row in df.iterrows():
+                # get speed_mask from training Mouse_Results object
+                mouse_val = row["mouse"]
+                mouse_manipe = row["manipe"]
+                speed_mask = (
+                    self.results_df.query(
+                        "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
+                    )["results"]
+                    .values[0]
+                    .data_helper[str(winMS)]
+                    .fullBehavior["Times"]["speedFilter"]
+                    .flatten()[row["posIndex_NN"]]
+                )
+
+                if phase == "training":
+                    # remove the last bit that is actually not training
+                    real_train = (
+                        self.results_df.query(
+                            "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
+                        )["results"]
+                        .values[0]
+                        .data_helper[str(winMS)]
+                        .fullBehavior["Times"]["trainEpochs"]
+                    )
+
+                    epochMask = inEpochsMask(row["timeNN"], real_train)
+                else:
+                    epochMask = np.ones_like(row["timeNN"], dtype=bool)
+
+                mask = ~speed_mask & epochMask
+
+                linPred.append(row["linPred"][mask])
+                linTrue.append(row["linTruePos"][mask])
+
+            H, xedges, yedges = np.histogram2d(
+                np.concatenate(linPred).reshape(-1),
+                np.concatenate(linTrue).reshape(-1),
+                bins=(nbins, nbins),
+                density=True,
+            )
+            if normalized:
+                with np.errstate(invalid="ignore"):
+                    H = H / H.max(axis=1, keepdims=True)
+            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+            ax_all = axes[1]
+            ax_all.set_xlim(0, 1)
+            ax_all.set_ylim(0, 1)
+            im = ax_all.imshow(
+                H.T,
+                extent=extent,
+                cmap="viridis",
+                interpolation="none",
+                origin="lower",
+                aspect="auto",
+            )
+            fig.colorbar(im, ax=ax_all)
+            ax_all.set_title("Slow speeds only")
 
             # -------- Labels and layout --------
             fig.suptitle(f"{nameExp} | Phase: {phase} | winMS: {winMS}")
@@ -4594,6 +4704,946 @@ class Results_Loader:
         if show:
             plt.show()
         plt.close(fig)
+
+    def plot_ann_pred_by_stride_and_phase(
+        self,
+        phase_list=None,
+        stride_list=None,
+        winMS_list=None,
+        folder=None,
+        show=False,
+    ):
+        # --- Filter relevant rows first ---
+        df = self.results_df.copy()
+        if phase_list is not None:
+            phase_list = phase_list if isinstance(phase_list, list) else [phase_list]
+            df = df[df["phase"].isin(phase_list)]
+        if stride_list is not None:
+            stride_list = (
+                stride_list if isinstance(stride_list, list) else [stride_list]
+            )
+            df = df[df["stride"].isin(stride_list)]
+        if winMS_list is not None:
+            winMS_list = winMS_list if isinstance(winMS_list, list) else [winMS_list]
+            winMS_list = [int(w) for w in winMS_list]
+            df = df[df["winMS"].astype(int).isin(winMS_list)]
+
+        # --- helper to get speed mask from training phase ---
+        def get_speed_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            return (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["speedFilter"]
+                .flatten()[row.posIndex_NN]
+            )
+
+        # --- helper to get true training mask ---
+        def get_true_train_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            train_mask = (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["trainEpochs"]
+            )
+            return inEpochsMask(row.timeNN, train_mask)
+
+        # --- compute mean errors ---
+        errors = []
+        for (mouse, phase, winMS, stride), group in df.groupby(
+            ["mouse_manipe", "phase", "winMS", "stride"]
+        ):
+            # Build mask (vector of booleans, same length as group)
+            speed_mask = group.apply(lambda r: get_speed_mask(r, df), axis=1)
+            mask = np.array(speed_mask.tolist(), dtype=bool)
+
+            if phase == "training":
+                train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
+                mask = mask & np.array(train_mask.tolist(), dtype=bool)
+
+            lin_true = np.array(group["linTruePos"].tolist())[mask]
+            lin_pred = np.array(group["linPred"].tolist())[mask]
+
+            if len(lin_true) > 0:
+                mean_err = np.mean(np.abs(lin_true - lin_pred))
+                errors.append([mouse, phase, winMS, stride, mean_err])
+
+        err_df = pd.DataFrame(
+            errors, columns=["mouse_manipe", "phase", "winMS", "stride", "mean_error"]
+        )
+
+        fig, ax = plt.subplots()
+        # Draw boxplot
+        sns.boxplot(
+            data=err_df,
+            x="stride",
+            y="mean_error",
+            hue="phase",
+            showcaps=False,
+            showfliers=False,
+            order=stride_list if stride_list is not None else ["1", "2", "4"],
+            hue_order=phase_list if phase_list is not None else ["training", "pre"],
+            ax=ax,
+        )
+
+        # Draw scatter
+        strip = sns.stripplot(
+            data=err_df,
+            x="stride",
+            y="mean_error",
+            hue="phase",
+            dodge=True,
+            marker="o",
+            linewidth=1,
+            edgecolor="k",
+            alpha=0.7,
+            order=stride_list if stride_list is not None else ["1", "2", "4"],
+            hue_order=phase_list if phase_list is not None else ["training", "pre"],
+            ax=ax,
+        )
+
+        # Now connect corresponding dots across phases
+        # Extract positions from the scatter artists
+        paths = strip.collections  # one PathCollection per hue per x
+
+        # Build a lookup: (stride, phase) -> list of (x, y) coords
+        coords = {}
+        x_ticks = stride_list if stride_list is not None else ["1", "2", "4"]
+        phases = phase_list if phase_list is not None else ["training", "pre"]
+        n_hues = len(phases)
+
+        for i, (stride, phase) in enumerate([(s, p) for s in x_ticks for p in phases]):
+            coll = paths[i]
+            offsets = coll.get_offsets()
+            coords[(stride, phase)] = offsets
+            # --- connect dots ---
+        if len(phase_list) > 1:
+            # case 1: connect across phases
+            for (mouse, winMS, stride), sub in err_df.groupby(
+                ["mouse_manipe", "winMS", "stride"]
+            ):
+                if set(sub["phase"]) >= set(phase_list):  # both phases present
+                    pts = []
+                    for _, row in sub.iterrows():
+                        stride_val = str(row["stride"])
+                        phase_val = row["phase"]
+                        arr = coords[(stride_val, phase_val)]
+                        idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                        pts.append(arr[idx])
+                    if len(pts) == len(phase_list):
+                        ax.plot(
+                            [p[0] for p in pts],
+                            [p[1] for p in pts],
+                            color="gray",
+                            alpha=0.6,
+                            linewidth=1,
+                        )
+
+        else:
+            # case 2: connect across strides (same mouse+winMS, one phase only)
+            phase = phase_list[0]
+            for (mouse, winMS), sub in err_df.query("phase == @phase").groupby(
+                ["mouse_manipe", "winMS"]
+            ):
+                pts = []
+                for _, row in sub.iterrows():
+                    stride_val = str(row["stride"])
+                    arr = coords[(stride_val, phase)]
+                    idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                    pts.append(arr[idx])
+                if len(pts) > 1:
+                    pts = sorted(pts, key=lambda x: x[0])  # sort by x-position (stride)
+                    ax.plot(
+                        [p[0] for p in pts],
+                        [p[1] for p in pts],
+                        color="gray",
+                        alpha=0.6,
+                        linewidth=1,
+                    )
+        # Now loop over each mouse/winMS/stride and connect
+        for (mouse, winMS, stride), sub in err_df.groupby(
+            ["mouse_manipe", "winMS", "stride"]
+        ):
+            if len(sub) == 2:  # both phases present
+                pts = []
+                for _, row in sub.iterrows():
+                    stride_val = str(row["stride"])
+                    phase_val = row["phase"]
+                    # find closest point (match y)
+                    arr = coords[(stride_val, phase_val)]
+                    idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                    pts.append(arr[idx])
+                if len(pts) == 2:
+                    ax.plot(
+                        [pts[0][0], pts[1][0]],
+                        [pts[0][1], pts[1][1]],
+                        color="gray",
+                        alpha=0.6,
+                        linewidth=1,
+                    )
+
+        # --- outlier labeling ---
+        df_phase = err_df.copy()
+        df_phase = df_phase.rename(columns={"mouse_manipe": "mouse"})
+        df_metric = df_phase[["stride", "mouse", "mean_error"]].dropna()
+
+        for stride in stride_list:
+            vals = df_metric[df_metric["stride"] == stride]["mean_error"].dropna()
+            if vals.empty:
+                continue
+            fliers = [y for stat in boxplot_stats(vals) for y in stat["fliers"]]
+            for outlier in fliers:
+                outlier_rows = df_metric[
+                    (df_metric["stride"] == stride)
+                    & (df_metric["mean_error"] == outlier)
+                ]
+                for _, row in outlier_rows.iterrows():
+                    x = stride_list.index(stride)
+                    ax.annotate(
+                        row["mouse"],
+                        xy=(x, row["mean_error"]),
+                        xytext=(6, 6),
+                        textcoords="offset points",
+                        fontsize=10,
+                        color="red",
+                    )
+
+        plt.xlabel("Stride")
+        plt.ylabel("Mean Linear Error")
+        plt.title("Mean LinError (Pred vs True) filtered by speed_mask")
+        plt.legend(title="Dataset")
+        plt.tight_layout()
+        if folder is not None:
+            plt.savefig(
+                os.path.join(folder, "linError_by_stride_and_phase.png"), dpi=150
+            )
+            plt.savefig(os.path.join(folder, "linError_by_stride_and_phase.svg"))
+        if show:
+            plt.show()
+
+    def plot_ann_pred_by_stride_and_winMS(
+        self,
+        phase_list=None,
+        stride_list=None,
+        winMS_list=None,
+        folder=None,
+        show=False,
+    ):
+        # --- Filter relevant rows first ---
+        df = self.results_df.copy()
+        if phase_list is not None:
+            phase_list = phase_list if isinstance(phase_list, list) else [phase_list]
+            df = df[df["phase"].isin(phase_list)]
+        else:
+            phase_list = sorted(df["phase"].unique().tolist())
+        if stride_list is not None:
+            stride_list = (
+                stride_list if isinstance(stride_list, list) else [stride_list]
+            )
+            df = df[df["stride"].isin(stride_list)]
+        else:
+            stride_list = sorted(df["stride"].unique().tolist())
+        if winMS_list is not None:
+            winMS_list = winMS_list if isinstance(winMS_list, list) else [winMS_list]
+            winMS_list = [int(w) for w in winMS_list]
+            df = df[df["winMS"].astype(int).isin(winMS_list)]
+        else:
+            winMS_list = sorted(df["winMS"].astype(int).unique().tolist())
+
+        # --- helper to get speed mask from training phase ---
+        def get_speed_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            return (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["speedFilter"]
+                .flatten()[row.posIndex_NN]
+            )
+
+        # --- helper to get true training mask ---
+        def get_true_train_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            train_mask = (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["trainEpochs"]
+            )
+            return inEpochsMask(row.timeNN, train_mask)
+
+        # --- compute mean errors ---
+        errors = []
+        for (mouse, phase, winMS, stride), group in df.groupby(
+            ["mouse_manipe", "phase", "winMS", "stride"]
+        ):
+            # Build mask (vector of booleans, same length as group)
+            speed_mask = group.apply(lambda r: get_speed_mask(r, df), axis=1)
+            mask = np.array(speed_mask.tolist(), dtype=bool)
+
+            if phase == "training":
+                train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
+                mask = mask & np.array(train_mask.tolist(), dtype=bool)
+
+            lin_true = np.array(group["linTruePos"].tolist())[mask]
+            lin_pred = np.array(group["linPred"].tolist())[mask]
+
+            if len(lin_true) > 0:
+                mean_err = np.mean(np.abs(lin_true - lin_pred))
+                errors.append([mouse, phase, winMS, stride, mean_err])
+
+        err_df = pd.DataFrame(
+            errors, columns=["mouse_manipe", "phase", "winMS", "stride", "mean_error"]
+        )
+
+        fig, ax = plt.subplots()
+        # Draw boxplot
+        sns.boxplot(
+            data=err_df,
+            x="stride",
+            y="mean_error",
+            hue="winMS",
+            showcaps=False,
+            showfliers=False,
+            order=stride_list if stride_list is not None else ["1", "2", "4"],
+            hue_order=winMS_list if winMS_list is not None else ["36", "108", "252"],
+            ax=ax,
+        )
+
+        # Draw scatter
+        strip = sns.stripplot(
+            data=err_df,
+            x="stride",
+            y="mean_error",
+            hue="winMS",
+            dodge=True,
+            marker="o",
+            linewidth=1,
+            edgecolor="k",
+            alpha=0.7,
+            order=stride_list if stride_list is not None else ["1", "2", "4"],
+            hue_order=winMS_list if winMS_list is not None else ["36", "108", "252"],
+            ax=ax,
+        )
+
+        # Now connect corresponding dots across winMSs
+        # Extract positions from the scatter artists
+        paths = strip.collections  # one PathCollection per hue per x
+
+        # Build a lookup: (stride, winMS) -> list of (x, y) coords
+        coords = {}
+        x_ticks = stride_list if stride_list is not None else ["1", "2", "4"]
+        winMSs = winMS_list if winMS_list is not None else ["36", "108", "252"]
+        n_hues = len(winMSs)
+
+        for i, (stride, winMS) in enumerate([(s, p) for s in x_ticks for p in winMSs]):
+            coll = paths[i]
+            offsets = coll.get_offsets()
+            coords[(stride, winMS)] = offsets
+            # --- connect dots ---
+        if len(winMS_list) > 1:
+            # case 1: connect across winMSs
+            for (mouse, phase, stride), sub in err_df.groupby(
+                ["mouse_manipe", "phase", "stride"]
+            ):
+                if set(sub["winMS"]) >= set(winMS_list):  # both winMSs present
+                    pts = []
+                    for _, row in sub.iterrows():
+                        stride_val = str(row["stride"])
+                        winMS_val = row["winMS"]
+                        arr = coords[(stride_val, winMS_val)]
+                        idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                        pts.append(arr[idx])
+                    if len(pts) == len(winMS_list):
+                        ax.plot(
+                            [p[0] for p in pts],
+                            [p[1] for p in pts],
+                            color="gray",
+                            alpha=0.6,
+                            linewidth=1,
+                        )
+
+        else:
+            # case 2: connect across strides (same mouse+winMS, one winMS only)
+            winMS = winMS_list[0]
+            for (mouse, phase), sub in err_df.query("winMS == @winMS").groupby(
+                ["mouse_manipe", "phase"]
+            ):
+                pts = []
+                for _, row in sub.iterrows():
+                    stride_val = str(row["stride"])
+                    arr = coords[(stride_val, winMS)]
+                    idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                    pts.append(arr[idx])
+                if len(pts) > 1:
+                    pts = sorted(pts, key=lambda x: x[0])  # sort by x-position (stride)
+                    ax.plot(
+                        [p[0] for p in pts],
+                        [p[1] for p in pts],
+                        color="gray",
+                        alpha=0.6,
+                        linewidth=1,
+                    )
+        # Now loop over each mouse/phase/stride and connect
+        for (mouse, phase, stride), sub in err_df.groupby(
+            ["mouse_manipe", "phase", "stride"]
+        ):
+            if len(sub) == 2:  # both winMSs present
+                pts = []
+                for _, row in sub.iterrows():
+                    stride_val = str(row["stride"])
+                    winMS_val = row["winMS"]
+                    # find closest point (match y)
+                    arr = coords[(stride_val, winMS_val)]
+                    idx = np.argmin(np.abs(arr[:, 1] - row["mean_error"]))
+                    pts.append(arr[idx])
+                if len(pts) == 2:
+                    ax.plot(
+                        [pts[0][0], pts[1][0]],
+                        [pts[0][1], pts[1][1]],
+                        color="gray",
+                        alpha=0.6,
+                        linewidth=1,
+                    )
+
+        # --- outlier labeling ---
+        df_winMS = err_df.copy()
+        df_winMS = df_winMS.rename(columns={"mouse_manipe": "mouse"})
+        df_metric = df_winMS[["stride", "mouse", "mean_error"]].dropna()
+
+        # for stride in stride_list:
+        #     vals = df_metric[df_metric["stride"] == stride]["mean_error"].dropna()
+        #     if vals.empty:
+        #         continue
+        #     fliers = [y for stat in boxplot_stats(vals) for y in stat["fliers"]]
+        #     for outlier in fliers:
+        #         outlier_rows = df_metric[
+        #             (df_metric["stride"] == stride)
+        #             & (df_metric["mean_error"] == outlier)
+        #         ]
+        #         for _, row in outlier_rows.iterrows():
+        #             x = stride_list.index(stride)
+        #             ax.annotate(
+        #                 row["mouse"],
+        #                 xy=(x, row["mean_error"]),
+        #                 xytext=(6, 6),
+        #                 textcoords="offset points",
+        #                 fontsize=10,
+        #                 color="red",
+        #             )
+
+        plt.xlabel("Stride")
+        plt.ylabel("Mean Linear Error")
+        plt.title("Mean LinError (Pred vs True) filtered by speed_mask")
+        plt.legend(title="Window Size (ms)")
+        plt.tight_layout()
+        if folder is not None:
+            plt.savefig(
+                os.path.join(folder, "linError_by_stride_and_winMS.png"), dpi=150
+            )
+            plt.savefig(os.path.join(folder, "linError_by_stride_and_winMS.svg"))
+        if show:
+            plt.show()
+
+    def plot_ann_pred_by_phase_and_winMS(
+        self,
+        phase_list=None,
+        stride_list=None,
+        winMS_list=None,
+        folder=None,
+        show=False,
+        add_bayes=False,
+        bayes_nameExp="new_4d_GaussianHeatMap_LinearLoss_Transformer",
+        ax=None,
+        entropy_thresh_pct=None,
+        chance_level=None,
+        palette="Set1",
+        alpha=1,
+        by="entropy",
+    ):
+        # --- Filter relevant rows first ---
+        df = self.results_df.copy()
+        if phase_list is not None:
+            tmp_phase_list = (
+                phase_list if isinstance(phase_list, list) else [phase_list]
+            )
+            if "training" not in tmp_phase_list:
+                tmp_phase_list = ["training"] + tmp_phase_list
+            df = df[df["phase"].isin(tmp_phase_list)]
+        else:
+            phase_list = sorted(df["phase"].unique().tolist())
+        if stride_list is not None:
+            stride_list = (
+                stride_list if isinstance(stride_list, list) else [stride_list]
+            )
+            df = df[df["stride"].isin(stride_list)]
+        else:
+            stride_list = sorted(df["stride"].unique().tolist())
+
+        if len(stride_list) > 1:
+            raise ValueError(
+                "Warning: Multiple strides found. Consider filtering by a single stride for clarity."
+            )
+
+        if winMS_list is not None:
+            winMS_list = winMS_list if isinstance(winMS_list, list) else [winMS_list]
+            winMS_list = [int(w) for w in winMS_list]
+            df = df[df["winMS"].astype(int).isin(winMS_list)]
+        else:
+            winMS_list = sorted(df["winMS"].astype(int).unique().tolist())
+
+        if add_bayes:
+            # Filter for bayes_nameExp
+            bayes_df = self.results_df[
+                self.results_df["nameExp"] == bayes_nameExp
+            ].copy()
+
+        # --- helper to get speed mask from training phase ---
+        def get_speed_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            return (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["speedFilter"]
+                .flatten()
+                .reshape(-1)[row.posIndex_NN]
+                .flatten()
+            )
+
+        def get_entropy_mask(row, df, thresh_pct):
+            good_row = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )
+            res = good_row["results"]
+            if len(res) == 0:
+                return None
+            speed_mask = (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["speedFilter"]
+                .flatten()
+                .reshape(-1)[good_row["posIndex_NN"].iloc[0]]
+                .flatten()
+            )
+            if by == "entropy":
+                thresh = np.percentile(
+                    good_row["predLoss"].iloc[0][speed_mask], thresh_pct
+                )
+                return (row["predLoss"] <= thresh).flatten()
+            elif by == "maxp":
+                with open(
+                    os.path.join(
+                        row["results"].projectPath.experimentPath,
+                        "..",
+                        row["nameExp"],
+                        "results",
+                        str(row["winMS"]),
+                        f"decoding_results_training.pkl",
+                    ),
+                    "rb",
+                ) as f:
+                    decoding_results = pickle.load(f)
+                    thresh = np.percentile(decoding_results["maxp"], 100 - thresh_pct)
+                with open(
+                    os.path.join(
+                        row["results"].projectPath.experimentPath,
+                        "..",
+                        row["nameExp"],
+                        "results",
+                        str(row["winMS"]),
+                        f"decoding_results_{row['phase']}.pkl",
+                    ),
+                    "rb",
+                ) as f:
+                    decoding_results = pickle.load(f)
+                    maxp = decoding_results["maxp"]
+                    return (maxp >= thresh).flatten()
+
+        def get_speed_mask_bayes(row, df):
+            with open(
+                os.path.join(
+                    row["results"].projectPath.experimentPath,
+                    "..",
+                    bayes_nameExp,
+                    "results",
+                    str(row["winMS"]),
+                    f"bayes_decoding_results_{row['phase']}.pkl",
+                ),
+                "rb",
+            ) as f:
+                decoding_results = pickle.load(f)
+            speed_mask = decoding_results["speed_mask"].flatten()
+            phase_value = row["phase"]
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == @phase_value "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["posIndex_NN"]
+            del decoding_results
+            return speed_mask[res.iloc[0]].flatten()
+
+        def get_true_train_mask_bayes(row, df):
+            with open(
+                os.path.join(
+                    row["results"].projectPath.experimentPath,
+                    "..",
+                    bayes_nameExp,
+                    "results",
+                    str(row["winMS"]),
+                    f"bayes_decoding_results_training.pkl",
+                ),
+                "rb",
+            ) as f:
+                decoding_results = pickle.load(f)
+            times = decoding_results["times"].reshape(-1)
+            trainEpochs = (
+                row["results"]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["trainEpochs"]
+            )
+            del decoding_results
+            return inEpochsMask(times, trainEpochs).flatten()
+
+        # --- helper to get true training mask ---
+        def get_true_train_mask(row, df):
+            res = df.query(
+                "mouse_manipe == @row.mouse_manipe and phase == 'training' "
+                "and winMS == @row.winMS and stride == @row.stride"
+            )["results"]
+            if len(res) == 0:
+                return None
+            train_mask = (
+                res.iloc[0]
+                .data_helper[str(row.winMS)]
+                .fullBehavior["Times"]["trainEpochs"]
+            )
+            return inEpochsMask(row.timeNN, train_mask).flatten()
+
+        # --- compute median errors ---
+        errors = []
+        errors_filtered = []
+        bayes_errors = []
+
+        # Collect errors
+        for (mouse, phase, winMS, stride), group in df.groupby(
+            ["mouse_manipe", "phase", "winMS", "stride"]
+        ):
+            if phase not in phase_list or int(winMS) not in winMS_list:
+                continue
+            # Build mask
+            speed_mask = group.apply(lambda r: get_speed_mask(r, df), axis=1)
+            mask = np.array(speed_mask.tolist(), dtype=bool)
+
+            if phase == "training":
+                train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
+                mask = mask & np.array(train_mask.tolist(), dtype=bool)
+
+            lin_true = np.array(group["linTruePos"].tolist())[mask]
+            lin_pred = np.array(group["linPred"].tolist())[mask]
+
+            if len(lin_true) > 0:
+                median_err = np.median(np.abs(lin_true - lin_pred))
+                errors.append([mouse, phase, winMS, stride, median_err])
+
+            if entropy_thresh_pct is not None:
+                entropy_mask = group.apply(
+                    lambda r: get_entropy_mask(r, df, entropy_thresh_pct), axis=1
+                )
+                mask = mask & np.array(entropy_mask.tolist(), dtype=bool)
+                lin_true_filtered = np.array(group["linTruePos"].tolist())[mask]
+                lin_pred_filtered = np.array(group["linPred"].tolist())[mask]
+
+                if len(lin_true_filtered) > 0:
+                    median_err_filtered = np.median(
+                        np.abs(lin_true_filtered - lin_pred_filtered)
+                    )
+                    errors_filtered.append(
+                        [mouse, phase, winMS, stride, median_err_filtered]
+                    )
+
+            if add_bayes:
+                # Build mask
+                bayes_df["stride"] = np.unique(df["stride"].values)[0]
+                speed_mask = group.apply(
+                    lambda r: get_speed_mask_bayes(r, bayes_df), axis=1
+                )
+                mask = np.array(speed_mask.tolist(), dtype=bool)
+
+                if phase == "training":
+                    train_mask = group.apply(
+                        lambda r: get_true_train_mask_bayes(r, bayes_df), axis=1
+                    )
+                    mask = mask & np.array(train_mask.tolist(), dtype=bool)
+                bayes_pred = np.array(
+                    bayes_df[
+                        (bayes_df["mouse_manipe"] == mouse)
+                        & (bayes_df["phase"] == phase)
+                        & (bayes_df["winMS"] == winMS)
+                    ]["linPred"].tolist()
+                )[mask]
+                bayes_true = np.array(
+                    bayes_df[
+                        (bayes_df["mouse_manipe"] == mouse)
+                        & (bayes_df["phase"] == phase)
+                        & (bayes_df["winMS"] == winMS)
+                    ]["linTruePos"].tolist()
+                )[mask]
+                if len(lin_true) > 0:
+                    bayes_median_err = np.median(np.abs(bayes_true - bayes_pred))
+                    bayes_errors.append([mouse, phase, winMS, stride, bayes_median_err])
+
+        # Create DataFrames
+        err_df = pd.DataFrame(
+            errors, columns=["mouse_manipe", "phase", "winMS", "stride", "median_error"]
+        )
+
+        if add_bayes:
+            bayes_err_df = pd.DataFrame(
+                bayes_errors,
+                columns=["mouse_manipe", "phase", "winMS", "stride", "median_error"],
+            )
+        if entropy_thresh_pct is not None:
+            err_df_filtered = pd.DataFrame(
+                errors_filtered,
+                columns=[
+                    "mouse_manipe",
+                    "phase",
+                    "winMS",
+                    "stride",
+                    "median_error_filtered",
+                ],
+            )
+            err_df = err_df.merge(
+                err_df_filtered[
+                    [
+                        "mouse_manipe",
+                        "phase",
+                        "winMS",
+                        "stride",
+                        "median_error_filtered",
+                    ]
+                ],
+                on=["mouse_manipe", "phase", "winMS", "stride"],
+                how="left",
+            )
+
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        # --- ANN plots ---
+        sns.boxplot(
+            data=err_df,
+            x="phase",
+            y="median_error",
+            hue="winMS",
+            showcaps=False,
+            showfliers=False,
+            order=phase_list
+            if phase_list is not None
+            else ["training", "pre", "cond", "post"],
+            hue_order=winMS_list if winMS_list is not None else ["36", "108", "252"],
+            ax=ax,
+            palette=palette,
+            boxprops=dict(alpha=alpha),
+        )
+
+        ann_strip = sns.stripplot(
+            data=err_df,
+            x="phase",
+            y="median_error",
+            hue="winMS",
+            dodge=True,
+            marker="o",
+            linewidth=1,
+            edgecolor="k",
+            order=phase_list
+            if phase_list is not None
+            else ["training", "pre", "cond", "post"],
+            hue_order=winMS_list if winMS_list is not None else ["36", "108", "252"],
+            ax=ax,
+            palette=palette,
+            alpha=0.7 * alpha,
+        )
+
+        # --- Bayesian plots ---
+        if add_bayes:
+            sns.boxplot(
+                data=bayes_err_df,
+                x="phase",
+                y="median_error",
+                hue="winMS",
+                showcaps=False,
+                showfliers=False,
+                order=phase_list
+                if phase_list is not None
+                else ["training", "pre", "cond", "post"],
+                hue_order=winMS_list
+                if winMS_list is not None
+                else ["36", "108", "252"],
+                ax=ax,
+                palette="Set1",
+                boxprops=dict(alpha=0.3),
+            )
+
+            bayes_strip = sns.stripplot(
+                data=bayes_err_df,
+                x="phase",
+                y="median_error",
+                hue="winMS",
+                dodge=True,
+                marker="D",
+                linewidth=1,
+                edgecolor="k",
+                alpha=0.7,
+                order=phase_list
+                if phase_list is not None
+                else ["training", "pre", "cond", "post"],
+                hue_order=winMS_list
+                if winMS_list is not None
+                else ["36", "108", "252"],
+                ax=ax,
+                palette="Set1",
+            )
+
+        # --- Connect points for ANN and Bayes ---
+        def connect_points(strip, data_df, color="gray"):
+            paths = strip.collections
+            x_ticks = (
+                phase_list
+                if phase_list is not None
+                else ["training", "pre", "cond", "post"]
+            )
+            winMSs = winMS_list if winMS_list is not None else ["36", "108", "252"]
+
+            coords = {}
+            for i, (phase, winMS) in enumerate(
+                [(s, p) for s in x_ticks for p in winMSs]
+            ):
+                coll = paths[i]
+                offsets = coll.get_offsets()
+                coords[(phase, winMS)] = offsets
+
+            # Connect across phases or winMSs
+            if len(winMSs) > 1:
+                for (mouse, phase, _), sub in data_df.groupby(
+                    ["mouse_manipe", "phase", "phase"]
+                ):
+                    if set(sub["winMS"]) >= set(winMSs):
+                        pts = []
+                        for _, row in sub.iterrows():
+                            phase_val = str(row["phase"])
+                            winMS_val = row["winMS"]
+                            arr = coords[(phase_val, winMS_val)]
+                            idx = np.argmin(np.abs(arr[:, 1] - row["median_error"]))
+                            pts.append(arr[idx])
+                        if len(pts) == len(winMSs):
+                            ax.plot(
+                                [p[0] for p in pts],
+                                [p[1] for p in pts],
+                                color=color,
+                                alpha=0.6,
+                                linewidth=1,
+                            )
+            else:
+                winMS = winMSs[0]
+                for (mouse, phase), sub in data_df.query("winMS == @winMS").groupby(
+                    ["mouse_manipe", "phase"]
+                ):
+                    pts = []
+                    for _, row in sub.iterrows():
+                        phase_val = str(row["phase"])
+                        arr = coords[(phase_val, winMS)]
+                        idx = np.argmin(np.abs(arr[:, 1] - row["median_error"]))
+                        pts.append(arr[idx])
+                    if len(pts) > 1:
+                        pts = sorted(pts, key=lambda x: x[0])
+                        ax.plot(
+                            [p[0] for p in pts],
+                            [p[1] for p in pts],
+                            color=color,
+                            alpha=0.6,
+                            linewidth=1,
+                        )
+
+        connect_points(ann_strip, err_df, color="gray")
+        if add_bayes:
+            connect_points(bayes_strip, bayes_err_df, color="blue")
+
+        # --- Outlier labeling (ANN only) ---
+        df_winMS = err_df.copy().rename(columns={"mouse_manipe": "mouse"})
+        df_metric = df_winMS[["phase", "mouse", "median_error"]].dropna()
+
+        for phase in phase_list:
+            vals = df_metric[df_metric["phase"] == phase]["median_error"].dropna()
+            if vals.empty:
+                continue
+            fliers = [y for stat in boxplot_stats(vals) for y in stat["fliers"]]
+            for outlier in fliers:
+                outlier_rows = df_metric[
+                    (df_metric["phase"] == phase)
+                    & (df_metric["median_error"] == outlier)
+                ]
+                for _, row in outlier_rows.iterrows():
+                    x = phase_list.index(phase)
+                    ax.annotate(
+                        row["mouse"],
+                        xy=(x, row["median_error"]),
+                        xytext=(6, 6),
+                        textcoords="offset points",
+                        fontsize=10,
+                        color="red",
+                    )
+
+        if chance_level is not None:
+            ax.axhline(
+                y=chance_level,
+                color="black",
+                linestyle="--",
+                label="Chance Level",
+                linewidth=2.5,
+            )
+        # change ylim to 0.5 at least
+        if ax.get_ylim()[1] < 0.5:
+            ax.set_ylim(0, max(0.5, 1.15 * ax.get_ylim()[1]))
+
+        ax.set_xlabel("Phase")
+        ax.set_ylabel("Median Linear Error")
+        plt.title("Median Linear Error (ANN vs Bayes)")
+        plt.legend(title="Window Size (ms)")
+        plt.tight_layout()
+        if folder is not None:
+            plt.savefig(
+                os.path.join(folder, "linError_by_phase_and_winMS.png"), dpi=150
+            )
+            plt.savefig(os.path.join(folder, "linError_by_phase_and_winMS.svg"))
+        if show:
+            plt.show()
+        plt.close()
+
+        return err_df
 
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):
