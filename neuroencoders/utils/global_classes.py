@@ -5,6 +5,7 @@ It also provides methods to compute the true target of interest, the distance to
 """
 
 # Load libs
+import copy
 import json
 
 # Load custom code
@@ -19,6 +20,7 @@ import dill as pickle
 # import matplotlib as mplt
 # mplt.use("TkAgg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import tables
@@ -27,6 +29,7 @@ from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
+from neuroencoders.utils.management import get_git_info
 
 MAZE_COORDS = np.array(
     [
@@ -44,15 +47,15 @@ MAZE_COORDS = np.array(
 ZONEDEF = np.array(
     [
         [[0, 0.35], [0, 0.43]],  # shock
-        [[0.65, 1], [0, 0.43]],  # safe
-        [[0.35, 0.65], [0.75, 1]],  # center
         [[0, 0.35], [0.43, 1]],  # shock center
+        [[0.35, 0.65], [0.75, 1]],  # center
         [[0.65, 1], [0.43, 1]],  # safe center
+        [[0.65, 1], [0, 0.43]],  # safe
     ]
 )
-ZONELABELS = ["Shock", "Safe", "Center", "ShockCenter", "SafeCenter"]
+ZONELABELS = ["Shock", "ShockCenter", "Center", "SafeCenter", "Safe"]
 
-ZONE_COLORS = ["r", "b", "k", "m", "c"]
+ZONE_COLORS = ["r", "m", "k", "c", "b"]
 
 
 class Project:
@@ -359,9 +362,12 @@ class DataHelper(Project):
             warn(
                 "old_positions already exist,meaning you already ran the true target ! beware."
             )
+            self.positions = self.old_positions
 
         if not hasattr(self, "l_function") and l_function is None:
             self.l_function = l_function
+        if hasattr(self, "l_function") and l_function is None:
+            l_function = self.l_function
 
         self.get_maze_limits(show=False)
 
@@ -433,6 +439,30 @@ class DataHelper(Project):
             positions = np.concatenate(
                 (positions.reshape(-1, 2), self.head_direction.reshape(-1, 1)), axis=1
             )
+        elif self.target.lower() == "posanddirectionandthigmo":
+            _, positions = l_function(self.positions)
+            self.direction = self._get_traveling_direction(positions)
+            thigmo = self.dist2wall(self.positions, show=show)
+            positions = np.concatenate(
+                (
+                    self.positions.reshape(-1, 2),
+                    self.direction.reshape(-1, 1),
+                    thigmo.reshape(-1, 1),
+                ),
+                axis=1,
+            )
+        elif self.target.lower() == "posandheaddirectionandthigmo":
+            positions = self.positions
+            self.head_direction = self._get_head_direction(self.positions)
+            thigmo = self.dist2wall(self.positions, show=show)
+            positions = np.concatenate(
+                (
+                    positions.reshape(-1, 2),
+                    self.head_direction.reshape(-1, 1),
+                    thigmo.reshape(-1, 1),
+                ),
+                axis=1,
+            )
         elif self.target.lower() == "posandspeed":
             positions = self.positions
             self.speed = self._get_speed(self.positions, interval=1 / (15))
@@ -457,10 +487,16 @@ class DataHelper(Project):
             )
 
         if show:
-            from importData.gui_elements import AnimatedPositionPlotter
+            from neuroencoders.importData.gui_elements import AnimatedPositionPlotter
+
+            data_helper = copy.deepcopy(self)
+            data_helper.old_positions = data_helper.positions
+            data_helper.positions = positions
+            data_helper.fullBehavior["old_positions"] = data_helper.old_positions
+            data_helper.fullBehavior["Positions"] = positions
 
             plotter = AnimatedPositionPlotter(
-                data_helper=self,
+                data_helper=data_helper,
                 trail_length=40,
                 l_function=l_function,
                 linear_position_mode=True,
@@ -539,7 +575,7 @@ class DataHelper(Project):
             plt.ylim(0, 1)
             plt.tight_layout()
             plt.title(f"Maze limits for {self.folder}")
-            plt.show()
+            plt.show(block=True)
         return (
             self.lower_x,
             self.upper_x,
@@ -876,6 +912,7 @@ class DataHelper(Project):
         if len(coords) == 3:
             x, y = zip(*coords)
             XYOutput = np.array([y, x])
+            plt.close(fig)
             return XYOutput
 
     def _transform_coordinates_and_image(
@@ -1053,7 +1090,7 @@ class DataHelper(Project):
         # Define zones
         self.ZoneEpochAligned = []
 
-        fig, ax = plt.subplots(figsize=(10, 10))
+        fig, ax = plt.subplots()
 
         ax.imshow(
             reference_image,
@@ -1091,6 +1128,118 @@ class DataHelper(Project):
         plt.tight_layout()
         plt.show()
 
+        return fig
+
+    def plot_maze_and_zones(self, savepath=None):
+        """Plot maze boundaries and forbidden zones"""
+        maze = np.array(MAZE_COORDS)
+        fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+        ax.plot(maze[:, 0], maze[:, 1], "k", alpha=0.5)
+
+        for i, zone in enumerate(ZONEDEF):
+            zone = np.array(zone)
+            poly = Rectangle(
+                (zone[0, 0], zone[1, 0]),
+                width=zone[0, 1] - zone[0, 0],
+                height=zone[1, 1] - zone[1, 0],
+                alpha=0.2,
+                color=ZONE_COLORS[i],
+                label=ZONELABELS[i],
+            )
+            ax.add_patch(poly)
+
+        # add a red line that goes from the start to the end of the maze in the center of the arms, with regular points plotted
+        linearized = np.array(
+            [
+                [0.17, 0],
+                [0.17, 0.4],
+                [0.17, 0.87],
+                [0.5, 0.87],
+                [0.83, 0.87],
+                [0.83, 0.4],
+                [0.83, 0],
+            ]
+        )
+        ax.plot(
+            linearized[:, 0],
+            linearized[:, 1],
+            "_-",
+            color="r",
+            alpha=0.5,
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+        )
+        # make the last marker an arrow pointing downards
+        ax.plot(
+            linearized[-1, 0],
+            linearized[-1, 1],
+            "v",
+            color="r",
+            alpha=0.8,
+            markersize=10,
+            markeredgewidth=10,
+        )
+
+        # make the ticks bigger
+        ax.tick_params(axis="both", which="major", labelsize=20)
+        # make the legend bigger
+        ax.legend(fontsize=20, loc="best", bbox_to_anchor=(0.3, 0.34), frameon=True)
+        if savepath is not None:
+            plt.savefig(savepath, dpi=300)
+        plt.show()
+        return fig
+
+    def plot_linearized_maze(self, savepath=None):
+        # now plot the maze all flattened, ie zone after the other on a flat line
+        fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+        old_start = (0, 0)
+        for i, zone in enumerate(ZONEDEF):
+            zone = np.array(zone)
+            poly = Rectangle(
+                old_start,
+                width=0.2,
+                height=0.35,
+                alpha=0.2,
+                color=ZONE_COLORS[i],
+                label=ZONELABELS[i],
+            )
+            old_start = (old_start[0] + 0.2, 0)
+            ax.add_patch(poly)
+
+        # plot the red line
+        linearized = np.linspace(0, 1, 7)
+        ax.plot(
+            linearized,
+            np.zeros_like(linearized) + 0.17,
+            "|-",
+            color="r",
+            alpha=0.5,
+            label="Linearization",
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+        )
+        ax.plot(
+            linearized[-1],
+            0.17,
+            ">",
+            color="r",
+            alpha=0.8,
+            markersize=10,
+            markeredgewidth=10,
+        )
+        ax.tick_params(axis="both", which="major", labelsize=20)
+
+        # make the y axis invisible
+        ax.set_yticks([])
+        # make the x ticks bigger
+        ax.tick_params(axis="x", which="major", labelsize=20)
+        ax.set_xlabel("Maze Linearized position", fontsize=20)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 0.35)
+        if savepath is not None:
+            plt.savefig(savepath, dpi=300)
         return fig
 
     def _get_traveling_direction(
@@ -1327,6 +1476,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1348,6 +1498,11 @@ class Params:
         Initialize all parameters from the helper object and set default values.
         This is where you want to modify or add any additional parameters.
         """
+        self.all_args = kwargs.get("all_args", None)
+        print(self.all_args)
+
+        self.mixed_loss = kwargs.get("mixed_loss", False)
+        self.git_info = get_git_info()
         self.nGroups = helper.nGroups()  # number of anatomical spiking groups
         self.dimOutput = helper.dim_output()  # dimension of what needs to be predicted
         self.originalDimOutput = (
@@ -1374,10 +1529,6 @@ class Params:
         ### from units encoder params
         # MOVED TO DECODE CONFIG
         self.validCluWindow = 0.0005
-        self.kernel = "epanechnikov"  # is not connected
-        self.bandwidth = 0.1
-        self.masking = 20
-
         ### full encoder params
         self.nFeatures = kwargs.pop("nFeatures", 64)
         self.isTransformer = (
@@ -1388,23 +1539,41 @@ class Params:
         self.nHeads = kwargs.pop(
             "nHeads", 8
         )  # number of attention heads in the transformer if used
+        self.project_transformer = kwargs.pop("project_transformer", False)
 
-        default_lstm_layers = 2 if not self.isTransformer else 4
+        default_lstm_layers = (
+            2 if not self.isTransformer else 4
+        )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
         self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
         self.ff_dim1 = kwargs.pop(
-            "ff_dim1", self.nFeatures * 2
+            "ff_dim1",
+            self.nFeatures * 2
+            if self.project_transformer
+            else self.nFeatures * self.nGroups * 2,
         )  # first fully connected layer in Transformer arch dimension
         self.ff_dim2 = (
             self.nFeatures
+            if self.project_transformer
+            else self.nFeatures * self.nGroups  # ie PositionalEncoding dimension!!!!
         )  # second fully connected layer in Transformer arch dimension
 
         # if using transformer, we need to set 2 other dense layers output (after the multihead attention blocks)
-        self.TransformerDenseSize1 = kwargs.pop("TransformerDense1", self.nFeatures * 8)
-        self.TransformerDenseSize2 = kwargs.pop("TransformerDense2", self.nFeatures * 4)
+        self.TransformerDenseSize1 = kwargs.pop(
+            "TransformerDense1",
+            self.nFeatures * 8
+            if self.project_transformer
+            else self.nFeatures * self.nGroups * 8,
+        )
+        self.TransformerDenseSize2 = kwargs.pop(
+            "TransformerDense2",
+            self.nFeatures * 4
+            if self.project_transformer
+            else self.nFeatures * self.nGroups * 4,
+        )
 
         self.nDenseLayers = kwargs.pop(
             "nDenseLayers", 2
@@ -1413,28 +1582,46 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0004]
+            "learningRates", [0.0003]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
 
-        self.lossActivation = None  # activation function for the loss layer
+        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
+        self.GaussianSigma = kwargs.pop(
+            "GaussianSigma", 0.025
+        )  # 1/44 ~= 0.023, so it should cover ~3 bins
+        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
+        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
 
+        self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
+
+        self.lossActivation = None  # activation function for the loss layer
+        self.featureActivation = kwargs.pop("featureActivation", None)
+
+        # TODO: put it in a function
         self.loss = kwargs.pop(
-            "loss", "mse"
+            "loss", "huber"
         )  # "mse" or "huber" or "msle" or "logcosh" or "mse_plus_msle"
         if self.target.lower() == "direction":
             self.loss = "binary_crossentropy"
 
         self.column_losses = {
-            "0": self.loss,
-            "1": "binary_crossentropy"
-            if "direction" in self.target.lower()
-            else "cyclic_mae",
+            "0": "cyclic_mae"
+            if "head" in self.target.lower()
+            else "binary_crossentropy",
+            "1": self.loss,
         }
+        self.heatmap_weight = kwargs.pop("heatmap_weight", 1.0)
+        self.others_weight = kwargs.pop("other_weight", 0.5)
+
         self.column_weights = (
-            {"0": 0.6, "1": 0.4} if "direction" in self.target.lower() else {}
+            {"0": 0.5, "1": 0.5} if "direction" in self.target.lower() else {}
         )
+        self.merge_columns = []
+        self.merge_losses = []
+        self.merge_weights = []
 
         if self.target.lower() == "posandheaddirectionandspeed":
             self.column_losses = {
@@ -1458,22 +1645,14 @@ class Params:
             "mutual_info_method", "shannon"
         )  # "skaggs" or "I_spike" or shannon or I_sec
 
-        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
-        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
-        self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.025
-        )  # 1/44 ~= 0.023, so it should cover ~3 bins
-        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
-        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
-
-        self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
-
         # self.transform = "log"  # "log" or "sqrt" or None
         self.transform_w_log = kwargs.pop(
             "transform_w_log", False
         )  # "log" or "sqrt" or None
-        self.delta = 0.4  # for the huber loss - roughly the random prediction threshold
-        self.alpha = 5
+        self.delta = (
+            0.01  # for the huber loss - roughly the random prediction threshold
+        )
+        self.alpha = 5  # for combined loss mse + msle
 
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
@@ -1599,6 +1778,24 @@ class SpatialConstraintsMixin:
         y_cent_tf = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
         self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
 
+    def get_spatial_config(self):
+        """Return spatial config for serialization"""
+        return {
+            "grid_size": self.grid_size,
+            "maze_params": self.maze_params,
+        }
+
+    def get_config(self):
+        """Return config for serialization"""
+        return self.get_spatial_config()
+
+    @classmethod
+    def from_config(self, config):
+        """Create instance from config"""
+        grid_size = config.get("grid_size", (45, 45))
+        maze_params = config.get("maze_params", None)
+        return self.__class__(grid_size=grid_size, maze_params=maze_params)
+
     def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
         """
         Extract maze boundaries from provided parameters or default coordinates.
@@ -1667,9 +1864,6 @@ class SpatialConstraintsMixin:
         )
 
         # identiy problematic zones
-        print(
-            f"Occupation map: {np.sum(occ == 0)} zero-occupation bins, {np.sum(occ[allowed_mask.astype(bool)] < zero_threshold)} low-density bins (below {zero_threshold:.4e}) in allowed zones."
-        )
         low_density = (occ < zero_threshold) & allowed_mask
 
         # Expand forbidden zones by 1 pixel
@@ -1684,10 +1878,6 @@ class SpatialConstraintsMixin:
         problematic_bins = low_density & expanded_forbidden
         forbid_mask = forbid_mask | problematic_bins  # Update forbidden mask
         occ[problematic_bins] = 0.0
-
-        print(
-            f"Weight map: Removed {np.sum(problematic_bins)} low-density bins adjacent to forbidden zones"
-        )
 
         self.update_allowed_mask(forbid_mask)
         return forbid_mask, occ

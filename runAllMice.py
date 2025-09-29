@@ -20,6 +20,7 @@ win_values = [0.504]  # only kept for new dataset
 win_values = [0.108, 0.252]
 win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
+win_values = [0.252, 0.108, 0.036]  # only kept for new dataset
 # Mice name
 mice_nb = []
 mice_nb = [
@@ -29,13 +30,19 @@ mice_nb = [
     "M1230_Novel",
     "M1230_Known",
     "M1162_MFB",
+    "M905",
 ]
 # mice_nb = ["M1199_PAG"]
-nameExp = "smallSigma_GaussianHeatMap_LinearLoss"
+# nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
+nameExp = "new_4d_GaussianHeatMap_LinearLoss"
 nbEpochs = str(200)
 run_ann = True
-target = "pos"
+target = "PosAndHeadDirectionAndThigmo"
 phase = "pre"
+useStridingFactor = True
+stridingFactor = 2
+if useStridingFactor:
+    nameExp = f"STRIDE_{stridingFactor}_{nameExp}"
 
 
 def check_memory_usage():
@@ -194,6 +201,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--early_stop",
             # "--transform_w_log",
             "--no-dense",
+            # "--mixed_loss",
+            # "--no_gaussian",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
@@ -201,6 +210,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--name", nameExp + "_Transformer"]
         if sleep:
             cmd_ann += ["--test_sleep"]
+        if useStridingFactor:
+            cmd_ann += ["--striding_factor", str(stridingFactor)]
 
         cmd_bayes = [
             "/usr/bin/env",
@@ -277,7 +288,7 @@ if __name__ == "__main__":
     redo = "--redo" in sys.argv
     rsync = "--rsync" in sys.argv
     sleep = "--sleep" in sys.argv
-    force = "--force" in sys.argv
+    force = "--force" in sys.argv or "--redo" in sys.argv
     lstm = "--lstm" in sys.argv
     run_bayes = "--bayes" in sys.argv
 

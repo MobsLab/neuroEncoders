@@ -43,12 +43,12 @@ class DecoderConfig:
     """
 
     bandwidth: Optional[float] = None
-    kernel: str = "epanechnikov"  # 'gaussian', 'epanechnikov'
-    masking_factor: float = 15.0
+    kernel: str = "gaussian"
+    masking_factor: float = 20.0
     min_spikes_threshold: int = 5
-    regularization_factor: float = 1e-2  # for numerical stability.
+    regularization_factor: float = 1e-8  # for numerical stability.
     empty_unit_value: float = 1e-5  # value for empty units in rate functions
-    sigma: float = 0.25  # for smoother masking transition
+    sigma: float = 0.25  # for gaussian smoothing of rate functions
     maxPos: Optional[Tuple[float, float]] = None
     fullBehaviorBandwidth: Optional[float] = None
 
@@ -248,6 +248,7 @@ class Trainer(SpatialConstraintsMixin):
 
         bayesMatrices = {
             "occupation": occupation,
+            "occupation_inverse": final_occupation,
             "marginalRateFunctions": marginal_rates,
             "rateFunctions": local_rates,
             "bins": [np.unique(gridFeature[i]) for i in range(len(gridFeature))],
@@ -333,11 +334,37 @@ class Trainer(SpatialConstraintsMixin):
         if kwargs.get("bayesMatrices", None) is None:
             try:
                 if not kwargs.get("redo", False):
-                    with open(
-                        os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
-                    ) as f:
-                        bayesMatrices = pickle.load(f)
-                    self.logger.info("Loaded existing Bayesian matrices.")
+                    try:
+                        with open(
+                            os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
+                        ) as f:
+                            bayesMatrices = pickle.load(f)
+                        self.logger.info("Loaded existing Bayesian matrices.")
+                    except FileNotFoundError:
+                        if kwargs.get("load_last_bayes", False):
+                            with open(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "..",
+                                    "last_bayes",
+                                    "results",
+                                    "bayesMatrices.pkl",
+                                ),
+                                "rb",
+                            ) as f:
+                                bayesMatrices = pickle.load(f)
+                            self.logger.info(
+                                "Loaded existing Bayesian matrices from last_bayes folder. Copying it to current results folder."
+                            )
+                            with open(
+                                os.path.join(self.folderResult, "bayesMatrices.pkl"),
+                                "wb",
+                            ) as f:
+                                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+                        else:
+                            raise FileNotFoundError(
+                                f"No existing Bayesian matrices found in {self.folderResult}."
+                            )
 
                     # Check if the matrices are already saved with linear ordering
                     if "orderedLinearPlaceFields" in bayesMatrices:
@@ -434,7 +461,7 @@ class Trainer(SpatialConstraintsMixin):
         return np.array(preferred_pos)
 
     def _build_occupation_map(
-        self, positions: np.ndarray, remove_isolated_zeros: bool = True
+        self, positions: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, List]:
         """
         Build occupation map with improved masking and unified constraints with ANN.
@@ -486,20 +513,13 @@ class Trainer(SpatialConstraintsMixin):
         )  # WARN: ij because butils.kdenD returns meshgrid in 'ij' indexing - ann returns the other way around
         occupation = occupation * allowed_mask
 
-        if remove_isolated_zeros:
-            forbid_mask_final, occupation = self.remove_isolated_zeros(
-                ~(allowed_mask.astype(bool)), occupation
-            )
-            allowed_mask = ~forbid_mask_final
-
         # Improved masking strategy - logistic thresholding
         # before :
         # occupation[occupation==0] = np.min(occupation[occupation!=0])  # We want to avoid having zeros
         occupation_threshold = np.max(occupation) / self.config.masking_factor
-        sigma = (
-            self.config.sigma * occupation_threshold
-        )  # Adjust sigma for smoother transition
+        sigma = 0.25 * occupation_threshold  # Adjust sigma for smoother transition
         density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+
         combined_mask = density_mask * allowed_mask
 
         # Add regularization instead of just replacing zeros
@@ -524,7 +544,7 @@ class Trainer(SpatialConstraintsMixin):
                 allowed_mask, density_mask, combined_mask, occupation
             )
 
-        return occupation_inverse, occupation_reg, gridFeature
+        return occupation_inverse, occupation, gridFeature
 
     def _log_masking_stats(self, spatial_mask, density_mask, combined_mask, occupation):
         """Log masking statistics"""
@@ -552,17 +572,21 @@ class Trainer(SpatialConstraintsMixin):
         Compute rate function with better numerical stability
         """
         if n_spikes < self.config.min_spikes_threshold:
+            allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
             if n_spikes == 0:
                 warnings.warn("No spikes found, using uniform rate")
                 rate_map = np.zeros_like(final_occupation)
                 eps = self.config.regularization_factor / final_occupation.size
                 rate_map += eps  # almost zero
+                rate_map = rate_map * allowed_mask
                 rate_map /= np.sum(rate_map)
                 return rate_map
             else:
                 warnings.warn(f"Only {len(spike_positions)} spikes, using uniform rate")
                 # stronger uniform rate than above
-                return np.ones_like(final_occupation) * self.config.empty_unit_value
+                uniform = np.ones_like(final_occupation) * self.config.empty_unit_value
+                uniform = uniform * allowed_mask
+                return uniform
 
         _, rate_map = butils.kdenD(
             spike_positions,
@@ -709,14 +733,17 @@ class Trainer(SpatialConstraintsMixin):
             self.logger.warning(
                 f"Cluster {cluster_idx} in tetrode {tetrode_idx} has only {len(cluster_positions)} spikes, using uniform rate."
             )
+            allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
             if len(cluster_positions) != 0:
                 rate_function = (
                     np.ones_like(final_occupation) * self.config.empty_unit_value
                 )
+                rate_function = rate_function * allowed_mask
             else:
                 rate_function = np.zeros_like(final_occupation)
                 eps = self.config.regularization_factor / final_occupation.size
                 rate_function += eps
+                rate_function = rate_function * allowed_mask
                 rate_function /= np.sum(rate_function)
 
         # Compute mutual information
@@ -734,6 +761,7 @@ class Trainer(SpatialConstraintsMixin):
         occupation: np.ndarray,
         mutual_info_method: str = "skaggs",
         n_rate_bins=5,
+        **kwargs,
     ) -> float:
         """
         Compute mutual information between rate and position
@@ -1484,11 +1512,18 @@ class Trainer(SpatialConstraintsMixin):
 
         # Log summary statistics
         self._log_decoding_summary(outputResults)
+        if kwargs.get("update_last_bayes_symlink", True):
+            print("Updating last bayes symlink...")
+            self._update_last_bayes_symlink()
 
         return outputResults
 
     def _prepare_spike_data(
-        self, behaviorData: Dict, useTrain: bool, sleepEpochs: List
+        self,
+        behaviorData: Dict,
+        useTrain: bool,
+        sleepEpochs: List,
+        save_as_pickle: bool = True,
     ) -> Tuple[List, List]:
         """Prepare spike data for decoding epochs.
         Args:
@@ -1526,6 +1561,22 @@ class Trainer(SpatialConstraintsMixin):
                 self.clusterData["Spike_times"][tetrode][combined_epochs]
             )
             clusters.append(self.clusterData["Spike_labels"][tetrode][combined_epochs])
+        if save_as_pickle:
+            with open(
+                os.path.join(
+                    self.folderResult,
+                    f"clusters_time{self.suffix}_wTrain_{useTrain}.pkl",
+                ),
+                "wb",
+            ) as f:
+                pickle.dump(clusters_time, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with open(
+                os.path.join(
+                    self.folderResult, f"clusters{self.suffix}_wTrain_{useTrain}.pkl"
+                ),
+                "wb",
+            ) as f:
+                pickle.dump(clusters, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         return clusters_time, clusters
 
@@ -1547,27 +1598,19 @@ class Trainer(SpatialConstraintsMixin):
 
         allowed_mask = self.get_allowed_mask(use_tensorflow=False)
         occupation = occupation * allowed_mask
-
         # Improved masking strategy - logistic thresholding
         occupation_threshold = np.max(occupation) / self.config.masking_factor
         sigma = (
             self.config.sigma * occupation_threshold
         )  # Adjust sigma for smoother transition
         density_mask = 1 / (1 + np.exp(-(occupation - occupation_threshold) / sigma))
+
         combined_mask = allowed_mask * density_mask
 
-        # safer log occupation with regularization and avoiding log(0)
-        masked_occupation = occupation * combined_mask
-        positive_occupations = masked_occupation[masked_occupation > 0]
-        if len(positive_occupations) > 0:
-            min_positive = np.min(positive_occupations)
-            regularization = min_positive * 1e-4
-        else:
-            regularization = 1e-10
-
-        safe_occupation = np.maximum(occupation, regularization)
         # Log occupation with regularization
-        log_occupation = np.log(safe_occupation)
+        log_occupation = np.log(
+            occupation + np.min(np.multiply(occupation, combined_mask)) * 1e-4
+        )
 
         # Poisson terms (probability of no spikes)
         all_poisson = []
@@ -1575,8 +1618,7 @@ class Trainer(SpatialConstraintsMixin):
             # Clip very high rates to prevent numerical issues
             clipped_rates = np.clip(marginal_rate_functions[tetrode], 1e-10, 500)
             poisson_term = np.exp(-windowSize * clipped_rates)
-            safe_poisson = np.maximum(poisson_term, 1e-15)
-            all_poisson.append(safe_poisson)
+            all_poisson.append(poisson_term)
 
         # sum of logs instead of product of poisson terms to avoid underflow
         log_poisson_sum = np.zeros_like(all_poisson[0])
@@ -1590,24 +1632,18 @@ class Trainer(SpatialConstraintsMixin):
             for cluster in range(len(rate_functions[tetrode])):
                 rate_map = rate_functions[tetrode][cluster]
 
-                # Use percentile-based regularization instead of minimum for allowed only
-                allowed_rates = rate_map[allowed_mask > 0]
-                nonzero_rates = allowed_rates[allowed_rates > 0]
+                # Use percentile-based regularization instead of minimum
+                nonzero_rates = rate_map[rate_map > 0]
                 if len(nonzero_rates) > 0:
                     regularization = np.percentile(nonzero_rates, 1)  # 1st percentile
                 else:
                     regularization = self.config.regularization_factor
 
-                # ensure regularization is not zero
-                regularization = max(regularization, 1e-10)
-
                 # Apply mask to regularization - don't regularize masked areas
-                regularized_rates = np.where(
-                    allowed_mask > 0,
-                    combined_mask * np.maximum(rate_map, regularization * 0.1)
-                    + (1 - combined_mask) * (regularization * 0.1),
-                    1e-12,
-                )
+                regularized_rates = rate_map.copy()
+                regularized_rates = combined_mask * np.maximum(
+                    rate_map, regularization * 0.1
+                ) + (1 - combined_mask) * (regularization * 0.1)
                 log_rate = np.log(regularized_rates)
                 tetrode_log_rf.append(log_rate)
             log_rf.append(tetrode_log_rf)
@@ -1656,6 +1692,136 @@ class Trainer(SpatialConstraintsMixin):
         )
         # TODO: add error handling and non-parallel fallback
         return output_pos
+
+    def compute_firing_rate_with_bins(
+        self, time_points=None, spike_matrix=None, mask=None, bin_size=None
+    ):
+        """
+        Alternative method using time bins for more accurate rate estimation.
+
+        Parameters:
+        -----------
+        time_points : array-like, shape (N,)
+            Array of time points
+        spike_matrix : array-like, shape (N, nb_neurons)
+            Boolean spike matrix
+        bin_size : float, optional
+            Time bin size. If None, uses average time step
+
+        Returns:
+        --------
+        firing_rates : ndarray, shape (nb_neurons,)
+            Firing rate for each neuron
+        mean_firing_rate : float
+            Mean firing rate across all neurons
+        """
+        if time_points is None:
+            time_points = self.spikeMatTimes
+        if spike_matrix is None:
+            spike_matrix = self.spikeMatLabels
+
+        if mask is not None:
+            spike_matrix = spike_matrix[:, mask]
+            time_points = time_points[mask]
+        time_points = np.asarray(time_points).reshape(-1)
+        spike_matrix = np.asarray(spike_matrix, dtype=bool)
+
+        if bin_size is None:
+            # Use average time step as bin size
+            bin_size = np.mean(np.diff(time_points))
+
+        # Calculate firing rate as spikes per bin divided by bin size
+        spike_counts = np.sum(spike_matrix, axis=0)
+        n_bins = len(time_points)
+
+        # Rate = (total spikes) / (n_bins * bin_size)
+        firing_rates = spike_counts / (n_bins * bin_size)
+        mean_firing_rate = np.mean(firing_rates)
+
+        return firing_rates, mean_firing_rate
+
+    def compute_firing_rate_across_time(
+        self,
+        time_points=None,
+        spike_matrix=None,
+        mask=None,
+        window_size=None,
+        step_size=None,
+    ):
+        """
+        Compute firing rate across time using sliding windows.
+
+        Parameters:
+        -----------
+        time_points : array-like, shape (N,)
+            Array of time points
+        spike_matrix : array-like, shape (N, nb_neurons)
+            Boolean spike matrix
+        window_size : float, optional
+            Time window size for rate calculation. If None, uses 10x average time step
+        step_size : float, optional
+            Step size for sliding window. If None, uses average time step
+
+        Returns:
+        --------
+        time_centers : ndarray, shape (n_windows,)
+            Time points at center of each window
+        firing_rates : ndarray, shape (n_windows, nb_neurons)
+            Firing rate for each neuron at each time window
+        mean_firing_rate : ndarray, shape (n_windows,)
+            Mean firing rate across neurons at each time window
+        """
+        if time_points is None:
+            time_points = self.spikeMatTimes
+        if spike_matrix is None:
+            spike_matrix = self.spikeMatLabels
+
+        if mask is not None:
+            spike_matrix = spike_matrix[:, mask]
+            time_points = time_points[mask]
+
+        time_points = np.asarray(time_points).reshape(-1)
+        spike_matrix = np.asarray(spike_matrix, dtype=bool)
+
+        dt = np.mean(np.diff(time_points))
+
+        if window_size is None:
+            window_size = 10 * dt  # Default: 10 time steps
+
+        if step_size is None:
+            step_size = dt  # Default: slide by one time step
+
+        # Convert time sizes to indices
+        window_samples = int(window_size / dt)
+        step_samples = int(step_size / dt)
+
+        # Ensure minimum window size
+        window_samples = max(1, window_samples)
+        step_samples = max(1, step_samples)
+
+        n_windows = (len(time_points) - window_samples) // step_samples + 1
+        n_neurons = spike_matrix.shape[1]
+
+        firing_rates = np.zeros((n_windows, n_neurons))
+        time_centers = np.zeros(n_windows)
+
+        for i in range(n_windows):
+            start_idx = i * step_samples
+            end_idx = start_idx + window_samples
+
+            # Get spike counts in this window
+            window_spikes = np.sum(spike_matrix[start_idx:end_idx], axis=0)
+
+            # Calculate firing rate (spikes / window_duration)
+            firing_rates[i] = window_spikes / window_size
+
+            # Time center of window
+            time_centers[i] = time_points[start_idx + window_samples // 2]
+
+        # Mean firing rate across neurons at each time point
+        mean_firing_rate = np.mean(firing_rates, axis=1)
+
+        return time_centers, firing_rates, mean_firing_rate
 
     def _process_decoding_output(
         self,
@@ -2547,7 +2713,7 @@ class Trainer(SpatialConstraintsMixin):
             )
         )
         epochForField = np.array([minTime, maxTime])
-        _, linearTraj = linearization_function(behaviorData["Positions"])
+        _, linearTraj = linearization_function(behaviorData["Positions"][:, :2])
         timesMask = inEpochsMask(
             np.squeeze(behaviorData["positionTime"]), epochForField
         ).flatten()
@@ -2646,26 +2812,7 @@ class Trainer(SpatialConstraintsMixin):
             df = pd.DataFrame(test_output["posLoss"])
             df.to_csv(os.path.join(folderToSave, f"bayes_posLoss{suffix}.csv"))
 
-        # Full posterior distribution
-        if "probaMaps" in test_output:
-            """
-            save as a table with colums: time_step, x_pos, y_pos, proba
-            """
-            n_time_steps, n_x, n_y = np.shape(test_output["probaMaps"])
-            # Create coordinate grids
-            time_steps, x_coords, y_coords = np.meshgrid(
-                np.arange(n_time_steps), np.arange(n_x), np.arange(n_y), indexing="ij"
-            )
-            data = {
-                "time_step": time_steps.flatten(),
-                "x_pos": x_coords.flatten(),
-                "y_pos": y_coords.flatten(),
-                "proba": test_output["probaMaps"].flatten(),
-            }
-            df = pd.DataFrame(data)
-            df.to_csv(
-                os.path.join(folderToSave, f"bayes_probaMaps{suffix}.csv"), index=False
-            )
+        # Full posterior distribution will be saved in pickle
 
         # Times of prediction
         df = pd.DataFrame(test_output["times"])
@@ -2701,6 +2848,56 @@ class Trainer(SpatialConstraintsMixin):
             with open(filename, "wb") as f:
                 pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
 
+    def _update_last_bayes_symlink(self):
+        # At the end of def test_bayes(self):
+
+        # Update last_bayes symlink to point to current experiment
+        experiment_parent = os.path.abspath(
+            os.path.join(self.projectPath.experimentPath, "..")
+        )
+
+        last_bayes_folder = os.path.abspath(
+            os.path.join(experiment_parent, "last_bayes")
+        )
+
+        current_experiment_path = os.path.abspath(self.projectPath.experimentPath)
+
+        # Check if last_bayes already points to current experiment
+        should_update_symlink = True
+
+        if os.path.exists(last_bayes_folder):
+            if os.path.islink(last_bayes_folder):
+                # Check if it points to the current experiment path
+                current_target = os.path.abspath(os.readlink(last_bayes_folder))
+                if current_target == current_experiment_path:
+                    print(
+                        f"last_bayes already points to current experiment: {current_experiment_path}"
+                    )
+                    should_update_symlink = False
+                else:
+                    # Remove existing symlink to replace it
+                    try:
+                        os.unlink(last_bayes_folder)
+                        print(
+                            f"Updating last_bayes symlink from {current_target} to {current_experiment_path}"
+                        )
+                    except OSError as e:
+                        print(f"Failed to remove existing symlink: {e}")
+                        should_update_symlink = False
+            else:
+                print(f"Warning: {last_bayes_folder} exists but is not a symlink")
+                should_update_symlink = False
+
+        # Create/update the symlink
+        if should_update_symlink:
+            try:
+                os.symlink(current_experiment_path, last_bayes_folder)
+                print(
+                    f"Created/updated last_bayes symlink: {last_bayes_folder} -> {current_experiment_path}"
+                )
+            except OSError as e:
+                print(f"Failed to create symlink: {e}")
+
 
 ############## Utils ##############
 def find_next_bin(times, clusters, start, stop, start_time, stop_time):
@@ -2717,6 +2914,156 @@ def find_next_bin(times, clusters, start, stop, start_time, stop_time):
         newStopId += 1
     newStopId = newStopId - 1
     return newStartID, newStopId, clusters[newStartID : newStopId + 1]
+
+
+def extract_spike_counts(firstSpikeNNTime, spikeMatTimes, window_size_s):
+    """
+    Extract spike times and counts for bins defined by `time_array` and `window_size`.
+
+    Args:
+    --------
+        firstSpikeNNTime: array of shape (N,), bin start times.
+        spikeMatTimes: array of shape (M,), spike timestamps (sorted, float).
+        window_size_s: float, size of each window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N,), number of spikes in each bin.
+        spike_times: list of arrays, each entry contains the spikes in that bin.
+    """
+    firstSpikeNNTime = np.asarray(firstSpikeNNTime).reshape(-1)
+    spikeMatTimes = np.asarray(spikeMatTimes).reshape(-1)
+
+    bin_start = firstSpikeNNTime
+    bin_stop = bin_start + window_size_s
+
+    spike_counts = np.zeros(len(firstSpikeNNTime), dtype=int)
+    spike_times = []
+
+    for start, stop in zip(bin_start, bin_stop):
+        # select spikes within window
+        in_bin = spikeMatTimes[(spikeMatTimes >= start) & (spikeMatTimes < stop)]
+        spike_counts[len(spike_times)] = len(in_bin)
+        spike_times.append(in_bin)
+
+    return spike_counts, spike_times
+
+
+def extract_spike_counts_keops(firstSpikeNNTime, spikeMatTimes, window_size_s):
+    """
+    Extract spike counts for bins defined by `firstSpikeNNTime` and `window_size_s`
+    using PyKeOps (fast on large arrays).
+
+    Args:
+    --------
+        firstSpikeNNTime: array of shape (N,), bin start times.
+        spikeMatTimes: array of shape (M,), spike timestamps (sorted, float).
+        window_size_s: float, size of each window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N,), number of spikes in each bin.
+    """
+    firstSpikeNNTime = np.asarray(firstSpikeNNTime).reshape(-1).astype(np.float64)
+    spikeMatTimes = np.asarray(spikeMatTimes).reshape(-1).astype(np.float64)
+
+    bin_start = LazyTensor_np(firstSpikeNNTime[:, None, None])  # (N,1,1)
+    bin_stop = bin_start + window_size_s
+    spikes = LazyTensor_np(spikeMatTimes[None, :, None])  # (1,M,1)
+
+    good_start = (spikes - bin_start).relu().sign()  # spike >= start
+    good_stop = (bin_stop - spikes).relu().sign()  # spike < stop
+    in_bin = good_start * good_stop  # (N,M,1)
+
+    spike_counts = in_bin.sum(axis=1).squeeze()  # (N,)
+
+    return spike_counts
+
+
+def extract_spike_counts_from_matrix(
+    time_array, spike_matrix, spike_times, window_size
+):
+    """
+    Extract spike counts per bin from a [num_timepoints, n_neurons] spike matrix.
+
+    Args:
+    --------
+        time_array: array of shape (N,), bin start times.
+        spike_matrix: array of shape (T, M), 0/1 (or counts), where T=num_timepoints, M=n_neurons.
+        spike_times: array of shape (T,), time associated with each row of spike_matrix.
+        window_size: float, size of the window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N, M), spike counts for each (bin, neuron).
+        spike_times_per_bin: list of lists of arrays,
+                             spike_times_per_bin[bin][neuron] = spike times in that bin.
+    """
+    time_array = np.asarray(time_array).reshape(-1)
+    spike_times = np.asarray(spike_times).reshape(-1)
+    spike_matrix = np.asarray(spike_matrix)
+
+    N_bins = len(time_array)
+    T, M = spike_matrix.shape
+
+    spike_counts = np.zeros((N_bins, M), dtype=int)
+    spike_times_per_bin = [[None] * M for _ in range(N_bins)]
+
+    for i, start in enumerate(time_array):
+        stop = start + window_size
+
+        # mask rows belonging to this bin
+        in_bin_mask = (spike_times >= start) & (spike_times < stop)
+
+        if not np.any(in_bin_mask):
+            continue  # no spikes in this bin
+
+        # sum along rows for counts
+        spike_counts[i, :] = spike_matrix[in_bin_mask, :].sum(axis=0)
+
+        # extract actual spike times per neuron
+        for m in range(M):
+            spikes_here = spike_times[in_bin_mask & (spike_matrix[:, m] > 0)]
+            spike_times_per_bin[i][m] = spikes_here
+
+    return spike_counts, spike_times_per_bin
+
+
+def extract_spike_counts_matrix_keops(
+    time_array, spike_matrix, spike_times, window_size
+):
+    """
+    Extract spike counts per bin from a [T, M] spike matrix using PyKeOps.
+
+    Args:
+    --------
+        time_array: array of shape (N,), bin start times.
+        spike_matrix: array of shape (T, M), 0/1 (or counts).
+        spike_times: array of shape (T,), time associated with each row of spike_matrix.
+        window_size: float, size of the window in seconds.
+
+    Returns:
+    --------
+        spike_counts: array of shape (N, M), spike counts for each (bin, neuron).
+    """
+    time_array = np.asarray(time_array).reshape(-1).astype(np.float64)
+    spike_times = np.asarray(spike_times).reshape(-1).astype(np.float64)
+    spike_matrix = np.asarray(spike_matrix).astype(np.float64)
+
+    # Lazy tensors
+    bin_start = LazyTensor_np(time_array[:, None, None])  # (N,1,1)
+    bin_stop = bin_start + window_size
+    st_lazy = LazyTensor_np(spike_times[None, :, None])  # (1,T,1)
+
+    good_start = (st_lazy - bin_start).relu().sign()
+    good_stop = (bin_stop - st_lazy).relu().sign()
+    in_bin = good_start * good_stop  # (N,T,1)
+
+    # Weight by spike_matrix and sum over timepoints
+    spike_counts = in_bin * spike_matrix[None, :, :]  # (N,T,M)
+    spike_counts = spike_counts.sum(axis=1)  # (N,M)
+
+    return spike_counts
 
 
 # TODO: le passer en test_parallel??
@@ -2852,20 +3199,10 @@ def parallel_pred_as_NN(
         # posterior has shape (n_time_steps, n_position_bins)
         # Use argmax reduction to force evaluation, then reconstruct full array
         n_time_steps, n_position_bins = posterior.shape
-
-        # Create array to store results
-        posterior_array = np.zeros((n_time_steps, n_position_bins))
-
-        # Extract each position bin separately using indexing reduction
-        for pos_idx in range(n_position_bins):
-            # Create selector for this position
-            selector = np.zeros((n_position_bins, 1))
-            selector[pos_idx, 0] = 1.0
-            selector_vj = pykeops.numpy.Vj(selector)
-
-            # Extract values for this position across all time steps
-            pos_values = (posterior * selector_vj).sum(axis=1)  # Sum over position dim
-            posterior_array[:, pos_idx] = pos_values.squeeze()
+        eye = np.eye(n_position_bins, dtype=posterior.dtype)
+        eye_vj = pykeops.numpy.Vj(eye)  # shape (n_position_bins, n_position_bins)
+        # sum reduction on dummy axis to get full array
+        posterior_array = (posterior * eye_vj).sum(axis=1)
 
         # Reshape to original spatial dimensions
         full_posteriors = posterior_array.reshape((n_time_steps, *spatial_shape))

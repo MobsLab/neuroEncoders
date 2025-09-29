@@ -31,7 +31,7 @@ def boxplot_linError(
             "decoder": decoderForPD,
         }
     )
-    fig, ax = plt.subplots(figsize=(9, 9))
+    fig, ax = plt.subplots()
     myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
     sns.boxplot(
         data=datToPlot,
@@ -68,7 +68,7 @@ def boxplot_euclError(
             "decoder": decoderForPD,
         }
     )
-    fig, ax = plt.subplots(figsize=(9, 9))
+    fig, ax = plt.subplots()
     myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
     sns.boxplot(
         data=datToPlot,
@@ -115,7 +115,7 @@ def barplot_linError_mouse_by_mouse(
             )
         )
 
-        fig, ax = plt.subplots(figsize=(9, 9))
+        fig, ax = plt.subplots()
         myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
         sns.barplot(
             data=dataByWindow[iWindow],
@@ -170,7 +170,7 @@ def barplot_euclError_mouse_by_mouse(
             )
         )
 
-        fig, ax = plt.subplots(figsize=(9, 9))
+        fig, ax = plt.subplots()
         myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
         sns.barplot(
             data=dataByWindow[iWindow],
@@ -206,7 +206,7 @@ def plot_euclError_mouse_by_mouse(
     suffix="",
 ):
     for iWindow in range(len(timeWindows)):
-        fig, ax = plt.subplots(figsize=(9, 9))
+        fig, ax = plt.subplots()
         ax.errorbar(
             mouseNames,
             errorNN_mean[:, iWindow],
@@ -250,7 +250,7 @@ def boxplot_euclDist_decoders(
     datToPlot = pd.DataFrame(
         {"eucl. distance (cm)": data, "time window (ms)": timeWindowsForDF}
     )
-    fig, ax = plt.subplots(figsize=(9, 9))
+    fig, ax = plt.subplots()
     sns.boxplot(
         data=datToPlot,
         x="time window (ms)",
@@ -285,7 +285,7 @@ def fig_eucl_error_filtered(
             "filtered": decoderForPD,
         }
     )
-    fig, ax = plt.subplots(figsize=(9, 9))
+    fig, ax = plt.subplots()
     myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
     sns.boxplot(
         data=datToPlot,
@@ -312,7 +312,7 @@ def fig_average_predLoss_vs_euclError(
         euclErrorAv.append(np.nanmean(euclError[:, iw, :], axis=0))
         euclErrorSEM.append(sem(euclError[:, iw, :], axis=0, nan_policy="omit"))
 
-    fig, ax = plt.subplots(figsize=(15, 9))
+    fig, ax = plt.subplots()
     for iw in range(len(timeWindows)):
         ax.plot(
             predLossTicks, euclErrorAv[iw], c=cm(12 + iw), label=f"{timeWindows[iw]} ms"

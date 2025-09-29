@@ -342,7 +342,7 @@ def get_behavior(
 
 def speed_filter(
     folder: str,
-    overWrite: bool = True,
+    overWrite: bool = False,
     phase=None,
     template=None,
     force: bool = False,
@@ -495,8 +495,8 @@ def speed_filter(
         if speedOG is None:
             speedThreshold = max(
                 np.log(
-                    np.percentile(speedToshowSm[speedToshowSm >= 0], 70) + 10 ** (-8)
-                ),  # take 30% highest
+                    np.percentile(speedToshowSm[speedToshowSm >= 0], 50) + 10 ** (-8)
+                ),  # take 50% highest
                 np.log(4),  # default minimal threshold
             )
         else:
@@ -512,7 +512,7 @@ def speed_filter(
         speedFilter = speedToshowSm > np.exp(speedThreshold)
 
         # Figure
-        fig = plt.figure(figsize=(7, 15))
+        fig = plt.figure()
         fig.suptitle(
             f"Speed threshold selection for {phase}", fontsize=18, fontweight="bold"
         )
@@ -593,7 +593,7 @@ def speed_filter(
         ax = [ax0, ax1, ax2, ax3, ax4, ax5]
 
         # create scatter plot of environmental variable depending on speed
-        fig2d, ax2d = plt.subplots(figsize=(7, 7))
+        fig2d, ax2d = plt.subplots()
         idxs = np.arange(0, behToShow.shape[0])
         to_show = (
             (window_idx * window_range < idxs)
@@ -734,8 +734,10 @@ def speed_filter(
                 mngr1.resize(*mngr1.window.maxsize())
                 mngr2.window.wm_geometry("+2560+0")
                 mngr2.resize(*mngr2.window.maxsize())
-            plt.show(block=not force)
+            plt.show(block=True)
             speedThreshold = slider.val
+        else:
+            plt.close("all")
         fig2d.savefig(
             os.path.join(folder, f"speed_filter_2d_{phase}.png"),
             dpi=300,
@@ -769,7 +771,7 @@ def speed_filter(
 
 def select_epochs(
     folder: str,
-    overWrite: bool = True,
+    overWrite: bool = False,
     phase=None,
     force: bool = False,
     find_best_sets: bool = False,
@@ -986,22 +988,18 @@ def select_epochs(
 
         # Default train and test sets
         sizeTest = (
-            timeToShow.shape[0] // 10
-            if phase == "all"
-            else timeToShowPRE.shape[0] // 10
+            timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
         )
         testSetId = (
-            timeToShow.shape[0] - timeToShow.shape[0] // 10
+            timeToShow.shape[0] - timeToShow.shape[0] // 5
             if phase == "all"
-            else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 10
+            else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 5
         )
 
         useLossPredTrainSet = False  # whether to use a loss prediction training set
         lossPredSetId = 0  # the loss prediction set id
         sizelossPredSet = (
-            timeToShow.shape[0] // 10
-            if phase == "all"
-            else timeToShowPRE.shape[0] // 10
+            timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
         )
 
         if find_best_sets:
@@ -1050,6 +1048,7 @@ def select_epochs(
                 bestTestSet,
                 "with real (speedMasked) size",
                 nb_points[bestTestSet],
+                "(20% of total epochs)",
             )
             if isPredLoss:
                 useLossPredTrainSet = True
@@ -1059,6 +1058,7 @@ def select_epochs(
                     bestPLSet,
                     "with real (speedMasked) size",
                     nb_points[bestPLSet],
+                    "(20% of total epochs)",
                 )
                 lossPredSetId = bestPLSet * sizelossPredSet + idx_cut
             else:
@@ -1790,7 +1790,7 @@ def select_epochs(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
                 # plt.get_current_fig_manager().window.state('zoomed') # on windows
-            plt.show(block=not force)
+            plt.show(block=True)
             fig.savefig(os.path.join(folder, f"epochs_{phase}.png"))
 
             if IsMultiSessions:
@@ -1806,6 +1806,7 @@ def select_epochs(
                     timeToShow, SetData, keptSession
                 )
 
+        plt.close("all")
         if "testEpochs" in children:
             f.remove_node("/behavior", "testEpochs")
         f.create_array("/behavior", "testEpochs", testEpochs)
@@ -1856,3 +1857,5 @@ def select_epochs(
                     c="orange",
                 )
             plt.show(block=True)
+        else:
+            plt.close("all")
