@@ -109,9 +109,9 @@ class LSTMandSpikeNetwork:
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
         ):
-            assert not params.denseweight, (
-                "Cannot use both GaussianHeatmap and DenseWeight"
-            )
+            # assert not params.denseweight, (
+            #     "Cannot use both GaussianHeatmap and DenseWeight"
+            # )
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
@@ -255,10 +255,19 @@ class LSTMandSpikeNetwork:
                     TransformerEncoderBlock,
                 )
 
+                dim_factor = getattr(
+                    self.params, "dim_factor", 1
+                )  # factor to increase the dimension of the transformer if needed
+                print("dim_factor:", dim_factor)
+                print(
+                    "project transformer:",
+                    getattr(self.params, "project_transformer", True),
+                )
+
                 self.lstmsNets = (
                     [
                         PositionalEncoding(
-                            d_model=self.params.nFeatures
+                            d_model=self.params.nFeatures * dim_factor
                             if getattr(self.params, "project_transformer", True)
                             else self.params.nFeatures * self.params.nGroups,
                             # if we dont shrink the feature dimension before feeding to the transformer, we need to account for the nGroups factor
@@ -267,7 +276,7 @@ class LSTMandSpikeNetwork:
                     ]
                     + [
                         TransformerEncoderBlock(
-                            d_model=self.params.nFeatures
+                            d_model=self.params.nFeatures * dim_factor
                             if getattr(self.params, "project_transformer", True)
                             else self.params.nFeatures * self.params.nGroups,
                             num_heads=self.params.nHeads,
@@ -275,6 +284,7 @@ class LSTMandSpikeNetwork:
                             ff_dim2=self.params.ff_dim2,
                             dropout_rate=self.params.dropoutLSTM,
                             device=self.deviceName,
+                            residual=kwargs.get("transformer_residual", True),
                         )
                         for _ in range(self.params.lstmLayers)
                     ]
@@ -314,10 +324,13 @@ class LSTMandSpikeNetwork:
                 name="feature_output",
                 kernel_regularizer="l2",
             )
+            dim_factor = getattr(
+                self.params, "dim_factor", 1
+            )  # factor to increase the dimension of the transformer if needed
 
             if getattr(self.params, "project_transformer", True):
                 self.transformer_projection_layer = tf.keras.layers.Dense(
-                    self.params.nFeatures,
+                    self.params.nFeatures * dim_factor,
                     activation="relu",
                     dtype=tf.float32,
                     name="feature_projection_transformer",
@@ -642,7 +655,9 @@ class LSTMandSpikeNetwork:
                         "targets": targets_hw,
                     }
                     tempPosLoss_logits = self.GaussianLoss_layer(
-                        loss_inputs, loss_type="safe_kl", return_batch=True
+                        loss_inputs,
+                        loss_type=getattr(self.params, "loss_type", "safe_kl"),
+                        return_batch=True,
                     )
                     others = myoutputPos[
                         :,
@@ -663,7 +678,9 @@ class LSTMandSpikeNetwork:
                         "targets": targets_hw,
                     }
                     tempPosLoss = self.GaussianLoss_layer(
-                        loss_inputs, loss_type="safe_kl", return_batch=True
+                        loss_inputs,
+                        loss_type=getattr(self.params, "loss_type", "safe_kl"),
+                        return_batch=True,
                     )
                 tempPosLoss = kops.cast(tempPosLoss, tf.float32)
 
@@ -777,7 +794,10 @@ class LSTMandSpikeNetwork:
         #     learning_rate=kwargs.get("lr", self.params.learningRates[0])
         # )
         self.optimizer = tf.keras.optimizers.Adam(
-            learning_rate=kwargs.get("lr", self.params.learningRates[0])
+            learning_rate=kwargs.get("lr", self.params.learningRates[0]),
+            beta_1=0.9,
+            beta_2=0.98,
+            epsilon=1e-09,
         )
         # TODO: something with mixed precision and keras policy ?
         if not predLossOnly:
@@ -1949,12 +1969,27 @@ class LSTMandSpikeNetwork:
                     self.params, *vals, batched=True
                 )
 
-            @tf.autograph.experimental.do_not_convert
+            dim_output = (
+                self.params.dimOutput
+                if not getattr(self.params, "GaussianHeatmap", False)
+                else (
+                    self.params.dimOutput
+                    - 2
+                    + self.params.GaussianGridSize[0] * self.params.GaussianGridSize[1]
+                )
+            )
+
+            @tf.function
             def map_outputs(vals):
                 return (
                     vals,
                     {
-                        "tf_op_layer_posLoss": tf.zeros(self.params.batchSize),
+                        self.outNames[0]: tf.zeros(
+                            (self.params.batchSize, dim_output), dtype=tf.float32
+                        ),
+                        self.outNames[1]: tf.zeros(
+                            self.params.batchSize, dtype=tf.float32
+                        ),
                     },
                 )
 
@@ -2648,7 +2683,7 @@ class LSTMandSpikeNetwork:
                 print(f"Dynamic weights shape: {weightings.shape}")
 
             # Apply Dense Loss: f_w(α, current_batch) * M(ŷ_i, y_i)
-            temp_pos_loss = tf.math.multiply(temp_pos_loss, weightings[:, tf.newaxis])
+            temp_pos_loss = kops.multiply(temp_pos_loss, weightings[:, tf.newaxis])
 
             if self.dynamicdense_verbose:
                 print("✓ Applied Dynamic Dense Loss reweighting")
