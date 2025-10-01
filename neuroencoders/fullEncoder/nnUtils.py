@@ -325,6 +325,9 @@ class PositionalEncoding(tf.keras.layers.Layer):
         }
         return cls(**layer_config)
 
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 
 def safe_mask_creation(batchedInputGroups, pad_value=-1):
     """
@@ -350,38 +353,6 @@ def safe_mask_creation(batchedInputGroups, pad_value=-1):
     return padding_mask
 
 
-def bonjour_safe_mask_creation(batchedInputGroups, pad_value=-1):
-    """
-    Safely create padding mask from batched input groups.
-
-    Args:
-        batchedInputGroups: Tensor of shape [batch, max_n_spikes] with pad_value for padding
-        pad_value: Value used for padding (default: -1)
-
-    Returns:
-        padding_mask: Boolean tensor [batch, max_n_spikes] where True = real data
-    """
-    if isinstance(batchedInputGroups, tf.SparseTensor):
-        batchedInputGroups = tf.sparse.to_dense(
-            batchedInputGroups, default_value=pad_value
-        )
-
-    # Create padding mask
-    batchedInputGroups = kops.cast(batchedInputGroups, tf.float32)
-    padding_mask = kops.cast(
-        kops.not_equal(batchedInputGroups, pad_value), dtype=tf.float32
-    )
-
-    # Verify shape
-    mask_shape = kops.shape(padding_mask)
-    if len(mask_shape) != 2:
-        raise ValueError(
-            f"Expected 2D mask from batchedInputGroups, got shape {mask_shape}"
-        )
-
-    return padding_mask
-
-
 class TransformerEncoderBlock(tf.keras.layers.Layer):
     """
         A custom Transformer Encoder Block layer with multi-head attention and feedforward network.
@@ -399,6 +370,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         device="/cpu:0",
         **kwargs,
     ):
+        self.residual = kwargs.pop("residual", True)
         super().__init__(**kwargs)
         self.d_model = d_model
         self.num_heads = num_heads
@@ -495,7 +467,9 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
                 x_norm, x_norm, attention_mask=attention_mask, training=training
             )
             attn_output = self.dropout1(attn_output, training=training)
-            x = x + attn_output  # Residual connection
+
+            if self.residual:
+                x = x + attn_output  # Residual connection
 
             # Feedforward network
             ff_output = self.ff_layer1(x)
@@ -2438,6 +2412,13 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # make sure these won't be part of gradients
         self.cost_matrix = tf.stop_gradient(tf.cast(self.cost_matrix, tf.float32))
         self.kernel = tf.stop_gradient(tf.cast(self.kernel, tf.float32))
+        # compute Wasserstein without forming full batch*N*N transport T:
+        # W_b = sum_i u_i * ( sum_j ( v_j * K_ij * C_ij ) )
+        # Precompute M = K * C on CPU (N,N) to keep memory lower
+        self.matrix = (
+            self.kernel * self.cost_matrix
+        )  # [N, N]  (this is not batch-sized)
+        self.M = tf.stop_gradient(tf.cast(self.matrix, tf.float32))
 
     def _safe_kl_wasserstein_heatmap_loss(
         self,
@@ -2486,6 +2467,9 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         entropy = -kops.sum(P_flat * tf.math.log(P_flat + self.EPS), axis=-1)
         kl = ce - entropy  # [B]
 
+        # small numeric epsilon
+        tiny = 1e-9
+
         # --- Wasserstein penalty ---
         if alpha > 0.0:
             # use precomputed CPU-side constants (self.kernel, self.cost_matrix)
@@ -2504,13 +2488,8 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
                 Ku = kops.matmul(u, kernel) + tiny  # [batch, N]
                 v = q_probs / Ku
 
-            # compute Wasserstein without forming full batch*N*N transport T:
-            # W_b = sum_i u_i * ( sum_j ( v_j * K_ij * C_ij ) )
-            # Precompute M = K * C on CPU (N,N) to keep memory lower
-            M = kernel * C  # [N, N]  (this is not batch-sized)
-
             # temp = v @ M -> [batch, N]
-            temp = kops.matmul(v, M)
+            temp = kops.matmul(v, self.M)
             # W = sum(u * temp, axis=1)
             W = kops.sum(u * temp, axis=1)
 

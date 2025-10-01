@@ -348,6 +348,7 @@ def speed_filter(
     force: bool = False,
     window_range=-1,  # -1 means no window range
     get_rid_of_sleep: bool = True,
+    threshold: Optional[float] = None,
 ) -> None:
     """
     A simple tool to set up a threshold on the speed value
@@ -371,6 +372,7 @@ def speed_filter(
         the range of the window to show (default is -1, which means no window range)
     get_rid_of_sleep : bool, optional
         whether to get rid of sleep epochs in the nnBehavior and replace by NaN. Otherwise it messes with the next functions (default is True)
+    threshold : float, optional, default is None: a threshold value in cm/s to use directly instead of selecting it manually
 
     """
     # TODO: change the order of the epochs AND be able to select the training set in the middle of the dataset
@@ -421,6 +423,10 @@ def speed_filter(
             else:
                 return
 
+        # If threshold is provided, use it directly
+        if threshold is not None:
+            speedThresholdOG = np.log(threshold).astype(float)
+            speedOG = speedThresholdOG
         # Prepare data
         positions = f.root.behavior.positions
         speed = f.root.behavior.speed
@@ -501,10 +507,7 @@ def speed_filter(
             )
         else:
             speedThreshold = speedOG
-            if phase != "pre":
-                speedThreshold = min(
-                    speedOG, np.log(1.5)
-                )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
+
         if phase != "pre":
             speedThreshold = min(
                 speedThreshold, np.log(1.5)
@@ -767,6 +770,7 @@ def speed_filter(
         df.to_csv(
             folder + f"speedFilterValue_{phase}.csv"
         )  # save the speed filter value
+        return np.exp(speedThreshold)
 
 
 def select_epochs(

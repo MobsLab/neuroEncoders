@@ -39,7 +39,7 @@ def path_for_experiments(
      |                  |  M1168MFB          |  M994_PAG              |                 |             |
      |                  |  M1239MFB          |  M1239_PAG             |                 |             |
      |                  |  M1162_MFB         |  M1162_PAG             |                 |             |
-     |                  |  M1199_MFB         |                        |                 |             |
+     |                  |  M1199_MFB         |  M905_PAG              |                 |             |
      -----------------------------------------------------------------------------------------------
 
     Exemple:
@@ -88,6 +88,7 @@ def path_for_experiments(
         "m994_PAG",
         "m1239_PAG",
         "m1162_PAG",
+        "m905_pag",
     ]
     Reversal_keys = ["m1199_reversal"]
     Known_keys = ["m1336_known", "m1230_Known"]
@@ -115,6 +116,7 @@ def path_for_experiments(
         "m1162_PAG": f"neuroencoders_1021/_work/M1162_PAG/{training_name}",
         "m1230_Known": f"neuroencoders_1021/_work/M1230_Known/{training_name}",
         "m1230_Novel": f"neuroencoders_1021/_work/M1230_Novel/{training_name}",
+        "m905_pag": f"neuroencoders_1021/_work/M905_PAG/{training_name}",
     }
 
     # Define the second dictionary (subpython_REAL equivalent)
@@ -136,6 +138,7 @@ def path_for_experiments(
         "m1162_PAG": "/media/nas5/ProjetERC2/Mouse-K162/20210121/_Concatenated/",
         "m1230_Known": "/media/nas6/ProjetERC1/Known/M1230/",
         "m1230_Novel": "/media/nas6/ProjetERC1/Novel/M1230/",
+        "m905_pag": "/media/nas5/ProjetERC2/Mouse-905/20190404/PAGExp/_Concatenated/",
     }
 
     # Select appropriate keys based on experiment name
@@ -272,6 +275,7 @@ def path_for_experiments(
             "/media/nas6/ProjetERC2/Mouse-K199/20210408/_Concatenated/",
             "/media/nas7/ProjetERC2/Mouse-K230/20210927/_Concatenated/",
             "/media/nas7/ProjetERC2/Mouse-K239/2021110/_Concatenated/",
+            "/media/nas5/ProjetERC2/Mouse-905/20190404/PAGExp/_Concatenated/",
         ]
 
         # Special case for Mouse1230 with two paths

@@ -1482,7 +1482,9 @@ class Params:
         # Initialize all other parameters...
         self._initialize_params_attributes(helper, **kwargs)
         # save those to json file
-        if save_json:
+        if save_json and not os.path.isfile(
+            os.path.join(helper.resultsPath, "params.json")
+        ):
             self.save_params_to_json()
         if not os.path.isfile(os.path.join(self.resultsPath, "Parameters.pkl")):
             # save the parameters to a pickle file
@@ -1542,6 +1544,8 @@ class Params:
 
         # changed after CSI - better scaleability + transformer pretraining?
         self.project_transformer = kwargs.pop("project_transformer", True)
+        self.dim_factor = kwargs.pop("dim_factor", 1)
+        self.loss_type = kwargs.pop("loss_type", "safe_kl")  # or "wasserstein"
 
         default_lstm_layers = (
             2 if not self.isTransformer else 4
@@ -1553,12 +1557,12 @@ class Params:
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
         self.ff_dim1 = kwargs.pop(
             "ff_dim1",
-            self.nFeatures * 2
+            self.nFeatures * 2 * self.dim_factor
             if self.project_transformer
             else self.nFeatures * self.nGroups * 2,
         )  # first fully connected layer in Transformer arch dimension
         self.ff_dim2 = (
-            self.nFeatures
+            self.nFeatures * self.dim_factor
             if self.project_transformer
             else self.nFeatures * self.nGroups  # ie PositionalEncoding dimension!!!!
         )  # second fully connected layer in Transformer arch dimension
@@ -1568,13 +1572,13 @@ class Params:
             "TransformerDense1",
             self.nFeatures * 8
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 8,
+            else self.nFeatures * self.nGroups * 4,
         )
         self.TransformerDenseSize2 = kwargs.pop(
             "TransformerDense2",
             self.nFeatures * 4
             if self.project_transformer
-            else self.nFeatures * self.nGroups * 4,
+            else self.nFeatures * self.nGroups,
         )
 
         self.nDenseLayers = kwargs.pop(
@@ -1584,7 +1588,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0003]
+            "learningRates", [0.0005]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
@@ -1627,8 +1631,8 @@ class Params:
 
         if self.target.lower() == "posandheaddirectionandspeed":
             self.column_losses = {
-                "0": "mse",
-                "1": "mse",
+                "0": "huber",
+                "1": "huber",
                 "2": "cyclic_mae",
                 "3": "mae",
             }
