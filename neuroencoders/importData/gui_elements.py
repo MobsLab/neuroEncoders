@@ -160,6 +160,9 @@ class AnimatedPositionPlotter:
         else:
             self.predicted_heatmap = None
 
+        if kwargs.get("predicted_dim_please", None) is not None:
+            self.predicted_dim_please = kwargs.pop("predicted_dim_please")
+
         self.positions = np.array(self.data_helper.fullBehavior["Positions"])
         self.plot_all_stims = kwargs.get("plot_all_stims", False)
         self.true_posIndex = np.arange(len(self.positions))  # will be used with masking
@@ -267,9 +270,9 @@ class AnimatedPositionPlotter:
             )
             # restrict to best epochs no prediction given
         else:
-            epochMask = (self.positionTime >= self.prediction_positionTime[0]) & (
-                self.positionTime <= self.prediction_positionTime[-1]
-            )
+            epochMask = (
+                self.positionTime >= np.nanmin(self.prediction_positionTime)
+            ) & (self.positionTime <= np.nanmax(self.prediction_positionTime))
             # restrict to rough prediction time range
 
         try:
@@ -971,8 +974,9 @@ class AnimatedPositionPlotter:
                 dim = dim[self.totMask][self.true_valid_indices]
             except:
                 dim = self.speed_mask
+
             if self.predicted is not None:
-                predicted_dim = self.speed_mask
+                predicted_dim = np.ones_like(self.linpredicted)
             kwargs["pair_points"] = True
             kwargs["alpha_trail_line"] = 0.9
             kwargs["alpha_delta_line"] = 0.9
@@ -2030,7 +2034,11 @@ class AnimatedPositionPlotter:
             artists_dict = self.artists
         flat_list = []
         for value in artists_dict.values():
-            if hasattr(value, "set_figure"):  # It's an Artist object
+            if (
+                hasattr(value, "set_figure")
+                and getattr(value, "figure", None) is not None
+                and getattr(value, "axes", None) is not None
+            ):  # It's an Artist object
                 flat_list.append(value)
             elif isinstance(value, dict):  # Nested dictionary
                 flat_list.extend(self.flatten_artists(value))
@@ -2795,14 +2803,14 @@ class AnimatedPositionPlotter:
                 "cache_frame_data", False
             ),  # Reduce memory usage
         }
-        if not self.be_fast:
-            anim_kwargs["blit"] = (
-                False  # Disable blitting for better Qt compatibility (otherwise fig title does not update)
-            )
+        # if not self.be_fast:
+        #     anim_kwargs["blit"] = (
+        #         False  # Disable blitting for better Qt compatibility (otherwise fig title does not update)
+        #     )
 
         self.animation = animation.FuncAnimation(
-            self.fig,
-            self.animate_frame,
+            fig=self.fig,
+            func=self.animate_frame,
             frames=self.total_frames,
             interval=interval,
             repeat=repeat,
