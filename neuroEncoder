@@ -26,7 +26,7 @@ from neuroencoders.utils.global_classes import Params, Project, save_project_to_
 # Meta parameters
 show_figures = False
 debug = True
-overWrite_speed_filter_and_linearization = False
+overWrite_speed_filter_and_linearization = True
 
 
 def main(args):
@@ -85,9 +85,10 @@ def main(args):
     # Select the data for testing
     if mode != "decode":
         try:
-            rawdata_parser.speed_filter(
+            speedThresh = rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                overWrite=args.redo and overWrite_speed_filter_and_linearization,
+                # overWrite=args.redo and overWrite_speed_filter_and_linearization,
+                overWrite=False,
                 phase=args.phase,
                 window_range=2000,
                 force=True
@@ -98,9 +99,10 @@ def main(args):
             # If an IndexError occurs, it means that the speed filter failed
             print(f"Error during speed filter: {e}")
             args.phase = None
-            rawdata_parser.speed_filter(
+            speedThresh = rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                overWrite=args.redo and overWrite_speed_filter_and_linearization,
+                # overWrite=args.redo and overWrite_speed_filter_and_linearization,
+                overWrite=False,
                 phase=args.phase,
                 force=False,
             )
@@ -115,6 +117,8 @@ def main(args):
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
         )
+
+    print(f"Speed threshold is {speedThresh} cm/s")
     # Create parameters
     DataHelper = DataHelperClass(
         ProjectPath.xml,
@@ -128,22 +132,28 @@ def main(args):
     )
     helpers = [DataHelper]
     if args.phase != "cond":
+        print("Adding conditioning and post test helpers")
+        print(
+            f"speed filter will be redone: {args.redo and overWrite_speed_filter_and_linearization}"
+        )
         rawdata_parser.speed_filter(
             ProjectPath.folder,
             overWrite=args.redo and overWrite_speed_filter_and_linearization,
             phase="cond",
             template=args.phase,
             window_range=2000,
-            force=True
-            if (args.phase is not None and not show_figures and not args.redo)
-            else False,
+            force=True,
+            # if (args.phase is not None and not show_figures and not args.redo)
+            # else False,
+            threshold=speedThresh,
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
             # overWrite=(True if (args.redo and args.phase is not None) else False),
             overWrite=False,
             phase="cond",
-            force=True if (args.phase is not None and not show_figures) else False,
+            # force=True if (args.phase is not None and not show_figures) else False,
+            force=True,
             find_best_sets=True,
         )
         DataHelper_cond = DataHelperClass(
@@ -163,9 +173,10 @@ def main(args):
             phase="post",
             template=args.phase,
             window_range=2000,
-            force=True
-            if (args.phase is not None and not show_figures and not args.redo)
-            else False,
+            force=True,
+            # if (args.phase is not None and not show_figures and not args.redo)
+            # else False,
+            threshold=speedThresh,
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
@@ -192,14 +203,16 @@ def main(args):
             ProjectPath.folder,
             phase=helper.phase,
             data_helper=helper,
-            redo=args.redo and overWrite_speed_filter_and_linearization,
+            # redo=args.redo and overWrite_speed_filter_and_linearization,
+            redo=False,
         )
         Linearizer.verify_linearization(
             # WARNING: should we use the helper.maxPos() here?
             # as positions are already Aligned/Normalized --> only for viz
             helper.positions / helper.maxPos(),
             ProjectPath.folder,
-            overwrite=args.redo and overWrite_speed_filter_and_linearization,
+            # overwrite=args.redo and overWrite_speed_filter_and_linearization,
+            overwrite=False,
         )
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
@@ -239,10 +252,16 @@ def main(args):
         mixed_loss=args.mixed_loss,
         GaussianHeatmap=not args.no_gaussian,
         all_args=vars(args),
+        lstmLayers=args.n_transformers,
+        dim_factor=args.dim_factor,
+        loss_type=args.loss_type,
+        project_transformer=not args.no_project_transformer,
     )
 
     # Save ProjectPath object
     save_project_to_pickle(ProjectPath)
+
+    # return
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
@@ -648,6 +667,10 @@ def main(args):
             )
             or args.redo
         ):
+            num_augmentations = args.num_augmentations
+            print("num_augmentations", num_augmentations)
+            if num_augmentations is None:
+                num_augmentations = 5 if args.window < 0.504 else 3
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -656,7 +679,7 @@ def main(args):
                 load_model=False,
                 fine_tune=False,
                 l_function=l_function,
-                num_augmentations=5 if args.window < 0.504 else 3,
+                num_augmentations=num_augmentations,
                 strideFactor=strideFactor,
             )
             T = None
@@ -1179,6 +1202,41 @@ if __name__ == "__main__":
             "--no_gaussian",
             action="store_true",
             help="defines whether we train on gaussian heatmaps or on simple (x,y) positions",
+        )
+        p.add_argument(
+            "-df",
+            "--dim_factor",
+            type=int,
+            help="factor to multiply the CNN output feature dimension before feeding it to the transformer. Defaults to 1 (no multiplication)",
+            default=1,
+        )
+        p.add_argument(
+            "-ntransfo",
+            "--n_transformers",
+            type=int,
+            help="number of transformers to be stacked. Defaults to 4",
+            default=4,
+        )
+        p.add_argument(
+            "-naug",
+            "--num_augmentations",
+            type=int,
+            help="number of augmentations to be used during training. Defaults to 5 if window<0.504s, else 3",
+            default=None,
+        )
+        p.add_argument(
+            "-loss",
+            "--loss_type",
+            type=str,
+            help="type of loss to be used for Gaussian Heatmap. Defaults to safe_kl",
+            choices=["safe_kl", "wasserstein"],
+            default="safe_kl",
+        )
+        p.add_argument(
+            "-NoProjectTransfo",
+            "--no_project_transformer",
+            action="store_true",
+            help="defines whether to use a linear projection before the transformer or not",
         )
 
         if cmd == "bayes":

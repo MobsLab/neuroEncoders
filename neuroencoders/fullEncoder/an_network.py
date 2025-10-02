@@ -225,6 +225,7 @@ class LSTMandSpikeNetwork:
                     nFeatures=self.params.nFeatures,
                     number=str(group),
                     batch_normalization=False,
+                    reduce_dense=self.params.reduce_dense,
                 )
                 for group in range(self.params.nGroups)
             ]
@@ -1051,16 +1052,32 @@ class LSTMandSpikeNetwork:
                         print("nb_epochs_already_trained =", nb_epochs_already_trained)
                         loaded = True
                     except Exception as e:
-                        print(
-                            "Error loading weights for",
-                            key,
-                            "from",
-                            checkpointPath[key],
-                            "or",
-                            new_checkpointPath[key],
-                            ":",
-                            e,
-                        )
+                        try:
+                            self.model.load_weights(checkpointPath[key])
+                            csv_hist = pd.read_csv(
+                                os.path.join(
+                                    self.folderModels,
+                                    str(windowSizeMS),
+                                    "full",
+                                    "fullmodel.log",
+                                )
+                            )
+                            nb_epochs_already_trained = csv_hist["epoch"].max() + 1
+                            print(
+                                "nb_epochs_already_trained =", nb_epochs_already_trained
+                            )
+                            loaded = True
+                        except Exception as e:
+                            print(
+                                "Error loading weights for",
+                                key,
+                                "from",
+                                checkpointPath[key],
+                                "or",
+                                new_checkpointPath[key],
+                                ":",
+                                e,
+                            )
 
             if loaded:
                 print(
