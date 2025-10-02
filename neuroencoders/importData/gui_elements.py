@@ -163,16 +163,11 @@ class AnimatedPositionPlotter:
         if kwargs.get("predicted_dim_please", None) is not None:
             self.predicted_dim_please = kwargs.pop("predicted_dim_please")
 
-        self.positions = np.array(self.data_helper.fullBehavior["Positions"])
+        self.positions = self.positions_from_NN
+        self.positionTime = self.prediction_positionTime
         self.plot_all_stims = kwargs.get("plot_all_stims", False)
-        self.true_posIndex = np.arange(len(self.positions))  # will be used with masking
-        self.og_positions = self.positions.copy()
-        self.positionTime = self.data_helper.fullBehavior["positionTime"][:, 0]
         # we setup a "true" positionTime to use for precise plotting such as stims...
         # same for "true" positions, which are the original positions for each and every timepoint
-
-        # compute the nyquist frequency from positionTime
-        self.nyquist_freq = 2 * (1 / np.mean(np.diff(self.positionTime)))
 
         # Get predicted positions if available
         if kwargs.get("predicted", None) is not None:
@@ -182,16 +177,9 @@ class AnimatedPositionPlotter:
                 raise ValueError(
                     "You must provide a posIndex when using predicted positions."
                 )
-
-            self.posIndex_in_true_posIndex = np.zeros_like(
-                self.true_posIndex, dtype=bool
-            )
-            self.posIndex_in_true_posIndex[self.posIndex] = 1
-
         else:
             self.predicted = None
             self.posIndex = None
-            self.posIndex_in_true_posIndex = None
 
         # Get linearized positions/predictions if available
         if kwargs.get("linearized_true", None) is not None:
@@ -216,6 +204,38 @@ class AnimatedPositionPlotter:
         else:
             self.linpredicted = None
 
+        if self.predicted is not None:
+            # sort predicted positions by posIndex
+            self.sort_idx = np.argsort(self.posIndex)
+            self.positions_from_NN = self.positions_from_NN[self.sort_idx]
+            self.prediction_positionTime = self.prediction_positionTime[self.sort_idx]
+            self.predicted_heatmap = (
+                self.predicted_heatmap[self.sort_idx]
+                if self.predicted_heatmap is not None
+                else None
+            )
+            self.positions = self.positions[self.sort_idx]
+            self.positionTime = self.positionTime[self.sort_idx]
+            self.predicted = (
+                self.predicted[self.sort_idx] if self.predicted is not None else None
+            )
+            self.posIndex = self.posIndex[self.sort_idx]
+            self.linpositions = (
+                self.linpositions[self.sort_idx]
+                if self.linpositions is not None
+                else None
+            )
+            self.linpredicted = (
+                self.linpredicted[self.sort_idx]
+                if self.linpredicted is not None
+                else None
+            )
+            self.predicted_dim_please = (
+                self.predicted_dim_please[self.sort_idx]
+                if self.predicted_dim_please is not None
+                else None
+            )
+
         if self.plot_stims:
             self.start_stim = self.data_helper.fullBehavior["Times"]["start_stim"]
             self.stop_stim = self.data_helper.fullBehavior["Times"]["stop_stim"]
@@ -234,7 +254,15 @@ class AnimatedPositionPlotter:
 
         if self.plot_all_stims:
             if self.usePosMat:
-                self.stims_positions = self.positions[self.PosMatStimMask]
+                assert self.data_helper.fullBehavior["Positions"] is not None
+                # assert they have the same length
+                assert (
+                    self.data_helper.fullBehavior["Positions"].shape[0]
+                    == self.PosMatStimMask.shape[0]
+                )
+                self.stims_positions = self.data_helper.fullBehavior["Positions"][
+                    self.PosMatStimMask, :2
+                ]
             else:
                 raise NotImplementedError(
                     "Due to inconsistencies in StimEpoch, you need PosMat to plot all the stims at the perfectly right time/positions."
@@ -259,6 +287,11 @@ class AnimatedPositionPlotter:
                 self.predLossMask = np.ones(len(self.predicted), dtype=bool)
         else:
             self.predLossMask = np.array(kwargs["predLossMask"])
+        self.predLossMask = (
+            self.predLossMask[self.sort_idx]
+            if self.predicted is not None
+            else self.predLossMask
+        )
 
         if self.predicted is None:
             epochMask = ep.inEpochsMask(
@@ -289,33 +322,9 @@ class AnimatedPositionPlotter:
                 "this should not happen, epochMask does not match positions length. Check your position and prediction time arrays."
             )
 
-        # WARNING: probably a bit hacky, but how should you deal with duplicate positions?
-        # check if indexes are unique, if not, merge predictions
-        if self.posIndex is not None and self.predicted is not None:
-            unique_indices, inverse_indices = np.unique(
-                self.posIndex, return_inverse=True
-            )
-            self.unique_indices = unique_indices
-            self.inverse_indices = inverse_indices
-            self.predicted = self.deduplicate_and_merge(
-                self.predicted, unique_indices, inverse_indices
-            )
-            self.posIndex = unique_indices
-            self.posIndex_in_true_posIndex = np.zeros_like(
-                self.true_posIndex, dtype=bool
-            )
-            self.posIndex_in_true_posIndex[self.posIndex] = 1
-
         if kwargs.get("speedMaskArray", None) is not None:
             print("Using provided speed mask array.")
             self.speed_mask = np.array(kwargs["speedMaskArray"])
-            # size of prediction_positionTime, not positionTime
-            self.speed_mask = self.deduplicate_and_merge(
-                self.speed_mask,
-                self.unique_indices,
-                self.inverse_indices,
-                reduce_fn=np.max,
-            )
         elif kwargs.get("speedMask", False):
             print("Using speed mask from data_helper.")
             try:
@@ -330,6 +339,11 @@ class AnimatedPositionPlotter:
         else:
             self.speed_mask = None
             # size of prediction_positionTime
+        self.speed_mask = (
+            self.speed_mask[self.sort_idx]
+            if self.speed_mask is not None
+            else self.speed_mask
+        )
 
         print(f"Speed mask applied: {self.speed_mask is not None}.")
         if self.speed_mask is not None:
@@ -337,22 +351,13 @@ class AnimatedPositionPlotter:
                 f"{self.speed_mask.sum() / len(self.speed_mask) * 100:.2f}% of positions kept."
             )
 
-        if self.predLossMask is not None:
-            print("Applying deduplication and merging to predLossMask.")
-            self.predLossMask = self.deduplicate_and_merge(
-                self.predLossMask,
-                self.unique_indices,
-                self.inverse_indices,
-                reduce_fn=np.max,
-            )
-
         # apply mask to positionTime now - others follow at the end
         self.positionTime = self.positionTime[self.totMask]
-        self.true_posIndex = self.true_posIndex[self.totMask]
         # now we have masked indexing
 
         if self.plot_stims:
             if not self.usePosMat:
+                # should not be available
                 self.stimEpochsIndex = np.array(
                     [
                         [
@@ -372,8 +377,9 @@ class AnimatedPositionPlotter:
                 self.stim_indices = np.array(sorted(index_set))
                 self.stim_indices = self.stim_indices[self.stim_indices != -1]
             else:
-                self.PosMatStimMask = self.PosMatStimMask[self.totMask]
-                self.stim_indices = np.where(self.PosMatStimMask)[0]
+                stim_indices = np.where(self.PosMatStimMask)[0]
+                self.stim_indices = np.where(np.isin(self.posIndex, stim_indices))[0]
+                print(self.stim_indices)
 
             if self.tRipples is not None:
                 # same as stim indices, give a bit of room for the time matching
@@ -381,8 +387,8 @@ class AnimatedPositionPlotter:
                     [
                         t
                         for t in self.tRipples
-                        if t <= self.positionTime[-1] + 4 / self.nyquist_freq
-                        and t >= self.positionTime[0] - 4 / self.nyquist_freq
+                        if t <= self.positionTime[-1] + 0.2  # in seconds
+                        and t >= self.positionTime[0] - 0.2
                     ]
                 )
                 self.ripples_indices = np.array(
@@ -400,10 +406,10 @@ class AnimatedPositionPlotter:
                 [
                     [start, stop]
                     for start, stop in zip(self.start_freeze, self.stop_freeze)
-                    if start <= self.positionTime[-1] + 4 / self.nyquist_freq
-                    and start >= self.positionTime[0] - 4 / self.nyquist_freq
-                    and stop <= self.positionTime[-1] + 4 / self.nyquist_freq
-                    and stop >= self.positionTime[0] - 4 / self.nyquist_freq
+                    if start <= self.positionTime[-1] + 0.2
+                    and start >= self.positionTime[0] - 0.2
+                    and stop <= self.positionTime[-1] + 0.2
+                    and stop >= self.positionTime[0] - 0.2
                 ]
             ).reshape(-1, 2)
             self.start_freeze = self.FreezeEpochs[:, 0]
@@ -424,62 +430,22 @@ class AnimatedPositionPlotter:
             self.freezing_indices = np.array(sorted(index_set))
             self.freezing_indices = self.freezing_indices[self.freezing_indices > 0]
 
-        # compute the mask for predicted positions
-        if self.predicted is not None:
-            # here the predictionMask already has unique values!
-            self.predictionMask = self.totMask[self.posIndex]
-            self.posIndex = self.posIndex[self.predictionMask]
-            self.posIndex_in_true_posIndex = self.posIndex_in_true_posIndex[
-                self.totMask
-            ]
-
         self.positions = self.positions[self.totMask]
-
-        if self.speed_mask is not None:
-            if kwargs.get("speedMaskArray", None) is not None:
-                # it means it should be the same shape as prediction_positionTime
-                self.speed_mask = self.speed_mask[self.predictionMask]
-                # if simply dummy
-            else:
-                # simply subset with the masked posIndex from NN
-                self.speed_mask = self.speed_mask[self.posIndex]
 
         if self.predLossMask is not None:
             # same reasoning
             try:
                 self.predLossMask = self.predLossMask[self.totMask]
             except IndexError:
-                self.predLossMask = self.predLossMask[self.predictionMask]
+                self.predLossMask = self.predLossMask
 
-        if self.predicted is not None:
-            self.predicted = self.predicted[self.predictionMask]
-
-        if self.prediction_positionTime is not None:
-            self.prediction_positionTime = self.deduplicate_and_merge(
-                self.prediction_positionTime,
-                self.unique_indices,
-                self.inverse_indices,
-            )
-            self.prediction_positionTime = self.prediction_positionTime[
-                self.predictionMask
-            ]
         if self.linpositions is not None:
             self.linpositions = self.linpositions[self.totMask]
         if self.linpredicted is not None:
-            self.linpredicted = self.deduplicate_and_merge(
-                self.linpredicted,
-                self.unique_indices,
-                self.inverse_indices,
-            )
-            self.linpredicted = self.linpredicted[self.predictionMask]
+            self.linpredicted = self.linpredicted
 
         if self.predicted_heatmap is not None:
-            self.predicted_heatmap = self.deduplicate_and_merge(
-                self.predicted_heatmap,
-                self.unique_indices,
-                self.inverse_indices,
-            )
-            self.predicted_heatmap = self.predicted_heatmap[self.predictionMask]
+            self.predicted_heatmap = self.predicted_heatmap
 
         # Remove NaN values
         # WARNING: I'm afraid this will remove too much data, and would prefer plotting NaN values instead of removing them.
@@ -492,7 +458,6 @@ class AnimatedPositionPlotter:
             self.prediction_valid_indices = np.ones(len(self.predicted), dtype=bool)
             self.predicted = self.predicted[self.prediction_valid_indices]
             self.posIndex = self.posIndex[self.prediction_valid_indices]
-            self.true_posIndex = self.true_posIndex[self.true_valid_indices]
 
             self.predLossMask = self.predLossMask[self.prediction_valid_indices]
 
@@ -564,7 +529,7 @@ class AnimatedPositionPlotter:
                 self.dim = np.array(self.data_helper.direction)
                 self.dim_name = "direction"
                 # get rid of NaN values in directions
-                self.dim = self.dim[self.totMask][self.true_valid_indices]
+                self.dim = self.dim[self.posIndex]
             elif dim == "distance" or dim == "thigmo":
                 if not hasattr(self.data_helper, "thigmo"):
                     self.data_helper.thigmo = np.array(
@@ -572,16 +537,16 @@ class AnimatedPositionPlotter:
                     )
                 self.dim = np.array(self.data_helper.thigmo)
                 self.dim_name = "dist2wall"
-                self.dim = self.dim[self.true_valid_indices]
+                self.dim = self.dim[self.posIndex]
             elif dim == "PosHDSpeed":
                 self.dim = np.array(self.data_helper.positions)
                 self.dim_name = "PosHDSpeed"
-                self.dim = self.dim[self.totMask][self.true_valid_indices]
+                self.dim = self.dim[self.posIndex]
             elif dim == "Head Direction":
                 self.dim = np.array(self.data_helper.positions[:, 3])
                 self.dim_name = "Head Direction"
                 # self.lin_dim = self.data_helper.positions[:, 2]
-                self.dim = self.dim[self.totMask][self.true_valid_indices]
+                self.dim = self.dim[self.posIndex]
                 # self.lin_dim = self.lin_dim[self.totMask][self.true_valid_indices]
                 self.positions = self.positions[:, :2]
         elif isinstance(dim, np.ndarray):
@@ -757,6 +722,7 @@ class AnimatedPositionPlotter:
             if kwargs.get("very_simple_plot", False):
                 print("Setting up very simple plot (trajectory only)...")
                 self.very_simple_plot = True
+                self.simple_plot = False
                 return self._setup_simple_plot(**kwargs)
             elif kwargs.get("simple_plot", True):
                 print(
@@ -970,9 +936,10 @@ class AnimatedPositionPlotter:
             print("Using speed for color coding!")
 
             try:
-                dim = self.data_helper.fullBehavior["Times"]["speedFilter"]
+                dim = self.predicted_dim_please
                 dim = dim[self.totMask][self.true_valid_indices]
             except:
+                print("Using speed mask from random.")
                 dim = self.speed_mask
 
             if self.predicted is not None:
@@ -1265,7 +1232,9 @@ class AnimatedPositionPlotter:
         self.axes["trajectory"] = self.ax  # For consistency
 
         # Use the same setup logic as the trajectory panel
-        self._setup_trajectory_panel_logic(ax=self.ax, dark_theme=usedark, **kwargs)
+        self._setup_trajectory_panel_logic(
+            ax=self.ax, loc_in_gs="trajectory", dark_theme=usedark, **kwargs
+        )
 
         return self.fig, self.axes
 
@@ -1831,8 +1800,6 @@ class AnimatedPositionPlotter:
             ripples_handle = self.artists[name_axis]["ripples_stars"]
             handles_for_legend.append(stims_handle)
             labels_for_legend.append("Stimulation")
-            handles_for_legend.append(freezing_handle)
-            labels_for_legend.append("Freezing")
             handles_for_legend.append(ripples_handle)
             labels_for_legend.append("Ripples")
 
@@ -1851,14 +1818,9 @@ class AnimatedPositionPlotter:
         ax.set_xlabel("X Position")
         ax.set_ylabel("Y Position")
 
-        if self.binary_colors[name_axis]:
-            title_text = (
-                "Position Trajectory - Towards Shock Zone (Pink) or Safe Zone (Blue)"
-            )
-        else:
-            title_text = "Position Trajectory"
+        title_text = "Position Trajectory"
 
-        if self.very_simple_plot:
+        if not self.very_simple_plot:
             self.artists[name_axis]["pos_title"] = ax.set_title(
                 title_text,
                 color="white" if kwargs.get("dark_theme", True) else "black",
@@ -2133,16 +2095,12 @@ class AnimatedPositionPlotter:
             trail_directions = self.dims[name_axis][start_idx:end_idx]
             trail_times = self.positionTime[start_idx:end_idx]
 
-            if self.predicted is not None and self.posIndex_in_true_posIndex[frame]:
-                mask = (self.posIndex >= self.true_posIndex[start_idx]) & (
-                    self.posIndex < self.true_posIndex[end_idx]
-                )
-                trail_predicted = self.predicted[mask]
-                trail_directions_predicted = self.predicted_dims[name_axis][mask]
-                trail_predicted_times = self.positionTime[
-                    self.posIndex_in_true_posIndex
-                ][np.where(mask)[0]]
-                common_mask = np.isin(trail_times, trail_predicted_times)
+            if self.predicted is not None:
+                trail_predicted = self.predicted[start_idx:end_idx]
+                trail_directions_predicted = self.predicted_dims[name_axis][
+                    start_idx:end_idx
+                ]
+                trail_predicted_times = self.positionTime[start_idx:end_idx]
                 assert trail_predicted.shape[0] == trail_directions_predicted.shape[0]
             else:
                 trail_predicted = None
@@ -2154,7 +2112,7 @@ class AnimatedPositionPlotter:
 
             if not self.pair_points[name_axis]:
                 # Update trail line
-                if self.predicted is not None and self.posIndex_in_true_posIndex[frame]:
+                if self.predicted is not None:
                     self.artists[name_axis]["predicted_line"].set_data(
                         trail_predicted[:, 0], trail_predicted[:, 1]
                     )
@@ -2166,26 +2124,24 @@ class AnimatedPositionPlotter:
                     x, y = self.get_linearized_point(current_lin_pos[0])
                     self.artists[name_axis]["linearized_arrow_true"].set_data((x, y))
                 if self.linpredicted is not None:
-                    if self.posIndex_in_true_posIndex[frame]:
-                        idx = np.where(self.posIndex == self.true_posIndex[frame])[0][0]
-                        current_lin_predicted = self.linpredicted[idx : idx + 1]
+                    current_lin_predicted = self.linpredicted[frame : frame + 1]
 
-                        x, y = self.get_linearized_point(current_lin_predicted[0])
-                        if (
-                            x
-                            == self.artists[name_axis][
-                                "linearized_arrow_predicted"
-                            ].get_xdata()
-                            and y
-                            == self.artists[name_axis][
-                                "linearized_arrow_predicted"
-                            ].get_ydata()
-                        ):
-                            pass
-                        else:
-                            self.artists[name_axis][
-                                "linearized_arrow_predicted"
-                            ].set_data((x, y))
+                    x, y = self.get_linearized_point(current_lin_predicted[0])
+                    if (
+                        x
+                        == self.artists[name_axis][
+                            "linearized_arrow_predicted"
+                        ].get_xdata()
+                        and y
+                        == self.artists[name_axis][
+                            "linearized_arrow_predicted"
+                        ].get_ydata()
+                    ):
+                        pass
+                    else:
+                        self.artists[name_axis]["linearized_arrow_predicted"].set_data(
+                            (x, y)
+                        )
 
             n_trail_points = len(trail_positions)
             alphas = np.linspace(0.4, 1, n_trail_points)
@@ -2216,7 +2172,6 @@ class AnimatedPositionPlotter:
                 if (
                     self.predicted is not None
                     and self.artists[name_axis]["predicted_points"] is not None
-                    and self.posIndex_in_true_posIndex[frame]
                 ):
                     trail_colors_predicted = [
                         self.predicted_colormap[name_axis][int(d)]
@@ -2282,7 +2237,6 @@ class AnimatedPositionPlotter:
                 if (
                     self.predicted is not None
                     and self.artists[name_axis]["predicted_points"] is not None
-                    and self.posIndex_in_true_posIndex[frame]
                 ):
                     if self.dim_name != "dummy":
                         trail_predicted_colors = self.predicted_colormap[name_axis](
@@ -2332,16 +2286,8 @@ class AnimatedPositionPlotter:
             # Update current position with color based on direction
             current_pos = self.positions[frame : frame + 1]
             current_dir = self.dims[name_axis][frame]
-            if (
-                self.predicted is not None
-                and trail_predicted is not None
-                and self.posIndex_in_true_posIndex[frame]
-            ):
-                current_predicted_pos = self.predicted[
-                    np.where(self.posIndex == self.true_posIndex[frame])[0][
-                        0
-                    ] : np.where(self.posIndex == self.true_posIndex[frame])[0][0] + 1
-                ]
+            if self.predicted is not None and trail_predicted is not None:
+                current_predicted_pos = self.predicted[frame : frame + 1]
                 current_predicted_dir = self.dims[name_axis][frame]
                 if not self.pair_points[name_axis]:
                     self.artists[name_axis]["delta_predicted_true"].set_data(
@@ -2351,10 +2297,7 @@ class AnimatedPositionPlotter:
                 elif self.dim_name != "speed_mask":
                     # For paired points, we need to create segments
                     # first, we find common timepoints
-                    common_mask = np.isin(trail_times, trail_predicted_times)
-                    segments = np.stack(
-                        [trail_positions[common_mask], trail_predicted], axis=1
-                    )
+                    segments = np.stack([trail_positions, trail_predicted], axis=1)
 
                     if self.velocity_true is not None and (
                         self.speed_mask is None
@@ -2363,16 +2306,11 @@ class AnimatedPositionPlotter:
                         ).sum()
                         >= 0
                     ):
-                        velocity_true = self.velocity_true[start_idx:end_idx][
-                            common_mask
-                        ]
-                        mask = (self.posIndex >= self.true_posIndex[start_idx]) & (
-                            self.posIndex < self.true_posIndex[end_idx]
-                        )
+                        velocity_true = self.velocity_true[start_idx:end_idx]
 
                         position_diff = (
-                            self.predicted[mask]
-                            - self.positions[start_idx:end_idx][common_mask]
+                            self.predicted[start_idx:end_idx]
+                            - self.positions[start_idx:end_idx]
                         )
                         # Create a mask for concordant and discordant directions by using dot product
                         mask = np.sum(velocity_true * position_diff, axis=1) >= 0
@@ -2389,15 +2327,12 @@ class AnimatedPositionPlotter:
                     )
                     self.artists[name_axis]["delta_predicted_true"].set_color(colors)
                 elif self.dim_name == "speed_mask":
-                    common_mask = np.isin(trail_times, trail_predicted_times)
-                    segments = np.stack(
-                        [trail_positions[common_mask], trail_predicted], axis=1
-                    )
+                    segments = np.stack([trail_positions, trail_predicted], axis=1)
                     self.artists[name_axis]["delta_predicted_true"].set_segments(
                         segments
                     )
                     colors = np.where(
-                        trail_directions[common_mask],
+                        trail_directions,
                         self.delta_color_forward,
                         self.delta_color_reverse,
                     )
@@ -2407,13 +2342,8 @@ class AnimatedPositionPlotter:
                         "Error: paired points logic only works for speed_mask or when velocity_true is provided."
                     )
 
-            if (
-                self.predicted_heatmap is not None
-                and self.posIndex_in_true_posIndex[frame]
-            ):
-                current_heatmap = self.predicted_heatmap[
-                    np.where(self.posIndex == self.true_posIndex[frame])[0][0]
-                ]
+            if self.predicted_heatmap is not None:
+                current_heatmap = self.predicted_heatmap[frame]
                 masked = np.ma.masked_where(
                     current_heatmap <= current_heatmap.mean(), current_heatmap
                 )
@@ -2433,7 +2363,6 @@ class AnimatedPositionPlotter:
                 if (
                     self.predicted is not None
                     and "current_predicted_point" in self.artists[name_axis]
-                    and self.posIndex_in_true_posIndex[frame]
                 ):
                     self.artists[name_axis]["current_predicted_point"].set_offsets(
                         current_predicted_pos
@@ -2446,7 +2375,6 @@ class AnimatedPositionPlotter:
                 if (
                     self.predicted is not None
                     and "current_predicted_point" in self.artists[name_axis]
-                    and self.posIndex_in_true_posIndex[frame]
                 ):
                     self.artists[name_axis]["current_predicted_point"].set_offsets(
                         current_predicted_pos
@@ -2545,33 +2473,14 @@ class AnimatedPositionPlotter:
 
                 # In analysis mode, also show position error
                 if self.predicted is not None:
-                    if self.posIndex_in_true_posIndex[frame]:
-                        up_until_mask_pred = np.where(
-                            self.posIndex <= self.true_posIndex[frame]
-                        )[0]
-                        up_until_mask_true = self.posIndex_in_true_posIndex[: frame + 1]
-                        pos_error = np.nanmean(
-                            np.linalg.norm(
-                                self.predicted[up_until_mask_pred]
-                                - self.positions[: frame + 1][up_until_mask_true],
-                                axis=1,
-                            )
+                    pos_error = np.nanmean(
+                        np.linalg.norm(
+                            self.predicted[: frame + 1] - self.positions[: frame + 1],
+                            axis=1,
                         )
-                        title_text = (
-                            f"Position error: {pos_error:.2f} cm | " + title_text
-                        )
-                    else:
-                        # just keep the old title_text
-                        if self.very_simple_plot:
-                            title_text = self.artists[name_axis]["pos_title"].get_text()
-                        else:
-                            title_text = self.artists["fig_title"].get_text()
-                        # replace the frame number with the current frame info
-                        title_text = re.sub(
-                            r"(?<=Frame )\d+(?=/)", f"{frame + 1}", title_text
-                        )
-
-                if self.very_simple_plot:
+                    )
+                    title_text = f"Position error: {pos_error:.2f} cm | " + title_text
+                if not self.very_simple_plot:
                     self.artists[name_axis]["pos_title"].set_text(title_text)
                 else:
                     self.artists["fig_title"].set_text(title_text)
@@ -2607,10 +2516,7 @@ class AnimatedPositionPlotter:
         )
 
         # Draw predicted arrow if available
-        if (
-            self.predicted_head_direction is not None
-            and self.posIndex_in_true_posIndex[frame]
-        ):
+        if self.predicted_head_direction is not None:
             idx = np.where(self.posIndex == self.true_posIndex[frame])[0][0]
             pred_heading = np.radians(self.predicted_head_direction[idx])
             self.artists["pred_arrow"] = ax.arrow(
@@ -2664,27 +2570,33 @@ class AnimatedPositionPlotter:
             np.array([self.positionTime[frame], self.linpositions[frame]])
         )
 
-        if self.linpredicted is not None and self.posIndex_in_true_posIndex[frame]:
-            mask = (self.posIndex >= self.true_posIndex[start_idx]) & (
-                self.posIndex < self.true_posIndex[end_idx]
-            )
-            linpredicted = self.linpredicted[mask]
-            prediction_time = self.positionTime[self.posIndex_in_true_posIndex][
-                np.where(mask)[0]
-            ]
-            idx = np.where(self.posIndex == self.true_posIndex[frame])[0][0]
+        if self.linpredicted is not None:
+            linpredicted = self.linpredicted[start_idx:end_idx]
+            prediction_time = self.positionTime[start_idx:end_idx]
 
             self.artists["linpos_pred_line"].set_data(prediction_time, linpredicted)
             self.artists["linpos_pred_points"].set_offsets(
                 np.column_stack((prediction_time, linpredicted))
             )
             self.artists["current_predicted_point"].set_data(
-                self.positionTime[frame], self.linpredicted[idx]
+                self.positionTime[frame], self.linpredicted[frame]
             )
             if hasattr(self, "lin_dim_pred"):
-                values = self.lin_dim_pred[mask]
+                values = self.lin_dim_pred[start_idx:end_idx]
                 color = self.predicted_lin_cmap(self.predicted_lin_norm(values))
                 self.artists["linpos_pred_points"].set_facecolors(color)
+            if self.dim_name == "speed_mask":
+                dim = (
+                    self.dims["top"][start_idx:end_idx]
+                    if "top" in self.dims
+                    else self.dims[list(self.dims.keys())[0]][start_idx:end_idx]
+                )
+                colors = np.where(
+                    dim,
+                    self.delta_color_forward,
+                    self.delta_color_reverse,
+                )
+                self.artists["linpos_pred_points"].set_color(colors)
 
         self.axes["linpos_movie"].set_xlim(
             self.positionTime[start_idx],
@@ -2803,10 +2715,6 @@ class AnimatedPositionPlotter:
                 "cache_frame_data", False
             ),  # Reduce memory usage
         }
-        # if not self.be_fast:
-        #     anim_kwargs["blit"] = (
-        #         False  # Disable blitting for better Qt compatibility (otherwise fig title does not update)
-        #     )
 
         self.animation = animation.FuncAnimation(
             fig=self.fig,

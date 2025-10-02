@@ -1667,7 +1667,7 @@ class Mouse_Results(Params, PaperFigures):
                 else kwargs.get("video_path")
             )
 
-            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 30 -i "{input_pattern}" -c:v libx264 -preset medium -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
+            ffmpeg_cmd = f'{ffmpeg_path} -y -framerate 60 -i "{input_pattern}" -c:v libx264 -preset medium -crf 16 -pix_fmt yuv420p -g 40 -keyint_min 40 -vf "crop=trunc(iw/2)*2:trunc(ih/2)*2" "{output_video_path}"'
 
             import subprocess
 

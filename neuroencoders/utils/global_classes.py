@@ -20,11 +20,11 @@ import dill as pickle
 # import matplotlib as mplt
 # mplt.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import tables
 import tensorflow as tf
+from matplotlib.patches import Rectangle
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
@@ -1476,7 +1476,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 5)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1567,18 +1567,31 @@ class Params:
             else self.nFeatures * self.nGroups  # ie PositionalEncoding dimension!!!!
         )  # second fully connected layer in Transformer arch dimension
 
+        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
+        self.GaussianSigma = kwargs.pop(
+            "GaussianSigma", 0.04
+        )  # 1/44 ~= 0.023, so it should cover ~3 bins
+        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
+        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
+
         # if using transformer, we need to set 2 other dense layers output (after the multihead attention blocks)
+        if self.GaussianHeatmap:
+            default_transformer_dense1 = int(
+                self.GaussianGridSize[0] * self.GaussianGridSize[1] / 4
+            )
+            default_transformer_dense2 = int(
+                self.GaussianGridSize[0] * self.GaussianGridSize[1] / 2
+            )
+        else:
+            default_transformer_dense1 = int(self.nFeatures * self.dim_factor / 4)
+            default_transformer_dense2 = int(self.nFeatures * self.dim_factor / 8)
+
         self.TransformerDenseSize1 = kwargs.pop(
-            "TransformerDense1",
-            self.nFeatures * 8
-            if self.project_transformer
-            else self.nFeatures * self.nGroups * 4,
+            "TransformerDense1", default_transformer_dense1
         )
         self.TransformerDenseSize2 = kwargs.pop(
-            "TransformerDense2",
-            self.nFeatures * 4
-            if self.project_transformer
-            else self.nFeatures * self.nGroups,
+            "TransformerDense2", default_transformer_dense2
         )
 
         self.nDenseLayers = kwargs.pop(
@@ -1592,14 +1605,6 @@ class Params:
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
-
-        self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
-        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
-        self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.025
-        )  # 1/44 ~= 0.023, so it should cover ~3 bins
-        self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
-        self.GaussianNeg = -50  # value for forbidden zones in the heatmap
 
         self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
 
@@ -1663,6 +1668,8 @@ class Params:
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
         self.usingMixedPrecision = False
+
+        self.reduce_dense = kwargs.pop("reduce_dense", None)
         # enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer
         # except the output for unclear reasons linked to gradient computations

@@ -45,9 +45,11 @@ class spikeNet(tf.keras.layers.Layer):
         device: str = "/cpu:0",
         nFeatures=128,
         number="",
+        reduce_dense=False,
         **kwargs,
     ):
         name = kwargs.pop("name", "spikeNet{}".format(number))
+        self.reduce_dense = reduce_dense
         self.batch_normalization = kwargs.pop("batch_normalization", True)
         super().__init__(name=name, **kwargs)
         self.nFeatures = nFeatures
@@ -144,10 +146,15 @@ class spikeNet(tf.keras.layers.Layer):
 
             # or we could simply tf.keras.layers.Flatten() the output of the conv layers - leaves batch size unchanged
             x = tf.keras.layers.Flatten()(x)
-            x = self.denseLayer1(x)
-            x = self.dropoutLayer(x)
-            x = self.denseLayer2(x)
-            x = self.denseLayer3(x)
+            if not self.reduce_dense:
+                x = self.denseLayer1(x)
+                x = self.dropoutLayer(x)
+                x = self.denseLayer2(x)
+                x = self.denseLayer3(x)
+            else:
+                x = self.denseLayer3(x)
+                x = self.dropoutLayer(x)
+
         return x
 
     @property
@@ -159,10 +166,10 @@ class spikeNet(tf.keras.layers.Layer):
             + self.maxPoolLayer1.variables
             + self.maxPoolLayer2.variables
             + self.maxPoolLayer3.variables
-            + self.denseLayer1.variables
-            + self.denseLayer2.variables
             + self.denseLayer3.variables
         )
+        if not self.reduce_dense:
+            vars_list += self.denseLayer1.variables + self.denseLayer2.variables
         if self.batch_normalization:
             vars_list += self.bn1.variables + self.bn2.variables + self.bn3.variables
         return vars_list
@@ -175,10 +182,10 @@ class spikeNet(tf.keras.layers.Layer):
             self.maxPoolLayer1,
             self.maxPoolLayer2,
             self.maxPoolLayer3,
-            self.denseLayer1,
-            self.denseLayer2,
             self.denseLayer3,
         )
+        if not self.reduce_dense:
+            layers_list += (self.denseLayer1, self.denseLayer2)
         if self.batch_normalization:
             layers_list += (self.bn1, self.bn2, self.bn3)
         return layers_list
@@ -2435,7 +2442,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         using precomputed linearized maze cost matrix.
         """
         if alpha is None:
-            alpha = 0.5  # default weight for Wasserstein penalty
+            alpha = 0.2  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
         allowed_mask = kops.cast(self.allowed_mask_tf, tf.float32)

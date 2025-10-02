@@ -403,7 +403,9 @@ def speed_filter(
     with tables.open_file(filename, "a") as f:
         children = [c.name for c in f.list_nodes("/behavior")]
         if "speedMask" in children:
-            print(f"speedMask already created for {phase} phase")
+            print(
+                f"speedMask already created for {phase} phase, will overwrite: {overWrite}"
+            )
             try:
                 # check the value is a numeric value
                 speedThresholdOG = (
@@ -418,15 +420,23 @@ def speed_filter(
                 print(e)
                 speedOG = None
                 overWrite = True  # otherwise we never get to chose a new value
+
             if overWrite:
                 f.remove_node("/behavior", "speedMask")
             else:
-                return
+                return np.exp(speedOG)
 
         # If threshold is provided, use it directly
+        print(f"Select speed threshold for {phase} phase")
+        print(f"threshold provided: {threshold is not None}")
+        if threshold is not None:
+            print("WARNING: provided threshold will override any previous speedMask")
         if threshold is not None:
             speedThresholdOG = np.log(threshold).astype(float)
             speedOG = speedThresholdOG
+            print(
+                f"Using provided speed threshold: {np.exp(speedThresholdOG):.2f} cm/s"
+            )
         # Prepare data
         positions = f.root.behavior.positions
         speed = f.root.behavior.speed
@@ -509,7 +519,7 @@ def speed_filter(
             speedThreshold = speedOG
 
         if phase != "pre":
-            speedThreshold = min(
+            speedThreshold = max(
                 speedThreshold, np.log(1.5)
             )  # default minimal threshold for non pre phases to make sure we still have a test set (speedMask can be very restrictive)
         speedFilter = speedToshowSm > np.exp(speedThreshold)
