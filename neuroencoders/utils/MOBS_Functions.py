@@ -864,11 +864,7 @@ class Mouse_Results(Params, PaperFigures):
             if kwargs.get("keops_linearization", False):
                 self.l_function = self.linearizer[winMS].pykeops_linearization
             else:
-
-                def cpu_linearization(x):
-                    return self.linearizer[winMS].apply_linearization(x, keops=False)
-
-                self.l_function = cpu_linearization
+                self.l_function = self.cpu_linearization
 
             self.data_helper[winMS].get_true_target(
                 self.l_function, in_place=True, show=kwargs.get("show", False)
@@ -905,6 +901,10 @@ class Mouse_Results(Params, PaperFigures):
             phase=self.phase,
         )
         print(self)
+
+    def cpu_linearization(self, x):
+        winMS = self.windows[0]
+        return self.linearizer[winMS].apply_linearization(x, keops=False)
 
     def __getstate__(self):
         """
@@ -1492,50 +1492,51 @@ class Mouse_Results(Params, PaperFigures):
 
         blit = kwargs.pop("blit", True)
         predicted_probs = None
-        self.load_trainers(which="ann")
-        if (
-            self.ann[str(win)].params.GaussianHeatmap
-            and kwargs.get("predicted_heatmap", None) is None
-            and kwargs.get("plot_heatmap", False)
-        ):
-            try:
-                predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                    "logits_hw"
-                ]
-            except (AttributeError, KeyError, TypeError):
-                # create an empty list of size windows_values
-                self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
-                with open(
-                    os.path.join(
-                        self.projectPath.experimentPath,
-                        "results",
-                        str(winMS),
-                        f"decoding_results{phase}.pkl",
-                    ),
-                    "rb",
-                ) as f:
-                    results = pickle.load(f)
-                self.resultsNN_phase_pkl[phase][idWindow] = results
-                predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                    "logits_hw"
-                ]
-            try:
-                predicted_probs = (
-                    self.ann[str(win)]
-                    .GaussianHeatmap.decode_and_uncertainty(
-                        predicted_logits, return_probs=True
-                    )[-1]
-                    .numpy()
-                )
-            except Exception as e:
-                self.load_trainers(which="ann")
-                predicted_probs = (
-                    self.ann[str(win)]
-                    .GaussianHeatmap.decode_and_uncertainty(
-                        predicted_logits, return_probs=True
-                    )[-1]
-                    .numpy()
-                )
+        if kwargs.get("plot_heatmap", False):
+            self.load_trainers(which="ann", **kwargs)
+            if (
+                self.ann[str(win)].params.GaussianHeatmap
+                and kwargs.get("predicted_heatmap", None) is None
+                and kwargs.get("plot_heatmap", False)
+            ):
+                try:
+                    predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+                        "logits_hw"
+                    ]
+                except (AttributeError, KeyError, TypeError):
+                    # create an empty list of size windows_values
+                    self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
+                    with open(
+                        os.path.join(
+                            self.projectPath.experimentPath,
+                            "results",
+                            str(winMS),
+                            f"decoding_results{phase}.pkl",
+                        ),
+                        "rb",
+                    ) as f:
+                        results = pickle.load(f)
+                    self.resultsNN_phase_pkl[phase][idWindow] = results
+                    predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+                        "logits_hw"
+                    ]
+                try:
+                    predicted_probs = (
+                        self.ann[str(win)]
+                        .GaussianHeatmap.decode_and_uncertainty(
+                            predicted_logits, return_probs=True
+                        )[-1]
+                        .numpy()
+                    )
+                except Exception as e:
+                    self.load_trainers(which="ann")
+                    predicted_probs = (
+                        self.ann[str(win)]
+                        .GaussianHeatmap.decode_and_uncertainty(
+                            predicted_logits, return_probs=True
+                        )[-1]
+                        .numpy()
+                    )
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
@@ -1545,7 +1546,7 @@ class Mouse_Results(Params, PaperFigures):
             prediction_time=prediction_time,
             posIndex=posIndex,
             predicted_heatmap=kwargs.pop("predicted_heatmap", predicted_probs)
-            if self.ann[str(win)].params.GaussianHeatmap
+            if kwargs.get("plot_heatmap", False)
             else None,
             predicted_dim_please=speedMaskArray_for_dim,
             blit=blit,
@@ -1631,7 +1632,7 @@ class Mouse_Results(Params, PaperFigures):
         total_frames = init_plotter.total_frames
 
         i = 5
-        save_path = os.path.join(init_plotter.output_dir, f"frame_{i:04d}.png")
+        save_path = os.path.join(init_plotter.output_dir, f"frame_{i:09d}.png")
         if not os.path.exists(save_path):
             try:
                 print("🚀 Using linear loop for rendering")
@@ -1642,7 +1643,7 @@ class Mouse_Results(Params, PaperFigures):
                     if i > 10 and kwargs.get("debug", False):
                         break  # DEBUG LIMIT TO 100 FRAMES
                     save_path = os.path.join(
-                        init_plotter.output_dir, f"frame_{i:06d}.png"
+                        init_plotter.output_dir, f"frame_{i:09d}.png"
                     )
                     init_plotter.animate_frame(i, **kwargs, save_path=save_path)
             except Exception as e:
@@ -1655,7 +1656,7 @@ class Mouse_Results(Params, PaperFigures):
         if kwargs.get("auto_encode", True):
             print("🎬 Encoding video with ffmpeg...")
 
-            input_pattern = os.path.join(output_dir, "frame_%06d.png")
+            input_pattern = os.path.join(output_dir, "frame_%09d.png")
             video_name = kwargs.get(
                 "video_name",
                 f"mouse_{self.mouse_name}_win_{winMS}_phase_{self.phase}.mp4",
@@ -1680,7 +1681,7 @@ class Mouse_Results(Params, PaperFigures):
             if kwargs.get("remove_frames", True):
                 print("🗑️ Removing temporary frame files...")
                 for i in range(total_frames):
-                    frame_path = os.path.join(output_dir, f"frame_{i:04d}.png")
+                    frame_path = os.path.join(output_dir, f"frame_{i:09d}.png")
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
                 print("✅ Temporary frames removed.")
