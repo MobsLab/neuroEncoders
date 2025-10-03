@@ -26,7 +26,8 @@ from neuroencoders.utils.global_classes import Params, Project, save_project_to_
 # Meta parameters
 show_figures = False
 debug = True
-overWrite_speed_filter_and_linearization = True
+overWrite_speed_filter_and_linearization = False
+redo_params = False
 
 
 def main(args):
@@ -87,8 +88,7 @@ def main(args):
         try:
             speedThresh = rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                # overWrite=args.redo and overWrite_speed_filter_and_linearization,
-                overWrite=False,
+                overWrite=args.redo and overWrite_speed_filter_and_linearization,
                 phase=args.phase,
                 window_range=2000,
                 force=True
@@ -101,8 +101,7 @@ def main(args):
             args.phase = None
             speedThresh = rawdata_parser.speed_filter(
                 ProjectPath.folder,
-                # overWrite=args.redo and overWrite_speed_filter_and_linearization,
-                overWrite=False,
+                overWrite=args.redo and overWrite_speed_filter_and_linearization,
                 phase=args.phase,
                 force=False,
             )
@@ -111,14 +110,16 @@ def main(args):
             )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            # overWrite=(True if (args.redo and args.phase is not None) else False),
-            overWrite=False,
+            overWrite=(
+                True
+                if (args.redo and args.phase is not None and redo_params)
+                else False
+            ),
             phase=args.phase,
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
         )
 
-    print(f"Speed threshold is {speedThresh} cm/s")
     # Create parameters
     DataHelper = DataHelperClass(
         ProjectPath.xml,
@@ -132,28 +133,26 @@ def main(args):
     )
     helpers = [DataHelper]
     if args.phase != "cond":
-        print("Adding conditioning and post test helpers")
-        print(
-            f"speed filter will be redone: {args.redo and overWrite_speed_filter_and_linearization}"
-        )
         rawdata_parser.speed_filter(
             ProjectPath.folder,
             overWrite=args.redo and overWrite_speed_filter_and_linearization,
             phase="cond",
             template=args.phase,
             window_range=2000,
-            force=True,
-            # if (args.phase is not None and not show_figures and not args.redo)
-            # else False,
+            force=True
+            if (args.phase is not None and not show_figures and not args.redo)
+            else False,
             threshold=speedThresh,
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            # overWrite=(True if (args.redo and args.phase is not None) else False),
-            overWrite=False,
+            overWrite=(
+                True
+                if (args.redo and args.phase is not None and redo_params)
+                else False
+            ),
             phase="cond",
-            # force=True if (args.phase is not None and not show_figures) else False,
-            force=True,
+            force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
         )
         DataHelper_cond = DataHelperClass(
@@ -173,15 +172,18 @@ def main(args):
             phase="post",
             template=args.phase,
             window_range=2000,
-            force=True,
-            # if (args.phase is not None and not show_figures and not args.redo)
-            # else False,
+            force=True
+            if (args.phase is not None and not show_figures and not args.redo)
+            else False,
             threshold=speedThresh,
         )
         rawdata_parser.select_epochs(
             ProjectPath.folder,
-            # overWrite=(True if (args.redo and args.phase is not None) else False),
-            overWrite=False,
+            overWrite=(
+                True
+                if (args.redo and args.phase is not None and redo_params)
+                else False
+            ),
             phase="post",
             force=True if (args.phase is not None and not show_figures) else False,
             find_best_sets=True,
@@ -203,16 +205,14 @@ def main(args):
             ProjectPath.folder,
             phase=helper.phase,
             data_helper=helper,
-            # redo=args.redo and overWrite_speed_filter_and_linearization,
-            redo=False,
+            redo=args.redo and overWrite_speed_filter_and_linearization,
         )
         Linearizer.verify_linearization(
             # WARNING: should we use the helper.maxPos() here?
             # as positions are already Aligned/Normalized --> only for viz
             helper.positions / helper.maxPos(),
             ProjectPath.folder,
-            # overwrite=args.redo and overWrite_speed_filter_and_linearization,
-            overwrite=False,
+            overwrite=args.redo and overWrite_speed_filter_and_linearization,
         )
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
@@ -256,6 +256,7 @@ def main(args):
         dim_factor=args.dim_factor,
         loss_type=args.loss_type,
         project_transformer=not args.no_project_transformer,
+        reduce_dense=args.reduce_dense,
     )
 
     # Save ProjectPath object
@@ -1237,6 +1238,12 @@ if __name__ == "__main__":
             "--no_project_transformer",
             action="store_true",
             help="defines whether to use a linear projection before the transformer or not",
+        )
+        p.add_argument(
+            "-rdense",
+            "--reduce_dense",
+            action="store_true",
+            help="defines whether the CNN has fewer dense layers (1 instead of 3)",
         )
 
         if cmd == "bayes":

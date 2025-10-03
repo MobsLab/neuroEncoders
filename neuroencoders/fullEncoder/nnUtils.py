@@ -75,7 +75,7 @@ class spikeNet(tf.keras.layers.Layer):
                 self.bn2 = tf.keras.layers.BatchNormalization()
                 self.bn3 = tf.keras.layers.BatchNormalization()
 
-            self.dropoutLayer = tf.keras.layers.Dropout(0.5)
+            self.dropoutLayer = tf.keras.layers.Dropout(0.2)
             self.denseLayer1 = tf.keras.layers.Dense(self.nFeatures, activation="relu")
             self.denseLayer2 = tf.keras.layers.Dense(self.nFeatures, activation="relu")
             self.denseLayer3 = tf.keras.layers.Dense(
@@ -2083,7 +2083,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         neg=-100,
         maze_params=None,
         l_function_layer=None,
-        sinkhorn_eps=1e-2,
+        sinkhorn_eps=0.4,
         **kwargs,
     ):
         """
@@ -2113,6 +2113,17 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.maze_params = maze_params
         self.l_function_layer = l_function_layer
         self.sinkhorn_eps = sinkhorn_eps
+
+        allowed_mask = kops.cast(self.get_allowed_mask(use_tensorflow=True), tf.float32)
+        allowed_mask_flat = kops.reshape(allowed_mask, (-1,))  # [H*W]
+
+        # keep only allowed coordinates
+        mask_indices = kops.where(allowed_mask_flat > 0)[0]  # [N_allowed]
+        mask_indices = kops.reshape(mask_indices, (-1,))  # ensure 1D
+        # store to map [H,W] to allowed indices
+        self.allowed_indices = mask_indices  # store for reference
+
+        self.N_valid = kops.shape(mask_indices)[0]
         self._precompute_cost_matrix()
 
     def call(self, inputs, loss_type="safe_kl", **kwargs):
@@ -2200,6 +2211,8 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.allowed_mask_tf = kops.cast(
             self.get_allowed_mask(use_tensorflow=True), tf.float32
         )
+        self.forbid_mask_tf = kops.cast(1 - self.allowed_mask_tf, tf.float32)
+
         self.NEG = tf.constant(self.neg, tf.float32)
         self.EPS = self.eps
 
@@ -2375,38 +2388,34 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Build coordinate grid [H, W, 2] in symbolic form
         xs = kops.linspace(0.0, 1.0, self.GRID_W)  # [W]
         ys = kops.linspace(0.0, 1.0, self.GRID_H)  # [H]
-
-        # Create meshgrid in [H, W] form
-        xs = kops.tile(xs[None, :], [self.GRID_H, 1])  # [H, W]
-        ys = kops.tile(ys[:, None], [1, self.GRID_W])  # [H, W]
-
+        xs = kops.broadcast_to(xs[None, :], (self.GRID_H, self.GRID_W))
+        ys = kops.broadcast_to(ys[:, None], (self.GRID_H, self.GRID_W))
         coords = kops.stack([xs, ys], axis=-1)  # [H, W, 2]
-        coords = kops.reshape(coords, (-1, 2))  # [N, 2]
+        coords = kops.reshape(coords, (-1, 2))  # [N, 2] where N=H*W
 
+        coords_allowed = kops.take(
+            coords, self.allowed_indices, axis=0
+        )  # [N_allowed, 2]
         # Apply your linearization function (kept symbolic)
-        _, lin_coords = self.l_function_layer(coords)  # [N, 1]
+        _, lin_coords = self.l_function_layer(coords_allowed)  # [N_valid, 1]
         lin_coords = kops.reshape(lin_coords, (-1,))  # [N]
 
         # Build cost matrix |li - lj|
-        li = kops.expand_dims(lin_coords, 0)  # [1, N]
-        lj = kops.expand_dims(lin_coords, 1)  # [N, 1]
-        diff = li - lj  # [N, N]
+        li = kops.expand_dims(lin_coords, 0)  # [1, N_valid]
+        lj = kops.expand_dims(lin_coords, 1)  # [N_valid, 1]
+        diff = li - lj  # [N_valid, N_valid]
         C = kops.abs(diff)
 
         # --- Make sure cost_matrix and lin_coords are stored as eager tensors
         # Try to evaluate them to numpy (this will succeed when called eagerly during __init__).
         # If that fails (rare), fall back to storing them as non-trainable tf.Variable
-        try:
-            C_np = tf.keras.backend.get_value(C)
-            lin_coords_np = tf.keras.backend.get_value(lin_coords)
-            # store as eager tf.constant so they won't be graph-captured later
-            self.cost_matrix = tf.constant(C_np, dtype=tf.float32)
-            self.lin_coords = tf.constant(lin_coords_np, dtype=tf.float32)
-        except Exception:
-            # Fallback: convert to a non-trainable Variable (still safe across functions)
-            # this avoids "tensor defined in different FuncGraph" errors
-            self.cost_matrix = tf.Variable(C, trainable=False, dtype=tf.float32)
-            self.lin_coords = tf.Variable(lin_coords, trainable=False, dtype=tf.float32)
+
+        C_np = tf.keras.backend.get_value(C)
+        C_rescaled, info = rescale_cost_matrix(C_np)
+        lin_coords_np = tf.keras.backend.get_value(lin_coords)
+        # store as eager tf.constant so they won't be graph-captured later
+        self.cost_matrix = tf.constant(C_rescaled, dtype=tf.float32)
+        self.lin_coords = tf.constant(lin_coords_np, dtype=tf.float32)
 
         # compute kernel once and store as CPU-side constant; don't keep gradient tracking
         eps_tf = tf.cast(self.sinkhorn_eps, tf.float32)
@@ -2414,25 +2423,20 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             kernel_np = tf.keras.backend.get_value(
                 kops.exp(-tf.cast(self.cost_matrix, tf.float32) / eps_tf)
             )
+            M_np = kernel_np * tf.keras.backend.get_value(self.cost_matrix)
             self.kernel = tf.constant(kernel_np, dtype=tf.float32)
+            self.M = tf.constant(M_np, dtype=tf.float32)
 
         # make sure these won't be part of gradients
         self.cost_matrix = tf.stop_gradient(tf.cast(self.cost_matrix, tf.float32))
         self.kernel = tf.stop_gradient(tf.cast(self.kernel, tf.float32))
-        # compute Wasserstein without forming full batch*N*N transport T:
-        # W_b = sum_i u_i * ( sum_j ( v_j * K_ij * C_ij ) )
-        # Precompute M = K * C on CPU (N,N) to keep memory lower
-        self.matrix = (
-            self.kernel * self.cost_matrix
-        )  # [N, N]  (this is not batch-sized)
-        self.M = tf.stop_gradient(tf.cast(self.matrix, tf.float32))
+        self.M = tf.stop_gradient(tf.cast(self.M, tf.float32))
 
     def _safe_kl_wasserstein_heatmap_loss(
         self,
         logits_hw,
         target_hw,
         alpha=None,
-        sinkhorn_eps=1e-2,
         sinkhorn_iters=20,
         return_batch=False,
         reduction=None,
@@ -2442,7 +2446,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         using precomputed linearized maze cost matrix.
         """
         if alpha is None:
-            alpha = 0.2  # default weight for Wasserstein penalty
+            alpha = 1  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
         allowed_mask = kops.cast(self.allowed_mask_tf, tf.float32)
@@ -2469,9 +2473,14 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         P_flat = kops.reshape(P, (batch_size, self.GRID_H * self.GRID_W))
 
         # --- KL(P||Q) ---
+        # q_probs = kops.softmax(logits_flat/(3*1e-2), axis=-1)
         q_probs = kops.softmax(logits_flat, axis=-1)
-        ce = -kops.sum(P_flat * kops.log(q_probs + self.EPS), axis=-1)
-        entropy = -kops.sum(P_flat * tf.math.log(P_flat + self.EPS), axis=-1)
+
+        P_allowed = tf.gather(P_flat, self.allowed_indices, axis=1)  # [B, N_valid]
+        q_allowed = tf.gather(q_probs, self.allowed_indices, axis=1)  # [B, N_valid]
+
+        ce = -kops.sum(P_allowed * kops.log(q_allowed + self.EPS), axis=-1)
+        entropy = -kops.sum(P_allowed * tf.math.log(P_allowed + self.EPS), axis=-1)
         kl = ce - entropy  # [B]
 
         # small numeric epsilon
@@ -2480,26 +2489,10 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # --- Wasserstein penalty ---
         if alpha > 0.0:
             # use precomputed CPU-side constants (self.kernel, self.cost_matrix)
-            # make sure they are float32 and stopped from gradients
-            kernel = tf.cast(self.kernel, tf.float32)  # [N, N]
-            C = tf.cast(self.cost_matrix, tf.float32)  # [N, N]
-
-            # Initialize sinkhorn scalings (shape [batch, N])
-            N = kops.shape(P_flat)[1]
-            u = kops.ones_like(P_flat) / kops.cast(N, tf.float32)
-            v = kops.ones_like(P_flat) / kops.cast(N, tf.float32)
-            for _ in range(sinkhorn_iters):
-                # K @ v^T -> for batch we compute v @ K
-                Kv = kops.matmul(v, kernel) + tiny  # [batch, N]
-                u = P_flat / Kv
-                Ku = kops.matmul(u, kernel) + tiny  # [batch, N]
-                v = q_probs / Ku
-
-            # temp = v @ M -> [batch, N]
-            temp = kops.matmul(v, self.M)
-            # W = sum(u * temp, axis=1)
-            W = kops.sum(u * temp, axis=1)
-
+            P_allowed = P_allowed / (kops.sum(P_allowed, axis=1, keepdims=True) + 1e-9)
+            q_allowed = q_allowed / (kops.sum(q_allowed, axis=1, keepdims=True) + 1e-9)
+            temp = kops.matmul(P_allowed, self.cost_matrix)  # [batch, N]
+            W = kops.sum(temp * q_allowed, axis=1)  # [batch]
             loss = kl + alpha * W
         else:
             loss = kl
@@ -2565,6 +2558,107 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Otherwise assume a single shape-like object
         batch = _batch_from_shape(input_shape)
         return (batch,)
+
+
+def rescale_cost_matrix(
+    C_orig,  # numpy array shape [N, N] original cost matrix (CPU)
+    allowed_indices=None,  # optional list/array of allowed indices (subset of 0..N-1)
+    sample_true_indices=None,  # optional sample of true indices to check "local" costs
+    global_target=5.0,
+    local_target=0.8,
+    local_radius=2,  # neighborhood radius in grid steps (Manhattan or index-based – choose consistent with how C was built)
+    max_gamma=8.0,
+    gamma_step=1.25,
+    max_iters=10,
+    verbose=True,
+):
+    """
+    Returns C_rescaled (numpy float32).
+    C_orig expected >=0.
+    The function will:
+      - linear normalize C to [0,1]
+      - raise to power gamma (>=1) to compress small values if needed
+      - multiply by global_target so max ~ global_target
+    It tries to ensure the mean cost within `local_radius` of sample_true_indices is <= local_target.
+    """
+    C = np.array(C_orig, dtype=np.float64)
+    N = C.shape[0]
+    assert C.shape[0] == C.shape[1]
+
+    # basic linear normalize to [0,1]
+    C_min = C.min()
+    C_max = C.max()
+    if C_max <= C_min + 1e-12:
+        raise ValueError("cost matrix is constant; cannot rescale usefully")
+
+    C_norm = (C - C_min) / (C_max - C_min)  # in [0,1]
+
+    # choose sample indices to inspect local costs
+    if sample_true_indices is None:
+        # if allowed_indices provided, sample a few of those, otherwise sample some indices
+        pool = (
+            np.array(allowed_indices) if allowed_indices is not None else np.arange(N)
+        )
+        rng = np.random.default_rng(0)
+        # sample up to 20 indices
+        sample_true_indices = rng.choice(pool, size=min(20, pool.size), replace=False)
+
+    # helper: function to compute local mean for an index
+    # This assumes C rows correspond to distances from that "true" index to all target indices.
+    # We need a way to define neighbors within `local_radius`. If C_orig was built from grid coords,
+    # the neighbor selection should be computed from the grid coordinates; here we approximate by
+    # selecting the K smallest distances (a cheap proxy). If you can map indices -> (x,y), better: use manhattan.
+    def local_mean_from_row(Crow_norm, radius=local_radius, approx_k=None):
+        # Quick approach: take the smallest K distances as "neighbors".
+        # If grid coords are available, replace this with manhattan neighborhood selection.
+        if approx_k is None:
+            # approximate number of cells within Manhattan radius r on a grid:
+            # K ≈ 1 + 2*r*(r+1)  (diamond shape). For r=2 -> 1 + 2*2*3 = 13
+            approx_k = 1 + 2 * radius * (radius + 1)
+        smallest = np.partition(Crow_norm, approx_k)[:approx_k]
+        return smallest.mean()
+
+    # iterate gamma to compress small values until local_mean <= local_target (after scaling by global_target)
+    gamma = 1.0
+    it = 0
+    while it < max_iters:
+        C_try = (C_norm**gamma) * global_target  # in [0, global_target]
+        # compute mean local cost across sample indices
+        local_means = []
+        for idx in sample_true_indices:
+            row = C_try[idx, :]  # cost from idx to all
+            lm = local_mean_from_row(row, radius=local_radius)
+            local_means.append(lm)
+        avg_local = float(np.mean(local_means))
+        max_val = float(C_try.max())
+        if verbose:
+            print(
+                f"iter {it}: gamma={gamma:.3f}, max={max_val:.4f}, avg_local={avg_local:.4f}"
+            )
+        # Check targets:
+        if (
+            avg_local <= local_target
+            and abs(max_val - global_target) / global_target < 1e-6
+        ):
+            break
+        # if local mean too large, increase gamma to compress small distances
+        if avg_local > local_target and gamma < max_gamma:
+            gamma = min(max_gamma, gamma * gamma_step)
+            it += 1
+            continue
+        # if max deviates (shouldn't because we always multiply by global_target), break
+        break
+
+    # final matrix
+    C_rescaled = (C_norm**gamma) * global_target
+    # final safety-clamp (avoid negative / numerical issues)
+    C_rescaled = np.clip(C_rescaled, 0.0, None).astype(np.float32)
+    return C_rescaled, {
+        "gamma": gamma,
+        "iters": it,
+        "avg_local": avg_local,
+        "global_max": float(C_rescaled.max()),
+    }
 
 
 class KLHeatmapLoss(tf.keras.losses.Loss):

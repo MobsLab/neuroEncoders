@@ -287,7 +287,7 @@ def find_closest_index(arr, value, tolerance=None):
             warn(
                 "Tolerance is set to True, will compare against apparent sampling rate."
             )
-            tolerance = np.nanmean(
+            tolerance = 2 * np.nanmean(
                 np.diff(arr)
             )  # should be half the average sampling rate
             if np.abs(arr[idx] - value) > tolerance:

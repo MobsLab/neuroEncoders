@@ -206,7 +206,7 @@ class AnimatedPositionPlotter:
 
         if self.predicted is not None:
             # sort predicted positions by posIndex
-            self.sort_idx = np.argsort(self.posIndex)
+            self.sort_idx = np.argsort(self.prediction_positionTime)
             self.positions_from_NN = self.positions_from_NN[self.sort_idx]
             self.prediction_positionTime = self.prediction_positionTime[self.sort_idx]
             self.predicted_heatmap = (
