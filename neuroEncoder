@@ -28,6 +28,7 @@ show_figures = False
 debug = True
 overWrite_speed_filter_and_linearization = False
 redo_params = False
+redo_all_params = False
 
 
 def main(args):
@@ -117,7 +118,8 @@ def main(args):
             ),
             phase=args.phase,
             force=True if (args.phase is not None and not show_figures) else False,
-            find_best_sets=True,
+            # We set it to false to have the test set at the end!
+            find_best_sets=False,
         )
 
     # Create parameters
@@ -148,7 +150,12 @@ def main(args):
             ProjectPath.folder,
             overWrite=(
                 True
-                if (args.redo and args.phase is not None and redo_params)
+                if (
+                    args.redo
+                    and args.phase is not None
+                    and redo_params
+                    and redo_all_params
+                )
                 else False
             ),
             phase="cond",
@@ -181,7 +188,12 @@ def main(args):
             ProjectPath.folder,
             overWrite=(
                 True
-                if (args.redo and args.phase is not None and redo_params)
+                if (
+                    args.redo
+                    and args.phase is not None
+                    and redo_params
+                    and redo_all_params
+                )
                 else False
             ),
             phase="post",
@@ -262,7 +274,16 @@ def main(args):
     # Save ProjectPath object
     save_project_to_pickle(ProjectPath)
 
-    # return
+    # Save DataHelper object to pickle
+    output = os.path.join(
+        ProjectPath.experimentPath,
+        "DataHelper.pkl",
+    )
+    if not os.path.exists(output):
+        save_project_to_pickle(
+            DataHelper,
+            output=output,
+        )
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":

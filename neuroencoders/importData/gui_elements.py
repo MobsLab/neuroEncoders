@@ -235,6 +235,8 @@ class AnimatedPositionPlotter:
                 if self.predicted_dim_please is not None
                 else None
             )
+        else:
+            self.sort_idx = np.arange(len(self.positions))
 
         if self.plot_stims:
             self.start_stim = self.data_helper.fullBehavior["Times"]["start_stim"]
@@ -309,9 +311,9 @@ class AnimatedPositionPlotter:
             # restrict to rough prediction time range
 
         try:
-            self.positions[epochMask]
+            self.positions[epochMask.flatten()]
             # should work if there is no prediction - totMask is very long
-            self.totMask = epochMask
+            self.totMask = epochMask.flatten()
         except (IndexError, ValueError):
             warn(
                 "Epoch mask does not match positions length. Check your position and prediction time arrays."
