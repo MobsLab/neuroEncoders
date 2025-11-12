@@ -1456,7 +1456,7 @@ class Mouse_Results(Params, PaperFigures):
         print_results.print_results(
             self.folderResult,
             windowSizeMS=winMS,
-            target=self.target,
+            target=kwargs.pop("target", self.target),
             phase=phase,
             training_data=self.ann[win].training_data,
             l_function=self.l_function,

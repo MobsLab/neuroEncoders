@@ -286,7 +286,7 @@ def print_results(
             qControl = qControl * np.linalg.norm(EC)
 
     # Save the executable
-    if typeDec == "NN":
+    if typeDec == "NN" and kwargs.get("save", True):
         with open(os.path.join(outdir, "reDrawFigures"), "w") as f:
             f.write(sys.executable + " " + os.path.abspath(__file__) + " " + dir)
         st = os.stat(os.path.join(outdir, "reDrawFigures"))
@@ -805,13 +805,20 @@ N samples: {selection.sum()}
         )
 
         plt.tight_layout()
-        fig.savefig(
-            os.path.join(
-                outfolder, f"4d_overviewFig_{dimOutput}d_{typeDec}{suffix}.png"
-            ),
-            dpi=150,
-        )
+        if kwargs.get("save", True):
+            fig.savefig(
+                os.path.join(
+                    outfolder, f"4d_overviewFig_{dimOutput}d_{typeDec}{suffix}.png"
+                ),
+                dpi=150,
+            )
         if show:
+            if mplt.get_backend() == "QtAgg":
+                plt.get_current_fig_manager().window.showMaximized()
+            elif mplt.get_backend() == "TkAgg":
+                plt.get_current_fig_manager().resize(
+                    *plt.get_current_fig_manager().window.maxsize()
+                )
             plt.show(block=True)
         plt.close(fig)
 
@@ -829,13 +836,21 @@ N samples: {selection.sum()}
         ax.set_title("Position Predictions Colored by Distance to Wall")
         ax.legend()
         if show:
+            if mplt.get_backend() == "QtAgg":
+                plt.get_current_fig_manager().window.showMaximized()
+            elif mplt.get_backend() == "TkAgg":
+                plt.get_current_fig_manager().resize(
+                    *plt.get_current_fig_manager().window.maxsize()
+                )
             plt.show(block=True)
-        fig.savefig(
-            os.path.join(
-                outfolder, f"overviewFig_{dimOutput}d_{typeDec}_DistWall{suffix}.png"
-            ),
-            dpi=150,
-        )
+        if kwargs.get("save", True):
+            fig.savefig(
+                os.path.join(
+                    outfolder,
+                    f"overviewFig_{dimOutput}d_{typeDec}_DistWall{suffix}.png",
+                ),
+                dpi=150,
+            )
         plt.close(fig)
         return
 
@@ -876,18 +891,6 @@ N samples: {selection.sum()}
                 ax1.scatter(
                     timeStepsPred[selection],
                     inferring[selection, dim],
-                    c=inferring[selection, 2]
-                    if (
-                        target.lower() == "posandheaddirectionandthigmo"
-                        and inferring.shape[1] > 2
-                    )
-                    else None,
-                    cmap="hsv"
-                    if (
-                        target.lower() == "posandheaddirectionandthigmo"
-                        and inferring.shape[1] > 2
-                    )
-                    else None,
                     label=f"guessed {dim_names[dim]} selection",
                     s=20,
                 )
