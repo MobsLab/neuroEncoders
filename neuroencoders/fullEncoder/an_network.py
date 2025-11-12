@@ -320,7 +320,9 @@ class LSTMandSpikeNetwork:
                 )  # if we have a heatmap and other vars, only the others are predicted here
                 and self.params.dimOutput > 2
                 else self.params.dimOutput,
-                activation=self.params.featureActivation,  # ensures output is in [0,1]
+                activation=getattr(
+                    self.params, "featureActivation", None
+                ),  # ensures output is in [0,1]
                 dtype=tf.float32,
                 name="feature_output",
                 kernel_regularizer="l2",
@@ -337,7 +339,9 @@ class LSTMandSpikeNetwork:
                     name="feature_projection_transformer",
                 )
             self.ProjectionInMazeLayer = UMazeProjectionLayer(
-                grid_size=kwargs.get("grid_size", self.params.GaussianGridSize)
+                grid_size=kwargs.get(
+                    "grid_size", getattr(self.params, "GaussianGridSize", (40, 40))
+                ),
             )
 
             # Gather the full model
@@ -819,14 +823,15 @@ class LSTMandSpikeNetwork:
                 # steps_per_execution=4,
             )
             # Get internal names of losses
-        try:
-            tf.keras.utils.plot_model(
-                model,
-                to_file=(os.path.join(self.projectPath.experimentPath, modelName)),
-                show_shapes=True,
-            )
-        except Exception as e:
-            print("Could not plot the model:", e)
+        if not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName)):
+            try:
+                tf.keras.utils.plot_model(
+                    model,
+                    to_file=(os.path.join(self.projectPath.experimentPath, modelName)),
+                    show_shapes=True,
+                )
+            except Exception as e:
+                print("Could not plot the model:", e)
         return model
 
     def generate_model_Cplusplus(self):
@@ -2905,10 +2910,12 @@ class LSTMandSpikeNetwork:
             raise ValueError(
                 "You must provide behaviorData to setup Gaussian Heatmap Layer."
             )
-        grid_size = kwargs.get("grid_size", self.params.GaussianGridSize)
-        eps = kwargs.get("eps", self.params.GaussianEps)
-        sigma = kwargs.get("sigma", self.params.GaussianSigma)
-        neg = kwargs.get("neg", self.params.GaussianNeg)
+        grid_size = kwargs.get(
+            "grid_size", getattr(self.params, "GaussianGridSize", (40, 40))
+        )
+        eps = kwargs.get("eps", getattr(self.params, "GaussianEps", 1e-8))
+        sigma = kwargs.get("sigma", getattr(self.params, "GaussianSigma", 0.03))
+        neg = kwargs.get("neg", getattr(self.params, "GaussianNeg", -100))
         name = kwargs.get("name", "gaussian_heatmap")
 
         print("Setting up GaussianHeatmapLayer...")
