@@ -142,12 +142,27 @@ def print_results(
             qControl = np.squeeze(
                 pd.read_csv(
                     os.path.expanduser(
-                        os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
+                        os.path.join(dir, str(windowSizeMS), f"lossPred{suffix}.csv")
                     )
                 ).values[:, 1:]
             )
         except FileNotFoundError:
-            qControl = np.random.uniform(0, 1, size=pos.shape[0])
+            print(
+                f"Warning: lossPred{suffix}.csv not found, trying with Hn{suffix}.csv"
+            )
+            try:
+                qControl = np.squeeze(
+                    pd.read_csv(
+                        os.path.expanduser(
+                            os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
+                        )
+                    ).values[:, 1:]
+                )
+            except FileNotFoundError:
+                print(
+                    f"Error: Hn{suffix}.csv not found, generating random qControl values."
+                )
+                qControl = np.random.uniform(0, 1, size=pos.shape[0])
         if os.path.isfile(
             os.path.expanduser(
                 os.path.join(dir, str(windowSizeMS), f"linearPred{suffix}.csv")
@@ -564,12 +579,24 @@ def overview_fig(
     target = kwargs.pop("target", "pos")
     training_data = kwargs.pop("training_data", None)
     posIndex = kwargs.pop("posIndex", None)
+    if posIndex is None:
+        warnings.warn("posIndex not provided, using range(pos.shape[0]) as posIndex.")
+        posIndex = np.arange(pos.shape[0])
     timeStepsPred = kwargs.pop("timeStepsPred", None)
     if timeStepsPred is None:
         raise ValueError(
             "timeStepsPred should be provided in kwargs, it is mandatory for plotting the overview figure. Otherwise you need to implement the range(pos.shape[0]) as timeStepsPred."
         )
     useSpeedMask = kwargs.get("useSpeedMask", False)
+
+    # Sort the data by posIndex to have a correct time representation
+    sorted_indices = np.argsort(posIndex)
+    pos = pos[sorted_indices]
+    inferring = inferring[sorted_indices]
+    selection = selection[sorted_indices]
+    timeStepsPred = timeStepsPred[sorted_indices]
+    if speedMask is not None:
+        speedMask = speedMask[sorted_indices]
 
     suffix = f"_{phase}" if phase is not None else ""
     if (
@@ -830,6 +857,22 @@ N samples: {selection.sum()}
                         colspan=4,
                     )
                     plt.setp(ax1.get_xticklabels(), visible=False)
+                ax1.plot(
+                    timeStepsPred,
+                    pos[:, dim],
+                    ".-",
+                    markersize=6,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                )
+                ax1.scatter(
+                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
+                    pos[:, dim] if not useSpeedMask else pos[selection, dim],
+                    s=24,
+                    alpha=0.6,
+                    label=f"true {dim_names[dim]}" + str(dim),
+                    color="xkcd:dark pink",
+                )
                 ax1.scatter(
                     timeStepsPred[selection],
                     inferring[selection, dim],
@@ -848,13 +891,13 @@ N samples: {selection.sum()}
                     label=f"guessed {dim_names[dim]} selection",
                     s=20,
                 )
-                ax1.scatter(
-                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
-                    pos[:, dim] if not useSpeedMask else pos[selection, dim],
-                    s=24,
-                    alpha=0.6,
-                    label=f"true {dim_names[dim]}" + str(dim),
-                    color="xkcd:dark pink",
+                # also plot the lines
+                ax1.plot(
+                    timeStepsPred[selection],
+                    inferring[selection, dim],
+                    color="blue",
+                    alpha=0.7,
+                    linewidth=0.7,
                 )
                 if with_hist_distribution and selection.sum() > 0:
                     ax2 = plt.subplot2grid((dimOutput, 5), (dim, 4), sharey=ax1)
@@ -1012,11 +1055,13 @@ N samples: {selection.sum()}
             ax2 = plt.subplot2grid(
                 (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
             )
-            ax2.scatter(
-                timeStepsPred[selection],
-                inferring[selection],
-                s=20,
-                label=f"guessed {dim_names[2]} selection",
+            ax2.plot(
+                timeStepsPred,
+                pos,
+                ".-",
+                markersize=6,
+                alpha=0.6,
+                color="xkcd:dark pink",
             )
             ax2.scatter(
                 timeStepsPred if not useSpeedMask else timeStepsPred[selection],
@@ -1025,6 +1070,20 @@ N samples: {selection.sum()}
                 alpha=0.6,
                 label=f"true {dim_names[2]}",
                 color="xkcd:dark pink",
+            )
+            ax2.scatter(
+                timeStepsPred[selection],
+                inferring[selection],
+                s=20,
+                label=f"guessed {dim_names[2]} selection",
+            )
+            # also plot the lines
+            ax2.plot(
+                timeStepsPred[selection],
+                inferring[selection],
+                color="blue",
+                alpha=0.7,
+                linewidth=0.7,
             )
             ax2.legend(
                 loc="lower center",
