@@ -797,16 +797,22 @@ class Mouse_Results(Params, PaperFigures):
                     os.path.join(self.folderResult, winMS)
                 )
                 # otherwise will be loaded by super init
-                self.data_helper[winMS] = DataHelperClass(
-                    self.projects[winMS].xml,
-                    mode="compare",
-                    windowSize=int(winMS) / 1000,
-                    **kwargs,
-                )
+                try:
+                    self.data_helper[winMS] = DataHelperClass.load(
+                        self.projects[winMS].experimentPath
+                    )
+                except FileNotFoundError as e:
+                    print("did not manage to load DataHelper:", e)
+                    self.data_helper[winMS] = DataHelperClass(
+                        self.projects[winMS].xml,
+                        mode="compare",
+                        windowSize=int(winMS) / 1000,
+                        **kwargs,
+                    )
                 assert os.path.realpath(self.projects[winMS].xml) == os.path.realpath(
                     self.xml
                 )
-            except (FileNotFoundError, AttributeError) as e:
+            except (FileNotFoundError, AttributeError, ModuleNotFoundError) as e:
                 warn(
                     f"Failed to load project for window {winMS} with error: {e}. "
                     "Creating new Project and DataHelper."
@@ -843,7 +849,7 @@ class Mouse_Results(Params, PaperFigures):
                     for key, value in saved_params.items():
                         if key not in kwargs:
                             params_dict[key] = value
-                del params_dict["windowSize"]
+                    del params_dict["windowSize"]
                 self.parameters[winMS] = Params(
                     self.data_helper[winMS],
                     windowSize=int(winMS) / 1000,
@@ -1059,6 +1065,16 @@ class Mouse_Results(Params, PaperFigures):
             self.windows = windows
             if not isinstance(self.windows, list):
                 self.windows = [self.windows]
+
+        in_dir = [
+            os.path.isdir(os.path.join(self.folderResult, d)) for d in self.windows
+        ]
+        if not all(in_dir):
+            warn(
+                f"Some specified windows not found in {self.folderResult} for {self.mouse_name}:{[w for w, exists in zip(self.windows, in_dir) if not exists]}. Fixing..."
+            )
+            self.windows = [w for w, exists in zip(self.windows, in_dir) if exists]
+
         # order windows by their name (assuming they are named only with a number)
         self.windows.sort(key=lambda x: int(x))
         # convert windows str to int
@@ -1495,7 +1511,7 @@ class Mouse_Results(Params, PaperFigures):
         if kwargs.get("plot_heatmap", False):
             self.load_trainers(which="ann", **kwargs)
             if (
-                self.ann[str(win)].params.GaussianHeatmap
+                getattr(self.ann[str(win)].params, "GaussianHeatmap", False)
                 and kwargs.get("predicted_heatmap", None) is None
                 and kwargs.get("plot_heatmap", False)
             ):
@@ -1506,37 +1522,51 @@ class Mouse_Results(Params, PaperFigures):
                 except (AttributeError, KeyError, TypeError):
                     # create an empty list of size windows_values
                     self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
-                    with open(
-                        os.path.join(
-                            self.projectPath.experimentPath,
-                            "results",
-                            str(winMS),
-                            f"decoding_results{phase}.pkl",
-                        ),
-                        "rb",
-                    ) as f:
-                        results = pickle.load(f)
-                    self.resultsNN_phase_pkl[phase][idWindow] = results
-                    predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                        "logits_hw"
-                    ]
-                try:
-                    predicted_probs = (
-                        self.ann[str(win)]
-                        .GaussianHeatmap.decode_and_uncertainty(
-                            predicted_logits, return_probs=True
-                        )[-1]
-                        .numpy()
-                    )
-                except Exception as e:
-                    self.load_trainers(which="ann")
-                    predicted_probs = (
-                        self.ann[str(win)]
-                        .GaussianHeatmap.decode_and_uncertainty(
-                            predicted_logits, return_probs=True
-                        )[-1]
-                        .numpy()
-                    )
+                    try:
+                        with open(
+                            os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(winMS),
+                                f"decoding_results{phase}.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            results = pickle.load(f)
+                        self.resultsNN_phase_pkl[phase][idWindow] = results
+                        predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+                            "logits_hw"
+                        ]
+                    except FileNotFoundError:
+                        print(
+                            f"No decoding_results{phase}.pkl found for window {winMS}."
+                        )
+                        self.ann[str(win)].params.GaussianHeatmap = False
+                        kwargs["predicted_heatmap"] = None
+                        kwargs["plot_heatmap"] = False
+                        predicted_probs = None
+                if predicted_probs is not None:
+                    try:
+                        predicted_probs = (
+                            self.ann[str(win)]
+                            .GaussianHeatmap.decode_and_uncertainty(
+                                predicted_logits, return_probs=True
+                            )[-1]
+                            .numpy()
+                        )
+                    except Exception as e:
+                        self.load_trainers(which="ann")
+                        predicted_probs = (
+                            self.ann[str(win)]
+                            .GaussianHeatmap.decode_and_uncertainty(
+                                predicted_logits, return_probs=True
+                            )[-1]
+                            .numpy()
+                        )
+
+        predicted_heatmap = kwargs.pop("predicted_heatmap", None)
+        if not kwargs.get("plot_heatmap", False):
+            predicted_heatmap = None
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
@@ -1545,9 +1575,7 @@ class Mouse_Results(Params, PaperFigures):
             speedMaskArray=speedMaskArray,
             prediction_time=prediction_time,
             posIndex=posIndex,
-            predicted_heatmap=kwargs.pop("predicted_heatmap", predicted_probs)
-            if kwargs.get("plot_heatmap", False)
-            else None,
+            predicted_heatmap=predicted_heatmap,
             predicted_dim_please=speedMaskArray_for_dim,
             blit=blit,
             l_function=kwargs.pop("l_function", self.l_function),
@@ -1587,6 +1615,434 @@ class Mouse_Results(Params, PaperFigures):
             show=True,
             **kwargs,
         )
+
+    def plot_and_save_analysis(self, winMS=None, **kwargs):
+        # we want to plot the behavior during training and test epochs, to be sure we have the right behavior, and compare witht the decoding
+        # this way we get a nice identity card of the quality of the data + decoding
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from scipy.ndimage import gaussian_filter
+        from scipy.stats import pearsonr
+        from pathlib import Path
+
+        from neuroencoders.importData.epochs_management import inEpochs
+        from neuroencoders.utils.viz_params import (
+            TRUE_LINE_COLOR,
+            PREDICTED_COLOR,
+            PREDICTED_LINE_COLOR,
+            DELTA_COLOR_FORWARD,
+            DELTA_COLOR_REVERSE,
+        )
+
+        # ----------------------------------------------------------------------
+        # INPUTS (replace these with your own arrays)
+        # ----------------------------------------------------------------------
+        # x_true, y_true, x_pred, y_pred, time, train_mask = ...
+        # sampling_rate = 30  # Hz (or infer from np.diff(time))
+
+        # training + test together
+        if winMS is None:
+            winMS = self.windows_values[-1]
+        idx = self.windows_values.index(winMS)
+
+        x_true = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["truePos"][idx][:, 0],
+                self.resultsNN_phase["_pre"]["truePos"][idx][:, 0],
+            ]
+        )
+        y_true = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["truePos"][idx][:, 1],
+                self.resultsNN_phase["_pre"]["truePos"][idx][:, 1],
+            ]
+        )
+        x_pred = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["fullPred"][idx][:, 0],
+                self.resultsNN_phase["_pre"]["fullPred"][idx][:, 0],
+            ]
+        )
+        y_pred = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["fullPred"][idx][:, 1],
+                self.resultsNN_phase["_pre"]["fullPred"][idx][:, 1],
+            ]
+        )
+        lin_true = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["linTruePos"][idx],
+                self.resultsNN_phase["_pre"]["linTruePos"][idx],
+            ]
+        )
+        lin_pred = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["linPred"][idx],
+                self.resultsNN_phase["_pre"]["linPred"][idx],
+            ]
+        )
+        time = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["time"][idx],
+                self.resultsNN_phase["_pre"]["time"][idx],
+            ]
+        )
+        posIndex = [
+            self.resultsNN_phase["_training"]["posIndex"][idx],
+            self.resultsNN_phase["_pre"]["posIndex"][idx],
+        ]
+        # train mask not defined based on datahelper (can change if epochs were modified after loading data)
+        test_mask = (time >= min(self.resultsNN_phase["_pre"]["time"][idx])) & (
+            time <= max(self.resultsNN_phase["_pre"]["time"][idx])
+        )
+        train_mask = ~test_mask
+        speed_mask = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["speedMask"][idx],
+                self.resultsNN_phase["_pre"]["speedMask"][idx],
+            ]
+        ).astype(bool)
+        sampling_rate = 1 / max(0.036, int(winMS) / 4000)
+
+        # add chance level
+        random_pred = np.random.permutation(lin_true)
+        chance_mae = np.mean(np.abs(random_pred - lin_true))
+        chance_mae_speed = np.mean(
+            np.abs(
+                random_pred[train_mask & speed_mask] - lin_true[train_mask & speed_mask]
+            )
+        )
+
+        # ----------------------------------------------------------------------
+        # 1. BEHAVIORAL MEASURES
+        # ----------------------------------------------------------------------
+
+        # --- Speed ---
+        speed_train = self.DataHelper.fullBehavior["Speed"][posIndex[0]].flatten()
+        speed_test = self.DataHelper.fullBehavior["Speed"][posIndex[1]].flatten()
+        speed = np.concatenate([speed_train, speed_test])
+
+        # --- Freezing ---
+        freeze_train = inEpochsMask(
+            self.DataHelper.fullBehavior["positionTime"][posIndex[0]],
+            self.DataHelper.fullBehavior["Times"]["FreezeEpoch"],
+        )
+        freeze_fraction_train = np.mean(freeze_train)
+        freeze_duration_train = np.sum(
+            self.DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 1]
+            - self.DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 0]
+        )  # total freeze duration in seconds
+        freeze_duration_train /= sampling_rate  # convert to seconds
+
+        freeze_test = inEpochsMask(
+            self.DataHelper.fullBehavior["positionTime"][posIndex[1]],
+            self.DataHelper.fullBehavior["Times"]["FreezeEpoch"],
+        )
+        freeze_fraction_test = np.mean(freeze_test)
+        freeze_duration_test = np.sum(
+            self.DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 1]
+            - self.DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 0]
+        )  # total freeze duration in seconds
+        freeze_duration_test /= sampling_rate  # convert to seconds
+        freeze_duration_total = freeze_duration_train + freeze_duration_test
+
+        # ----------------------------------------------------------------------
+        # 1b. Reordering in time and removing "false" train epochs (ie test epochs)
+        # ----------------------------------------------------------------------
+        time_order = np.argsort(np.concatenate([posIndex[0], posIndex[1]]).flatten())
+        x_true = x_true[time_order]
+        y_true = y_true[time_order]
+        x_pred = x_pred[time_order]
+        y_pred = y_pred[time_order]
+        lin_true = lin_true[time_order]
+        lin_pred = lin_pred[time_order]
+        time = time[time_order]
+        train_mask = train_mask[time_order]
+        test_mask = test_mask[time_order]
+        speed_mask = speed_mask[time_order]
+        speed = speed[time_order]
+
+        # --- Occupancy heatmap (true behavior) ---
+        # look only for test set to avoid train bias
+        bins = 40
+        H_true, xedges, yedges = np.histogram2d(
+            x_true[test_mask & speed_mask], y_true[test_mask & speed_mask], bins=bins
+        )
+        H_true_smooth = gaussian_filter(H_true, sigma=1)
+        H_true_norm = H_true_smooth / np.sum(H_true_smooth)
+
+        # ----------------------------------------------------------------------
+        # 2. DECODING METRICS
+        # ----------------------------------------------------------------------
+
+        # --- Decoding error ---
+        # either euclidean
+        error = np.sqrt((x_pred - x_true) ** 2 + (y_pred - y_true) ** 2)
+        # or linearized
+
+        error = np.abs(lin_pred - lin_true)
+        mae_train = np.mean(error[speed_mask & train_mask])
+        mae_train_raw = np.mean(error[train_mask])
+        mae_test = np.mean(error[speed_mask & test_mask])
+        mae_test_raw = np.mean(error[test_mask])
+
+        # Rolling MAE (5 s window)
+        win = int(5 * sampling_rate)
+        rolling_mae = np.convolve(error, np.ones(win) / win, mode="same")
+
+        # --- Spatial error heatmap ---
+        H_err_sum = np.zeros_like(H_true, dtype=float)
+        H_count = np.zeros_like(H_true, dtype=float)
+
+        # assign each sample to a bin
+        x_bin = np.digitize(x_true[test_mask & speed_mask], xedges) - 1
+        y_bin = np.digitize(y_true[test_mask & speed_mask], yedges) - 1
+
+        valid = (x_bin >= 0) & (x_bin < bins) & (y_bin >= 0) & (y_bin < bins)
+        for xb, yb, e in zip(
+            x_bin[valid], y_bin[valid], error[test_mask & speed_mask][valid]
+        ):
+            H_err_sum[xb, yb] += e
+            H_count[xb, yb] += 1
+
+        H_err_mean = np.divide(H_err_sum, H_count, where=H_count > 0)
+        H_err_smooth = gaussian_filter(H_err_mean, sigma=1)
+
+        # --- Occupancy map from decoded position ---
+        H_decoded, _, _ = np.histogram2d(
+            x_pred[test_mask & speed_mask],
+            y_pred[test_mask & speed_mask],
+            bins=[xedges, yedges],
+        )
+        H_decoded_smooth = gaussian_filter(H_decoded, sigma=1)
+        H_decoded_norm = H_decoded_smooth / np.sum(H_decoded_smooth)
+
+        # --- Spatial correlation between true and decoded occupancy ---
+        mask_nonzero = (H_true_norm > 0) | (H_decoded_norm > 0)
+        r_occ, _ = pearsonr(
+            H_true_norm[mask_nonzero].flatten(), H_decoded_norm[mask_nonzero].flatten()
+        )
+
+        # ----------------------------------------------------------------------
+        # 3. PLOTTING
+        # ----------------------------------------------------------------------
+
+        fig, axes = plt.subplots(4, 3, figsize=(15, 10))
+        ax = axes.ravel()
+
+        # (A) Occupancy heatmap (true)
+        im0 = ax[0].imshow(
+            H_true_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[0].set_title("Occupancy (True)")
+        fig.colorbar(im0, ax=ax[0], label="Occupancy probability")
+
+        # (B) Speed distribution
+        ax[1].hist(
+            speed[train_mask],
+            bins=30,
+            label="Train",
+            alpha=0.7,
+            density=True,
+            color="green",
+        )
+        ax[1].hist(
+            speed[test_mask],
+            bins=30,
+            label="Test",
+            alpha=0.7,
+            density=True,
+            color="orange",
+        )
+        ax[1].set_title("Speed Distribution")
+        ax[1].set_xlabel("Speed (cm/s)")
+        ax[1].set_ylabel("Density")
+        ax[1].grid(True, alpha=0.3)
+        # removed per-axis legend here
+
+        # (C) Freezing fraction
+        ax[2].bar(
+            ["Train", "Test"],
+            [freeze_fraction_train, freeze_fraction_test],
+            color=["green", "orange"],
+        )
+        ax[2].set_title("Freezing Fraction")
+        ax[2].set_ylabel("Proportion of time frozen")
+        ax[2].set_ylim(0, 1)
+
+        # (D) Error over time with speed mask - + speed on a twin axis
+        ax[3].plot(
+            time[speed_mask],
+            error[speed_mask],
+            lw=0.5,
+            alpha=0.6,
+            label="Instantaneous",
+        )
+        ax[3].plot(
+            time[speed_mask], rolling_mae[speed_mask], lw=2, label="Rolling MAE (5s)"
+        )
+        ax[3].axvspan(
+            min(time[test_mask]),
+            max(time[test_mask]),
+            color="orange",
+            alpha=0.5,
+            label="Test",
+        )
+        ax[3].set_title("Decoding Error Over Time (With Speed Mask)")
+        ax[3].set_ylabel("Error (lin. dist.)")
+        # removed per-axis legend here
+        # add chance level as a horizontal line
+        ax[3].axhline(
+            chance_mae_speed,
+            color="red",
+            linestyle="--",
+            lw=1,
+            label="Chance level on movement",
+        )
+
+        # (E) Error over time without speed mask
+        ax[4].plot(time, error, lw=0.5, alpha=0.6, label="Instantaneous")
+        ax[4].plot(time, rolling_mae, lw=2, label="Rolling MAE (5s)")
+        ax[4].axvspan(
+            min(time[test_mask]),
+            max(time[test_mask]),
+            color="orange",
+            alpha=0.5,
+            label="Test",
+        )
+        ax[4].set_title("Decoding Error Over Time (No Speed Mask)")
+        ax[4].set_ylabel("Error (lin. dist.)")
+        # removed per-axis legend here
+        # add chance level as a horizontal line
+        ax[4].axhline(
+            chance_mae, color="red", linestyle="--", lw=1, label="Chance level"
+        )
+
+        # (F) Spatial decoding error heatmap
+        im2 = ax[5].imshow(
+            H_err_smooth.T,
+            origin="lower",
+            cmap="coolwarm",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[5].set_title("Mean Spatial Decoding Error (lin. dist.)")
+        fig.colorbar(im2, ax=ax[5], label="Error (lin. dist.)")
+
+        # (G) Occupancy map (decoded)
+        im3 = ax[6].imshow(
+            H_decoded_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[6].set_title("Occupancy (Decoded)")
+        fig.colorbar(im3, ax=ax[6], label="Occupancy probability")
+
+        # (H) True vs Decoded Occupancy comparison
+        ax[7].scatter(H_true_norm.flatten(), H_decoded_norm.flatten(), s=8, alpha=0.5)
+        ax[7].plot(
+            [0, max(H_true_norm.max(), H_decoded_norm.max())],
+            [0, max(H_true_norm.max(), H_decoded_norm.max())],
+            "k--",
+            lw=1,
+        )
+        ax[7].set_xlabel("True occupancy")
+        ax[7].set_ylabel("Decoded occupancy")
+        ax[7].set_title(f"Occupancy correlation r = {r_occ:.2f}")
+
+        # (I) Summary metrics + legend consolidation
+        text = (
+            f"Train MAE: {mae_train:.2f} lin. dist. (~{mae_train * 100:.1f} cm) vs {mae_train_raw:.2f} with immobility.\n"
+            f"Test MAE: {mae_test:.2f} lin. dist. (~{mae_test * 100:.1f} cm) vs {mae_test_raw:.2f} with immobility.\n"
+            f"Freeze duration: {freeze_duration_total:.1f}s\n"
+            f"Occupancy corr (r): {r_occ:.2f}\n"
+            f"Train freeze: {freeze_fraction_train * 100:.1f}%\n"
+            f"Test freeze: {freeze_fraction_test * 100:.1f}%"
+        )
+        ax[8].text(0.02, 0.5, text, fontsize=12, va="center", wrap=True)
+
+        ax[8].axis("off")
+        ax[8].set_title("Summary Metrics")
+
+        # the last subplot line is an ax that spans the whole row for better layout
+        # it just shows an example of true and decoded trajectory in the linear space
+        # first remove the original axis
+        ax[9].remove()
+        ax[10].remove()
+        ax[11].remove()
+        ax[9] = fig.add_subplot(4, 1, 4)
+        ax[9].plot(
+            time[test_mask], lin_true[test_mask], alpha=0.7, color=TRUE_LINE_COLOR
+        )
+        ax[9].plot(
+            time[test_mask],
+            lin_pred[test_mask],
+            "--",
+            alpha=0.5,
+            color=PREDICTED_LINE_COLOR,
+        )
+        ax[9].scatter(
+            time[test_mask & speed_mask],
+            lin_pred[test_mask & speed_mask],
+            label="Decoded Position on movement",
+            s=20,
+            alpha=0.7,
+            color=DELTA_COLOR_FORWARD,
+            marker="o",
+        )
+        ax[9].scatter(
+            time[test_mask & ~speed_mask],
+            lin_pred[test_mask & ~speed_mask],
+            label="Decoded Position while immobile",
+            s=6,
+            alpha=0.7,
+            color=DELTA_COLOR_REVERSE,
+            marker="o",
+        )
+        ax[9].set_xlabel("Time (s)")
+        ax[9].set_ylabel("Linearized Position")
+        ax[9].set_title("Performance on test set")
+
+        # Collect handles & labels from axes that used legends and put a single legend box into ax[8]
+        source_axes = [ax[1], ax[3], ax[4], ax[9]]
+        handles_map = {}
+        for a in source_axes:
+            h, l = a.get_legend_handles_labels()
+            for hh, ll in zip(h, l):
+                if ll not in handles_map:  # keep first handle for each unique label
+                    handles_map[ll] = hh
+        if len(handles_map) > 0:
+            unique_labels = list(handles_map.keys())
+            unique_handles = [handles_map[k] for k in unique_labels]
+            # place legend on the right side of ax[8] so it doesn't overlap the text
+            # + move it even more to the right
+            legend = ax[8].legend(
+                unique_handles,
+                unique_labels,
+                loc="lower left",
+                bbox_to_anchor=(0.7, -0.5),
+            )
+            ax[8].add_artist(legend)
+        fig.suptitle(
+            f"Decoding Analysis for Mouse {self.mouse_name} - Experiment: {self.nameExp}"
+        )
+        plt.tight_layout()
+        fig.savefig(
+            os.path.join(
+                Path.home(),
+                "download",
+                "tmp_results",
+                f"decoding_analysis_mouse_{self.mouse_name}_{self.nameExp}_{winMS}.png",
+            ),
+            dpi=300,
+        )
+        if kwargs.get("show", True):
+            plt.show()
+        plt.close(fig)
 
     def render_frame_static(self, frame: int, winMS=None, **kwargs):
         """

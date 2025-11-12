@@ -297,6 +297,15 @@ class DataHelper(Project):
         self._define_maze_zones()
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
 
+    @classmethod
+    def load(cls, path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except (IsADirectoryError, FileNotFoundError, EOFError):
+            with open(os.path.join(path, "DataHelper.pkl"), "rb") as f:
+                return pickle.load(f)
+
     def nGroups(self):
         """
         Returns the number of **spike** groups (visually, neurons are spiking) of channels by looking
@@ -500,6 +509,8 @@ class DataHelper(Project):
                 trail_length=40,
                 l_function=l_function,
                 linear_position_mode=True,
+                positions_from_NN=positions[:, :2],
+                prediction_time=data_helper.fullBehavior["positionTime"],
                 **kwargs,
             )
             anim = plotter.show(interval=1, repeat=True, block=True)

@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+from warnings import warn
 import xml.etree.ElementTree as ET
 from tkinter import Button, Entry, Label, Toplevel
 from typing import Literal, Optional
@@ -179,6 +180,18 @@ def get_behavior(
                 follow_symlinks=True,
             )
     # Extract basic behavior
+    # First verify that we do indeed have trainEpochs - otherwise default callback to "_pre" phase
+    with tables.open_file(filename) as f:
+        children = [c.name for c in f.list_nodes("/behavior")]
+        if "trainEpochs" not in children and not decode:
+            warn(
+                f"trainEpochs not found in {filename}, switching to _pre phase behavior file"
+            )
+            filename = os.path.join(folder, "nnBehavior_pre.mat")
+            if not os.path.exists(filename):
+                raise ValueError(
+                    "this file does not exist :" + folder + "nnBehavior_pre.mat"
+                )
     with tables.open_file(filename) as f:
         positions = f.root.behavior.positions
         positions = np.swapaxes(positions[:, :], 1, 0)
@@ -1004,13 +1017,16 @@ def select_epochs(
         sizeTest = (
             timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
         )
+        # by default last 20% is test set
         testSetId = (
             timeToShow.shape[0] - timeToShow.shape[0] // 5
             if phase == "all"
             else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 5
         )
 
-        useLossPredTrainSet = False  # whether to use a loss prediction training set
+        useLossPredTrainSet = (
+            isPredLoss  # whether to use a loss prediction training set
+        )
         lossPredSetId = 0  # the loss prediction set id
         sizelossPredSet = (
             timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
