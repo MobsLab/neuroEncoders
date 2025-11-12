@@ -115,21 +115,6 @@ class PaperFigures:
             resultsNN_phase_pkl = []
             spikes_count = []
             for ws in self.timeWindows:
-                lPredPos.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"linearPred{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    )
-                )
                 fPredPos.append(
                     np.array(
                         pd.read_csv(
@@ -156,21 +141,47 @@ class PaperFigures:
                         dtype=np.float32,
                     )
                 )
-                lTruePos.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"linearTrue{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
+                if os.path.exists(
+                    os.path.join(
+                        self.projectPath.experimentPath,
+                        "results",
+                        str(ws),
+                        f"linearTrue{suffix}.csv",
+                    )
+                ):
+                    lPredPos.append(
+                        np.squeeze(
+                            np.array(
+                                pd.read_csv(
+                                    os.path.join(
+                                        self.projectPath.experimentPath,
+                                        "results",
+                                        str(ws),
+                                        f"linearPred{suffix}.csv",
+                                    )
+                                ).values[:, 1:],
+                                dtype=np.float32,
+                            )
                         )
-                    ).flatten()
-                )
+                    )
+                    lTruePos.append(
+                        np.squeeze(
+                            np.array(
+                                pd.read_csv(
+                                    os.path.join(
+                                        self.projectPath.experimentPath,
+                                        "results",
+                                        str(ws),
+                                        f"linearTrue{suffix}.csv",
+                                    )
+                                ).values[:, 1:],
+                                dtype=np.float32,
+                            )
+                        ).flatten()
+                    )
+                else:
+                    lPredPos.append(self.l_function(fPredPos[-1][:, :2])[1].flatten())
+                    lTruePos.append(self.l_function(truePos[-1][:, :2])[1].flatten())
                 time.append(
                     np.squeeze(
                         np.array(
