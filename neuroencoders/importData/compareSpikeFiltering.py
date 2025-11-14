@@ -71,18 +71,23 @@ class WaveFormComparator:
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
         self.feat_desc = {
+            # index of the position in the position array
             "pos_index": tf.io.FixedLenFeature([], tf.int64),
-            "pos": tf.io.FixedLenFeature(
-                [self.params.dimOutput], tf.float32
-            ),  # target position: current value of the environmental correlate
-            "length": tf.io.FixedLenFeature(
-                [], tf.int64
-            ),  # number of spike sequence gathered in the window
-            "groups": tf.io.VarLenFeature(
-                tf.int64
-            ),  # the index of the groups having spike sequences in the window
+            # target position: current value of the environmental correlate
+            # WARNING: if the target is not position, this might change
+            # this is very dirty, but we need to hardcode the position dimension to 2 for the TFRecord parsing
+            # then it will be modified by the DataHelper.get_true_target method to actually match the target.
+            "pos": tf.io.FixedLenFeature([2], tf.float32),
+            # number of spike sequence gathered in the window
+            "length": tf.io.FixedLenFeature([], tf.int64),
+            # the index of the groups having spike sequences in the window
+            "groups": tf.io.VarLenFeature(tf.int64),
+            # the mean time-steps of each spike measured in the various groups.
+            # Question: should the time not be a VarLenFeature??
             "time": tf.io.FixedLenFeature([], tf.float32),
+            # the exact time step from behaviorData["Times"]
             "time_behavior": tf.io.FixedLenFeature([], tf.float32),
+            # sample of the spike
             "indexInDat": tf.io.VarLenFeature(tf.int64),
         }
         for g in range(self.params.nGroups):
