@@ -499,7 +499,7 @@ class AnimatedPositionPlotter:
         self.dim_name = getattr(self.data_helper, "target", "position").capitalize()
 
         if dim is None:
-            if self.data_helper.target == "pos":
+            if self.data_helper.target == "pos" and self.positions.shape[1] == 2:
                 dim = np.ones_like(self.true_valid_indices)
                 self.dim_name = "dummy"
             elif (
@@ -515,7 +515,7 @@ class AnimatedPositionPlotter:
                 self.dim_name = "PosHDSpeed"
             elif (
                 self.data_helper.target.lower() == "posandheaddirectionandthigmo"
-                and self.positions.shape[1] > 2
+                or self.positions.shape[1] > 2
             ):
                 dim = "Head Direction"
                 self.dim_name = "Head Direction"
