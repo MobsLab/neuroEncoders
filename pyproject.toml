@@ -11,11 +11,18 @@ requires-python = ">=3.10"
 dependencies = [
     "bokeh>=3.7.3",
     "cmcrameri>=1.9",
+    "cucim-cu12>=25.10",
+    "cudf-cu12>=25.10",
+    "cugraph-cu12>=25.10",
+    "cuml-cu12>=25.10",
+    "cuvs-cu12>=25.10",
+    "dask-cudf-cu12>=25.10",
     "denseweight>=0.1.2",
     "dill>=0.3.9",
     "ffmpeg>=1.4",
     "graphviz>=0.20.3",
     "h5py>=3.13.0",
+    "hdbscan>=0.8.40",
     "ipykernel>=6.29.5",
     "ipympl>=0.9.7",
     "isort>=6.0.1",
@@ -26,6 +33,7 @@ dependencies = [
     "numba>=0.60.0",
     "numpy<=2",
     "nvidia-cudnn-cu12~=8.9",
+    "nx-cugraph-cu12>=25.10",
     "opencv-python-headless>=4.11.0.86",
     "pandas>=2.1.0",
     "parameterized>=0.9.0",
@@ -34,9 +42,11 @@ dependencies = [
     "pydot>=3.0.4",
     "pydotplus>=2.0.2",
     "pykeops>=2.3",
+    "pylibraft-cu12>=25.10",
     "pynapple>=0.9.0",
     "pyqt5>=5.15.11",
     "pyyaml>=6.0.2",
+    "raft-dask-cu12>=25.10",
     "scikeras>=0.12.0",
     "scikit-image>=0.24.0",
     "scikit-learn>=1.6.1",
@@ -47,15 +57,19 @@ dependencies = [
     "statannotations>=0.7.2",
     "statsmodels>=0.14.0",
     "tables>=3.10.1",
+    "tbb>=2022.3.0",
+    "tbb-devel>=2022.3.0",
     "tensorflow",
     "termplotlib>=0.3.9",
     "tqdm>=4.67.1",
+    "umap-learn>=0.5.9.post2",
     "wandb>=0.20.1",
     "xlsxwriter>=3.2.5",
 ]
 
 [dependency-groups]
 dev = [
+    "bokeh>=3.8.1",
     "dash>=3.1.1",
     "ephyviewer>=1.7.0",
     "imageio[ffmpeg,pyav]>=2.37.0",
@@ -64,6 +78,7 @@ dev = [
     "neuroencoders",
     "openpyxl>=3.1.5",
     "pandas>=2.1.0",
+    "pillow>=12.0.0",
     "plotly>=6.2.0",
     "psutil>=7.0.0",
     "pympler>=1.1",
@@ -141,6 +156,9 @@ include = ["neuroencoders"]
 
 [tool.uv.sources]
 neuroencoders = { workspace = true }
+
+[[tool.uv.index]]
+url = "https://pypi.nvidia.com/"
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]
