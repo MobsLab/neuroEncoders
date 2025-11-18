@@ -23,102 +23,126 @@ import spikeinterface.full as si
 
 # filename is the first argument
 
-filename = sys.argv[1]
-# if filename ends with .fil - create a symbolic link to a {filename}_filtered.dat file and open it instead
-if filename.endswith(".fil"):
-    filtered_filename = filename.replace(".fil", "_filtered.dat")
-    if not os.path.exists(filtered_filename):
-        os.symlink(filename, filtered_filename)
-        # also symlink the .xml file if it exists
-        if os.path.exists(filename.replace(".fil", ".xml")):
-            os.symlink(
-                filename.replace(".fil", ".xml"),
-                filtered_filename.replace(".dat", ".xml"),
-            )
-    filename = filtered_filename
 
-recording = se.extractor_classes.NeuroScopeRecordingExtractor(file_path=filename)
-recording._set_neuroscope_groups()
+def main(args):
+    filename = args[1]
+    # if filename ends with .fil - create a symbolic link to a {filename}_filtered.dat file and open it instead
+    if filename.endswith(".fil"):
+        filtered_filename = filename.replace(".fil", "_filtered.dat")
+        if not os.path.exists(filtered_filename):
+            os.symlink(filename, filtered_filename)
+            # also symlink the .xml file if it exists
+            if os.path.exists(filename.replace(".fil", ".xml")):
+                os.symlink(
+                    filename.replace(".fil", ".xml"),
+                    filtered_filename.replace(".dat", ".xml"),
+                )
+        filename = filtered_filename
 
-channel_groups = recording.get_property("neuroscope_group")
-num_channels = recording.get_num_channels()
+    recording = se.extractor_classes.NeuroScopeRecordingExtractor(file_path=filename)
+    recording._set_neuroscope_groups()
 
-sig_source = ephyviewer.SpikeInterfaceRecordingSource(recording=recording)
+    channel_groups = recording.get_property("neuroscope_group")
+    num_channels = recording.get_num_channels()
 
-app = ephyviewer.mkQApp()
-win = ephyviewer.MainViewer(show_auto_scale=False)
+    sig_source = ephyviewer.SpikeInterfaceRecordingSource(recording=recording)
 
-view = ephyviewer.TraceViewer(source=sig_source, name="signals")
+    app = ephyviewer.mkQApp()
+    win = ephyviewer.MainViewer(show_auto_scale=False)
 
-view.params["scale_mode"] = "by_channel"
-view.params["scale_mode"] = "same_for_all"
-view.params["display_labels"] = True
-view.params["auto_scale_factor"] = 0.25
+    view = ephyviewer.TraceViewer(source=sig_source, name="signals")
 
-colors = recording.get_property("colors")
-discarded = recording.get_property("discarded_channels")
+    view.params["scale_mode"] = "by_channel"
+    view.params["scale_mode"] = "same_for_all"
+    view.params["display_labels"] = True
+    view.params["auto_scale_factor"] = 0.25
 
-# Set a group-based offset: the first group will start at n_channels, and then each channel will get -1, until the last channel from the last group, which will be at 0.
-# This way, the first group will be at the top of the plot, and the last group will be at the bottom.:
+    colors = recording.get_property("colors")
+    discarded = recording.get_property("discarded_channels")
 
-# 1. Get the number of channels in each group
-group_id, group_sizes = np.unique(channel_groups, return_counts=True)
-# 2. Calculate the offsets for each group
-group_offsets = [sum(group_sizes[:i]) for i in range(len(group_sizes))]
-# 3. Create a list of offsets for each channel by starting at n_channels and then subtracting the index of the channel in the group
-# prefill the offsets with zeros
-offsets = np.zeros(num_channels, dtype=int)
-for group_id in channel_groups:
-    group_offset = group_offsets[group_id]
-    group_channels = np.where(channel_groups == group_id)[0]
-    # Assign the offset for each channel in the group
-    for i, channel in enumerate(group_channels):
-        offsets[channel] = num_channels - 1 - group_offset - i
-# 5. Set the colors and visibility for each channel
-for i, channel in enumerate(channel_groups):
-    view.by_channel_params[f"ch{i}", "color"] = colors[i]
-    if discarded[i]:
-        view.by_channel_params[f"ch{i}", "visible"] = False
+    # Set a group-based offset: the first group will start at n_channels, and then each channel will get -1, until the last channel from the last group, which will be at 0.
+    # This way, the first group will be at the top of the plot, and the last group will be at the bottom.:
 
-view.auto_scale()
+    # 1. Get the number of channels in each group
+    group_id, group_sizes = np.unique(channel_groups, return_counts=True)
+    # 2. Calculate the offsets for each group
+    group_offsets = [sum(group_sizes[:i]) for i in range(len(group_sizes))]
+    # 3. Create a list of offsets for each channel by starting at n_channels and then subtracting the index of the channel in the group
+    # prefill the offsets with zeros
+    offsets = np.zeros(num_channels, dtype=int)
+    for group_id in channel_groups:
+        group_offset = group_offsets[group_id]
+        group_channels = np.where(channel_groups == group_id)[0]
+        # Assign the offset for each channel in the group
+        for i, channel in enumerate(group_channels):
+            offsets[channel] = num_channels - 1 - group_offset - i
+    # 5. Set the colors and visibility for each channel
+    for i, channel in enumerate(channel_groups):
+        view.by_channel_params[f"ch{i}", "color"] = colors[i]
+        if discarded[i]:
+            view.by_channel_params[f"ch{i}", "visible"] = False
 
-current_offsets = np.array(
-    [view.by_channel_params["ch{}".format(i), "offset"] for i in range(num_channels)]
-)
+    view.auto_scale()
 
-# get indices where the offsets are different by more than 20%
-indices = np.where(np.abs(current_offsets - offsets) > 0.2 * current_offsets)[0]
+    current_offsets = np.array(
+        [
+            view.by_channel_params["ch{}".format(i), "offset"]
+            for i in range(num_channels)
+        ]
+    )
 
-# 4. Set the offsets for each channel in the view
-for idx in indices:
-    view.by_channel_params[f"ch{idx}", "offset"] = offsets[idx]
+    # get indices where the offsets are different by more than 20%
+    indices = np.where(np.abs(current_offsets - offsets) > 0.2 * current_offsets)[0]
 
-win.add_view(view)
+    # 4. Set the offsets for each channel in the view
+    for idx in indices:
+        view.by_channel_params[f"ch{idx}", "offset"] = offsets[idx]
 
-# check if the same filename that ends with .clu.1 exists
-if os.path.exists(os.path.splitext(filename)[0] + ".clu.1") or os.path.exists(
-    os.path.splitext(filename)[0] + ".clu.2"
-):
-    try:
-        sorting = si.read_neuroscope_sorting(
-            folder_path=os.path.dirname(filename),
-            xml_file_path=filename.replace(".dat", ".xml"),
-        )
-    except Exception:
+    win.add_view(view)
+
+    # check if the same filename that ends with .clu.1 exists
+    if os.path.exists(os.path.splitext(filename)[0] + ".clu.1") or os.path.exists(
+        os.path.splitext(filename)[0] + ".clu.2"
+    ):
         try:
             sorting = si.read_neuroscope_sorting(
                 folder_path=os.path.dirname(filename),
-                xml_file_path=filename.replace(".fil", ".xml"),
+                xml_file_path=filename.replace(".dat", ".xml"),
             )
         except Exception:
-            sorting = si.read_neuroscope_sorting(
-                folder_path=os.path.dirname(filename),
-                xml_file_path=filename.replace(".lfp", ".xml"),
+            try:
+                sorting = si.read_neuroscope_sorting(
+                    folder_path=os.path.dirname(filename),
+                    xml_file_path=filename.replace(".fil", ".xml"),
+                )
+            except Exception:
+                sorting = si.read_neuroscope_sorting(
+                    folder_path=os.path.dirname(filename),
+                    xml_file_path=filename.replace(".lfp", ".xml"),
+                )
+        spike_source = ephyviewer.SpikeInterfaceSortingSource(sorting=sorting)
+        view2 = ephyviewer.SpikeTrainViewer(source=spike_source, name="spikes")
+
+        win.add_view(view2)
+
+    win.show()
+    app.exec()
+
+
+if __name__ == "__main__":
+    # simply make sure that all the dependencies are there
+    if len(sys.argv) >= 2:
+        print("Usage: python all_with_spike_interface.py <filename>")
+        main(sys.argv)
+    else:
+        try:
+            import ephyviewer  # noqa: F401
+            import spikeinterface  # noqa: F401
+            import numpy  # noqa: F401
+
+            print(
+                "All dependencies are installed. You can run the script to visualize data."
             )
-    spike_source = ephyviewer.SpikeInterfaceSortingSource(sorting=sorting)
-    view2 = ephyviewer.SpikeTrainViewer(source=spike_source, name="spikes")
-
-    win.add_view(view2)
-
-win.show()
-app.exec()
+        except ImportError as e:
+            print("Missing dependency:", e.name)
+            print("Please install it before running this script.")

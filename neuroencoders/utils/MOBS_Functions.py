@@ -1064,7 +1064,7 @@ class Mouse_Results(Params, PaperFigures):
         else:
             self.windows = windows
             if not isinstance(self.windows, list):
-                self.windows = [self.windows]
+                self.windows = [str(self.windows)]
 
         in_dir = [
             os.path.isdir(os.path.join(self.folderResult, d)) for d in self.windows
