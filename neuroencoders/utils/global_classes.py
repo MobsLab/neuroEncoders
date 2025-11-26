@@ -1543,7 +1543,7 @@ class Params:
         # MOVED TO DECODE CONFIG
         self.validCluWindow = 0.0005
         ### full encoder params
-        self.nFeatures = kwargs.pop("nFeatures", 64)
+        self.nFeatures = kwargs.pop("nFeatures", 128)  # number of features after CNN
         self.isTransformer = (
             True
             if kwargs.get("isTransformer", None) is None
@@ -1681,6 +1681,7 @@ class Params:
         self.usingMixedPrecision = False
 
         self.reduce_dense = kwargs.pop("reduce_dense", None)
+        self.no_cnn = kwargs.pop("no_cnn", False)
         # enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer
         # except the output for unclear reasons linked to gradient computations

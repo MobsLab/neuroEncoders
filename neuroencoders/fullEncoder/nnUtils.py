@@ -46,11 +46,13 @@ class spikeNet(tf.keras.layers.Layer):
         nFeatures=128,
         number="",
         reduce_dense=False,
+        no_cnn=False,
         **kwargs,
     ):
         name = kwargs.pop("name", "spikeNet{}".format(number))
         self.reduce_dense = reduce_dense
         self.batch_normalization = kwargs.pop("batch_normalization", True)
+        self.no_cnn = no_cnn
         super().__init__(name=name, **kwargs)
         self.nFeatures = nFeatures
         self.nChannels = nChannels
@@ -106,12 +108,16 @@ class spikeNet(tf.keras.layers.Layer):
         nFeatures = config.get("nFeatures", 128)
         number = config.get("number", "")
         batch_normalization = config.get("batch_normalization", True)
+        reduce_dense = config.get("reduce_dense", False)
+        no_cnn = config.get("no_cnn", False)
         return cls(
             nChannels=nChannels,
             device=device,
             nFeatures=nFeatures,
             number=number,
             batch_normalization=batch_normalization,
+            reduce_dense=reduce_dense,
+            no_cnn=no_cnn,
         )
 
     def __call__(self, input):
@@ -119,6 +125,14 @@ class spikeNet(tf.keras.layers.Layer):
 
     def apply(self, input):
         with tf.device(self.device):
+            if self.no_cnn:
+                # reshape input directly to dense layer
+                # must be of shape (batch_size, -1)
+                x = tf.keras.layers.Flatten()(input)
+                x = self.denseLayer3(x)
+                x = self.dropoutLayer(x)
+                print("Skipping CNN layers")
+                return x
             x = kops.expand_dims(input, axis=3)
             x = self.convLayer1(x)
             if self.batch_normalization:
@@ -172,6 +186,8 @@ class spikeNet(tf.keras.layers.Layer):
             vars_list += self.denseLayer1.variables + self.denseLayer2.variables
         if self.batch_normalization:
             vars_list += self.bn1.variables + self.bn2.variables + self.bn3.variables
+        if self.no_cnn:
+            return self.denseLayer3.variables + self.dropoutLayer.variables
         return vars_list
 
     def layers(self):
@@ -188,6 +204,8 @@ class spikeNet(tf.keras.layers.Layer):
             layers_list += (self.denseLayer1, self.denseLayer2)
         if self.batch_normalization:
             layers_list += (self.bn1, self.bn2, self.bn3)
+        if self.no_cnn:
+            return (self.denseLayer3, self.dropoutLayer)
         return layers_list
 
     def build(self, input_shape):

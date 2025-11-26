@@ -226,6 +226,7 @@ class LSTMandSpikeNetwork:
                     number=str(group),
                     batch_normalization=False,
                     reduce_dense=getattr(self.params, "reduce_dense", False),
+                    no_cnn=getattr(self.params, "no_cnn", False),
                 )
                 for group in range(self.params.nGroups)
             ]
