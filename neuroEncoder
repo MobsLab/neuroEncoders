@@ -269,6 +269,7 @@ def main(args):
         loss_type=args.loss_type,
         project_transformer=not args.no_project_transformer,
         reduce_dense=args.reduce_dense,
+        no_cnn=args.no_cnn,
     )
 
     # Save ProjectPath object
@@ -1265,6 +1266,12 @@ if __name__ == "__main__":
             "--reduce_dense",
             action="store_true",
             help="defines whether the CNN has fewer dense layers (1 instead of 3)",
+        )
+        p.add_argument(
+            "-nocnn",
+            "--no_cnn",
+            action="store_true",
+            help="defines whether the CNN has no CNN layers (output is directly passed to transformer after dense layer for nChannels uniformization)",
         )
 
         if cmd == "bayes":

@@ -62,7 +62,7 @@ dependencies = [
     "tensorflow",
     "termplotlib>=0.3.9",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.9.post2",
+    "umap-learn[plot]>=0.5.9.post2",
     "wandb>=0.20.1",
     "xlsxwriter>=3.2.5",
 ]

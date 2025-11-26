@@ -38,10 +38,7 @@ mice_nb = [
     "M1199_reversal",
     "M905",
 ]
-# mice_nb = ["M1199_PAG"]
-# nameExp = "MixedLoss_2Transformer_Pos_HeadAndDirection"
-nameExp = "CSI_new_4d_GaussianHeatMap_LinearLoss"
-nameExp = "new_4d_GaussianHeatMap_LinearLoss"
+nameExp = "noCNN_4d_Gaussian_HeatMap"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -213,6 +210,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--no-dense",
             # "--mixed_loss",
             # "--no_gaussian",
+            "--no_cnn",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
