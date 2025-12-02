@@ -254,6 +254,7 @@ def main(args):
         windowSize=args.window,
         nEpochs=args.epochs,
         phase=args.phase,
+        nFeatures=args.n_features,
         batchSize=(256 if args.window < 0.252 else 128)
         if "1230" not in ProjectPath.xml
         else 64,
@@ -280,11 +281,7 @@ def main(args):
         ProjectPath.experimentPath,
         "DataHelper.pkl",
     )
-    if not os.path.exists(output):
-        save_project_to_pickle(
-            DataHelper,
-            output=output,
-        )
+    save_project_to_pickle(DataHelper, output=output)
 
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
@@ -1182,6 +1179,13 @@ if __name__ == "__main__":
             "--test_sleep",
             action="store_true",
             help="defines whether to test the decoder on the Pre and Post sleep phases",
+        )
+        p.add_argument(
+            "-nf",
+            "--n_features",
+            type=int,
+            help="dimension of CNN output for 1 spike group. Defaults to None (will use 32 or 64 depending on params default)",
+            default=None,
         )
         p.add_argument(
             "-lstm",

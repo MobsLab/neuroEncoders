@@ -198,6 +198,65 @@ class DataHelper(Project):
 
     """
 
+    _skip_new = False
+
+    def __new__(
+        cls,
+        xmlPath=None,
+        mode=None,
+        target=None,
+        *args,
+        load_path=None,
+        **kwargs,
+    ):
+        if cls._skip_new:
+            return super().__new__(cls)
+
+        # Handle positional arguments
+        if xmlPath is None and len(args) >= 3:
+            xmlPath, mode, target = args[0], args[1], args[2]
+            args = args[3:]
+        elif xmlPath is not None and mode is None and len(args) >= 2:
+            mode, target = args[0], args[1]
+            args = args[2:]
+        elif (
+            xmlPath is not None
+            and mode is not None
+            and target is None
+            and len(args) >= 1
+        ):
+            target = args[0]
+            args = args[1:]
+
+        if load_path is None:
+            if xmlPath is not None and kwargs.get("nameExp", None) is not None:
+                load_path = os.path.join(
+                    os.path.dirname(xmlPath),
+                    kwargs.get("nameExp", None),
+                    "DataHelper.pkl",
+                )
+            else:
+                return super().__new__(cls)
+        if os.path.isfile(load_path) and kwargs.pop("load_at_init", True):
+            obj = cls.load(load_path)
+            if (
+                ("_loaded_from_pickle" in dir(obj))
+                and (obj.mode == mode)
+                and (obj.target == target)
+            ):
+                print(f"Loading DataHelper from {load_path}")
+                # if loaded successfully, return the object, simply changing old_positions by positions
+                if hasattr(obj, "old_positions"):
+                    obj.positions = obj.old_positions
+                if "old_positions" in obj.fullBehavior:
+                    obj.fullBehavior["Positions"] = obj.fullBehavior["old_positions"]
+                return obj
+            else:
+                raise ValueError(
+                    "DataHelper load failed, incompatible mode/target or not loaded from pickle"
+                )
+        return super().__new__(cls)
+
     def __init__(
         self,
         xmlPath=None,
@@ -220,6 +279,9 @@ class DataHelper(Project):
             - phase: the phase of the experiment, can be "pre", "preNoHab", "hab", "cond", "post", "extinction"... or None.
             - force_ref: whether to force the computation of the reference and xy coordinates, even if they are already saved.
         """
+        if getattr(self, "_loaded_from_pickle", False):
+            return
+
         # Handle positional arguments
         if xmlPath is None and len(args) >= 3:
             xmlPath, mode, target = args[0], args[1], args[2]
@@ -299,12 +361,17 @@ class DataHelper(Project):
 
     @classmethod
     def load(cls, path):
+        cls._skip_new = True
         try:
             with open(path, "rb") as f:
-                return pickle.load(f)
+                obj = pickle.load(f)
         except (IsADirectoryError, FileNotFoundError, EOFError):
             with open(os.path.join(path, "DataHelper.pkl"), "rb") as f:
-                return pickle.load(f)
+                obj = pickle.load(f)
+        finally:
+            cls._skip_new = False
+        setattr(obj, "_loaded_from_pickle", True)
+        return obj
 
     def nGroups(self):
         """
@@ -1436,6 +1503,56 @@ class Params:
         nEpochs: number of epochs to train the network
     """
 
+    _skip_new = False
+
+    def __new__(cls, *args, load_path=None, **kwargs):
+        if cls._skip_new:
+            # Bypass __new__ if already called during loading from pickle
+            return super().__new__(cls)
+        # Extract required parameters
+        if len(args) >= 1:
+            helper = args[0]
+            args = args[1:]
+        else:
+            helper = kwargs.pop("helper", None)
+
+        if len(args) >= 1:
+            args = args[1:]
+
+        if helper is None:
+            raise ValueError("helper (DataHelper instance) is required")
+
+        # By default, we try to load Params from pickle if available
+        if kwargs.pop("load_at_init", True):
+            if load_path is not None:
+                params_path = load_path
+            else:
+                params_path = os.path.join(helper.resultsPath, "Parameters.pkl")
+            if os.path.isfile(params_path):
+                # load the params from pickle using the load classmethod
+                loaded = cls.load(params_path)
+                if isinstance(loaded, cls) and "_loaded_from_pickle" in dir(loaded):
+                    print("Loading existing Params from pickle file...")
+                    loaded._copy_from_helper(helper)
+                    # WARNING: re initialize for method vs attribute, idk why this was done this way in the first place
+                    loaded.nGroups = (
+                        helper.nGroups()
+                    )  # number of anatomical spiking groups
+                    loaded.dimOutput = (
+                        helper.dim_output()
+                    )  # dimension of what needs to be predicted
+                    loaded.originalDimOutput = (
+                        helper.old_positions.shape[1]
+                        if hasattr(helper, "old_positions")
+                        else helper.dim_output()
+                    )  # original dimension
+                    loaded.nChannelsPerGroup = (
+                        helper.numChannelsPerGroup()
+                    )  # number of channels per "spiking" anatomical group
+                    return loaded  # Return the loaded instance
+
+        return super().__new__(cls)
+
     def __init__(self, *args, **kwargs):
         """
         Initialize the Params object with required and optional parameters.
@@ -1452,6 +1569,10 @@ class Params:
                 - isTransformer (bool, optional, default True)
                 - transform_w_log (bool, optional, default False)
         """
+        if getattr(self, "_loaded_from_pickle", False):
+            # Already loaded from pickle, skip initialization
+            return
+
         # Extract required parameters
         if len(args) >= 1:
             helper = args[0]
@@ -1745,19 +1866,27 @@ class Params:
 
     @classmethod
     def load(cls, path):
+        cls._skip_new = True
         try:
             with open(path, "rb") as f:
-                return pickle.load(f)
+                obj = pickle.load(f)
         except (IsADirectoryError, FileNotFoundError, EOFError):
             with open(os.path.join(path, "Parameters.pkl"), "rb") as f:
-                return pickle.load(f)
+                obj = pickle.load(f)
+        finally:
+            cls._skip_new = False
+        setattr(obj, "_loaded_from_pickle", True)
+        return obj
 
 
-def save_project_to_pickle(project, output=None):
+def save_project_to_pickle(project, output=None, force=False):
     if output is None:
         output = os.path.join(
             project.experimentPath, f"Project_{int(project.windowSize * 1000)}.pkl"
         )
+    if not force and os.path.isfile(os.path.join(os.path.expanduser(output))):
+        print(f"Project pickle already exists at {output}, skipping save.")
+        return
     with open(os.path.join(os.path.expanduser(output)), "wb") as f:
         pickle.dump(
             project,
