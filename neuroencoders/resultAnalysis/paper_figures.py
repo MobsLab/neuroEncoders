@@ -1,16 +1,19 @@
 # Load libs
 import os
+from pathlib import Path
 
 import dill as pickle
-import matplotlib.gridspec as gridspec
+import matplotlib as mplt
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import tqdm
 from scipy import stats
-from scipy.stats import sem, zscore
-from statannotations.Annotator import Annotator
+from scipy.ndimage import gaussian_filter
+from scipy.stats import pearsonr, sem, zscore
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
@@ -19,12 +22,16 @@ from neuroencoders.simpleBayes.decode_bayes import (
     extract_spike_counts,
     extract_spike_counts_from_matrix,
 )
-from neuroencoders.utils.global_classes import Project
+from neuroencoders.utils.global_classes import Project, DataHelper, MAZE_COORDS
 from neuroencoders.utils.viz_params import (
+    DELTA_COLOR_FORWARD,
+    DELTA_COLOR_REVERSE,
     EC,
     MIDDLE_COLOR,
+    PREDICTED_LINE_COLOR,
     SAFE_COLOR,
     SHOCK_COLOR,
+    TRUE_LINE_COLOR,
     white_viridis,
 )
 
@@ -279,7 +286,9 @@ class PaperFigures:
                             f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
                         )
                         resultsNN_phase_pkl.append(None)
-                if kwargs.get("extract_spikes_count", False):
+                if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                    "extract_spike_counts", False
+                ):
                     try:
                         spikes_count.append(
                             pd.read_csv(
@@ -311,7 +320,9 @@ class PaperFigures:
                     "predLoss": lossPred,
                     "posIndex": posIndex,
                 }
-                if kwargs.get("extract_spikes_count", False):
+                if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                    "extract_spike_counts", False
+                ):
                     self.resultsNN["spikes_count"] = spikes_count
 
             self.resultsNN_phase[suffix] = {
@@ -325,7 +336,9 @@ class PaperFigures:
                 "posIndex": posIndex,
                 "spikes_count": spikes_count,
             }
-            if kwargs.get("extract_spikes_count", False):
+            if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                "extract_spike_counts", False
+            ):
                 self.resultsNN_phase[suffix]["spikes_count"] = spikes_count
             if kwargs.get("load_pickle", False):
                 self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
@@ -354,9 +367,14 @@ class PaperFigures:
                 - probaBayes: list of probabilities for each time window
                 - time: list of time arrays for each time window
         """
-        if not hasattr(self.trainerBayes, "linearPreferredPos") and kwargs.get(
-            "load_bayesMatrices", False
+        if not hasattr(self.trainerBayes, "linearPreferredPos") and (
+            kwargs.get("load_bayesMatrices", False)
+            or self.trainerBayes.config.extra_kwargs.get("load_bayesMatrices", False)
         ):
+            # load bayesMatrices if not already done
+            # first, we mix kwargs with trainerBayes config extra_kwargs, with kwargs having priority
+            combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
+
             self.bayesMatrices = self.trainerBayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
@@ -366,7 +384,7 @@ class PaperFigures:
                     and ("Occupation" in self.bayesMatrices.keys())
                 )
                 else None,
-                **kwargs,
+                **combined_kwargs,
             )
 
         # quickly obtain bayesian decoding:
@@ -484,7 +502,9 @@ class PaperFigures:
                             )
                         ).flatten()
                     )
-                    if kwargs.get("extract_spikes_count", False):
+                    if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                        "extract_spike_counts", False
+                    ):
                         total_count, _ = extract_spike_counts(
                             timesBayes[-1], self.trainerBayes.spikeMatTimes, ws / 1000
                         )
@@ -581,7 +601,9 @@ class PaperFigures:
                     "time": timesBayes,  # should be exactly the same as timeNN
                     "speedMask": self.resultsNN_phase[suffix]["speedMask"],
                 }
-                if kwargs.get("extract_spikes_count", False):
+                if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                    "extract_spike_counts", False
+                ):
                     self.resultsBayes.update(
                         {
                             "total_spikes_count": total_spikes_count,
@@ -599,7 +621,9 @@ class PaperFigures:
                 "time": timesBayes,  # should be exactly the same as timeNN
                 "speedMask": self.resultsNN_phase[suffix]["speedMask"],
             }
-            if kwargs.get("extract_spikes_count", False):
+            if kwargs.get("extract_spikes_count", False) or kwargs.get(
+                "extract_spike_counts", False
+            ):
                 self.resultsBayes_phase[suffix].update(
                     {
                         "total_spikes_count": total_spikes_count,

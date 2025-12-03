@@ -2124,7 +2124,9 @@ class AnimatedPositionPlotter:
                 if self.linpositions is not None:
                     current_lin_pos = self.linpositions[frame : frame + 1]
                     x, y = self.get_linearized_point(current_lin_pos[0])
-                    self.artists[name_axis]["linearized_arrow_true"].set_data((x, y))
+                    self.artists[name_axis]["linearized_arrow_true"].set_data(
+                        ([x], [y])
+                    )
                 if self.linpredicted is not None:
                     current_lin_predicted = self.linpredicted[frame : frame + 1]
 
@@ -2142,7 +2144,7 @@ class AnimatedPositionPlotter:
                         pass
                     else:
                         self.artists[name_axis]["linearized_arrow_predicted"].set_data(
-                            (x, y)
+                            ([x], [y])
                         )
 
             n_trail_points = len(trail_positions)
@@ -2581,7 +2583,7 @@ class AnimatedPositionPlotter:
                 np.column_stack((prediction_time, linpredicted))
             )
             self.artists["current_predicted_point"].set_data(
-                self.positionTime[frame], self.linpredicted[frame]
+                [[self.positionTime[frame]], [self.linpredicted[frame]]]
             )
             if hasattr(self, "lin_dim_pred"):
                 values = self.lin_dim_pred[start_idx:end_idx]

@@ -750,12 +750,12 @@ def speed_filter(
 
             mngr1 = fig.canvas.manager
             mngr2 = fig2d.canvas.manager
-            if mplt.get_backend() == "QtAgg":
+            if mplt.get_backend().lower() == "QtAgg".lower():
                 mngr1.window.move(0, 0)  # Position at left monitor
                 mngr1.window.showMaximized()
                 mngr2.window.move(2560, 0)  # Position at right monitor
                 mngr2.window.showMaximized()
-            elif mplt.get_backend() == "TkAgg":
+            elif mplt.get_backend().lower() == "TkAgg".lower():
                 mngr1.window.wm_geometry("+0+0")
                 mngr1.resize(*mngr1.window.maxsize())
                 mngr2.window.wm_geometry("+2560+0")
@@ -1813,9 +1813,9 @@ def select_epochs(
                 transform=fig.transFigure,
             )
 
-            if mplt.get_backend() == "QtAgg":
+            if mplt.get_backend().lower() == "QtAgg".lower():
                 plt.get_current_fig_manager().window.showMaximized()
-            elif mplt.get_backend() == "TkAgg":
+            elif mplt.get_backend().lower() == "TkAgg".lower():
                 plt.get_current_fig_manager().resize(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
