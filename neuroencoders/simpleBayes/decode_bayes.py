@@ -51,6 +51,7 @@ class DecoderConfig:
     sigma: float = 0.25  # for gaussian smoothing of rate functions
     maxPos: Optional[Tuple[float, float]] = None
     fullBehaviorBandwidth: Optional[float] = None
+    target_bayes: Optional[str] = "pos"  # target variable for decoding
 
     # Store unexpected kwargs here if needed
     extra_kwargs: dict = field(default_factory=dict, init=False, repr=False)
@@ -133,6 +134,13 @@ class Trainer(SpatialConstraintsMixin):
         )
         self.logger = logging.getLogger(__name__)
 
+        if self.config.target_bayes == "pos":
+            self.feature_dim = 2
+        else:
+            raise NotImplementedError(
+                "Only 'pos' target is implemented currently for bayes trainer."
+            )
+
         # Folders
         try:
             self.folderResult = os.path.join(self.projectPath.folderResult)
@@ -164,7 +172,9 @@ class Trainer(SpatialConstraintsMixin):
                 behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
             )
             totMask = speedMask * epochMask
-            full_training_true_positions = behaviorData["Positions"][totMask, :2]
+            full_training_true_positions = behaviorData["Positions"][
+                totMask, : self.feature_dim
+            ]
             self.training_data = full_training_true_positions
             self.logger.info(
                 f"Training data saved with {full_training_true_positions.shape} valid positions."
@@ -291,7 +301,9 @@ class Trainer(SpatialConstraintsMixin):
                 behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
             )
             totMask = speedMask * epochMask
-            full_training_true_positions = behaviorData["Positions"][totMask]
+            full_training_true_positions = behaviorData["Positions"][
+                totMask, : self.feature_dim
+            ]
             self.training_data = full_training_true_positions
             self.logger.info(
                 f"Training data saved with {full_training_true_positions.shape} valid positions."
@@ -341,7 +353,9 @@ class Trainer(SpatialConstraintsMixin):
                             bayesMatrices = pickle.load(f)
                         self.logger.info("Loaded existing Bayesian matrices.")
                     except FileNotFoundError:
-                        if kwargs.get("load_last_bayes", False):
+                        if kwargs.get(
+                            "load_last_bayes", False
+                        ) or self.config.extra_kwargs.get("load_last_bayes", False):
                             with open(
                                 os.path.join(
                                     self.projectPath.experimentPath,
@@ -1879,6 +1893,9 @@ class Trainer(SpatialConstraintsMixin):
                 for i in range(len(bayesMatrices["bins"]))
             ]
         ).T
+        assert featurePred.shape[1] == self.feature_dim, (
+            f"Expected feature dimension {self.feature_dim}, got {featurePred.shape[1]}"
+        )
         # invert column 0 and 1 to match original code (x,y) convention due to a change in meshgrid
         featurePred = featurePred[:, [1, 0]]
 
@@ -2073,10 +2090,10 @@ class Trainer(SpatialConstraintsMixin):
         real_times = behaviorData["positionTime"][epoch_mask]
 
         # Find nearest position for each prediction time
-        featureTrue = np.zeros((len(timeStepPred), 2))
+        featureTrue = np.zeros((len(timeStepPred), self.feature_dim))
         for i, time_stamp in enumerate(timeStepPred):
             nearest_idx = np.abs(real_times - time_stamp).argmin()
-            featureTrue[i] = real_positions[nearest_idx]
+            featureTrue[i] = real_positions[nearest_idx, : self.feature_dim]
 
         return featureTrue
 

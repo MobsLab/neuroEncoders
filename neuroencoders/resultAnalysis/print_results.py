@@ -1559,9 +1559,9 @@ def fig_interror(
             bbox_inches="tight",
         )
     if show:
-        if mplt.get_backend() == "QtAgg":
+        if mplt.get_backend().lower() == "QtAgg".lower():
             plt.get_current_fig_manager().window.showMaximized()
-        elif mplt.get_backend() == "TkAgg":
+        elif mplt.get_backend().lower() == "TkAgg".lower():
             plt.get_current_fig_manager().resize(
                 *plt.get_current_fig_manager().window.maxsize()
             )

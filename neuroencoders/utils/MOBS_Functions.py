@@ -1453,6 +1453,9 @@ class Mouse_Results(Params, PaperFigures):
             idx = self.windows_values.index(winMS)
             win = self.windows[idx]
 
+        if phase is None:
+            phase = self.phase
+
         print_results.print_results(
             self.folderResult,
             windowSizeMS=winMS,
@@ -1488,6 +1491,10 @@ class Mouse_Results(Params, PaperFigures):
         positions_from_NN = kwargs.pop("positions_from_NN", None)
         if positions_from_NN is None:
             positions_from_NN = self.resultsNN_phase[phase]["truePos"][idWindow]
+            if positions_from_NN is None:
+                raise ValueError(
+                    f"True positions not found in resultsNN_phase[{phase}]. Please run load_results first."
+                )
 
         predicted = kwargs.pop("predicted", None)
         if predicted is None:
