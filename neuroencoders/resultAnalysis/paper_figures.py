@@ -301,8 +301,9 @@ class PaperFigures:
                             )
                         )
                     except FileNotFoundError:
-                        print(
-                            f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
+                        warnings.warn(
+                            f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it.\n"
+                            f"You should export it when testing the model. See `extract_spike_counts` argument from `trainerNN.test`"
                         )
                         spikes_count.append(None)
 

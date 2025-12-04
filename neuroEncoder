@@ -696,7 +696,7 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=False,
+                load_model=True,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=num_augmentations,
@@ -738,6 +738,7 @@ def main(args):
                 template=args.phase,
                 T_scaling=T,
                 strideFactor=strideFactor,
+                extract_spikes_counts=True,
             )
             try:
                 print_results.print_results(
@@ -778,6 +779,7 @@ def main(args):
                 template=args.phase,
                 T_scaling=T,
                 strideFactor=strideFactor,
+                extract_spikes_counts=True,
             )
             try:
                 print_results.print_results(
@@ -817,6 +819,7 @@ def main(args):
                 useTrain=True,
                 T_scaling=T,
                 strideFactor=strideFactor,
+                extract_spikes_counts=True,
             )
 
             try:
@@ -857,6 +860,7 @@ def main(args):
                 useTrain=True,
                 T_scaling=T,
                 strideFactor=strideFactor,
+                extract_spikes_counts=True,
             )
 
             try:
