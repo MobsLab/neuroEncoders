@@ -658,7 +658,9 @@ def serialize_single_spike(clu, spike):
 
 
 # @tf.function
-def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_proto,
+def parse_serialized_sequence(
+    params, tensors, batched=False, count_spikes=False
+):  # featDesc, ex_proto,
     """
     Parse a serialized spike sequence example.
     Args:
@@ -678,6 +680,9 @@ def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_p
     tensors["groups"] = tf.reshape(tensors["groups"], [-1])
 
     tensors["indexInDat"] = tf.sparse.to_dense(tensors["indexInDat"], default_value=-1)
+    # keep a raw version of indexInDat before reshaping
+    tensors["indexInDat_raw"] = tf.identity(tensors["indexInDat"])
+    # reshape indexInDat to be a flat array
     tensors["indexInDat"] = tf.reshape(tensors["indexInDat"], [-1])
 
     for g in range(params.nGroups):
@@ -691,6 +696,25 @@ def parse_serialized_sequence(params, tensors, batched=False):  # featDesc, ex_p
                 tensors["group" + str(g)],
                 [params.batchSize, -1, params.nChannelsPerGroup[g], 32],
             )
+            if count_spikes:
+                group_batched = tensors["group" + str(g)]
+                # nonzero mask per sample
+                nonzero_mask = tf.logical_not(
+                    tf.equal(
+                        tf.reduce_sum(
+                            tf.cast(tf.equal(group_batched, zeros), tf.int32),
+                            axis=[2, 3],
+                        ),
+                        32 * params.nChannelsPerGroup[g],
+                    )
+                )
+
+                # spike counts per sample (shape = [batchSize])
+                spike_counts = tf.reduce_sum(tf.cast(nonzero_mask, tf.int32), axis=1)
+
+                # store result in tensors
+                tensors[f"group{g}_spikes_count"] = spike_counts
+
         # even if batched: gather all together, meaning batch and spikes are merged
         tensors["group" + str(g)] = tf.reshape(
             tensors["group" + str(g)], [-1, params.nChannelsPerGroup[g], 32]
@@ -970,6 +994,7 @@ def parse_serialized_sequence_with_augmentation(
     tensors,
     augmentation_config: Optional[NeuralDataAugmentation] = None,
     batched=False,
+    count_spikes=False,
 ):
     """
     Parse serialized sequence with optional data augmentation.
@@ -1004,6 +1029,24 @@ def parse_serialized_sequence_with_augmentation(
                 tensors["group" + str(g)],
                 [params.batchSize, -1, params.nChannelsPerGroup[g], 32],
             )
+            if count_spikes:
+                group_batched = tensors["group" + str(g)]
+                # nonzero mask per sample
+                nonzero_mask = tf.logical_not(
+                    tf.equal(
+                        tf.reduce_sum(
+                            tf.cast(tf.equal(group_batched, zeros), tf.int32),
+                            axis=[2, 3],
+                        ),
+                        32 * params.nChannelsPerGroup[g],
+                    )
+                )
+
+                # spike counts per sample (shape = [batchSize])
+                spike_counts = tf.reduce_sum(tf.cast(nonzero_mask, tf.int32), axis=1)
+
+                # store result in tensors
+                tensors[f"group{g}_spikes_count"] = spike_counts
 
         # Reshape for processing
         tensors["group" + str(g)] = tf.reshape(

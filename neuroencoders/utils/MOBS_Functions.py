@@ -697,6 +697,11 @@ class Mouse_Results(Params, PaperFigures):
     This class is used to store and manage results related to a specific mouse.
     """
 
+    # Bypass Params __new__ to avoid unwanted initialization
+    def __new__(cls, *args, **kwargs):
+        # Completely bypass Params.__new__
+        return object.__new__(cls)
+
     def __init__(self, *args, **kwargs):
         """
         Initialize the Mouse_Results class.

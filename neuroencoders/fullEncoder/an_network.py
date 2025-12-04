@@ -1110,7 +1110,6 @@ class LSTMandSpikeNetwork:
                         )
                     )
                 ) and not kwargs.get("fine_tune", False):
-                    print(kwargs.get("fine_tune", False))
                     print(
                         "Loading previous losses from",
                         os.path.join(self.folderModels, str(windowSizeMS)),
@@ -1290,8 +1289,6 @@ class LSTMandSpikeNetwork:
         **kwargs,
     ) -> Dict[str, tf.data.Dataset]:
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
-        useSpeedFilter = kwargs.get("useSpeedFilter", False)
-        phase = kwargs.get("phase", None)
         shuffle = kwargs.get("shuffle", True)
         batchSize = kwargs.get("batch_size", self.params.batchSize)
 
@@ -1376,24 +1373,6 @@ class LSTMandSpikeNetwork:
             dataset = dataset.map(nnUtils.import_true_pos(posFeature))
             dataset = dataset.filter(filter_nan_pos)
 
-            if kwargs.get("extract_spikes_counts", False):
-                if (
-                    not os.path.exists(
-                        os.path.join(
-                            self.folderResult,
-                            str(windowSizeMS),
-                            f"spikes_count_{phase}.csv",
-                        )
-                    )
-                    and not useSpeedFilter
-                ):
-                    self._extract_spikes_counts_from_dataset(
-                        dataset,
-                        map_outputs=map_outputs,
-                        windowSizeMS=windowSizeMS,
-                        **kwargs,
-                    )
-
             # now that we have clean positions, we can resample if needed
             if self.params.OversamplingResampling and key == "train":
                 dataset = self._apply_oversampling_resampling(
@@ -1405,10 +1384,15 @@ class LSTMandSpikeNetwork:
 
             dataset = dataset.batch(batchSize, drop_remainder=True)
 
-            if not self.params.dataAugmentation or key == "test":
+            if (
+                not self.params.dataAugmentation
+                or key == "test"
+                or kwargs.get("inference_mode", False)
+            ):
                 print("No data augmentation for", key, "dataset")
                 optimized_parse_fn = self.create_optimized_parse_function(
-                    augmentation=False
+                    augmentation=False,
+                    count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
                 dataset = dataset.map(
                     optimized_parse_fn,
@@ -1419,7 +1403,9 @@ class LSTMandSpikeNetwork:
                 print("Applying data augmentation to", key, "dataset with config:")
                 print(augmentation_config)
                 optimized_aug_fn = self.create_optimized_parse_function(
-                    augmentation=True, augmentation_config=augmentation_config
+                    augmentation=True,
+                    augmentation_config=augmentation_config,
+                    count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
 
                 dataset = dataset.map(
@@ -1476,73 +1462,11 @@ class LSTMandSpikeNetwork:
 
         return datasets
 
-    def _extract_spikes_counts_from_dataset(self, dataset, map_outputs, **kwargs):
-        """
-        Extract spikes counts from the dataset and save it as a CSV file.
-        """
-        windowSizeMS = kwargs.pop("windowSizeMS", 36)
-        phase = kwargs.get("phase", None)
-
-        @tf.autograph.experimental.do_not_convert
-        def map_parse_serialized_sequence_not_batched(*vals):
-            return nnUtils.parse_serialized_sequence(self.params, *vals, batched=False)
-
-        unbatched_dataset = dataset.map(
-            map_parse_serialized_sequence_not_batched,
-            num_parallel_calls=tf.data.AUTOTUNE,
-        )
-        unbatched_dataset = unbatched_dataset.map(
-            self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        unbatched_dataset = unbatched_dataset.map(
-            map_outputs, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        records = []
-
-        for i, (inputs, outputs) in enumerate(unbatched_dataset):
-            row = {}
-
-            # Count spikes for each group
-            for g in range(self.params.nGroups):
-                row[f"group{g}_spikes_count"] = inputs[f"group{g}"].numpy().shape[0]
-
-            # Total across groups
-            row["total_spikes_count"] = sum(
-                row[f"group{g}_spikes_count"] for g in range(self.params.nGroups)
-            )
-
-            # --- pos_index ---
-            pos_index = inputs["pos_index"].numpy()
-            if np.isscalar(pos_index) or pos_index.shape == ():
-                row["posIndex"] = np.int64(pos_index).item()
-            else:
-                raise ValueError(
-                    f"Expected scalar pos_index, got shape {pos_index.shape}"
-                )
-
-            # --- indexInDat must be an array (one array per posIndex) ---
-            index_in_dat = inputs["indexInDat"].numpy()
-            if index_in_dat.ndim == 1:
-                row["indexInDat"] = index_in_dat.copy()  # store array directly
-            else:
-                raise ValueError(
-                    f"Expected 1D array for indexInDat, got shape {index_in_dat.shape}"
-                )
-
-            records.append(row)
-
-        spikes_counts = pd.DataFrame.from_records(records)
-        spikes_counts.to_csv(
-            os.path.join(
-                self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
-            ),
-            index=False,
-        )
-
     def create_optimized_parse_function(
         self,
         augmentation: bool = False,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
+        count_spikes=False,
     ):
         """
         Create optimized parsing function that respects spike data structure
@@ -1565,6 +1489,7 @@ class LSTMandSpikeNetwork:
                     processed_batch,  # Pass the copy
                     augmentation_config=augmentation_config,
                     batched=True,
+                    count_spikes=count_spikes,
                 )
 
             return optimized_parse_with_augmentation
@@ -1578,7 +1503,10 @@ class LSTMandSpikeNetwork:
                     processed_batch[key] = batch_data[key]
 
                 return nnUtils.parse_serialized_sequence(
-                    self.params, processed_batch, batched=True
+                    self.params,
+                    processed_batch,
+                    batched=True,
+                    count_spikes=count_spikes,
                 )
 
             return optimized_parse_standard
@@ -1626,6 +1554,7 @@ class LSTMandSpikeNetwork:
         T_scaling = kwargs.get("T_scaling", None)
         epochKey = kwargs.get("epochKey", "testEpochs")
         strideFactor = kwargs.get("strideFactor", 1)
+        extract_spikes_counts = kwargs.get("extract_spikes_counts", False)
 
         # TODO: change speed filter with custom speed
         # Create the folder
@@ -1722,7 +1651,6 @@ class LSTMandSpikeNetwork:
             totMask,
             inference_mode=True,
             onTheFlyCorrection=onTheFlyCorrection,
-            extract_spikes_counts=True,
             shuffle=False,
             **kwargs,
         )["test"]
@@ -1819,6 +1747,19 @@ class LSTMandSpikeNetwork:
         def map_index_in_dat(x, y):
             return x["indexInDat"]
 
+        # map function to extract spike counts per group, instead of standalone method
+        @tf.autograph.experimental.do_not_convert
+        def map_spike_counts(x, y):
+            return {
+                "pos_index": x["pos_index"],
+                "indexInDat": x["indexInDat"],
+                "indexInDat_raw": x["indexInDat_raw"],
+                **{
+                    f"group{g}_spikes_count": x[f"group{g}_spikes_count"]
+                    for g in range(self.params.nGroups)
+                },
+            }
+
         datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
         times = list(datasetTimes.as_numpy_iterator())
         times = np.reshape(times, [outputTest[0].shape[0]])
@@ -1833,10 +1774,6 @@ class LSTMandSpikeNetwork:
         datasetPos_index = dataset.map(
             map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
         )
-        datasetIndexInDat = dataset.map(
-            map_index_in_dat, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        IDdat = list(datasetIndexInDat.as_numpy_iterator())
         posIndex = list(datasetPos_index.as_numpy_iterator())
         posIndex = np.ravel(np.array(posIndex))
         print("gathering speed mask")
@@ -1858,8 +1795,50 @@ class LSTMandSpikeNetwork:
             "posLoss": posLoss,
             "posIndex": posIndex,
             "speedMask": windowmaskSpeed,
-            "indexInDat": IDdat,
         }
+
+        if extract_spikes_counts:
+            if (
+                not os.path.exists(
+                    os.path.join(
+                        self.folderResult,
+                        str(windowSizeMS),
+                        f"spikes_count_{phase}.csv",
+                    )
+                )
+                and not useSpeedFilter
+            ):
+                print("extracting spike counts per sample")
+                datasetSpikeCounts = dataset.map(
+                    map_spike_counts, num_parallel_calls=tf.data.AUTOTUNE
+                )
+                spikeCounts = list(datasetSpikeCounts.as_numpy_iterator())
+                testOutput["spikeCounts"] = spikeCounts
+                print("merging into df and saving as csv")
+
+                rows = []
+                for d in spikeCounts:
+                    B = len(d["pos_index"])
+                    for i in range(B):
+                        r = {
+                            "posIndex": int(d["pos_index"][i]),
+                            "indexInDat": d["indexInDat_raw"][i].tolist(),
+                        }
+                        for g in range(self.params.nGroups):
+                            r[f"group{g}_spikes_count"] = int(
+                                d[f"group{g}_spikes_count"][i]
+                            )
+                        rows.append(r)
+
+                df = pd.DataFrame(rows)
+                df.to_csv(
+                    os.path.join(
+                        self.folderResult,
+                        str(windowSizeMS),
+                        f"spikes_count_{phase}.csv",
+                    ),
+                    index=False,
+                )
 
         if l_function:
             projPredPos, linearPred = l_function(outputTest[0][:, :2])

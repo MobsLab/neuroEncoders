@@ -1520,6 +1520,7 @@ class Params:
             args = args[1:]
 
         if helper is None:
+            return super().__new__(cls)
             raise ValueError("helper (DataHelper instance) is required")
 
         # By default, we try to load Params from pickle if available
@@ -1885,7 +1886,7 @@ def save_project_to_pickle(project, output=None, force=False):
             project.experimentPath, f"Project_{int(project.windowSize * 1000)}.pkl"
         )
     if not force and os.path.isfile(os.path.join(os.path.expanduser(output))):
-        print(f"Project pickle already exists at {output}, skipping save.")
+        print(f"Pickle already exists at {output}, skipping save.")
         return
     with open(os.path.join(os.path.expanduser(output)), "wb") as f:
         pickle.dump(
