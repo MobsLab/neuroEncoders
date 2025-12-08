@@ -7,6 +7,7 @@ Based on the original MATLAB PlaceField_DB function
 @author: corrected version
 """
 
+from math import isnan
 from typing import Dict, List, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -925,6 +926,37 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
     im3 = axes[1, 0].imshow(results["map"]["rate"], origin="lower", aspect="auto")
     axes[1, 0].set_title("Firing Rate Map (Hz)")
     plt.colorbar(im3, ax=axes[1, 0])
+    # add the peak firing location
+    peak_x = results["stats"]["x"]
+    peak_y = results["stats"]["y"]
+    axes[1, 0].plot(
+        peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR"
+    )
+    # draw the more precise contours of the firing field
+    if "field" in results["stats"]:
+        field_mask = results["stats"]["field"]
+        axes[1, 0].contour(
+            field_mask,
+            levels=[0.5],
+            colors="b",
+            linewidths=1,
+            origin="lower",
+            extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
+        )
+    elif "field_x" in results["stats"] and "field_y" in results["stats"]:
+        # draw a rectangle around the firing field
+        min_x, max_x = results["stats"]["field_x"]
+        min_y, max_y = results["stats"]["field_y"]
+        rect = plt.Rectangle(
+            (min_x, min_y),
+            max_x - min_x,
+            max_y - min_y,
+            linewidth=1,
+            edgecolor="g",
+            facecolor="none",
+            label="Firing Field",
+        )
+        axes[1, 0].add_patch(rect)
 
     # Trajectory with spikes - ONLY epoch-restricted data
     if hasattr(pos_x, "values"):
@@ -946,7 +978,7 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
             markersize=2,
         )
 
-    title_str = f"Trajectory + Spikes\nFR: {results['firing_rate']:.2f} Hz"
+    title_str = f"Trajectory + Spikes\nFR: {results['firing_rate']:.2f} Hz\n max FR at peak: {results['stats']['peak']:.2f} Hz"
     if epoch_restricted:
         title_str += f"\nDuration: {results['epoch_length']:.1f}s"
     axes[1, 1].set_title(title_str)
@@ -976,8 +1008,13 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
 
     if len(spike_time_vals) > 0:
         # Determine y-positions for spike markers
-        y_max_x = np.max(x_vals) if len(x_vals) > 0 else 1
-        y_max_y = np.max(y_vals) if len(y_vals) > 0 else 1
+        y_max_x = np.nanmax(x_vals) if len(x_vals) > 0 else 1
+        y_max_y = np.nanmax(y_vals) if len(y_vals) > 0 else 1
+
+        if y_max_x == 0:
+            y_max_x = 1
+        if np.isnan(y_max_x) or np.isinf(y_max_x) or y_max_y == 0:
+            raise ValueError("X position data contains only NaN values")
 
         spike_y_vals_x = np.full(len(spike_time_vals), y_max_x * 1.1)
         spike_y_vals_y = np.full(len(spike_time_vals), y_max_y * 1.1)
