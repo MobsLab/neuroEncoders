@@ -584,6 +584,15 @@ class Trainer(SpatialConstraintsMixin):
     ) -> np.ndarray:
         """
         Compute rate function with better numerical stability
+        Args:
+            spike_positions: np.ndarray, positions of spikes for the cluster.
+            gridFeature: List, grid features used for KDE.
+            final_occupation: np.ndarray, final occupation map (1/occupation + regularization).
+            n_spikes: int, number of spikes for the cluster.
+            learning_time: float, total learning time during training epochs.
+
+        Returns:
+            np.ndarray, computed rate function for the cluster (in Hz).
         """
         if n_spikes < self.config.min_spikes_threshold:
             allowed_mask = self.get_allowed_mask(use_tensorflow=False).astype(bool)
@@ -2706,10 +2715,19 @@ class Trainer(SpatialConstraintsMixin):
         return inferResultsDic
 
     def calculate_linear_tuning_curve(
-        self, linearization_function, behaviorData, min_occ=5
+        self, linearization_function, behaviorData, min_occ=5, sampling_rate=None
     ):
         """
         Calculate the linear tuning curve for each cell based on spike times and position data.
+        Args:
+            linearization_function: function to linearize 2D positions into 1D linear positions (distance to shock zone)
+            behaviorData: dictionary containing position and time data
+            min_occ: minimum occupancy threshold for including a cell's tuning curve
+            sampling_rate: sampling rate of the position data in Hz. If provided, output units will be in Hz. If None, output units will be in spikes per position bin.
+
+        Returns:
+            linearPlaceFields: list of linear tuning curves for each cell
+            binEdges: edges of the bins used for histogramming
         """
         linearPlaceFields = []
         # Create one large epoch that comprises both train and test dataset
@@ -2772,6 +2790,9 @@ class Trainer(SpatialConstraintsMixin):
                         out=np.zeros_like(histSpikes_smooth, dtype=float),
                         where=histPos_smooth > 0,
                     )
+                    if sampling_rate is not None:
+                        histTuning = histTuning * sampling_rate  # convert to Hz
+
                     linearPlaceFields.append(histTuning)  # save
                 else:
                     linearPlaceFields.append(np.zeros(len(linSpace) - 1))
