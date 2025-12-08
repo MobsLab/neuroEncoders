@@ -58,6 +58,18 @@ ZONELABELS = ["Shock", "ShockCenter", "Center", "SafeCenter", "Safe"]
 ZONE_COLORS = ["r", "m", "k", "c", "b"]
 
 
+# Helper function to check if a position is in a zone
+def is_in_zone(pos, zone_def):
+    x_min, x_max = zone_def[0]
+    y_min, y_max = zone_def[1]
+    return (
+        (pos[:, 0] >= x_min)
+        & (pos[:, 0] <= x_max)
+        & (pos[:, 1] >= y_min)
+        & (pos[:, 1] <= y_max)
+    )
+
+
 class Project:
     """
     Class to store the paths of the project.
