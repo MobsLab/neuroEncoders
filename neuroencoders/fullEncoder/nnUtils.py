@@ -1884,7 +1884,33 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Optional smoothing (but ignore forbid bins!)
         if smooth_sigma is not None and smooth_sigma > 0:
-            occ = gaussian_filter(occ, sigma=smooth_sigma, mode="constant")
+            # 1. Create a float mask (1.0 inside, 0.0 outside)
+            mask_weights = allowed_mask.astype(float)
+
+            # 2. Smooth the data (zeros outside are treated as "missing" by step 4)
+            occ_smoothed = gaussian_filter(
+                occ, sigma=smooth_sigma, mode="constant", cval=0.0
+            )
+
+            # 3. Smooth the mask (calculates the "validity" weight of each pixel)
+            mask_smoothed = gaussian_filter(
+                mask_weights, sigma=smooth_sigma, mode="constant", cval=0.0
+            )
+
+            # 4. Normalize: Divide smoothed data by smoothed mask
+            # We use np.divide with a 'where' clause to avoid dividing by zero outside the shape
+            occ_normalized = np.zeros_like(occ)
+            np.divide(
+                occ_smoothed,
+                mask_smoothed,
+                out=occ_normalized,
+                where=mask_smoothed > 1e-6,
+            )
+
+            # 5. Apply the result
+            occ = occ_normalized
+
+            # 6. Re-apply the hard mask to ensure the outside is perfectly zero
             occ[forbid_mask] = 0.0
 
         if remove_isolated_zeros:
