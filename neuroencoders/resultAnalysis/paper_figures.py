@@ -1,19 +1,22 @@
 # Load libs
 import os
-from pathlib import Path
 
 import dill as pickle
 import matplotlib as mplt
-import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pynapple as nap
 import seaborn as sns
+from tables import Optional
 import tqdm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 from scipy.ndimage import gaussian_filter
-from scipy.stats import pearsonr, sem, zscore
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+from scipy.stats import pearsonr, sem, zscore, binned_statistic_2d
+from statsmodels.stats.proportion import proportions_ztest
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
@@ -22,7 +25,15 @@ from neuroencoders.simpleBayes.decode_bayes import (
     extract_spike_counts,
     extract_spike_counts_from_matrix,
 )
-from neuroencoders.utils.global_classes import Project, DataHelper, MAZE_COORDS
+from neuroencoders.utils.global_classes import (
+    MAZE_COORDS,
+    ZONEDEF,
+    ZONELABELS,
+    DataHelper,
+    Project,
+    is_in_zone,
+)
+from neuroencoders.utils.PlaceField_dB import PlaceField_DB, _run_place_field_analysis
 from neuroencoders.utils.viz_params import (
     DELTA_COLOR_FORWARD,
     DELTA_COLOR_REVERSE,
@@ -110,6 +121,11 @@ class PaperFigures:
             self.suffixes = suffixes
         if not isinstance(self.suffixes, list):
             self.suffixes = [suffixes]
+
+        if "_training" in self.suffixes:
+            self.suffixes.remove("_training")
+            self.suffixes.insert(0, "_training")  # load training first if present
+
         for suffix in self.suffixes:
             lPredPos = []
             fPredPos = []
@@ -395,6 +411,9 @@ class PaperFigures:
             self.suffixes = suffixes
         if not isinstance(self.suffixes, list):
             self.suffixes = [suffixes]
+        if "_training" in self.suffixes:
+            self.suffixes.remove("_training")
+            self.suffixes.insert(0, "_training")  # load training first if present
 
         for suffix in self.suffixes:
             lPredPosBayes = []
@@ -3963,117 +3982,280 @@ class PaperFigures:
 
         self.trainerBayes must have been trained before calling this method.
         """
+        # kwargs processing
+        plot_high_quality = kwargs.pop("plot_high_quality", False)
+
+        # --- 1. Train/Load Data ---
         if getattr(self, "bayesMatrices", None) is None:
+            # Check if we have valid dictionary keys to pass, otherwise None
+            existing_bayes = (
+                self.bayesMatrices
+                if (
+                    isinstance(self.bayesMatrices, dict)
+                    and "Occupation" in self.bayesMatrices
+                )
+                else None
+            )
+
             self.bayesMatrices = self.trainerBayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
-                bayesMatrices=self.bayesMatrices
-                if (
-                    (isinstance(self.bayesMatrices, dict))
-                    and ("Occupation" in self.bayesMatrices.keys())
-                )
-                else None,
+                bayesMatrices=existing_bayes,
                 **kwargs,
             )
 
-        ordered_mi = np.array(
-            [mi for tetrode_mi in self.bayesMatrices["mutualInfo"] for mi in tetrode_mi]
-        )[self.trainerBayes.linearPosArgSort]
-
-        # 1. Identify interesting neurons
-        high_quality = self.trainerBayes.linearPosArgSort[
-            ordered_mi > np.percentile(ordered_mi, 80)
+        # Extract and sort Mutual Information
+        flat_mi = [
+            mi for tetrode_mi in self.bayesMatrices["mutualInfo"] for mi in tetrode_mi
         ]
-        high_quality_mask = ordered_mi > np.percentile(ordered_mi, 80)
-        print(f"High-quality place cells: {len(high_quality)} neurons")
+        ordered_mi = np.array(flat_mi)[self.trainerBayes.linearPosArgSort]
 
-        # 2. Explore the ordered data
+        # --- 2. Identify High-Quality Neurons ---
+        thresh = 80
+        percentile_val = np.percentile(ordered_mi, thresh)
+        high_quality_mask = ordered_mi > percentile_val
+        high_quality_indices = self.trainerBayes.linearPosArgSort[high_quality_mask]
+
+        print(
+            f"High-quality place cells: {len(high_quality_indices)} neurons (best {100 - thresh}%)"
+        )
         print(f"Found {len(self.trainerBayes.linearPosArgSort)} neurons")
         print(
             f"Position range: {self.trainerBayes.linearPreferredPos.min():.2f} - {self.trainerBayes.linearPreferredPos.max():.2f}"
         )
 
-        # 3. Visualize population
-        fig = plt.figure()
+        # --- 3. Visualization Setup ---
+        # Initialize 2 rows, 3 columns. figsize is roughly (width, height)
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        axes = axes.flatten()  # Flattens to 1D array [0, 1, ..., 5] for easy indexing
 
-        # Population place fields
-        plt.subplot(2, 3, 1)
-        plt.imshow(
-            self.trainerBayes.orderedPlaceFields[1], aspect="auto", origin="lower"
+        # --- Panel 0: First Ordered Place Field ---
+        ax = axes[0]
+        neuron_idx = (
+            self.trainerBayes.linearPosArgSort[1]
+            if not plot_high_quality
+            else high_quality_indices[0]
         )
-        plt.xticks([])
-        plt.yticks([])
-        plt.title("First Ordered Place Field")
+        spike_time = nap.Ts(
+            self.trainerBayes.spikeMatTimes[
+                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
+            ].flatten()
+        )
+        pos_x = nap.Tsd(
+            d=self.behaviorData["Positions"][:, 0],
+            t=self.behaviorData["positionTime"].flatten(),
+        )
+        pos_y = nap.Tsd(
+            d=self.behaviorData["Positions"][:, 1],
+            t=self.behaviorData["positionTime"].flatten(),
+        )
+        epoch = np.concatenate(
+            [
+                self.behaviorData["Times"]["trainEpochs"],
+                self.behaviorData["Times"]["testEpochs"],
+            ]
+        ).reshape(-1)
 
-        # Linear tuning curves (if computed)
-        if hasattr(self.trainerBayes, "orderedLinearPlaceFields"):
-            plt.subplot(2, 3, 2)
-            norm_fields = self.trainerBayes.orderedLinearPlaceFields / np.maximum(
-                np.mean(
-                    self.trainerBayes.orderedLinearPlaceFields, axis=1, keepdims=True
-                ),
-                1e-8,
+        results = _run_place_field_analysis(
+            spike_time,
+            pos_x,
+            pos_y,
+            epoch=nap.IntervalSet(epoch),
+            smoothing=3,
+            freq_video=30,
+            threshold=0.7,
+            size_map=50,
+            limit_maze=(0, 1, 0, 1),
+            large_matrix=True,
+        )
+        field_data = results["map"]["rate"]
+        ax.imshow(field_data, aspect="auto", origin="lower")
+        peak_x = results["stats"]["x"]
+        peak_y = results["stats"]["y"]
+        ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
+        ax.text(
+            peak_x + 2,
+            peak_y + 2,
+            f"{results['stats']['peak']:.2f}Hz",
+            color="magenta",
+            fontsize=10,
+        )
+        # draw the more precise contours of the firing field
+        if "field" in results["stats"]:
+            field_mask = results["stats"]["field"]
+            ax.contour(
+                field_mask,
+                levels=[0.5],
+                colors="b",
+                linewidths=1,
+                origin="lower",
+                extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
             )
-            plt.imshow(norm_fields, aspect="auto", origin="lower")
-            linearBins = np.linspace(0, 1, norm_fields.shape[1])
-            plt.xticks(
-                ticks=np.linspace(0, norm_fields.shape[1], norm_fields.shape[1])[::20],
-                labels=np.round(linearBins[::20], 2),
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title("First Ordered Place Field")
+
+        # --- Pre-calculate Linear Fields (if they exist) ---
+        has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
+        norm_fields = None
+        if has_linear:
+            # Z-score normalization
+            raw_fields = self.trainerBayes.orderedLinearPlaceFields
+            norm_fields = (raw_fields - np.mean(raw_fields, axis=0)) / (
+                np.std(raw_fields, axis=0) + 1e-8
             )
-            plt.xlabel("Linear Position")
-            plt.ylabel("Neuron Index")
-            plt.colorbar(label="Deviation from unit Mean Firing Rate")
-            plt.title("Linear Tuning Curves")
+            linear_bins = np.linspace(0, 1, norm_fields.shape[1])
+            x_ticks = np.arange(0, norm_fields.shape[1], 20)
+            x_labels = np.round(linear_bins[::20], 2)
 
-        # Position coverage
-        plt.subplot(2, 3, 3)
-        plt.hist(self.trainerBayes.linearPreferredPos, bins=20, alpha=0.7)
-        plt.xlabel("Linear Position")
-        plt.title("Pos Coverage in Training Data")
+        # --- Panel 1: All Linear Tuning Curves ---
+        ax = axes[1]
+        if has_linear and norm_fields is not None:
+            # add cmap normalizer to center at 0
+            norm = norm = mcolors.TwoSlopeNorm(
+                vmin=norm_fields.min(), vcenter=0, vmax=norm_fields.max()
+            )
+            im = ax.imshow(
+                norm_fields, aspect="auto", origin="lower", cmap="coolwarm", norm=norm
+            )
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels(x_labels)
+            ax.set_xlabel("Linear Position")
+            ax.set_ylabel("Neuron Index")
+            ax.set_title("Linear Tuning Curves")
+            fig.colorbar(im, ax=ax, label="Deviation from unit z-score FR")
+        else:
+            ax.axis("off")
 
-        # Quality metrics
-        plt.subplot(2, 3, 4)
+        # --- Panel 2: Position Coverage ---
+        ax = axes[2]
+        ax.hist(self.trainerBayes.linearPreferredPos, bins=20, alpha=0.7)
+        ax.set_xlabel("Linear Position")
+        ax.set_title("Pos Coverage in Training Data")
+
+        # --- Panel 3: Quality Metrics (Mutual Info) ---
+        ax = axes[3]
         colors = np.array(["blue"] * len(ordered_mi))
         colors[high_quality_mask] = "red"
-        plt.plot(ordered_mi, "o-", alpha=0.6, zorder=0)
 
-        plt.scatter(
-            np.arange(len(ordered_mi)), ordered_mi, c=colors, alpha=0.6, zorder=1
+        # Line plot background
+        ax.plot(ordered_mi, "o-", alpha=0.6, zorder=0, color="gray", linewidth=0.5)
+        # Colored scatter overlay
+        ax.scatter(
+            np.arange(len(ordered_mi)), ordered_mi, c=colors, alpha=0.8, zorder=1
         )
-        plt.title("Mutual Information (ordered)")
-        plt.xlabel("Neuron Index")
-        plt.ylabel("Mutual Information")
+        ax.set_title("Mutual Information (ordered)")
+        ax.set_xlabel("Neuron Index")
+        ax.set_ylabel("Mutual Information")
 
-        # Linear tuning curves (if computed)
-        if hasattr(self.trainerBayes, "orderedLinearPlaceFields"):
-            plt.subplot(2, 3, 5)
-            plt.imshow(norm_fields[high_quality_mask], aspect="auto", origin="lower")
-            linearBins = np.linspace(0, 1, norm_fields.shape[1])
-            neuron_idx = np.arange(norm_fields.shape[0])[high_quality_mask]
-            plt.xticks(
-                ticks=np.linspace(0, norm_fields.shape[1], norm_fields.shape[1])[::20],
-                labels=np.round(linearBins[::20], 2),
+        # --- Panel 4: Best Linear Tuning Curves (High Quality Only) ---
+        ax = axes[4]
+        if has_linear and norm_fields is not None:
+            norm = mcolors.TwoSlopeNorm(
+                vmin=norm_fields[high_quality_mask].min(),
+                vcenter=0,
+                vmax=norm_fields[high_quality_mask].max(),
             )
-            plt.yticks(ticks=np.arange(len(neuron_idx)), labels=neuron_idx)
-            plt.xlabel("Linear Position")
-            plt.ylabel("Neuron Index")
-            plt.colorbar(label="Deviation from unit Mean FR\n" + "- Only HQ cells")
-            plt.title("Best Linear Tuning Curves")
+            im = ax.imshow(
+                norm_fields[high_quality_mask],
+                aspect="auto",
+                origin="lower",
+                cmap="coolwarm",
+                norm=norm,
+            )
 
-        plt.tight_layout()
-        plt.show()
+            hq_indices = np.arange(norm_fields.shape[0])[high_quality_mask]
 
-        # Population place fields
-        plt.subplot(2, 3, 6)
-        plt.imshow(
-            self.trainerBayes.orderedPlaceFields[-1], aspect="auto", origin="lower"
+            ax.set_xticks(x_ticks)
+            ax.set_xticklabels(x_labels)
+
+            # Use fewer y-ticks if there are too many neurons, to avoid clutter
+            if len(hq_indices) > 20:
+                y_display_idx = np.linspace(0, len(hq_indices) - 1, 20, dtype=int)
+                ax.set_yticks(y_display_idx)
+                ax.set_yticklabels(hq_indices[y_display_idx])
+            else:
+                ax.set_yticks(np.arange(len(hq_indices)))
+                ax.set_yticklabels(hq_indices)
+
+            ax.set_xlabel("Linear Position")
+            ax.set_ylabel("Neuron Index")
+            ax.set_title("Best Linear Tuning Curves")
+            fig.colorbar(im, ax=ax, label="Deviation (HQ only)")
+        else:
+            ax.axis("off")
+
+        # --- Panel 5: Last Ordered Place Field ---
+        ax = axes[5]
+        # Use -1 to get the last one
+        neuron_idx = (
+            self.trainerBayes.linearPosArgSort[-1]
+            if not plot_high_quality
+            else high_quality_indices[-1]
         )
-        plt.xticks([])
-        plt.yticks([])
-        plt.title("Last Ordered Place Field")
+        spike_time = nap.Ts(
+            self.trainerBayes.spikeMatTimes[
+                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
+            ].flatten()
+        )
+        pos_x = nap.Tsd(
+            d=self.behaviorData["Positions"][:, 0],
+            t=self.behaviorData["positionTime"].flatten(),
+        )
+        pos_y = nap.Tsd(
+            d=self.behaviorData["Positions"][:, 1],
+            t=self.behaviorData["positionTime"].flatten(),
+        )
+        epoch = np.concatenate(
+            [
+                self.behaviorData["Times"]["trainEpochs"],
+                self.behaviorData["Times"]["testEpochs"],
+            ]
+        ).reshape(-1)
 
+        results = _run_place_field_analysis(
+            spike_time,
+            pos_x,
+            pos_y,
+            epoch=nap.IntervalSet(epoch),
+            smoothing=3,
+            freq_video=30,
+            threshold=0.7,
+            size_map=50,
+            limit_maze=(0, 1, 0, 1),
+            large_matrix=True,
+        )
+        field_data = results["map"]["rate"]
+        ax.imshow(field_data, aspect="auto", origin="lower")
+        peak_x = results["stats"]["x"]
+        peak_y = results["stats"]["y"]
+        ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
+        ax.text(
+            peak_x + 2,
+            peak_y + 5,
+            f"{results['stats']['peak']:.2f}Hz",
+            color="red",
+            fontsize=10,
+        )
+        # draw the more precise contours of the firing field
+        if "field" in results["stats"]:
+            field_mask = results["stats"]["field"]
+            ax.contour(
+                field_mask,
+                levels=[0.5],
+                colors="b",
+                linewidths=1,
+                origin="lower",
+                extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
+            )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title("Last Ordered Place Field")
+
+        # --- Finalize and Save ---
         plt.tight_layout()
-        plt.show(block=block)
+
+        # Save before showing, as show() can clear the figure in some backends
         fig.savefig(
             os.path.join(
                 self.folderFigures, f"bayesian_neurons_summary{self.suffix}.png"
@@ -4084,6 +4266,8 @@ class PaperFigures:
                 self.folderFigures, f"bayesian_neurons_summary{self.suffix}.svg"
             )
         )
+
+        plt.show(block=block)
         plt.close(fig)
 
 
@@ -4092,7 +4276,6 @@ if __name__ == "__main__":
 
     import tqdm
 
-    from neuroencoders.importData.rawdata_parser import get_behavior
     from neuroencoders.utils.MOBS_Functions import (
         Mouse_Results,
         path_for_experiments_df,
