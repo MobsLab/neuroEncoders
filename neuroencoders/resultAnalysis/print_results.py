@@ -540,7 +540,8 @@ def overview_fig(
     pos,
     inferring,
     selection,
-    outfolder,
+    axs=None,
+    outfolder=None,
     dimOutput=2,
     show=False,
     typeDec="NN",
@@ -579,6 +580,7 @@ def overview_fig(
     target = kwargs.pop("target", "pos")
     training_data = kwargs.pop("training_data", None)
     posIndex = kwargs.pop("posIndex", None)
+    join_points = kwargs.pop("join_points", False)
     if posIndex is None:
         warnings.warn("posIndex not provided, using range(pos.shape[0]) as posIndex.")
         posIndex = np.arange(pos.shape[0])
@@ -599,7 +601,7 @@ def overview_fig(
         speedMask = speedMask[sorted_indices]
 
     suffix = f"_{phase}" if phase is not None else ""
-    if (
+    if outfolder is not None and (
         os.path.isfile(
             os.path.expanduser(
                 os.path.join(
@@ -720,10 +722,17 @@ def overview_fig(
 
         # Time series for X and Y positions
         ax_x_time = plt.subplot2grid((3, 4), (1, 2))
-        ax_x_time.plot(
+        if join_points:
+            ax_x_time.plot(
+                timeStepsPred[selection],
+                inferring[selection, 0],
+                "r-",
+                alpha=0.7,
+            )
+        ax_x_time.scatter(
             timeStepsPred[selection],
             inferring[selection, 0],
-            "r-",
+            "r",
             alpha=0.7,
             label="Predicted X",
         )
@@ -737,10 +746,17 @@ def overview_fig(
         ax_x_time.grid(True, alpha=0.3)
 
         ax_y_time = plt.subplot2grid((3, 4), (1, 3))
-        ax_y_time.plot(
+        if join_points:
+            ax_y_time.plot(
+                timeStepsPred[selection],
+                inferring[selection, 1],
+                "r-",
+                alpha=0.7,
+            )
+        ax_y_time.scatter(
             timeStepsPred[selection],
             inferring[selection, 1],
-            "r-",
+            "r",
             alpha=0.7,
             label="Predicted Y",
         )
@@ -819,10 +835,11 @@ N samples: {selection.sum()}
                 plt.get_current_fig_manager().resize(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
-            plt.show(block=True)
-        plt.close(fig)
+            plt.show(block=kwargs.get("block", False))
+        if kwargs.get("close", True):
+            plt.close(fig)
 
-        fig, ax = plt.subplots()
+        fig = plt.figure()
         scatter = ax.scatter(
             inferring[selection, 0],
             inferring[selection, 1],
@@ -842,7 +859,7 @@ N samples: {selection.sum()}
                 plt.get_current_fig_manager().resize(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
-            plt.show(block=True)
+            plt.show(block=kwargs.get("block", False))
         if kwargs.get("save", True):
             fig.savefig(
                 os.path.join(
@@ -851,11 +868,14 @@ N samples: {selection.sum()}
                 ),
                 dpi=150,
             )
-        plt.close(fig)
-        return
+        if kwargs.get("close", True):
+            plt.close(fig)
+            return
+        else:
+            return fig
 
     elif dimOutput == 2:
-        fig, ax = plt.subplots()
+        fig = plt.figure()
         if target.lower() != "linanddirection":
             for dim in range(dimOutput):
                 if dim > 0:
@@ -871,7 +891,13 @@ N samples: {selection.sum()}
                         (dim, 0),
                         colspan=4,
                     )
-                    plt.setp(ax1.get_xticklabels(), visible=False)
+                if dim < dimOutput - 1:
+                    ax1.tick_params(
+                        axis="x",
+                        which="both",
+                        bottom=False,
+                        labelbottom=False,
+                    )
                 ax1.plot(
                     timeStepsPred,
                     pos[:, dim],
@@ -894,14 +920,15 @@ N samples: {selection.sum()}
                     label=f"guessed {dim_names[dim]} selection",
                     s=20,
                 )
-                # also plot the lines
-                ax1.plot(
-                    timeStepsPred[selection],
-                    inferring[selection, dim],
-                    color="blue",
-                    alpha=0.7,
-                    linewidth=0.7,
-                )
+                if join_points:
+                    # also plot the lines
+                    ax1.plot(
+                        timeStepsPred[selection],
+                        inferring[selection, dim],
+                        color="blue",
+                        alpha=0.7,
+                        linewidth=0.7,
+                    )
                 if with_hist_distribution and selection.sum() > 0:
                     ax2 = plt.subplot2grid((dimOutput, 5), (dim, 4), sharey=ax1)
                     isfinit = np.isfinite(inferring[:, dim])
@@ -931,7 +958,7 @@ N samples: {selection.sum()}
                         label=f"true {dim_names[dim]} distribution ({shown})",
                         density=True,
                     )
-                    plt.setp(ax2.get_yticklabels(), visible=False)
+                    ax2.tick_params(axis="y", which="both", left=False, labelleft=False)
                     ax2.set_xlabel(f"{dim_names[dim]} distribution")
                 if dim > 0:
                     handles_1, labels_1 = ax1.get_legend_handles_labels()
@@ -957,14 +984,15 @@ N samples: {selection.sum()}
 
             from matplotlib.colors import ListedColormap
 
-            ax1.plot(
-                timeStepsPred[selection],
-                inferring[selection, 0],
-                "--.",
-                zorder=2,
-                linewidth=0.7,
-                alpha=0.5,
-            )
+            if join_points:
+                ax1.plot(
+                    timeStepsPred[selection],
+                    inferring[selection, 0],
+                    "--.",
+                    zorder=2,
+                    linewidth=0.7,
+                    alpha=0.5,
+                )
             ax1.scatter(
                 timeStepsPred[selection],
                 inferring[selection, 0],
@@ -1054,7 +1082,7 @@ N samples: {selection.sum()}
 
     elif dimOutput == 1:
         if target.lower() != "direction":
-            fig, ax = plt.subplots()
+            fig = plt.figure()
             ax2 = plt.subplot2grid(
                 (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
             )
@@ -1080,14 +1108,15 @@ N samples: {selection.sum()}
                 s=20,
                 label=f"guessed {dim_names[2]} selection",
             )
-            # also plot the lines
-            ax2.plot(
-                timeStepsPred[selection],
-                inferring[selection],
-                color="blue",
-                alpha=0.7,
-                linewidth=0.7,
-            )
+            if join_points:
+                # also plot the lines
+                ax2.plot(
+                    timeStepsPred[selection],
+                    inferring[selection],
+                    color="blue",
+                    alpha=0.7,
+                    linewidth=0.7,
+                )
             ax2.legend(
                 loc="lower center",
                 fontsize="x-small",
@@ -1162,9 +1191,12 @@ N samples: {selection.sum()}
             plt.get_current_fig_manager().resize(
                 *plt.get_current_fig_manager().window.maxsize()
             )
-        plt.show(block=True)
-
-    plt.close("all")
+        plt.show(block=kwargs.get("block", False))
+    if kwargs.get("close", True):
+        plt.close(fig)
+        return
+    else:
+        return fig
     print()
 
     # Interactive figure 2D
