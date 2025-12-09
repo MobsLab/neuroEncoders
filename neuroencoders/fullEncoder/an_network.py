@@ -468,6 +468,10 @@ class LSTMandSpikeNetwork:
         output = self.lstmsNets[-3](
             output, mask=mymask
         )  # pooling (size [batch, nFeatures*nGroups])
+
+        # finally, normalize the output on the unit-hypersphere
+        output = tf.keras.layers.UnitNormalization(axis=-1)(output)
+
         x = self.lstmsNets[-2](
             output
         )  # dense layer after pooling (size [batch, TransformerDenseSize1])
