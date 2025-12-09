@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, Tuple
@@ -19,6 +18,7 @@ from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.ticker import FuncFormatter
+from scipy.stats import gaussian_kde
 from sklearn.metrics import (
     accuracy_score,
     confusion_matrix,
@@ -3892,6 +3892,109 @@ def create_polar_colorbar(
         spine.set_visible(False)
 
     return cax
+
+
+# --- [Helper to plot Horizontal KDE] ---
+def plot_horizontal_kde(ax, data, color, label, alpha=0.3, fill=True):
+    """Calculates and plots a horizontal KDE."""
+    if len(data) < 2 or np.std(data) == 0:
+        return  # Cannot compute KDE on singular or empty data
+
+    # 1. Calculate KDE
+    density = gaussian_kde(data)
+
+    # 2. Define the Y range (the vertical axis)
+    # We extend slightly past min/max to let the curve taper off naturally
+    lower, upper = data.min(), data.max()
+    pad = (upper - lower) * 0.1
+    y_grid = np.linspace(lower - pad, upper + pad, 200)
+
+    # 3. Evaluate the KDE on this grid (resulting in X values)
+    x_density = density(y_grid)
+
+    # 4. Plot Line (Envelope)
+    ax.plot(x_density, y_grid, color=color, linewidth=1.5, label=label)
+
+    # 5. Fill Area (Shading)
+    # Note: use fill_betweenx for horizontal plots
+    if fill:
+        ax.fill_betweenx(y_grid, 0, x_density, color=color, alpha=alpha)
+
+
+def plot_concatenated_bouts(
+    ax, original_time, y_data, mask, style="scatter", show_boundaries=True, **kwargs
+):
+    """
+    Plots only the masked data stitched together, removing gaps (mask=False).
+    For 'line' style, it breaks the line where real-time gaps occur.
+
+    Args:
+        ax: The matplotlib axis.
+        original_time: The original time steps.
+        y_data: The 1D array of data to plot.
+        mask: Boolean array (e.g. speedMask).
+        style: 'scatter' or 'line'.
+        show_boundaries: If True, draws vertical lines where time gaps occurred.
+        **kwargs: Arguments passed to ax.scatter or ax.plot.
+
+    Returns:
+        x_contiguous: The new x-axis coordinates used for this plot (without NaNs).
+    """
+    # 1. Select the data
+    y_selected = y_data[mask]
+    t_selected = original_time[mask]
+
+    if len(y_selected) == 0:
+        return np.array([])
+
+    # 2. Create a contiguous X axis (0, 1, 2, ... N)
+    x_contiguous = np.arange(len(y_selected))
+
+    # 3. Detect Boundaries (Time Jumps)
+    boundaries = []
+    if len(t_selected) > 1:
+        dt = np.median(np.diff(original_time))  # Estimate standard time step
+        # Find indices where the jump is larger than 2x the standard step
+        # These are the indices *before* the jump
+        boundaries = np.where(np.diff(t_selected) > dt * 2)[0]
+
+    # 4. Plotting Logic
+    if style == "scatter":
+        # Scatter plots don't need NaNs, they just plot points
+        ax.scatter(x_contiguous, y_selected, **kwargs)
+
+    elif style == "line":
+        if len(boundaries) > 0:
+            # We need to insert NaNs to break the line visually
+            # indicies to insert at are boundaries + 1
+            insert_locs = boundaries + 1
+
+            # Cast to float so they can hold np.nan
+            x_with_nans = x_contiguous.astype(float)
+            y_with_nans = y_selected.astype(float)
+
+            # Insert NaNs at the jump points
+            x_plot = np.insert(x_with_nans, insert_locs, np.nan)
+            y_plot = np.insert(y_with_nans, insert_locs, np.nan)
+
+            ax.plot(x_plot, y_plot, **kwargs)
+        else:
+            # Continuous line if no jumps found
+            ax.plot(x_contiguous, y_selected, **kwargs)
+
+    # 5. Draw Vertical Dividers (Optional)
+    if show_boundaries and len(boundaries) > 0:
+        for b in boundaries:
+            # Draw a faint vertical line at the cut point (between index b and b+1)
+            ax.axvline(
+                x=x_contiguous[b] + 0.5,
+                color="gray",
+                linestyle=":",
+                alpha=0.3,
+                linewidth=1,
+            )
+
+    return x_contiguous
 
 
 if __name__ == "__main__":

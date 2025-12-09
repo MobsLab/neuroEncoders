@@ -56,3 +56,16 @@ DELTA_COLOR = "xkcd:vivid purple"
 DELTA_COLOR_FORWARD = "xkcd:electric green"
 DELTA_COLOR_REVERSE = "xkcd:gray"
 MAX_NUM_STARS = 5
+
+
+# Helper function to get significance stars based on p-value
+def get_pvalue_stars(p_value):
+    """Returns significance stars based on p-value thresholds."""
+    if p_value < 0.001:
+        return "***"
+    elif p_value < 0.01:
+        return "**"
+    elif p_value < 0.05:
+        return "*"
+    else:
+        return None  # Return None for non-significant
