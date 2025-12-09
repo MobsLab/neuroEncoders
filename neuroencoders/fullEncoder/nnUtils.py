@@ -169,6 +169,9 @@ class spikeNet(tf.keras.layers.Layer):
                 x = self.denseLayer3(x)
                 x = self.dropoutLayer(x)
 
+            # normalize to the unit-hypersphere and dimension nFeatures (see FaceNet paper)
+            x = tf.keras.layers.UnitNormalization(axis=1)(x)
+
         return x
 
     @property
