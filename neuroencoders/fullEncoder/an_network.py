@@ -652,6 +652,7 @@ class LSTMandSpikeNetwork:
                     allFeatures, allFeatures_raw, mymask, **kwargs
                 )  # shape (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
 
+            # Regression loss
             loss_function = self._parse_loss_function_from_params(myoutputPos)
 
             #### note
@@ -737,6 +738,19 @@ class LSTMandSpikeNetwork:
 
             if self.params.denseweight:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
+            if getattr(self.params, "contrastive_loss", False):
+                print("Using contrastive loss")
+                print("output shape:", output.shape)
+                print("truePos shape:", self.truePos.shape)
+                regression_loss = self.distance_weighted_nt_xent(
+                    z=output,
+                    pos=self.truePos,
+                    sigma=5,
+                )
+                tempPosLoss += regression_loss * getattr(
+                    self.params, "lambda_contrastive", 0.5
+                )
+
             if self.params.transform_w_log:
                 posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
             elif not getattr(self.params, "GaussianHeatmap", False):
@@ -3378,6 +3392,65 @@ class LSTMandSpikeNetwork:
 
         # Get final predictions
         predictions = transformer_model.predict(transformer_inputs)
+
+    def distance_weighted_nt_xent(self, z, pos, sigma=2.0, temperature=0.1, eps=1e-8):
+        """
+        z:   (N, D) latent vectors (unnormalized)
+        pos: (N, 2) ground-truth positions (x, y)
+        sigma: spatial kernel width
+        temperature: NT-Xent temperature
+        """
+
+        # ---- Normalize latents ----
+        z = tf.keras.layers.UnitNormalization(axis=1)(z)  # (N, D)
+
+        batch_size, nFeatures = kops.shape(z)[0], kops.shape(z)[1]
+
+        # ---- Cosine similarity logits ----
+        logits = kops.matmul(z, kops.transpose(z))  # (N, N)
+        logits = logits / temperature
+
+        N = kops.shape(z)[0]
+        print(f"Batch size for loss: {N}")
+
+        # reshape pos to batch_size, n_dims
+        pos = kops.reshape(pos, (N, kops.shape(pos)[1]))
+
+        # ---- Pairwise Euclidean distance matrix d_ij ----
+        pos_sq = kops.sum(kops.square(pos), axis=1, keepdims=True)  # (N,1)
+        print(f"pos_sq shape: {kops.shape(pos_sq)}")
+        d2 = (
+            pos_sq
+            + kops.transpose(pos_sq)
+            - 2.0 * kops.matmul(pos, kops.transpose(pos))
+        )  # (N,N)
+        print(f"d2 shape before clamp: {kops.shape(d2)}")
+        d2 = kops.maximum(d2, 0.0)
+
+        d = kops.sqrt(d2 + 1e-12)
+
+        # ---- Distance-weighted soft positives ----
+        w = kops.exp(-0.5 * kops.square(d) / (sigma**2))  # (N, N)
+        print(f"Weight matrix shape: {kops.shape(w)}")
+
+        # Zero diagonal (no self-positives)
+        w = w * (1.0 - kops.eye(N))
+
+        # Normalize per row
+        w_sum = kops.sum(w, axis=1, keepdims=True) + eps
+        w_norm = w / w_sum  # each row sums to 1
+
+        # ---- Mask self-similarity logits ----
+        mask = 1.0 - kops.eye(N)
+        logits_masked = logits * mask + (-1e9) * (1.0 - mask)
+
+        # ---- Log-softmax over rows ----
+        log_prob = tf.nn.log_softmax(logits_masked, axis=1)
+
+        # ---- Contrastive loss: weighted NLL ----
+        loss_per_anchor = -kops.sum(w_norm * log_prob, axis=1)
+
+        return kops.mean(loss_per_anchor)
 
     @classmethod
     def clear_session(cls):
