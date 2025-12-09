@@ -19,6 +19,8 @@ from neuroencoders.importData.gui_elements import (
     circular_mean_error,
     create_polar_colorbar,
     plot_circular_comparison,
+    plot_horizontal_kde,
+    plot_concatenated_bouts,
 )
 
 EC = np.array([45, 39])  # range of x and y in cm
@@ -541,13 +543,16 @@ def overview_fig(
     inferring,
     selection,
     axs=None,
+    fig=None,
     outfolder=None,
     dimOutput=2,
     show=False,
     typeDec="NN",
     force=True,
     with_hist_distribution: bool = True,
+    plot_kde: bool = True,
     speedMask=None,
+    concat_epochs: bool = False,
     **kwargs,
 ):
     """
@@ -591,14 +596,17 @@ def overview_fig(
         )
     useSpeedMask = kwargs.get("useSpeedMask", False)
 
-    # Sort the data by posIndex to have a correct time representation
-    sorted_indices = np.argsort(posIndex)
-    pos = pos[sorted_indices]
-    inferring = inferring[sorted_indices]
-    selection = selection[sorted_indices]
-    timeStepsPred = timeStepsPred[sorted_indices]
-    if speedMask is not None:
-        speedMask = speedMask[sorted_indices]
+    # WARN: sorting by posIndex induces instabilities in the plots - should be fixed later
+    if kwargs.get("sort_indexs", False):
+        # Sort the data by posIndex to have a correct time representation
+        sorted_indices = np.argsort(posIndex)
+        posIndex = posIndex[sorted_indices]
+        pos = pos[sorted_indices]
+        inferring = inferring[sorted_indices]
+        selection = selection[sorted_indices]
+        timeStepsPred = timeStepsPred[sorted_indices]
+        if speedMask is not None:
+            speedMask = speedMask[sorted_indices]
 
     suffix = f"_{phase}" if phase is not None else ""
     if outfolder is not None and (
@@ -870,27 +878,42 @@ N samples: {selection.sum()}
             )
         if kwargs.get("close", True):
             plt.close(fig)
-            return
-        else:
-            return fig
 
     elif dimOutput == 2:
-        fig = plt.figure()
+        if fig is None:
+            if axs is None:
+                fig = plt.figure()
+            else:
+                fig = axs.flatten()[0].figure
         if target.lower() != "linanddirection":
+            # either get the first existing ax, or create new ones
+            first_ax_ref = None
+            ax2 = None
             for dim in range(dimOutput):
-                if dim > 0:
-                    ax1 = plt.subplot2grid(
-                        (dimOutput, 4 if not with_hist_distribution else 5),
-                        (dim, 0),
-                        sharex=ax1,
-                        colspan=4,
-                    )
+                if axs is None:
+                    cols = 4 if not with_hist_distribution else 5
+                    if dim == 0:
+                        ax1 = plt.subplot2grid(
+                            (dimOutput, cols),
+                            (dim, 0),
+                            colspan=4,
+                        )
+                        first_ax_ref = ax1
+                    else:
+                        ax1 = plt.subplot2grid(
+                            (dimOutput, cols),
+                            (dim, 0),
+                            sharex=first_ax_ref,
+                            colspan=4,
+                        )
+                    ax2_handle = None
                 else:
-                    ax1 = plt.subplot2grid(
-                        (dimOutput, 4 if not with_hist_distribution else 5),
-                        (dim, 0),
-                        colspan=4,
-                    )
+                    if with_hist_distribution:
+                        ax1 = axs[dim * 2]
+                        ax2_handle = axs[dim * 2 + 1]
+                    else:
+                        ax1 = axs[dim]
+                        ax2_handle = None
                 if dim < dimOutput - 1:
                     ax1.tick_params(
                         axis="x",
@@ -898,71 +921,166 @@ N samples: {selection.sum()}
                         bottom=False,
                         labelbottom=False,
                     )
-                ax1.plot(
-                    timeStepsPred,
-                    pos[:, dim],
-                    ".-",
-                    markersize=6,
-                    alpha=0.6,
-                    color="xkcd:dark pink",
+                active_mask = (
+                    selection if useSpeedMask else np.ones(len(pos), dtype=bool)
                 )
-                ax1.scatter(
-                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
-                    pos[:, dim] if not useSpeedMask else pos[selection, dim],
-                    s=24,
-                    alpha=0.6,
-                    label=f"true {dim_names[dim]}" + str(dim),
-                    color="xkcd:dark pink",
-                )
-                ax1.scatter(
-                    timeStepsPred[selection],
-                    inferring[selection, dim],
-                    label=f"guessed {dim_names[dim]} selection",
-                    s=20,
-                )
-                if join_points:
-                    # also plot the lines
-                    ax1.plot(
+                if useSpeedMask and concat_epochs:
+                    x_stitched = plot_concatenated_bouts(
+                        ax1,
+                        timeStepsPred,
+                        inferring[:, dim],
+                        active_mask,
+                        style="scatter",
+                        show_boundaries=False,
+                        s=8,
+                        color="tab:blue",
+                    )
+                    if join_points:
+                        # also plot the lines
+                        ax1.plot(
+                            x_stitched,
+                            inferring[active_mask, dim],
+                            color="tab:blue",
+                            alpha=0.7,
+                            linewidth=0.7,
+                        )
+                else:
+                    ax1.scatter(
                         timeStepsPred[selection],
                         inferring[selection, dim],
-                        color="blue",
-                        alpha=0.7,
-                        linewidth=0.7,
+                        label=f"guessed {dim_names[dim]} selection",
+                        s=8,
+                    )
+                    if join_points:
+                        ax1.plot(
+                            timeStepsPred[selection],
+                            inferring[selection, dim],
+                            color="tab:blue",
+                            alpha=0.7,
+                            linewidth=0.7,
+                        )
+                if useSpeedMask and concat_epochs:
+                    _ = plot_concatenated_bouts(
+                        ax1,
+                        timeStepsPred,
+                        pos[:, dim],
+                        active_mask,
+                        style="line",
+                        show_boundaries=False,
+                        color="xkcd:dark pink",
+                        markersize=6,
+                        alpha=0.6,
+                    )
+                else:
+                    ax1.plot(
+                        timeStepsPred,
+                        pos[:, dim],
+                        ".-",
+                        markersize=6,
+                        alpha=0.6,
+                        color="xkcd:dark pink",
+                    )
+
+                if useSpeedMask and concat_epochs:
+                    _ = plot_concatenated_bouts(
+                        ax1,
+                        timeStepsPred,
+                        pos[:, dim],
+                        active_mask,
+                        style="scatter",
+                        show_boundaries=False,
+                        color="xkcd:dark pink",
+                        s=4,
+                        alpha=0.2,
+                    )
+                else:
+                    ax1.scatter(
+                        timeStepsPred,
+                        pos[:, dim],
+                        s=4,
+                        alpha=0.2,
+                        color="xkcd:dark pink",
                     )
                 if with_hist_distribution and selection.sum() > 0:
-                    ax2 = plt.subplot2grid((dimOutput, 5), (dim, 4), sharey=ax1)
+                    # Determine ax2 based on mode
+                    if axs is None:
+                        # Create on the fly
+                        ax2 = plt.subplot2grid((dimOutput, 5), (dim, 4), sharey=ax1)
+                    else:
+                        # Use the pre-fetched handle
+                        ax2 = ax2_handle
                     isfinit = np.isfinite(inferring[:, dim])
-                    ax2.hist(
-                        inferring[isfinit & selection, dim],
-                        bins=50,
-                        alpha=0.5,
-                        orientation="horizontal",
-                        label=f"guessed {dim_names[dim]} distribution",
-                        density=True,
-                    )
-                    ax2.hist(
-                        pos[selection, dim],
-                        bins=50,
-                        color="xkcd:pink",
-                        alpha=0.5,
-                        orientation="horizontal",
-                        label=f"true {dim_names[dim]} distribution on selection (test set)",
-                        density=True,
-                    )
-                    ax2.hist(
-                        pos_to_show_on_histograms[speedMask_on_histograms, dim],
-                        bins=50,
-                        color="xkcd:neon purple",
-                        alpha=0.5,
-                        orientation="horizontal",
-                        label=f"true {dim_names[dim]} distribution ({shown})",
-                        density=True,
-                    )
+                    if ax2 is None:
+                        raise ValueError("ax2 should not be None here.")
+                    if plot_kde:
+                        # 3. True Distribution (Overall)
+                        plot_horizontal_kde(
+                            ax2,
+                            pos_to_show_on_histograms[speedMask_on_histograms, dim],
+                            color="xkcd:pale purple",
+                            label=f"true {dim_names[dim]} ({shown})",
+                            alpha=0.1,
+                            fill=False,
+                        )
+                        plot_horizontal_kde(
+                            ax2,
+                            inferring[isfinit & selection, dim],
+                            color="tab:blue",  # Default matplotlib blue
+                            label=f"guessed {dim_names[dim]}",
+                            fill=True,
+                            alpha=0.5,
+                        )
+
+                        # 2. True Distribution (Selection/Test)
+                        plot_horizontal_kde(
+                            ax2,
+                            pos[selection, dim],
+                            color="#B45C1F",
+                            label=f"true {dim_names[dim]} (selection)",
+                            alpha=0.5,
+                            fill=False,
+                        )
+
+                    else:
+                        ax2.hist(
+                            inferring[isfinit & selection, dim],
+                            bins=50,
+                            alpha=0.5,
+                            orientation="horizontal",
+                            label=f"guessed {dim_names[dim]} distribution",
+                            density=True,
+                        )
+                        ax2.hist(
+                            pos[selection, dim],
+                            bins=50,
+                            color="xkcd:pink",
+                            alpha=0.5,
+                            orientation="horizontal",
+                            label=f"true {dim_names[dim]} distribution on selection (test set)",
+                            density=True,
+                        )
+                        ax2.hist(
+                            pos_to_show_on_histograms[speedMask_on_histograms, dim],
+                            bins=50,
+                            color="xkcd:neon purple",
+                            alpha=0.5,
+                            orientation="horizontal",
+                            label=f"true {dim_names[dim]} distribution ({shown})",
+                            density=True,
+                        )
                     ax2.tick_params(axis="y", which="both", left=False, labelleft=False)
                     ax2.set_xlabel(f"{dim_names[dim]} distribution")
+                    if axs is not None:
+                        ax2.set_ylim(ax1.get_ylim())
                 if dim > 0:
                     handles_1, labels_1 = ax1.get_legend_handles_labels()
-                    handles_2, labels_2 = ax2.get_legend_handles_labels()
+                    # Try to get handles from ax2 only if it was actually defined/used
+                    if with_hist_distribution and selection.sum() > 0:
+                        # Re-fetch ax2 reference (same logic as above)
+                        curr_ax2 = ax2 if ax2 is not None else ax2_handle
+                        handles_2, labels_2 = curr_ax2.get_legend_handles_labels()
+                    else:
+                        handles_2, labels_2 = [], []
                     all_handles = handles_1 + handles_2
                     all_labels = labels_1 + labels_2
                     fig.legend(
@@ -1082,83 +1200,188 @@ N samples: {selection.sum()}
 
     elif dimOutput == 1:
         if target.lower() != "direction":
-            fig = plt.figure()
-            ax2 = plt.subplot2grid(
-                (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
-            )
-            ax2.plot(
-                timeStepsPred,
-                pos,
-                ".-",
-                markersize=6,
-                alpha=0.6,
-                color="xkcd:dark pink",
-            )
-            ax2.scatter(
-                timeStepsPred if not useSpeedMask else timeStepsPred[selection],
-                pos if not useSpeedMask else pos[selection],
-                s=24,
-                alpha=0.6,
-                label=f"true {dim_names[2]}",
-                color="xkcd:dark pink",
-            )
-            ax2.scatter(
-                timeStepsPred[selection],
-                inferring[selection],
-                s=20,
-                label=f"guessed {dim_names[2]} selection",
-            )
-            if join_points:
-                # also plot the lines
-                ax2.plot(
+            if fig is None:
+                if axs is None:
+                    fig = plt.figure()
+                else:
+                    fig = axs.flatten()[0].figure
+
+            # --- [Setup Axes] ---
+            # If axs are provided, use them. Otherwise, create a grid.
+            if axs is None:
+                cols = 4 if not with_hist_distribution else 5
+                # Create Main Axis (ax2 in your original code)
+                ax2 = plt.subplot2grid((1, cols), (0, 0), colspan=4)
+                ax3_handle = None
+            else:
+                if with_hist_distribution:
+                    ax2 = axs[0]
+                    ax3_handle = axs[1]
+                else:
+                    ax2 = axs[0]
+                    ax3_handle = None
+
+            # --- [Plotting Trajectory & Scatter] ---
+
+            # Define mask for "active" data
+            active_mask = selection if useSpeedMask else np.ones(len(pos), dtype=bool)
+
+            # 3. Plot Scatter (Inferred Points)
+            if useSpeedMask and concat_epochs:
+                x_stitched = plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    inferring,
+                    active_mask,
+                    style="scatter",
+                    show_boundaries=False,
+                    s=8,
+                    label=f"guessed {dim_names[2]} selection",
+                    alpha=1,
+                )
+                if join_points:
+                    ax2.plot(
+                        x_stitched,
+                        inferring[active_mask],
+                        color="tab:blue",
+                        alpha=0.7,
+                        linewidth=0.7,
+                    )
+            else:
+                ax2.scatter(
                     timeStepsPred[selection],
                     inferring[selection],
-                    color="blue",
-                    alpha=0.7,
-                    linewidth=0.7,
+                    s=8,
+                    label=f"guessed {dim_names[2]} selection",
                 )
-            ax2.legend(
+                if join_points:
+                    ax2.plot(
+                        timeStepsPred[selection],
+                        inferring[selection],
+                        color="tab:blue",
+                        alpha=0.7,
+                        linewidth=0.7,
+                    )
+            # 1. Plot Line (Trajectory)
+            if useSpeedMask and concat_epochs:
+                _ = plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    pos,
+                    active_mask,
+                    style="line",
+                    show_boundaries=False,
+                    markersize=6,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                )
+            else:
+                ax2.plot(
+                    timeStepsPred,
+                    pos,
+                    ".-",
+                    markersize=6,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                )
+
+            # 2. Plot Scatter (True Points)
+            if useSpeedMask and concat_epochs:
+                plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    pos,
+                    active_mask,
+                    style="scatter",
+                    show_boundaries=False,
+                    s=4,
+                    alpha=0.2,
+                    label=f"true {dim_names[2]} stitched",
+                    color="xkcd:dark pink",
+                )
+            else:
+                ax2.scatter(
+                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
+                    pos if not useSpeedMask else pos[selection],
+                    s=4,
+                    alpha=0.2,
+                    label=f"true {dim_names[2]}",
+                    color="xkcd:dark pink",
+                )
+
+            ax2.set_title(f"{dim_names[2]}")
+            ax2.set_ylabel(f"{dim_names[2]}")
+
+            # --- [Plotting Distribution (KDE)] ---
+            if with_hist_distribution and selection.sum() > 0:
+                if axs is None:
+                    ax3 = plt.subplot2grid((1, 5), (0, 4), sharey=ax2)
+                else:
+                    ax3 = ax3_handle
+
+                if ax3 is None:
+                    raise ValueError("ax3 (histogram axis) should not be None here.")
+                isfinit = np.isfinite(inferring)
+
+                # 3. True (Overall)
+                plot_horizontal_kde(
+                    ax3,
+                    pos_to_show_on_histograms[speedMask_on_histograms],
+                    color="xkcd:pale purple",
+                    label=f"true {dim_names[2]} ({shown})",
+                    alpha=0.1,
+                    fill=False,
+                )
+                # 1. Guessed
+                plot_horizontal_kde(
+                    ax3,
+                    inferring[isfinit & selection],
+                    color="tab:blue",
+                    label=f"guessed {dim_names[2]}",
+                    fill=True,
+                    alpha=0.5,
+                )
+
+                # 2. True (Selection)
+                plot_horizontal_kde(
+                    ax3,
+                    pos[selection],
+                    color="#B45C1F",
+                    label=f"true {dim_names[2]} (selection)",
+                    fill=False,
+                    alpha=0.5,
+                )
+
+                ax3.tick_params(axis="y", which="both", left=False, labelleft=False)
+                ax3.set_xlabel(f"{dim_names[2]} density")
+                if axs is not None:
+                    ax3.set_ylim(ax2.get_ylim())
+
+            # --- [Legends] ---
+            handles_1, labels_1 = ax2.get_legend_handles_labels()
+            handles_2, labels_2 = [], []
+
+            curr_ax3_ref = (
+                ax3
+                if (
+                    with_hist_distribution and selection.sum() > 0 and "ax3" in locals()
+                )
+                else ax3_handle
+            )
+
+            if curr_ax3_ref is not None:
+                handles_2, labels_2 = curr_ax3_ref.get_legend_handles_labels()
+
+            all_handles = handles_1 + handles_2
+            all_labels = labels_1 + labels_2
+
+            fig.legend(
+                all_handles,
+                all_labels,
                 loc="lower center",
                 fontsize="x-small",
-                bbox_to_anchor=(0.5, -0.1),
+                bbox_to_anchor=(0.5, 0),
             )
-            ax2.set_title(f"{dim_names[2]}")
-            if with_hist_distribution and selection.sum() > 0:
-                ax3 = plt.subplot2grid((1, 5), (0, 4), sharey=ax2)
-                isfinit = np.isfinite(inferring)
-                ax3.hist(
-                    inferring[isfinit & selection],
-                    bins=50,
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"guessed {dim_names[2]} distribution",
-                    density=True,
-                )
-                ax3.hist(
-                    pos[selection],
-                    bins=50,
-                    color="xkcd:pink",
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"true {dim_names[2]} distribution on selection (test set)",
-                    density=True,
-                )
-                ax3.hist(
-                    pos_to_show_on_histograms[speedMask_on_histograms],
-                    bins=50,
-                    color="xkcd:neon purple",
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"true {dim_names[2]} distribution ({shown})",
-                    density=True,
-                )
-                plt.setp(ax3.get_yticklabels(), visible=False)
-                ax3.set_xlabel(f"{dim_names[2]} distribution")
-                ax3.legend(
-                    loc="lower center",
-                    fontsize="xx-small",
-                    bbox_to_anchor=(0.5, -0.1),
-                )
         else:
             from neuroencoders.importData.gui_elements import ModelPerformanceVisualizer
 
@@ -1194,14 +1417,9 @@ N samples: {selection.sum()}
         plt.show(block=kwargs.get("block", False))
     if kwargs.get("close", True):
         plt.close(fig)
-        return
-    else:
-        return fig
-    print()
-
-    # Interactive figure 2D
 
 
+# Interactive figure 2D
 def fig_interror(
     pos: np.ndarray,
     Error: np.ndarray,

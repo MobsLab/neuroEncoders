@@ -1,30 +1,34 @@
 # Load libs
 import os
+import platform
+import subprocess
 
 import dill as pickle
 import matplotlib as mplt
-import matplotlib.gridspec as gridspec
 import matplotlib.colors as mcolors
+import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pynapple as nap
 import seaborn as sns
-from tables import Optional
 import tqdm
+from matplotlib.backends.backend_pdf import PdfPages
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 from scipy.ndimage import gaussian_filter
-from scipy.stats import pearsonr, sem, zscore, binned_statistic_2d
+from scipy.stats import binned_statistic_2d, pearsonr, sem, zscore
 from statsmodels.stats.proportion import proportions_ztest
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.resultAnalysis.print_results import overview_fig
 from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
 from neuroencoders.simpleBayes.decode_bayes import (
     extract_spike_counts,
     extract_spike_counts_from_matrix,
 )
+from neuroencoders.utils.PlaceField_dB import _run_place_field_analysis
 from neuroencoders.utils.global_classes import (
     MAZE_COORDS,
     ZONEDEF,
@@ -33,7 +37,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     is_in_zone,
 )
-from neuroencoders.utils.PlaceField_dB import PlaceField_DB, _run_place_field_analysis
 from neuroencoders.utils.viz_params import (
     DELTA_COLOR_FORWARD,
     DELTA_COLOR_REVERSE,
@@ -43,6 +46,7 @@ from neuroencoders.utils.viz_params import (
     SAFE_COLOR,
     SHOCK_COLOR,
     TRUE_LINE_COLOR,
+    get_pvalue_stars,
     white_viridis,
 )
 
@@ -915,6 +919,1280 @@ class PaperFigures:
 
         return np.mean(distMean)
 
+    def summary_behavior(
+        self,
+        DataHelper: DataHelper,
+        axs=None,
+        show: bool = True,
+        block: bool = False,
+        save: bool = False,
+        extended_zone: bool = False,
+        **kwargs,
+    ):
+        num_sess = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
+
+        # --- Figure Setup ---
+        num_cols = num_sess
+        if axs is None:
+            fig, axs = plt.subplots(2, num_cols, figsize=(15, 6))
+        else:
+            axs = np.array(axs).reshape(2, -1)
+            fig = axs[0, 0].get_figure()
+
+        map_axs = axs[0, :].flatten()
+        bar_axs = axs[1, :].flatten()
+
+        # --- Data Structure to hold occupancy values for plotting and stars ---
+        session_occupancy_data = []
+
+        # Find positions when stims happened
+        PosMat = DataHelper.fullBehavior["Times"]["PosMat"]
+        stim_mask = PosMat[:, 3] == 1
+
+        # Define custom colormap once
+        cmap_custom = plt.cm.get_cmap("Reds")
+        cmap_custom.set_under("white")
+
+        # --- Loop 1: Data Calculation & Map Plotting (First Row) ---
+        # first, sort session epochs by name key to have consistent order
+        sort_map = ["hab", "pre", "cond", "post", "extinction"]
+        DataHelper.fullBehavior["Times"]["SessionEpochs"] = dict(
+            sorted(
+                DataHelper.fullBehavior["Times"]["SessionEpochs"].items(),
+                key=lambda item: sort_map.index(item[0])
+                if item[0] in sort_map
+                else len(sort_map),
+            )
+        )
+        after_cond = False
+        for i, (sess_name, sess_time) in enumerate(
+            DataHelper.fullBehavior["Times"]["SessionEpochs"].items()
+        ):
+            if sess_name.lower() == "cond":
+                after_cond = True
+            # 1. Data Filtering
+            mask = inEpochsMask(
+                DataHelper.fullBehavior["positionTime"], sess_time
+            ).flatten()
+            pos = DataHelper.fullBehavior["Positions"][mask, :2]
+            nan_mask = ~np.any(np.isnan(pos), axis=1)
+            pos = pos[nan_mask]
+            total_time_points = len(pos)
+
+            # 2. Occupancy Calculation and Z-Test for Proportions
+            shock_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Shock")])
+            safe_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Safe")])
+            if extended_zone:
+                shock_mask = shock_mask | is_in_zone(
+                    pos, ZONEDEF[ZONELABELS.index("ShockCenter")]
+                )
+                safe_mask = safe_mask | is_in_zone(
+                    pos, ZONEDEF[ZONELABELS.index("SafeCenter")]
+                )
+
+            shock_count = np.sum(shock_mask)
+            safe_count = np.sum(safe_mask)
+
+            shock_occupancy = (
+                shock_count / total_time_points if total_time_points > 0 else 0
+            )
+            safe_occupancy = (
+                safe_count / total_time_points if total_time_points > 0 else 0
+            )
+
+            # Perform Two-Sample Z-Test for Proportions (Shock count vs Safe count)
+            # This is the statistically correct way to compare two proportions based on counts.
+            if total_time_points > 0:
+                counts = np.array([safe_count, shock_count])
+                # N must be total time points for both groups
+                nobs = np.array([total_time_points, total_time_points])
+
+                # Check if there is enough variance to run the test
+                if np.sum(nobs) > 0 and np.all(counts > 0):
+                    z_stat, p_value = proportions_ztest(
+                        counts, nobs=nobs, alternative="two-sided"
+                    )
+                    p_stars = get_pvalue_stars(p_value)
+                else:
+                    p_stars = None  # Not enough data/variance for test
+            else:
+                p_stars = None  # No data in session
+
+            # Store data
+            session_occupancy_data.append(
+                {
+                    "Session": sess_name,
+                    "Shock Occupancy": shock_occupancy,
+                    "Safe Occupancy": safe_occupancy,
+                    "Stars": p_stars,  # Store star string
+                }
+            )
+
+            # 3. Map Plotting (First Row)
+            map_ax = map_axs[i]
+            H_true, xedges, yedges = np.histogram2d(
+                pos[:, 0], pos[:, 1], bins=40, range=[[0, 1], [0, 1]]
+            )
+            occupancy_map = gaussian_filter(H_true.T, sigma=2)
+
+            map_ax.plot(
+                pos[:, 0], pos[:, 1], c="xkcd:dark grey", alpha=0.4, zorder=1
+            )  # Traces
+            map_ax.imshow(
+                occupancy_map,
+                origin="lower",
+                extent=[0, 1, 0, 1],
+                cmap=cmap_custom,
+                vmin=1,
+                zorder=0,
+            )
+            map_ax.plot(
+                MAZE_COORDS[:, 0], MAZE_COORDS[:, 1], color="black", lw=2, zorder=2
+            )
+
+            if after_cond:
+                pos_stim = DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                map_ax.scatter(
+                    pos_stim[:, 0],
+                    pos_stim[:, 1],
+                    c=SHOCK_COLOR,
+                    marker="*",
+                    s=20,
+                    alpha=0.6,
+                    label="Stimulations",
+                    zorder=3,
+                )
+
+            map_ax.set_title(f"{sess_name}")
+            if sess_name.lower() == "cond":
+                map_ax.set_title(f"{sess_name} (n_stims = {np.sum(stim_mask)})")
+            map_ax.set_aspect("equal", adjustable="box")
+            map_ax.set_xlim(0, 1)
+            map_ax.set_ylim(0, 1)
+            map_ax.set_xticks([])
+            map_ax.set_yticks([])
+
+        # --- Loop 2: Bar Plotting (Second Row) ---
+        # Find the maximum occupancy value across all sessions/zones for consistent Y-axis limits
+        max_occupancy = (
+            max(
+                [d["Shock Occupancy"] for d in session_occupancy_data]
+                + [d["Safe Occupancy"] for d in session_occupancy_data]
+            )
+            * 1.25  # Increased buffer for stars
+        )
+
+        for i, data in enumerate(session_occupancy_data):
+            bar_ax = bar_axs[i]
+
+            # Data points for this session
+            zones = ["Shock", "Safe"]
+            occupancy_values = [data["Shock Occupancy"], data["Safe Occupancy"]]
+
+            # Assuming SHOCK_COLOR and SAFE_COLOR are defined globally
+            colors = [SHOCK_COLOR, SAFE_COLOR]
+
+            # Plot the bar chart
+            bar_ax.bar(zones, occupancy_values, color=colors)
+            bar_ax.axhline(
+                0.215
+                if not extended_zone
+                else 0.465,  # expected occupancy if exploration is uniform
+                linestyle="--",
+                color="gray",
+                lw=1.6,
+            )  # Add reference line at y=0.215
+
+            # Add value labels on top of bars
+            for j, val in enumerate(occupancy_values):
+                bar_ax.text(
+                    j,
+                    val + 0.005 * max_occupancy,
+                    f"{val:.2f}",
+                    ha="center",
+                    fontsize=8,
+                )
+
+            # --- ADD STATISTICAL STAR (Simulating statannotations output) ---
+            if data["Stars"] is not None:
+                # Determine where to place the star (above the highest bar)
+                star_y_pos = max(occupancy_values) + 0.05 * max_occupancy
+                # Use a line to connect the two bars, similar to statannotations
+                bar_ax.plot([0, 1], [star_y_pos, star_y_pos], color="k", lw=0.8)
+                bar_ax.text(
+                    0.5,  # Center position between the two bars
+                    star_y_pos + 0.005 * max_occupancy,  # Slightly above the line
+                    data["Stars"],
+                    ha="center",
+                    color="k",
+                )
+
+            bar_ax.set_title(f"Occ: {data['Session']}")
+            bar_ax.set_ylim(0, max_occupancy)  # Constant Y-limit for comparison
+            bar_ax.set_yticks(np.linspace(0, max_occupancy, 3))  # Set few ticks
+            bar_ax.tick_params(axis="x", rotation=0)
+
+            # Only label the Y-axis on the first bar plot for clarity
+            if i == 0:
+                bar_ax.set_ylabel("Occupancy Fraction")
+            else:
+                bar_ax.set_yticklabels([])  # Hide Y-labels on subsequent plots
+
+        if show:
+            # Final layout adjustments
+            fig.suptitle(
+                "Behavioral Analysis Summary: Occupancy Maps and Zone Occupancy per Session",
+            )
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            plt.show(block=block)
+        if save:
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            fig.savefig(
+                os.path.join(self.folderFigures, "summary_behavior.png"),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(self.folderFigures, "summary_behavior.svg"),
+            )
+
+    def error_map(
+        self,
+        timeWindow: int,
+        phase_list=None,
+        suffix_list=None,
+        axs=None,
+        show: bool = True,
+        block: bool = False,
+        save: bool = False,
+        error_type: str = "lin",
+        **kwargs,
+    ):
+        if phase_list is not None:
+            suffix_list = [f"_{ph}" for ph in phase_list]
+        if suffix_list is None:
+            suffix_list = self.suffixes
+        if not isinstance(suffix_list, list):
+            suffix_list = [suffix_list]
+        try:
+            winIdx = self.timeWindows.index(timeWindow)
+        except ValueError:
+            raise ValueError(
+                f"Time window {timeWindow}ms not found in self.timeWindows: {self.timeWindows}"
+            )
+
+        if axs is None:
+            fig, axs = plt.subplots(
+                1,
+                len(suffix_list),
+            )
+            if len(suffix_list) == 1:
+                axs = np.array([[axs]])
+        else:
+            axs = np.array(axs).flatten()
+            fig = axs[0].get_figure()
+        axs = axs.flatten()
+
+        for i, suffix in enumerate(suffix_list):
+            lin_true = self.resultsNN_phase[suffix]["linTruePos"][winIdx]
+            lin_pred = self.resultsNN_phase[suffix]["linPred"][winIdx]
+            x_true = self.resultsNN_phase[suffix]["truePos"][winIdx][:, 0]
+            y_true = self.resultsNN_phase[suffix]["truePos"][winIdx][:, 1]
+            if error_type == "lin":
+                error = np.abs(lin_true - lin_pred)
+            elif error_type in {"xy", "euclidean"}:
+                error = np.linalg.norm(
+                    self.resultsNN_phase[suffix]["fullPred"][winIdx][:, :2]
+                    - self.resultsNN_phase[suffix]["truePos"][winIdx][:, :2],
+                    axis=1,
+                )
+            else:
+                raise ValueError(
+                    f"Unknown error_type {error_type}, should be 'lin' or 'xy'/'euclidean'."
+                )
+            speed_mask = self.resultsNN_phase[suffix]["speedMask"][winIdx].astype(bool)
+            bins = 40
+            mean_error_matrix, xedges, yedges, binnumber = binned_statistic_2d(
+                x_true[speed_mask],
+                y_true[speed_mask],
+                error[speed_mask],
+                statistic="mean",
+                bins=bins,
+                range=[[0, 1], [0, 1]],  # Set your min/max range here
+            )
+            # small smooth interpolation
+            mean_error_matrix = gaussian_filter(mean_error_matrix, 1e-1)
+
+            cmap_name = kwargs.get("cmap", "coolwarm")
+            cmap = plt.get_cmap(cmap_name)
+
+            axs[i].imshow(
+                mean_error_matrix.T,
+                origin="lower",
+                cmap=cmap,
+                extent=[0, 1, 0, 1],
+                # interpolation="nearest",
+            )
+            axs[i].plot(MAZE_COORDS[:, 0], MAZE_COORDS[:, 1], color="black", lw=2)
+            axs[i].set_xlim(0, 1)
+            axs[i].set_ylim(0, 1)
+            axs[i].set_aspect("equal", adjustable="box")
+            axs[i].set_xticks([])
+            axs[i].set_yticks([])
+            for spine in axs[i].spines.values():
+                spine.set_visible(False)
+            axs[i].set_title(f"{suffix.strip('_')}")
+        if show:
+            fig.suptitle(
+                f"Error map ({error_type}) for {timeWindow}ms window",
+            )
+            plt.tight_layout()
+            plt.show(block=block)
+        if save:
+            plt.tight_layout()
+            fig.savefig(
+                os.path.join(
+                    self.folderFigures,
+                    f"error_map_{error_type}_{timeWindow}ms.png",
+                ),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(
+                    self.folderFigures,
+                    f"error_map_{error_type}_{timeWindow}ms.svg",
+                )
+            )
+
+    def fig_summary_id_card(
+        self,
+        timeWindow: int,
+        DataHelper: DataHelper,
+        suffix: str = None,
+        save: bool = True,
+        dimOutput: int = 1,
+        **kwargs,
+    ):
+        """
+        Summary figure saved as a multipage PDF.
+        Page 1: Behavior & Error Maps
+        Page 2+: Trajectories (2 suffixes per page)
+        """
+        idWindow = self.timeWindows.index(timeWindow)
+
+        # 1. Setup PDF Path
+        filename = f"summary_id_card_{timeWindow}ms.pdf"
+        save_path = os.path.join(self.folderFigures, filename)
+
+        print(f"Generating PDF at: {save_path}")
+
+        with PdfPages(save_path) as pdf:
+            # =========================================================
+            # PAGE 1: Summary Behavior + Error Maps
+            # =========================================================
+            fig1 = plt.figure(
+                figsize=(8.27, 11.69)
+            )  # Landscape A4-ish, or use (8.27, 11.69) for Portrait
+            # Let's use Portrait for vertical stacking
+            fig1.set_size_inches(10, 14)
+
+            gs = gridspec.GridSpec(12, 3, figure=fig1)
+
+            # --- Top: Summary Behavior (Rows 0-1) ---
+            nrows_beh = 2
+            ncols_beh = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
+            gs_summary = gs[0 : nrows_beh + 1, :].subgridspec(nrows_beh, ncols_beh)
+
+            target_axs = [
+                fig1.add_subplot(gs_summary[i, j])
+                for i in range(nrows_beh)
+                for j in range(ncols_beh)
+            ]
+
+            self.summary_behavior(
+                DataHelper,
+                axs=target_axs,
+                show=False,
+                block=False,
+                save=False,
+                extended_zone=kwargs.get("extended_zone", False),
+            )
+
+            # On row 3, add a text box for error map title
+            ax_text = fig1.add_subplot(gs[3, :])
+            ax_text.axis("off")  # Hide the axis
+            ax_text.text(
+                0.5,
+                0.5,
+                "Error Maps on movement epochs",
+                horizontalalignment="center",
+                verticalalignment="center",
+                fontsize=16,
+                fontweight="bold",
+            )
+
+            # --- Middle: Error Maps (Rows 4-5) ---
+            # Leaving row 3 empty as spacing
+            start_row_map = 4
+            nrows_map = 2
+            ncols_map = len(self.suffixes)
+            gs_error_maps = gs[
+                start_row_map : start_row_map + nrows_map + 1, :
+            ].subgridspec(nrows_map, ncols_map)
+
+            target_axs = [
+                fig1.add_subplot(gs_error_maps[0, j]) for j in range(ncols_map)
+            ]
+
+            self.error_map(
+                timeWindow,
+                suffix_list=self.suffixes,
+                axs=target_axs,
+                show=False,
+                block=False,
+                save=False,
+                error_type=kwargs.get("error_type", "lin"),
+            )
+
+            fig1.suptitle(
+                f"Summary: {os.path.basename(self.projectPath.experimentPath)} ({timeWindow}ms)",
+                fontsize=14,
+            )
+            plt.tight_layout()
+            pdf.savefig(fig1)
+            plt.close(fig1)
+
+            # =========================================================
+            # PAGES 2+: Decoding Performance (Trajectories)
+            # =========================================================
+            # We want ~4 rows per page.
+            # Since 1 suffix = 2 rows (dim 0 and dim 1), we can fit 2 suffixes per page.
+
+            suffixes_per_page = 3 if dimOutput == 1 else 2
+            with_hist_distribution = kwargs.get("with_hist_distribution", True)
+
+            # Chunk the suffixes list
+            for i in range(0, len(self.suffixes), suffixes_per_page):
+                page_suffixes = self.suffixes[i : i + suffixes_per_page]
+
+                fig_page = plt.figure(figsize=(14, 11))  # Paysage
+
+                # Each suffix needs 2 rows.
+                # Total rows needed = len(page_suffixes) * 2.
+                # We allocate a generic GridSpec with ample rows
+                total_page_rows = (
+                    3 if dimOutput == 1 else 4
+                )  # Fixed to 4 rows (2 suffixes) for consistency
+                gs_page = gridspec.GridSpec(
+                    total_page_rows, 1, figure=fig_page, hspace=0.4
+                )
+
+                current_row_idx = 0
+
+                for suffix in page_suffixes:
+                    # Create subgridspec for this specific suffix (2 rows)
+                    # Columns: 5 if hist, 4 if not
+                    ncols = 6 if with_hist_distribution else 5
+
+                    # Select the 2 rows for this suffix
+                    gs_suffix = gs_page[
+                        current_row_idx : current_row_idx + dimOutput, 0
+                    ].subgridspec(2, ncols)
+
+                    axs_list = []
+                    first_ax_ref = None
+
+                    for r in range(dimOutput):  # 2 Dimensions
+                        # Main Trajectory Plot
+                        if r == 0:
+                            ax_main = fig_page.add_subplot(gs_suffix[r, 0:4])
+                            first_ax_ref = ax_main
+                        else:
+                            ax_main = fig_page.add_subplot(
+                                gs_suffix[r, 0:4], sharex=first_ax_ref
+                            )
+                        axs_list.append(ax_main)
+
+                        # Histogram Plot
+                        if with_hist_distribution:
+                            ax_dist = fig_page.add_subplot(
+                                gs_suffix[r, 4], sharey=ax_main
+                            )
+                            ax_dist.tick_params(axis="y", left=False, labelleft=False)
+                            axs_list.append(ax_dist)
+
+                    # Plot Data
+                    posIndex = self.resultsNN_phase[suffix]["posIndex"][idWindow]
+                    timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
+                    speedMask = self.resultsNN_phase[suffix]["speedMask"][idWindow]
+                    linpos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                    lininferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
+
+                    if dimOutput == 1:
+                        pos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                        inferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
+                        training_data = self.resultsNN_phase["_training"]["linTruePos"][
+                            idWindow
+                        ]
+                    elif dimOutput == 2:
+                        pos = self.resultsNN_phase[suffix]["truePos"][idWindow][:, :2]
+                        inferring = self.resultsNN_phase[suffix]["fullPred"][idWindow][
+                            :, :2
+                        ]
+                        training_data = self.resultsNN_phase["_training"]["truePos"][
+                            idWindow
+                        ][:, :2]
+                    else:
+                        raise ValueError("dimOutput must be 1 or 2.")
+                    overview_fig(
+                        pos=pos,
+                        inferring=inferring,
+                        selection=np.ones_like(
+                            self.resultsNN_phase[suffix]["speedMask"][idWindow],
+                            dtype=bool,
+                        ),
+                        posIndex=posIndex,
+                        timeStepsPred=timeStepsPred,
+                        speedMask=speedMask,
+                        useSpeedMask=True,
+                        concat_epochs=True,
+                        dimOutput=dimOutput,
+                        show=False,
+                        save=False,
+                        close=False,
+                        training_data=training_data,
+                        join_points=False,
+                        axs=np.array(axs_list),
+                        fig=fig_page,
+                    )
+                    axs_list[0].set_title(
+                        f"Phase: {suffix.strip('_')}",
+                    )
+                    freeze = inEpochsMask(
+                        self.behaviorData["positionTime"][
+                            self.resultsNN_phase[suffix]["posIndex"][idWindow]
+                        ],
+                        self.behaviorData["Times"]["FreezeEpoch"],
+                    )
+                    if dimOutput == 2:
+                        error = np.linalg.norm(inferring - pos, axis=1)
+                    else:
+                        error = np.abs(inferring - pos)
+                    mean_error = np.mean(error[speedMask])
+                    median_error = np.median(error[speedMask])
+                    random_pred = np.random.permutation(pos)
+                    chance_medianerror = np.median(np.abs(random_pred - pos)[speedMask])
+                    chance_meanerror = np.mean(np.abs(random_pred - pos)[speedMask])
+                    text = (
+                        f"Mean Error : {mean_error:.3f} (random {chance_meanerror:.3f})\n"
+                        f"Median Error : {median_error:.3f} (random {chance_medianerror:.3f})\n"
+                        f"Freeze Fraction: {np.mean(freeze):.3f}"
+                    )
+                    axs_list[0].text(
+                        0.75,
+                        -0.3,
+                        text,
+                        horizontalalignment="right",
+                        verticalalignment="top",
+                        transform=axs_list[0].transAxes,
+                        fontsize="small",
+                    )
+
+                    last_col_ax = fig_page.add_subplot(
+                        gs_suffix[:, -1]
+                    )  # all columns, first row
+                    last_col_ax.axis("off")  # Hide the axis
+                    self._plot_single_error_matrix(
+                        linpos[speedMask],
+                        lininferring[speedMask],
+                        last_col_ax,
+                    )
+
+                    current_row_idx += dimOutput  # Move down 2 rows for next suffix
+
+                plt.tight_layout()
+                pdf.savefig(fig_page)
+                plt.close(fig_page)
+            # =========================================================
+            # PAGES after+: Link with bayesian decoder and spike sorting
+            # =========================================================
+            bayesian_page = plt.figure(figsize=(11.69, 8.27))  # Portrait A4
+            bayesian_page.set_size_inches(14, 10)
+            # get (2,3) gridspec axes
+            gs_bayes = gridspec.GridSpec(2, 3, figure=bayesian_page)
+            bayesian_axs = [
+                bayesian_page.add_subplot(gs_bayes[i, j])
+                for i in range(2)
+                for j in range(3)
+            ]
+            self.bayesian_neurons_summary(
+                fig=bayesian_page, axs=bayesian_axs, show=False, block=False, save=False
+            )
+            plt.tight_layout()
+            pdf.savefig(bayesian_page)
+            plt.close(bayesian_page)
+
+        print("PDF generation complete.")
+
+        # =========================================================
+        # OPEN THE PDF
+        # =========================================================
+        if save:  # Using the 'save' flag to decide if we open it, or you can add an 'open_pdf' arg
+            try:
+                if platform.system() == "Darwin":  # macOS
+                    subprocess.call(("open", save_path))
+                elif platform.system() == "Windows":  # Windows
+                    os.startfile(save_path)
+                else:  # linux variants
+                    subprocess.call(("xdg-open", save_path))
+            except Exception as e:
+                print(f"Could not open PDF automatically: {e}")
+
+    def fig_summary_id_card_olddd(
+        self,
+        timeWindow: int,
+        DataHelper: DataHelper,
+        suffix: str = None,
+        show: bool = True,
+        block: bool = True,
+        save: bool = True,
+        **kwargs,
+    ):
+        """
+        Summary figure of decoding performance and behavioral metrics for a given time window.
+        """
+
+        # training + test together
+        idWindow = self.timeWindows.index(timeWindow)
+
+        x_true = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["truePos"][idWindow][:, 0]
+                for suffix in self.suffixes
+            ]
+        )
+        y_true = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["truePos"][idWindow][:, 1]
+                for suffix in self.suffixes
+            ]
+        )
+        x_pred = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["fullPred"][idWindow][:, 0]
+                for suffix in self.suffixes
+            ]
+        )
+        y_pred = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["fullPred"][idWindow][:, 1]
+                for suffix in self.suffixes
+            ]
+        )
+        lin_true = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                for suffix in self.suffixes
+            ]
+        )
+        lin_pred = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["linPred"][idWindow]
+                for suffix in self.suffixes
+            ]
+        )
+        time = np.concatenate(
+            [self.resultsNN_phase[suffix]["time"][idWindow] for suffix in self.suffixes]
+        )
+        posIndex = [
+            self.resultsNN_phase[suffix]["posIndex"][idWindow]
+            for suffix in self.suffixes
+        ]
+        # extract spikes count per group if not already loaded
+        if (
+            "spikes_count" not in self.resultsNN_phase["_training"]
+            or self.resultsNN_phase["_training"]["spikes_count"][idWindow] is None
+        ):
+            self.load_data(
+                suffixes=self.suffixes,
+                extract_spikes_count=True,
+                load_pickle=True,
+            )
+
+        spikes_count = np.concatenate(
+            [
+                self.resultsNN_phase[suffix]["spikes_count"][idWindow]
+                for suffix in self.suffixes
+            ]
+        )
+
+        # # train mask not defined based on datahelper (can change if epochs were modified after loading data)
+        test_mask = (time >= min(self.resultsNN_phase[suffix]["time"][idWindow])) & (
+            time <= max(self.resultsNN_phase[suffix]["time"][idWindow])
+        )
+        train_mask = ~test_mask
+        speed_mask = np.concatenate(
+            [
+                self.resultsNN_phase["_training"]["speedMask"][idWindow],
+                self.resultsNN_phase[suffix]["speedMask"][idWindow],
+            ]
+        ).astype(bool)
+        sampling_rate = 1 / max(0.036, int(timeWindow) / 4000)
+
+        # add chance level
+        random_pred = np.random.permutation(lin_true)
+        chance_mae = np.mean(np.abs(random_pred[train_mask] - lin_true[train_mask]))
+        chance_mae_speed = np.mean(
+            np.abs(
+                random_pred[train_mask & speed_mask] - lin_true[train_mask & speed_mask]
+            )
+        )
+
+        # ----------------------------------------------------------------------
+        # 1. BEHAVIORAL MEASURES
+        # ----------------------------------------------------------------------
+
+        # --- Speed ---
+        speed_train = DataHelper.fullBehavior["Speed"][posIndex[0]].flatten()
+        speed_test = DataHelper.fullBehavior["Speed"][posIndex[1]].flatten()
+        speed = np.concatenate([speed_train, speed_test])
+
+        # --- Freezing ---
+        freeze_train = inEpochsMask(
+            DataHelper.fullBehavior["positionTime"][posIndex[0]],
+            DataHelper.fullBehavior["Times"]["FreezeEpoch"],
+        )
+        freeze_fraction_train = np.mean(freeze_train)
+        freeze_duration_train = np.sum(
+            DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 1]
+            - DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 0]
+        )  # total freeze duration in seconds
+        freeze_duration_train /= sampling_rate  # convert to seconds
+
+        freeze_test = inEpochsMask(
+            DataHelper.fullBehavior["positionTime"][posIndex[1]],
+            DataHelper.fullBehavior["Times"]["FreezeEpoch"],
+        )
+        freeze_fraction_test = np.mean(freeze_test)
+        freeze_duration_test = np.sum(
+            DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 1]
+            - DataHelper.fullBehavior["Times"]["FreezeEpoch"][:, 0]
+        )  # total freeze duration in seconds
+        freeze_duration_test /= sampling_rate  # convert to seconds
+        freeze_duration_total = freeze_duration_train + freeze_duration_test
+
+        # ----------------------------------------------------------------------
+        # 1b. Reordering in time and removing "false" train epochs (ie test epochs)
+        # ----------------------------------------------------------------------
+        time_order = np.argsort(np.concatenate([posIndex[0], posIndex[1]]).flatten())
+        x_true = x_true[time_order]
+        y_true = y_true[time_order]
+        x_pred = x_pred[time_order]
+        y_pred = y_pred[time_order]
+        lin_true = lin_true[time_order]
+        lin_pred = lin_pred[time_order]
+        time = time[time_order]
+        train_mask = train_mask[time_order]
+        test_mask = test_mask[time_order]
+        speed_mask = speed_mask[time_order]
+        speed = speed[time_order]
+
+        # --- Occupancy heatmap (true behavior) ---
+        # look only for test set to avoid train bias
+        bins = 40
+        H_true, xedges, yedges = np.histogram2d(
+            x_true[test_mask & speed_mask], y_true[test_mask & speed_mask], bins=bins
+        )
+        H_true_smooth = gaussian_filter(H_true, sigma=1)
+        H_true_norm = H_true_smooth / np.sum(H_true_smooth)
+
+        H_true_train, _, _ = np.histogram2d(
+            x_true[train_mask & speed_mask], y_true[train_mask & speed_mask], bins=bins
+        )
+        H_true_train_smooth = gaussian_filter(H_true_train, sigma=1)
+        H_true_train_norm = H_true_train_smooth / np.sum(H_true_train_smooth)
+
+        # ----------------------------------------------------------------------
+        # 2. DECODING METRICS
+        # ----------------------------------------------------------------------
+
+        # --- Decoding error ---
+        # either euclidean
+        error = np.sqrt((x_pred - x_true) ** 2 + (y_pred - y_true) ** 2)
+        # or linearized
+
+        error = np.abs(lin_pred - lin_true)
+        mae_train = np.mean(error[speed_mask & train_mask])
+        mae_train_raw = np.mean(error[train_mask])
+        mae_test = np.mean(error[speed_mask & test_mask])
+        mae_test_raw = np.mean(error[test_mask])
+
+        # Rolling MAE (5 s window)
+        win = int(5 * sampling_rate)
+        rolling_mae = np.convolve(error, np.ones(win) / win, mode="same")
+
+        # --- Spatial error heatmap ---
+        H_err_sum = np.zeros_like(H_true, dtype=float)
+        H_count = np.zeros_like(H_true, dtype=float)
+
+        # assign each sample to a bin
+        x_bin = np.digitize(x_true[test_mask & speed_mask], xedges) - 1
+        y_bin = np.digitize(y_true[test_mask & speed_mask], yedges) - 1
+
+        valid = (x_bin >= 0) & (x_bin < bins) & (y_bin >= 0) & (y_bin < bins)
+        for xb, yb, e in zip(
+            x_bin[valid], y_bin[valid], error[test_mask & speed_mask][valid]
+        ):
+            H_err_sum[xb, yb] += e
+            H_count[xb, yb] += 1
+
+        H_err_mean = np.divide(H_err_sum, H_count, where=H_count > 0)
+        H_err_smooth = gaussian_filter(H_err_mean, sigma=1)
+
+        # --- Occupancy map from decoded position ---
+        H_decoded, _, _ = np.histogram2d(
+            x_pred[test_mask & speed_mask],
+            y_pred[test_mask & speed_mask],
+            bins=[xedges, yedges],
+        )
+        H_decoded_smooth = gaussian_filter(H_decoded, sigma=1)
+        H_decoded_norm = H_decoded_smooth / np.sum(H_decoded_smooth)
+
+        H_decoded_train, _, _ = np.histogram2d(
+            x_pred[train_mask & speed_mask],
+            y_pred[train_mask & speed_mask],
+            bins=[xedges, yedges],
+        )
+        H_decoded_train_smooth = gaussian_filter(H_decoded_train, sigma=1)
+        H_decoded_train_norm = H_decoded_train_smooth / np.sum(H_decoded_train_smooth)
+
+        # --- Spatial correlation between true and decoded occupancy ---
+        mask_nonzero = (H_true_norm > 0) | (H_decoded_norm > 0)
+        r_occ, _ = pearsonr(
+            H_true_norm[mask_nonzero].flatten(), H_decoded_norm[mask_nonzero].flatten()
+        )
+
+        # ----------------------------------------------------------------------
+        # 3. PLOTTING
+        # ----------------------------------------------------------------------
+
+        # create a long vertical figure with gridspec
+        fig = plt.figure(figsize=(10, 18))
+        gs = gridspec.GridSpec(6, 3, figure=fig)  # 6 rows, 3 columns
+
+        # Plot summary behavior at the top, different gridspec
+        nrows = 2
+        ncols = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
+        gs_summary = gs[0:nrows, :].subgridspec(nrows, ncols)  # occupy first 4 rows
+        target_axs = [
+            fig.add_subplot(gs_summary[i, j])
+            for i in range(nrows)
+            for j in range(ncols)
+        ]
+
+        self.summary_behavior(
+            DataHelper,
+            axs=target_axs,
+            show=False,
+            block=False,
+            save=False,
+            extended_zone=kwargs.get("extended_zone", False),
+        )
+
+        ax = []
+
+        # --- first 3 rows (3x3 grid) ---
+        for row in range(3):
+            for col in range(3):
+                ax.append(fig.add_subplot(gs[row + 2, col]))
+
+        # ax[0]..ax[8] exist normally
+
+        # --- 4th row: one big subplot spanning all columns ---
+        ax_big = fig.add_subplot(gs[3, :])  # span all 3 columns
+        ax.append(ax_big)  # this will be ax[9]
+        # --- 5th row: classic subplots ---
+        for col in range(3):
+            ax.append(fig.add_subplot(gs[4, col]))  # ax[10], ax[11], ax[12]
+
+        # (A) Occupancy heatmap (true)
+        # add maze outline in black
+        ax[0].plot(
+            xedges[0] + MAZE_COORDS[:, 0] * (xedges[-1] - xedges[0]),
+            yedges[0] + MAZE_COORDS[:, 1] * (yedges[-1] - yedges[0]),
+            color="black",
+            lw=2,
+        )
+        im0 = ax[0].imshow(
+            H_true_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[0].set_xlabel("Test")
+        # remove ticks and labels for cleaner look
+        ax[0].set_xticks([])
+        ax[0].set_yticks([])
+        # remove spines for cleaner look
+        for spine in ax[0].spines.values():
+            spine.set_visible(False)
+
+        fig.colorbar(im0, ax=ax[0], label="Occupancy prob")
+        divider = make_axes_locatable(ax[0])
+        ax_cb = divider.append_axes("left", size="100%", pad=0.6)
+        ax_cb.plot(
+            xedges[0] + MAZE_COORDS[:, 0] * (xedges[-1] - xedges[0]),
+            yedges[0] + MAZE_COORDS[:, 1] * (yedges[-1] - yedges[0]),
+            color="black",
+            lw=2,
+        )
+        im0 = ax_cb.imshow(
+            H_true_train_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax_cb.set_title("True Occupancy")
+        ax_cb.set_xlabel("Train")
+        # remove ticks and labels for cleaner look
+        ax_cb.set_xticks([])
+        ax_cb.set_yticks([])
+        # remove spines for cleaner look
+        for spine in ax_cb.spines.values():
+            spine.set_visible(False)
+
+        # (B) Speed distribution
+        ax[1].hist(
+            speed[train_mask],
+            bins=30,
+            label="Train",
+            alpha=0.7,
+            density=True,
+            color="green",
+        )
+        ax[1].hist(
+            speed[test_mask],
+            bins=30,
+            label="Test",
+            alpha=0.7,
+            density=True,
+            color="orange",
+        )
+        ax[1].set_title("Speed Distribution")
+        ax[1].set_xlabel("Speed (cm/s)")
+        ax[1].set_ylabel("Density")
+        ax[1].grid(True, alpha=0.3)
+        # removed per-axis legend here
+
+        # (C) Freezing fraction
+        ax[2].bar(
+            ["Train", "Test"],
+            [freeze_fraction_train, freeze_fraction_test],
+            color=["green", "orange"],
+        )
+        ax[2].set_title("Freezing Fraction")
+        ax[2].set_ylabel("Proportion of time\nin freezing")
+        ax[2].set_ylim(0, 1)
+
+        # (D) Error over time with speed mask - + speed on a twin axis
+        ax[3].plot(
+            time[speed_mask],
+            error[speed_mask],
+            lw=0.5,
+            alpha=0.6,
+            label="Instantaneous",
+        )
+        ax[3].plot(
+            time[speed_mask], rolling_mae[speed_mask], lw=2, label="Rolling MAE (5s)"
+        )
+        ax[3].axvspan(
+            min(time[~test_mask]),
+            max(time[~test_mask]),
+            color="green",
+            alpha=0.2,
+            label="Train",
+        )
+        ax[3].axvspan(
+            min(time[test_mask]),
+            max(time[test_mask]),
+            color="orange",
+            alpha=0.5,
+            label="Test",
+        )
+        ax[3].set_title("Decoding Error Over Time (With Speed Mask)")
+        ax[3].set_ylabel("Error (lin. dist.)")
+        # removed per-axis legend here
+        # add chance level as a horizontal line
+        ax[3].axhline(
+            chance_mae_speed,
+            color="pink",
+            linestyle="--",
+            lw=1,
+            label="Chance level on movement",
+        )
+        ax[3].set_ylim(0, 1)
+
+        # (E) Error over time without speed mask
+        ax[4].plot(time, error, lw=0.5, alpha=0.6, label="Instantaneous")
+        ax[4].plot(time, rolling_mae, lw=2, label="Rolling MAE (5s)")
+        ax[4].axvspan(
+            min(time[~test_mask]),
+            max(time[~test_mask]),
+            color="green",
+            alpha=0.2,
+            label="Train",
+        )
+        ax[4].axvspan(
+            min(time[test_mask]),
+            max(time[test_mask]),
+            color="orange",
+            alpha=0.5,
+            label="Test",
+        )
+        ax[4].set_title("Decoding Error Over Time (No Speed Mask)")
+        ax[4].set_ylabel("Error (lin. dist.)")
+        # removed per-axis legend here
+        # add chance level as a horizontal line
+        ax[4].axhline(
+            chance_mae, color="red", linestyle="--", lw=1, label="Chance level"
+        )
+        ax[4].set_ylim(0, 1)
+
+        # (F) Spatial decoding error heatmap
+        # add maze outline in white
+        ax[5].plot(
+            xedges[0] + MAZE_COORDS[:, 0] * (xedges[-1] - xedges[0]),
+            yedges[0] + MAZE_COORDS[:, 1] * (yedges[-1] - yedges[0]),
+            color="white",
+            lw=2,
+        )
+        im2 = ax[5].imshow(
+            H_err_smooth.T,
+            origin="lower",
+            cmap="coolwarm",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[5].set_title("Mean Spatial Decoding Error (lin. dist.)")
+        ax[5].set_xticks([])
+        ax[5].set_yticks([])
+        for spine in ax[5].spines.values():
+            spine.set_visible(False)
+        fig.colorbar(im2, ax=ax[5], label="Error (lin. dist.)")
+
+        # (G) Occupancy map (decoded)
+        ax[6].plot(
+            xedges[0] + MAZE_COORDS[:, 0] * (xedges[-1] - xedges[0]),
+            yedges[0] + MAZE_COORDS[:, 1] * (yedges[-1] - yedges[0]),
+            color="black",
+            lw=2,
+        )
+        im3 = ax[6].imshow(
+            H_decoded_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax[6].set_xlabel("Test")
+        ax[6].set_xticks([])
+        ax[6].set_yticks([])
+        for spine in ax[6].spines.values():
+            spine.set_visible(False)
+        fig.colorbar(im3, ax=ax[6], label="Occupancy probability")
+        divider = make_axes_locatable(ax[6])
+        ax_cb = divider.append_axes("left", size="100%", pad=0.6)
+        ax_cb.plot(
+            xedges[0] + MAZE_COORDS[:, 0] * (xedges[-1] - xedges[0]),
+            yedges[0] + MAZE_COORDS[:, 1] * (yedges[-1] - yedges[0]),
+            color="black",
+            lw=2,
+        )
+        im0 = ax_cb.imshow(
+            H_decoded_train_norm.T,
+            origin="lower",
+            cmap="hot",
+            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
+        )
+        ax_cb.set_title("Decoded Occupancy")
+        ax_cb.set_xlabel("Train")
+        # remove ticks and labels for cleaner look
+        ax_cb.set_xticks([])
+        ax_cb.set_yticks([])
+        for spine in ax_cb.spines.values():
+            spine.set_visible(False)
+
+        # (H) True vs Decoded Occupancy comparison
+        ax[7].scatter(H_true_norm.flatten(), H_decoded_norm.flatten(), s=8, alpha=0.5)
+        ax[7].plot(
+            [0, max(H_true_norm.max(), H_decoded_norm.max())],
+            [0, max(H_true_norm.max(), H_decoded_norm.max())],
+            "k--",
+            lw=1,
+        )
+        ax[7].set_xlabel("True occupancy")
+        ax[7].set_ylabel("Decoded occupancy")
+        ax[7].set_title(f"Occupancy correlation r = {r_occ:.2f}")
+
+        # (I) Summary metrics + legend consolidation
+        text = (
+            f"Train MAE: {mae_train:.2f} lin. dist. (~{mae_train * 100:.1f} cm) vs {mae_train_raw:.2f} with immobility.\n"
+            f"Test MAE: {mae_test:.2f} lin. dist. (~{mae_test * 100:.1f} cm) vs {mae_test_raw:.2f} with immobility.\n"
+            f"Freeze duration: {freeze_duration_total:.1f}s\n"
+            f"Occupancy corr (r): {r_occ:.2f}\n"
+            f"Train freeze: {freeze_fraction_train * 100:.1f}%\n"
+            f"Test freeze: {freeze_fraction_test * 100:.1f}%"
+        )
+        ax[8].text(0.02, 0.48, text, fontsize=12, va="center", wrap=True)
+
+        ax[8].axis("off")
+        ax[8].set_title("Summary Metrics")
+
+        # the last subplot line is an ax that spans the whole row for better layout
+        # it just shows an example of true and decoded trajectory in the linear space
+        ax[9].plot(
+            time[test_mask], lin_true[test_mask], alpha=0.7, color=TRUE_LINE_COLOR
+        )
+        ax[9].plot(
+            time[test_mask],
+            lin_pred[test_mask],
+            "--",
+            alpha=0.5,
+            color=PREDICTED_LINE_COLOR,
+        )
+        ax[9].scatter(
+            time[test_mask & speed_mask],
+            lin_pred[test_mask & speed_mask],
+            label="Decoded Position on movement",
+            s=20,
+            alpha=0.7,
+            color=DELTA_COLOR_FORWARD,
+            marker="o",
+        )
+        ax[9].scatter(
+            time[test_mask & ~speed_mask],
+            lin_pred[test_mask & ~speed_mask],
+            label="Decoded Position while immobile",
+            s=6,
+            alpha=0.7,
+            color=DELTA_COLOR_REVERSE,
+            marker="o",
+        )
+        ax[9].set_xlabel("Time (s)")
+        ax[9].set_ylabel("Linearized Position")
+        ax[9].set_title("Performance on test set")
+
+        # Collect handles & labels from axes that used legends and put a single legend box into ax[8]
+        source_axes = [ax[1], ax[3], ax[4], ax[9]]
+        handles_map = {}
+        for a in source_axes:
+            h, l = a.get_legend_handles_labels()
+            for hh, ll in zip(h, l):
+                if ll not in handles_map:  # keep first handle for each unique label
+                    handles_map[ll] = hh
+        if len(handles_map) > 0:
+            unique_labels = list(handles_map.keys())
+            unique_handles = [handles_map[k] for k in unique_labels]
+            # place legend on the right side of ax[8] so it doesn't overlap the text
+            # + move it even more to the right
+            legend = ax[8].legend(
+                unique_handles,
+                unique_labels,
+                loc="lower left",
+                bbox_to_anchor=(0.57, -1.3),
+                fontsize="x-small",
+            )
+            ax[8].add_artist(legend)
+
+        # bayesian and "neuron" analysis
+        # from bayesian_neurons_summary method
+        if getattr(self, "bayesMatrices", None) is None:
+            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+                self.behaviorData,
+                l_function=self.l_function,
+                bayesMatrices=self.bayesMatrices
+                if (
+                    (isinstance(self.bayesMatrices, dict))
+                    and ("Occupation" in self.bayesMatrices.keys())
+                )
+                else None,
+                **kwargs,
+            )
+
+        ordered_mi = np.array(
+            [mi for tetrode_mi in self.bayesMatrices["mutualInfo"] for mi in tetrode_mi]
+        )[self.trainerBayes.linearPosArgSort]
+
+        # 1. Identify interesting neurons
+        high_quality = self.trainerBayes.linearPosArgSort[
+            ordered_mi > np.percentile(ordered_mi, 80)
+        ]
+        # Linear tuning curves (if computed)
+        if hasattr(self.trainerBayes, "orderedLinearPlaceFields"):
+            norm_fields = self.trainerBayes.orderedLinearPlaceFields / np.maximum(
+                np.mean(
+                    self.trainerBayes.orderedLinearPlaceFields, axis=1, keepdims=True
+                ),
+                1e-8,
+            )
+            lTc = ax[10].imshow(norm_fields, aspect="auto", origin="lower")
+            linearBins = np.linspace(0, 1, norm_fields.shape[1])
+            ax[10].set_xticks(
+                ticks=np.linspace(0, norm_fields.shape[1], norm_fields.shape[1])[::20],
+                labels=np.round(linearBins[::20], 2),
+            )
+            ax[10].set_xlabel("Linear Position")
+            ax[10].set_ylabel("Neuron Index")
+            ax[10].set_xticks([])
+            ax[10].set_yticks([])
+            divider = make_axes_locatable(ax[10])
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            plt.colorbar(lTc, label="Deviation from unit Mean Firing Rate", cax=cax)
+            ax[10].set_title("Linear Tuning Curves")
+            # summary metrics about high-quality neurons
+
+            text = (
+                f"High-quality place cells: {len(high_quality)} neurons.\n"
+                f"Found {len(self.trainerBayes.linearPosArgSort)} neurons.\n"
+                f"Position range: {self.trainerBayes.linearPreferredPos.min():.2f} - {self.trainerBayes.linearPreferredPos.max():.2f}.\n"
+            )
+            new_ax = make_axes_locatable(ax[10]).append_axes(
+                "right", size="30%", pad=0.1
+            )
+            new_ax.axis("off")
+            new_ax.text(0.1, 0.5, text, fontsize=10, va="center", wrap=True)
+
+        ax[11].plot([1, 2], [1, 2])  # empty plot to be removed
+        ax[12].plot([1, 2], [1, 2])  # empty plot to be removed
+
+        # show
+        plt.tight_layout()
+        fig.suptitle(
+            f"Decoding ID Card for {os.path.basename(os.path.dirname(self.projectPath.baseName))} - Experiment: {os.path.basename(self.projectPath.experimentPath)} - Phase: {suffix.strip('_')}"
+        )
+
+        if show:
+            if mplt.get_backend().lower() == "QtAgg".lower():
+                plt.get_current_fig_manager().window.showMaximized()
+            elif mplt.get_backend().lower() == "TkAgg".lower():
+                plt.get_current_fig_manager().resize(
+                    *plt.get_current_fig_manager().window.maxsize()
+                )
+            plt.show(block=block)
+
+        if save:
+            fig.savefig(
+                os.path.join(
+                    self.folderFigures,
+                    f"summary_id_card_{timeWindow}ms{suffix}.png",
+                ),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(
+                    self.folderFigures,
+                    f"summary_id_card_{timeWindow}ms{suffix}.svg",
+                ),
+            )
+        plt.close(fig)
+
     def hist_linerrors(
         self,
         suffix=None,
@@ -1083,6 +2361,62 @@ class PaperFigures:
                 (f"cumulativeHist_{str(speed)}{suffix}.svg"),
             )
         )
+
+    def _plot_single_error_matrix(
+        self,
+        true_pos,
+        pred_pos,
+        ax=None,
+        nbins=40,
+        normalized=True,
+        cmap="viridis",  # Replace with white_viridis if defined elsewhere
+    ):
+        """
+        Helper function to plot a single error matrix.
+        If ax is None, creates a new figure.
+        """
+        # 1. Create Figure/Axis if not provided
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(5, 4))
+        else:
+            fig = ax.figure
+
+        # 2. Compute 2D Histogram
+        # x=Pred, y=True based on your original logic
+        H, xedges, yedges = np.histogram2d(
+            pred_pos.reshape(-1),
+            true_pos.reshape(-1),
+            bins=(nbins, nbins),
+            density=True,
+        )
+
+        # 3. Normalize (optional)
+        if normalized:
+            # Axis 1 is the 'y' input to histogram2d (TruePos)
+            # We add a small epsilon or handle 0 to avoid NaNs
+            max_vals = H.max(axis=1)
+            max_vals[max_vals == 0] = 1.0
+            H = H / max_vals[:, None]
+
+        extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+        # 4. Plot
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Note: Transpose H.T is used to align axes correctly with origin="lower"
+        im = ax.imshow(
+            H.T,
+            extent=extent,
+            cmap=cmap,
+            interpolation="none",
+            origin="lower",
+        )
+
+        # 5. Add Colorbar
+        fig.colorbar(im, ax=ax)
+
+        return fig, ax
 
     def error_matrix_linerrors_by_speed(
         self, suffixes=None, nbins=40, normalized=True, show=False
@@ -3969,25 +5303,72 @@ class PaperFigures:
         )
         plt.close(fig)
 
-    def bayesian_neurons_summary(self, block=True, **kwargs):
-        """
-        Summary of the Bayesian neurons:
-        - Identify interesting neurons based on mutual Information
-        - Explore the ordered data
-        - Visualize population place fields and linear tuning curves
-        - Show position coverage in training data
-        - Display quality metrics of the neurons
-        - Show the best linear tuning curves
-        - Display first and last ordered place fields
+    def _plot_single_place_field(self, ax, neuron_idx, pos_x, pos_y, epoch, title):
+        """Helper to plot a single place field on a specific axis."""
+        spike_time = nap.Ts(
+            self.trainerBayes.spikeMatTimes[
+                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
+            ].flatten()
+        )
 
-        self.trainerBayes must have been trained before calling this method.
+        results = _run_place_field_analysis(
+            spike_time,
+            pos_x,
+            pos_y,
+            epoch=nap.IntervalSet(epoch),
+            smoothing=3,
+            freq_video=30,
+            threshold=0.7,
+            size_map=50,
+            limit_maze=(0, 1, 0, 1),
+            large_matrix=True,
+        )
+
+        # Plot Heatmap
+        field_data = results["map"]["rate"]
+        ax.imshow(field_data, aspect="auto", origin="lower")
+
+        # Plot Peak
+        peak_x = results["stats"]["x"]
+        peak_y = results["stats"]["y"]
+        ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
+        ax.text(
+            peak_x + 2,
+            peak_y + 2,
+            f"{results['stats']['peak']:.2f}Hz",
+            color="magenta",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+        # Plot Contours
+        if "field" in results["stats"]:
+            field_mask = results["stats"]["field"]
+            ax.contour(
+                field_mask,
+                levels=[0.5],
+                colors="b",
+                linewidths=1,
+                origin="lower",
+                extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
+            )
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title)
+
+    def bayesian_neurons_summary(self, axs=None, fig=None, block=False, **kwargs):
+        """
+        Summary of the Bayesian neurons.
+        Can create its own figure or plot on provided axes.
         """
         # kwargs processing
-        plot_high_quality = kwargs.pop("plot_high_quality", False)
+        plot_high_quality = kwargs.get("plot_high_quality", False)
+        save = kwargs.get("save", True if axs is None else False)
+        show = kwargs.get("show", True if axs is None else False)
 
         # --- 1. Train/Load Data ---
         if getattr(self, "bayesMatrices", None) is None:
-            # Check if we have valid dictionary keys to pass, otherwise None
             existing_bayes = (
                 self.bayesMatrices
                 if (
@@ -4017,30 +5398,29 @@ class PaperFigures:
         high_quality_indices = self.trainerBayes.linearPosArgSort[high_quality_mask]
 
         print(
-            f"High-quality place cells: {len(high_quality_indices)} neurons (best {100 - thresh}%)"
+            f"High-quality place cells: {len(high_quality_indices)} neurons (top {100 - thresh}%)"
         )
-        print(f"Found {len(self.trainerBayes.linearPosArgSort)} neurons")
+        print(f"Total neurons: {len(self.trainerBayes.linearPosArgSort)}")
         print(
             f"Position range: {self.trainerBayes.linearPreferredPos.min():.2f} - {self.trainerBayes.linearPreferredPos.max():.2f}"
         )
 
         # --- 3. Visualization Setup ---
-        # Initialize 2 rows, 3 columns. figsize is roughly (width, height)
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-        axes = axes.flatten()  # Flattens to 1D array [0, 1, ..., 5] for easy indexing
+        if axs is None:
+            fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+            axs = axs.flatten()
+        else:
+            axs = np.array(axs).flatten()
+            if fig is None:
+                fig = axs[0].figure
 
-        # --- Panel 0: First Ordered Place Field ---
-        ax = axes[0]
-        neuron_idx = (
-            self.trainerBayes.linearPosArgSort[1]
-            if not plot_high_quality
-            else high_quality_indices[0]
-        )
-        spike_time = nap.Ts(
-            self.trainerBayes.spikeMatTimes[
-                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
-            ].flatten()
-        )
+        # Validate we have enough axes
+        if len(axs) < 6:
+            raise ValueError(
+                f"Provided 'axs' must have at least 6 subplots, got {len(axs)}."
+            )
+
+        # --- Data Prep for Place Fields (Do once) ---
         pos_x = nap.Tsd(
             d=self.behaviorData["Positions"][:, 0],
             t=self.behaviorData["positionTime"].flatten(),
@@ -4056,63 +5436,33 @@ class PaperFigures:
             ]
         ).reshape(-1)
 
-        results = _run_place_field_analysis(
-            spike_time,
-            pos_x,
-            pos_y,
-            epoch=nap.IntervalSet(epoch),
-            smoothing=3,
-            freq_video=30,
-            threshold=0.7,
-            size_map=50,
-            limit_maze=(0, 1, 0, 1),
-            large_matrix=True,
+        # --- Panel 0: First Ordered Place Field ---
+        neuron_first = (
+            self.trainerBayes.linearPosArgSort[1]
+            if not plot_high_quality
+            else high_quality_indices[0]
         )
-        field_data = results["map"]["rate"]
-        ax.imshow(field_data, aspect="auto", origin="lower")
-        peak_x = results["stats"]["x"]
-        peak_y = results["stats"]["y"]
-        ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
-        ax.text(
-            peak_x + 2,
-            peak_y + 2,
-            f"{results['stats']['peak']:.2f}Hz",
-            color="magenta",
-            fontsize=10,
+        self._plot_single_place_field(
+            axs[0], neuron_first, pos_x, pos_y, epoch, "First Ordered Place Field"
         )
-        # draw the more precise contours of the firing field
-        if "field" in results["stats"]:
-            field_mask = results["stats"]["field"]
-            ax.contour(
-                field_mask,
-                levels=[0.5],
-                colors="b",
-                linewidths=1,
-                origin="lower",
-                extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
-            )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("First Ordered Place Field")
 
-        # --- Pre-calculate Linear Fields (if they exist) ---
+        # --- Pre-calculate Linear Fields ---
         has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
         norm_fields = None
         if has_linear:
-            # Z-score normalization
             raw_fields = self.trainerBayes.orderedLinearPlaceFields
-            norm_fields = (raw_fields - np.mean(raw_fields, axis=0)) / (
-                np.std(raw_fields, axis=0) + 1e-8
-            )
+            # Safe Z-score normalization
+            std_val = np.std(raw_fields, axis=0)
+            norm_fields = (raw_fields - np.mean(raw_fields, axis=0)) / (std_val + 1e-8)
+
             linear_bins = np.linspace(0, 1, norm_fields.shape[1])
             x_ticks = np.arange(0, norm_fields.shape[1], 20)
             x_labels = np.round(linear_bins[::20], 2)
 
         # --- Panel 1: All Linear Tuning Curves ---
-        ax = axes[1]
+        ax = axs[1]
         if has_linear and norm_fields is not None:
-            # add cmap normalizer to center at 0
-            norm = norm = mcolors.TwoSlopeNorm(
+            norm = mcolors.TwoSlopeNorm(
                 vmin=norm_fields.min(), vcenter=0, vmax=norm_fields.max()
             )
             im = ax.imshow(
@@ -4123,55 +5473,47 @@ class PaperFigures:
             ax.set_xlabel("Linear Position")
             ax.set_ylabel("Neuron Index")
             ax.set_title("Linear Tuning Curves")
-            fig.colorbar(im, ax=ax, label="Deviation from unit z-score FR")
+            fig.colorbar(im, ax=ax, label="Deviation (Z-score)")
         else:
             ax.axis("off")
 
         # --- Panel 2: Position Coverage ---
-        ax = axes[2]
-        ax.hist(self.trainerBayes.linearPreferredPos, bins=20, alpha=0.7)
+        ax = axs[2]
+        ax.hist(self.trainerBayes.linearPreferredPos, bins=20, alpha=0.7, color="teal")
         ax.set_xlabel("Linear Position")
         ax.set_title("Pos Coverage in Training Data")
 
         # --- Panel 3: Quality Metrics (Mutual Info) ---
-        ax = axes[3]
+        ax = axs[3]
         colors = np.array(["blue"] * len(ordered_mi))
         colors[high_quality_mask] = "red"
 
-        # Line plot background
-        ax.plot(ordered_mi, "o-", alpha=0.6, zorder=0, color="gray", linewidth=0.5)
-        # Colored scatter overlay
+        ax.plot(ordered_mi, "o-", alpha=0.3, zorder=0, color="gray", linewidth=0.5)
         ax.scatter(
-            np.arange(len(ordered_mi)), ordered_mi, c=colors, alpha=0.8, zorder=1
+            np.arange(len(ordered_mi)), ordered_mi, c=colors, alpha=0.8, zorder=1, s=15
         )
         ax.set_title("Mutual Information (ordered)")
         ax.set_xlabel("Neuron Index")
         ax.set_ylabel("Mutual Information")
 
         # --- Panel 4: Best Linear Tuning Curves (High Quality Only) ---
-        ax = axes[4]
-        if has_linear and norm_fields is not None:
+        ax = axs[4]
+        if has_linear and norm_fields is not None and high_quality_mask.sum() > 0:
+            hq_fields = norm_fields[high_quality_mask]
             norm = mcolors.TwoSlopeNorm(
-                vmin=norm_fields[high_quality_mask].min(),
-                vcenter=0,
-                vmax=norm_fields[high_quality_mask].max(),
+                vmin=hq_fields.min(), vcenter=0, vmax=hq_fields.max()
             )
             im = ax.imshow(
-                norm_fields[high_quality_mask],
-                aspect="auto",
-                origin="lower",
-                cmap="coolwarm",
-                norm=norm,
+                hq_fields, aspect="auto", origin="lower", cmap="coolwarm", norm=norm
             )
 
             hq_indices = np.arange(norm_fields.shape[0])[high_quality_mask]
-
             ax.set_xticks(x_ticks)
             ax.set_xticklabels(x_labels)
 
-            # Use fewer y-ticks if there are too many neurons, to avoid clutter
+            # Intelligent Y-tick labeling
             if len(hq_indices) > 20:
-                y_display_idx = np.linspace(0, len(hq_indices) - 1, 20, dtype=int)
+                y_display_idx = np.linspace(0, len(hq_indices) - 1, 10, dtype=int)
                 ax.set_yticks(y_display_idx)
                 ax.set_yticklabels(hq_indices[y_display_idx])
             else:
@@ -4179,96 +5521,39 @@ class PaperFigures:
                 ax.set_yticklabels(hq_indices)
 
             ax.set_xlabel("Linear Position")
-            ax.set_ylabel("Neuron Index")
-            ax.set_title("Best Linear Tuning Curves")
-            fig.colorbar(im, ax=ax, label="Deviation (HQ only)")
+            ax.set_ylabel("Original Index")
+            ax.set_title(f"Best Linear Tuning Curves (Top {100 - thresh}%)")
+            fig.colorbar(im, ax=ax, label="Deviation")
         else:
+            ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
             ax.axis("off")
 
         # --- Panel 5: Last Ordered Place Field ---
-        ax = axes[5]
-        # Use -1 to get the last one
-        neuron_idx = (
+        neuron_last = (
             self.trainerBayes.linearPosArgSort[-1]
             if not plot_high_quality
             else high_quality_indices[-1]
         )
-        spike_time = nap.Ts(
-            self.trainerBayes.spikeMatTimes[
-                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
-            ].flatten()
+        self._plot_single_place_field(
+            axs[5], neuron_last, pos_x, pos_y, epoch, "Last Ordered Place Field"
         )
-        pos_x = nap.Tsd(
-            d=self.behaviorData["Positions"][:, 0],
-            t=self.behaviorData["positionTime"].flatten(),
-        )
-        pos_y = nap.Tsd(
-            d=self.behaviorData["Positions"][:, 1],
-            t=self.behaviorData["positionTime"].flatten(),
-        )
-        epoch = np.concatenate(
-            [
-                self.behaviorData["Times"]["trainEpochs"],
-                self.behaviorData["Times"]["testEpochs"],
-            ]
-        ).reshape(-1)
-
-        results = _run_place_field_analysis(
-            spike_time,
-            pos_x,
-            pos_y,
-            epoch=nap.IntervalSet(epoch),
-            smoothing=3,
-            freq_video=30,
-            threshold=0.7,
-            size_map=50,
-            limit_maze=(0, 1, 0, 1),
-            large_matrix=True,
-        )
-        field_data = results["map"]["rate"]
-        ax.imshow(field_data, aspect="auto", origin="lower")
-        peak_x = results["stats"]["x"]
-        peak_y = results["stats"]["y"]
-        ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
-        ax.text(
-            peak_x + 2,
-            peak_y + 5,
-            f"{results['stats']['peak']:.2f}Hz",
-            color="red",
-            fontsize=10,
-        )
-        # draw the more precise contours of the firing field
-        if "field" in results["stats"]:
-            field_mask = results["stats"]["field"]
-            ax.contour(
-                field_mask,
-                levels=[0.5],
-                colors="b",
-                linewidths=1,
-                origin="lower",
-                extent=(0, field_mask.shape[1], 0, field_mask.shape[0]),
-            )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("Last Ordered Place Field")
 
         # --- Finalize and Save ---
-        plt.tight_layout()
+        if save or show:
+            plt.tight_layout()
 
-        # Save before showing, as show() can clear the figure in some backends
-        fig.savefig(
-            os.path.join(
-                self.folderFigures, f"bayesian_neurons_summary{self.suffix}.png"
-            )
-        )
-        fig.savefig(
-            os.path.join(
-                self.folderFigures, f"bayesian_neurons_summary{self.suffix}.svg"
-            )
-        )
+        if save:
+            filename = f"bayesian_neurons_summary{self.suffix}"
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
 
-        plt.show(block=block)
-        plt.close(fig)
+        if show:
+            plt.show(block=block)
+        elif save:
+            # If we saved but didn't show, close the figure to free memory
+            plt.close(fig)
+
+        return fig
 
 
 if __name__ == "__main__":
