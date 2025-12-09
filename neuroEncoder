@@ -270,6 +270,7 @@ def main(args):
         project_transformer=not args.no_project_transformer,
         reduce_dense=args.reduce_dense,
         no_cnn=args.no_cnn,
+        contrastive_loss=args.contrastive_loss,
     )
 
     # Save ProjectPath object
@@ -1279,6 +1280,12 @@ if __name__ == "__main__":
             "--no_cnn",
             action="store_true",
             help="defines whether the CNN has no CNN layers (output is directly passed to transformer after dense layer for nChannels uniformization)",
+        )
+        p.add_argument(
+            "-contrast",
+            "--contrastive_loss",
+            action="store_true",
+            help="defines whether to use contrastive loss alongside the main loss",
         )
 
         if cmd == "bayes":
