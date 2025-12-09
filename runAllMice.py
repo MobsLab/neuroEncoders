@@ -38,7 +38,7 @@ mice_nb = [
     "M1199_reversal",
     "M905",
 ]
-nameExp = "noCNN_4d_Gaussian_HeatMap"
+nameExp = "unitNorm_CSI_very_small_model_2Transformer"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -207,10 +207,19 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             # "--predicted_loss",
             "--early_stop",
             # "--transform_w_log",
-            "--no-dense",
+            "--no_dense",
             # "--mixed_loss",
             # "--no_gaussian",
-            "--no_cnn",
+            # "--contrastive_loss",
+            "--n_features",
+            "64",
+            "--dim_factor",
+            "3",
+            "--n_transformers",
+            "2",
+            "--loss_type",
+            "wasserstein",
+            "--reduce_dense",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

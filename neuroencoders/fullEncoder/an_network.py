@@ -1658,52 +1658,137 @@ class LSTMandSpikeNetwork:
             shuffle=False,
             **kwargs,
         )["test"]
+        # -------------------------------------------------------------------------
+        # CUSTOM SYNCHRONIZED INFERENCE LOOP
+        # -------------------------------------------------------------------------
+        print("Starting synchronized inference loop...")
 
-        print("INFERRING")
-        outputTest = self.model.predict(dataset, verbose=1)
+        # 1. Initialize accumulators
+        # Predictions
+        list_pred_features = []
+        list_pred_loss = []
 
-        ### Post-inferring management
-        print("gathering true feature")
+        # Metadata / Ground Truth
+        list_pos = []
+        list_times = []
+        list_times_behavior = []
+        list_pos_index = []
+        list_speed_filter = []
+        list_index_in_dat = []
+        list_index_in_dat_raw = []
 
-        @tf.autograph.experimental.do_not_convert
-        def map_true_feature(x, y):
-            return x["pos"]
+        # Spike Counts (Dynamic dict to handle variable groups)
+        dict_spike_counts = {
+            f"group{g}_spikes_count": [] for g in range(self.params.nGroups)
+        }
 
-        datasetPos = dataset.map(map_true_feature, num_parallel_calls=tf.data.AUTOTUNE)
-        fullFeatureTrue = list(datasetPos.as_numpy_iterator())
-        fullFeatureTrue = np.array(fullFeatureTrue)
+        # 2. Iterate ONCE over the dataset
+        # This locks inputs and metadata together for every batch
+        for batch in tqdm(dataset, desc="Inferring"):
+            # Determine structure: Dataset usually yields (inputs, targets)
+            # Based on your map functions, 'inputs' is a dictionary containing 'pos', 'time', etc.
+            if isinstance(batch, tuple):
+                inputs = batch[0]
+                # targets = batch[1] # Unused here, but available
+            else:
+                inputs = batch
 
+            # A. Run Model Prediction
+            # training=False ensures Dropout/BatchNorm behave correctly for inference
+            preds = self.model(inputs, training=False)
+
+            # Handle model returning tuple (Features, Loss) vs single output
+            if isinstance(preds, (list, tuple)):
+                pred_feat_batch = preds[0]
+                pred_loss_batch = preds[1]
+            else:
+                pred_feat_batch = preds
+                pred_loss_batch = None
+
+            # B. Store Predictions (move to CPU/numpy immediately to save GPU mem)
+            list_pred_features.append(pred_feat_batch.numpy())
+            if pred_loss_batch is not None:
+                list_pred_loss.append(pred_loss_batch.numpy())
+
+            # C. Store Metadata from the 'inputs' dict
+            # We look for keys directly in the input batch that generated the prediction
+            list_pos.append(inputs["pos"].numpy())
+            list_times.append(inputs["time"].numpy())
+            list_times_behavior.append(inputs["time_behavior"].numpy())
+            list_pos_index.append(inputs["pos_index"].numpy())
+            list_index_in_dat.append(inputs["indexInDat"].numpy())
+
+            # Optional keys (use .get or check)
+            if "speedFilter" in inputs:
+                list_speed_filter.append(inputs["speedFilter"].numpy())
+
+            if extract_spikes_counts:
+                list_index_in_dat_raw.append(inputs["indexInDat_raw"].numpy())
+                for g in range(self.params.nGroups):
+                    key = f"group{g}_spikes_count"
+                    if key in inputs:
+                        dict_spike_counts[key].append(inputs[key].numpy())
+
+        # 3. Concatenate all batches into single arrays
+        print("Concatenating results...")
+        full_pred_features = np.concatenate(list_pred_features, axis=0)
+
+        # Handle Pos Loss
+        if len(list_pred_loss) > 0:
+            full_pos_loss = np.concatenate(list_pred_loss, axis=0)
+        else:
+            full_pos_loss = None  # Or empty array depending on downstream needs
+
+        full_feature_true = np.concatenate(list_pos, axis=0)
+        full_times = np.concatenate(list_times, axis=0).flatten()
+        full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
+        full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
+        full_index_in_dat = np.concatenate(list_index_in_dat, axis=0)
+
+        # Handle Speed Mask
+        # If speedFilter was in dataset, use it. Otherwise compute via lookup
+        if len(list_speed_filter) > 0:
+            windowmaskSpeed = np.concatenate(list_speed_filter, axis=0).flatten()
+        else:
+            # Fallback to your original lookup method
+            print("Looking up speed mask from original array...")
+            windowmaskSpeed = speedMask[full_pos_index]
+
+        # -------------------------------------------------------------------------
+        # POST-PROCESSING (Heatmaps, etc.)
+        # -------------------------------------------------------------------------
+
+        outputTest = (full_pred_features, full_pos_loss)
+
+        # Handle Direction classification target
         if self.target.lower() == "direction":
             outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
 
+        # Handle Gaussian Heatmap Decoding
         if getattr(self.params, "GaussianHeatmap", False):
+            print("Decoding Gaussian Heatmaps...")
             if self.params.dimOutput > 2:
-                output_logits = outputTest[0][
-                    :, : self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H
-                ]
+                # Split logits vs other outputs
+                grid_size = self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H
+                output_logits = outputTest[0][:, :grid_size]
                 output_logits = tf.reshape(
                     output_logits,
-                    (
-                        output_logits.shape[0],
-                        self.GaussianHeatmap.GRID_H,
-                        self.GaussianHeatmap.GRID_W,
-                    ),
-                )  # logits with shape (batch, H, W)
-                others = outputTest[0][
-                    :, self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H :
-                ]  # other outputs (speed, ...) with shape (batch, dimOutput-2)
+                    (-1, self.GaussianHeatmap.GRID_H, self.GaussianHeatmap.GRID_W),
+                )
+                others = outputTest[0][:, grid_size:]
             else:
-                # output_logits is already (batch, H, W) because flatten = False
                 output_logits = outputTest[0]
+                others = None
 
+            # Initial Decode
             xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
                 output_logits
             )
 
+            # Temperature Scaling Logic
             if fit_temperature:
-                # small hack to have the right shape for featureTrue (batch, dimOutput)
                 featureTrue = np.reshape(
-                    fullFeatureTrue, [xy.shape[0], self.params.dimOutput]
+                    full_feature_true, [xy.shape[0], self.params.dimOutput]
                 )
                 featureTruePos = featureTrue[:, :2]
                 val_targets = self.GaussianHeatmap.gaussian_heatmap_targets(
@@ -1716,134 +1801,74 @@ class LSTMandSpikeNetwork:
 
             if T_scaling is not None:
                 output_logits = output_logits / T_scaling
+                xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                    output_logits
+                )
 
-            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
-                output_logits
-            )
-
+            # Reassemble output
             if self.params.dimOutput > 2:
-                # concatenate xy with the other outputs (speed, ...)
                 total_output = tf.concat([xy, others], axis=-1)
             else:
                 total_output = xy
-            # reconstruct outputTest tuple with xy pred instead of heatmap
+
+            # Update outputTest with decoded XY
             outputTest = (total_output.numpy(), outputTest[1])
 
-        featureTrue = np.reshape(
-            fullFeatureTrue, [outputTest[0].shape[0], outputTest[0].shape[-1]]
-        )
+        # Ensure Feature True shape is correct
+        featureTrue = np.reshape(full_feature_true, [outputTest[0].shape[0], -1])
 
-        print("gathering times of the centre in the time window")
-
-        @tf.autograph.experimental.do_not_convert
-        def map_time(x, y):
-            return x["time"]
-
-        @tf.autograph.experimental.do_not_convert
-        def map_pos_index(x, y):
-            return x["pos_index"]
-
-        @tf.autograph.experimental.do_not_convert
-        def map_time_behavior(x, y):
-            return x["time_behavior"]
-
-        @tf.autograph.experimental.do_not_convert
-        def map_index_in_dat(x, y):
-            return x["indexInDat"]
-
-        # map function to extract spike counts per group, instead of standalone method
-        @tf.autograph.experimental.do_not_convert
-        def map_spike_counts(x, y):
-            return {
-                "pos_index": x["pos_index"],
-                "indexInDat": x["indexInDat"],
-                "indexInDat_raw": x["indexInDat_raw"],
-                **{
-                    f"group{g}_spikes_count": x[f"group{g}_spikes_count"]
-                    for g in range(self.params.nGroups)
-                },
-            }
-
-        datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
-        times = list(datasetTimes.as_numpy_iterator())
-        times = np.reshape(times, [outputTest[0].shape[0]])
-
-        datasetTimesBehavior = dataset.map(
-            map_time_behavior, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        times_behavior = list(datasetTimesBehavior.as_numpy_iterator())
-        times_behavior = np.reshape(times_behavior, [outputTest[0].shape[0]])
-        print("gathering indices of spikes relative to coordinates")
-
-        datasetPos_index = dataset.map(
-            map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
-        )
-        posIndex = list(datasetPos_index.as_numpy_iterator())
-        posIndex = np.ravel(np.array(posIndex))
-        print("gathering speed mask")
-        windowmaskSpeed = speedMask[
-            posIndex
-        ]  # the speedMask used in the table lookup call
-
-        posLoss = (
-            outputTest[1].numpy() if hasattr(outputTest[1], "numpy") else outputTest[1]
-        )
+        # -------------------------------------------------------------------------
+        # PACKAGING OUTPUTS
+        # -------------------------------------------------------------------------
 
         testOutput = {
-            "featurePred": outputTest[0].numpy()
-            if hasattr(outputTest[0], "numpy")
-            else outputTest[0],
+            "featurePred": outputTest[0],
             "featureTrue": featureTrue,
-            "times": times,
-            "times_behavior": times_behavior,
-            "posLoss": posLoss,
-            "posIndex": posIndex,
+            "times": full_times,
+            "times_behavior": full_times_behavior,
+            "posLoss": full_pos_loss,
+            "posIndex": full_pos_index,
             "speedMask": windowmaskSpeed,
         }
 
+        # -------------------------------------------------------------------------
+        # CSV GENERATION (Spike Counts)
+        # -------------------------------------------------------------------------
+
         if extract_spikes_counts:
-            if (
-                not os.path.exists(
-                    os.path.join(
-                        self.folderResult,
-                        str(windowSizeMS),
-                        f"spikes_count_{phase}.csv",
-                    )
-                )
-                and not useSpeedFilter
-            ):
-                print("extracting spike counts per sample")
-                datasetSpikeCounts = dataset.map(
-                    map_spike_counts, num_parallel_calls=tf.data.AUTOTUNE
-                )
-                spikeCounts = list(datasetSpikeCounts.as_numpy_iterator())
-                testOutput["spikeCounts"] = spikeCounts
-                print("merging into df and saving as csv")
+            csv_path = os.path.join(
+                self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+            )
 
-                rows = []
-                for d in spikeCounts:
-                    B = len(d["pos_index"])
-                    for i in range(B):
-                        r = {
-                            "posIndex": int(d["pos_index"][i]),
-                            "indexInDat": d["indexInDat_raw"][i].tolist(),
-                        }
-                        for g in range(self.params.nGroups):
-                            r[f"group{g}_spikes_count"] = int(
-                                d[f"group{g}_spikes_count"][i]
-                            )
-                        rows.append(r)
+            if not os.path.exists(csv_path) and not useSpeedFilter:
+                print("Processing spike counts for CSV...")
 
-                df = pd.DataFrame(rows)
-                df.to_csv(
-                    os.path.join(
-                        self.folderResult,
-                        str(windowSizeMS),
-                        f"spikes_count_{phase}.csv",
-                    ),
-                    index=False,
-                )
+                # Concatenate the raw indices
+                full_index_raw = np.concatenate(list_index_in_dat_raw, axis=0)
 
+                # Construct DataFrame directly from the arrays (Much faster than row-loop)
+                data_dict = {
+                    "posIndex": full_pos_index,
+                    # Convert list of arrays/lists to string or keep as object for indexInDat
+                    "indexInDat": [x.tolist() for x in full_index_raw],
+                }
+
+                # Add group counts
+                for g in range(self.params.nGroups):
+                    key = f"group{g}_spikes_count"
+                    if len(dict_spike_counts[key]) > 0:
+                        data_dict[key] = np.concatenate(
+                            dict_spike_counts[key], axis=0
+                        ).astype(int)
+
+                df = pd.DataFrame(data_dict)
+
+                print(f"Saving CSV to {csv_path}")
+                df.to_csv(csv_path, index=False)
+
+        # -------------------------------------------------------------------------
+        # LINEAR FUNCTION METRICS
+        # -------------------------------------------------------------------------
         if l_function:
             projPredPos, linearPred = l_function(outputTest[0][:, :2])
             projTruePos, linearTrue = l_function(featureTrue[:, :2])

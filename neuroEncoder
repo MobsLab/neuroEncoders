@@ -690,7 +690,7 @@ def main(args):
             num_augmentations = args.num_augmentations
             print("num_augmentations", num_augmentations)
             if num_augmentations is None:
-                num_augmentations = 5 if args.window < 0.504 else 3
+                num_augmentations = 9 if args.window < 0.504 else 5
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -1212,7 +1212,7 @@ if __name__ == "__main__":
         )
         p.add_argument(
             "-nod",
-            "--no-dense",
+            "--no_dense",
             action="store_true",
             help="defines whether the dense weight loss should be used or not",
         )
