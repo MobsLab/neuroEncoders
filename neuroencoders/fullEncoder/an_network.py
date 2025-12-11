@@ -219,7 +219,7 @@ class LSTMandSpikeNetwork:
 
             # Declare spike nets for the different groups:
             self.spikeNets = [
-                nnUtils.spikeNet(
+                nnUtils.SpikeNet1D(
                     nChannels=self.params.nChannelsPerGroup[group],
                     device=self.deviceName,
                     nFeatures=self.params.nFeatures,
@@ -230,6 +230,14 @@ class LSTMandSpikeNetwork:
                 )
                 for group in range(self.params.nGroups)
             ]
+            # 2. Initialize the Group Attention Fusion layer
+            self.group_fusion = nnUtils.GroupAttentionFusion(
+                n_groups=self.params.nGroups,
+                embed_dim=self.params.nFeatures,
+                num_heads=4,  # You can tune this
+                device=self.deviceName,
+                name="group_fusion",
+            )
             self.dropoutLayer = tf.keras.layers.Dropout(
                 kwargs.get("dropoutCNN", self.params.dropoutCNN)
             )
@@ -590,11 +598,19 @@ class LSTMandSpikeNetwork:
                 # this allow to separate spikes from the same window or from the same batch.
                 # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
                 allFeatures.append(filledFeatureTrain)
-            allFeatures = tf.tuple(tensors=allFeatures)
-            # synchronizes the computation of all features (like a join)
-            # The concatenation is made over axis 2, which is the Feature axis
-            # So we reserve columns to each output of the spiking networks...
-            allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+
+            # # OLD: concatenation over features
+            # allFeatures = tf.tuple(tensors=allFeatures)
+            # # synchronizes the computation of all features (like a join)
+            # # The concatenation is made over axis 2, which is the Feature axis
+            # # So we reserve columns to each output of the spiking networks...
+            # allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+
+            # NEW: Group Attention Fusion over groups (see nnUtils.GroupAttentionFusion)
+            # we pass a list of tensors of shape (NbBatch, NbTotSpikeDetected, nFeatures) for each spike group
+            # the class then applies a multi-head attention mechanism to fuse the information from different groups
+            allFeatures = self.group_fusion(allFeatures)
+
             # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
             # We would like to mask timesteps that were added for batching purpose, before running the RNN
             batchedInputGroups = kops.reshape(
@@ -1229,6 +1245,7 @@ class LSTMandSpikeNetwork:
         shuffle = kwargs.get("shuffle", True)
         batchSize = kwargs.get("batch_size", self.params.batchSize)
 
+        @tf.autograph.experimental.do_not_convert
         def filter_by_pos_index(x):
             return tf.equal(table.lookup(x["pos_index"]), 1.0)
 
@@ -1240,6 +1257,7 @@ class LSTMandSpikeNetwork:
 
             return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
 
+        @tf.autograph.experimental.do_not_convert
         def _parse_function(*vals):
             with tf.device(self.deviceName):
                 return nnUtils.parse_serialized_spike(self.featDesc, *vals)
