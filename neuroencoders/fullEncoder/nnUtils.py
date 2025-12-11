@@ -147,17 +147,6 @@ class spikeNet(tf.keras.layers.Layer):
                 x = self.bn3(x)
             x = self.maxPoolLayer3(x)
 
-            # FIX:Dynamic reshape calculation instead of hardcoding
-            # batch_size = kops.shape(x)[0]  # this is batch_size * nSpikes if batched
-            # flat_size = (
-            #     kops.shape(x)[1] * kops.shape(x)[2] * kops.shape(x)[3]
-            # )  # this will be nChannels * time_bins/8 * 32 timsteps
-            # flat_size = kops.cast(flat_size, tf.int32)
-            # flat_size = int(np.prod(x.shape[1:]))  # static product
-            # x = kops.reshape(x, (-1, flat_size))  # change from 32 to 16 and 4 to 8
-            # make sure the reshape is correct wrt flat_size:
-            # by pooling we moved from 32 bins to 4. By convolution we generated 32 channels
-
             # or we could simply tf.keras.layers.Flatten() the output of the conv layers - leaves batch size unchanged
             x = tf.keras.layers.Flatten()(x)
             if not self.reduce_dense:
@@ -168,9 +157,6 @@ class spikeNet(tf.keras.layers.Layer):
             else:
                 x = self.denseLayer3(x)
                 x = self.dropoutLayer(x)
-
-            # normalize to the unit-hypersphere and dimension nFeatures (see FaceNet paper)
-            x = tf.keras.layers.UnitNormalization(axis=1)(x)
 
         return x
 
