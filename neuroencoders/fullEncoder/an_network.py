@@ -469,7 +469,7 @@ class LSTMandSpikeNetwork:
             output, mask=mymask
         )  # pooling (size [batch, nFeatures*nGroups])
 
-        # finally, normalize the output on the unit-hypersphere
+        # finally, normalize the output on the unit-hypersphere (see FaceNet paper)
         output = tf.keras.layers.UnitNormalization(axis=-1)(output)
 
         x = self.lstmsNets[-2](
@@ -805,11 +805,13 @@ class LSTMandSpikeNetwork:
         # self.optimizer = tf.keras.optimizers.RMSprop(
         #     learning_rate=kwargs.get("lr", self.params.learningRates[0])
         # )
-        self.optimizer = tf.keras.optimizers.Adam(
+        self.optimizer = tf.keras.optimizers.AdamW(
             learning_rate=kwargs.get("lr", self.params.learningRates[0]),
             beta_1=0.9,
             beta_2=0.98,
             epsilon=1e-09,
+            weight_decay=getattr(self.params, "weight_decay", 1e-4),
+            global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
         )
         # TODO: something with mixed precision and keras policy ?
         if not predLossOnly:
@@ -838,79 +840,6 @@ class LSTMandSpikeNetwork:
             except Exception as e:
                 print("Could not plot the model:", e)
         return model
-
-    def generate_model_Cplusplus(self):
-        ### Describe
-        with tf.device(self.deviceName):
-            allFeatures = []
-            for group in range(self.params.nGroups):
-                x = self.inputsToSpikeNets[group]
-                x = self.spikeNets[group].apply(x)
-                filledFeatureTrain = tf.gather(
-                    tf.concat([self.zeroForGather, x], axis=0),
-                    self.indices[group],
-                    axis=0,
-                )
-                filledFeatureTrain = tf.reshape(
-                    filledFeatureTrain, [1, -1, self.params.nFeatures]
-                )
-                allFeatures.append(filledFeatureTrain)
-            allFeatures = tf.tuple(tensors=allFeatures)
-            allFeatures = tf.concat(allFeatures, axis=2)
-
-            sumFeatures = tf.math.reduce_sum(allFeatures, axis=1)
-            # This var will be used in the predLoss loss
-            allFeatures = self.dropoutLayer(allFeatures, training=True)
-            # LSTM
-            for ilstm, lstmLayer in enumerate(self.lstmsNets):
-                if ilstm == 0:
-                    if len(self.lstmsNets) == 1:
-                        output = lstmLayer(allFeatures)
-                    else:
-                        outputSeq = lstmLayer(allFeatures, training=True)
-                        outputSeq = self.dropoutLayer(outputSeq)
-                elif ilstm == len(self.lstmsNets) - 1:
-                    output = lstmLayer(outputSeq)
-                else:
-                    outputSeq = lstmLayer(outputSeq, training=True)
-                    outputSeq = self.dropoutLayer(outputSeq)
-                    output_seq = self.lstmsNets[0](allFeatures)
-                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-                    output_seq = self.dropoutLayer(output_seq, training=True)
-                    output_seq = self.lstmsNets[1](output_seq)
-                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-                    output_seq = self.dropoutLayer(output_seq, training=True)
-                    output_seq = self.lstmsNets[2](output_seq)
-                    # output_seq = tf.ensure_shape(output_seq, [self.params.batchSize,None, self.params.lstmSize])
-                    output_seq = self.dropoutLayer(output_seq, training=True)
-                    output = self.lstmsNets[3](output_seq)
-            output = tf.ensure_shape(output, [batchSize, self.params.lstmSize])
-            myoutputPos = self.denseFeatureOutput(output)
-            outputLoss = self.denseLoss2(
-                self.denseLoss3(
-                    self.denseLoss4(
-                        self.denseLoss5(
-                            self.denseLoss1(
-                                tf.stop_gradient(
-                                    tf.concat([output, sumFeatures], axis=1)
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        ### Initialize
-        self.cplusplusModel = tf.keras.Model(
-            inputs=self.inputsToSpikeNets + self.indices + [self.zeroForGather],
-            outputs=[myoutputPos, outputLoss],
-        )
-        tf.keras.utils.plot_model(
-            self.cplusplusModel,
-            to_file=(
-                os.path.join(self.projectPath.experimentPath, "FullModel_Cplusplus.png")
-            ),
-            show_shapes=True,
-        )
 
     def train(
         self,
