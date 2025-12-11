@@ -1100,7 +1100,7 @@ class LSTMandSpikeNetwork:
                 )
             elif scheduler == "cosine":
                 schedule = tf.keras.callbacks.LearningRateScheduler(
-                    LRScheduler.schedule_cosine
+                    LRScheduler.schedule_cosine_warmup
                 )
             else:
                 raise ValueError(
