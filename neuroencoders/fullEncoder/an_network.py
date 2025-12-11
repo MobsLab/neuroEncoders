@@ -14,7 +14,7 @@ import os
 import warnings
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
@@ -970,9 +970,14 @@ class LSTMandSpikeNetwork:
             totMask[key] = speedMask * epochMask[key]
 
         augmentation_config = NeuralDataAugmentation(device=self.deviceName, **kwargs)
-        datasets = self._dataset_loading_pipeline(
+        datasets, counts = self._dataset_loading_pipeline(
             filename, windowSizeMS, behaviorData, totMask, augmentation_config, **kwargs
         )
+        max_count = counts["train"].max()
+        # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
+        balanced_size = self.GaussianHeatmap.get_allowed_mask().sum() * max_count
+        print("Balanced dataset size would be:", balanced_size)
+        steps_per_epoch = np.ceil(balanced_size / self.params.batchSize)
 
         ### Train the model(s)
         # Train
@@ -1007,7 +1012,7 @@ class LSTMandSpikeNetwork:
                         nb_epochs_already_trained = csv_hist["epoch"].max() + 1
                         print("nb_epochs_already_trained =", nb_epochs_already_trained)
                         loaded = True
-                    except Exception as e:
+                    except Exception:
                         try:
                             self.model.load_weights(checkpointPath[key])
                             csv_hist = pd.read_csv(
@@ -1196,7 +1201,8 @@ class LSTMandSpikeNetwork:
                     epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
-                )  # steps_per_epoch = int(self.params.nSteps / self.params.nEpochs)
+                    steps_per_epoch=steps_per_epoch.astype(int),
+                )
 
                 self.trainLosses[key] = np.transpose(
                     np.stack(
@@ -1248,7 +1254,32 @@ class LSTMandSpikeNetwork:
         totMask,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
         **kwargs,
-    ) -> Dict[str, tf.data.Dataset]:
+    ) -> Tuple[Dict[str, tf.data.Dataset], Optional[Dict[str, np.ndarray]]]:
+        """
+        Create the dataset loading pipeline. It includes parsing, filtering, batching, data augmentation and prefetching. If oversampling resampling is enabled, it is also applied here and returns the counts for each position bin.
+
+        Parameters
+        ----------
+        filename : str
+            The name of the TFRecord file containing the dataset.
+        windowSizeMS : int
+            The size of the window in milliseconds.
+        behaviorData : dict
+            Dictionary containing behavioral data such as positions and times.
+        totMask : dict or list
+            Mask to filter the dataset based on speed and epochs.
+        augmentation_config : NeuralDataAugmentation, Optional
+            Configuration for data augmentation.
+        **kwargs : dict, Optional
+            Additional parameters such as onTheFlyCorrection, shuffle, batch_size, inference_mode, extract_spikes_counts.
+
+        Returns
+        -------
+        datasets : dict
+            Dictionary containing the training and testing datasets.
+        counts : dict of np.ndarray or None
+            Dict of arrays containing counts for oversampling resampling, or None if not applicable.
+        """
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         shuffle = kwargs.get("shuffle", True)
         batchSize = kwargs.get("batch_size", self.params.batchSize)
@@ -1309,6 +1340,7 @@ class LSTMandSpikeNetwork:
                 else {"train": totMask_backup}
             )
         datasets = {}
+        counts = {}
         for key in totMask.keys():
             # creates a lookup table to filter by pos index, and by totMask (speed + epoch)
             table = tf.lookup.StaticHashTable(
@@ -1338,7 +1370,7 @@ class LSTMandSpikeNetwork:
 
             # now that we have clean positions, we can resample if needed
             if self.params.OversamplingResampling and key == "train":
-                dataset = self._apply_oversampling_resampling(
+                dataset, count_tmp = self._apply_oversampling_resampling(
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
 
@@ -1426,8 +1458,16 @@ class LSTMandSpikeNetwork:
             dataset = dataset.with_options(options).prefetch(tf.data.AUTOTUNE)
 
             datasets[key] = dataset
+            counts[key] = (
+                count_tmp
+                if self.params.OversamplingResampling and key == "train"
+                else None
+            )
 
-        return datasets
+        if self.params.OversamplingResampling:
+            return datasets, counts
+        else:
+            return datasets, None
 
     def create_optimized_parse_function(
         self,
@@ -1611,7 +1651,7 @@ class LSTMandSpikeNetwork:
         else:
             filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
 
-        dataset = self._dataset_loading_pipeline(
+        datasets, _ = self._dataset_loading_pipeline(
             filename,
             windowSizeMS,
             behaviorData,
@@ -1620,7 +1660,8 @@ class LSTMandSpikeNetwork:
             onTheFlyCorrection=onTheFlyCorrection,
             shuffle=False,
             **kwargs,
-        )["test"]
+        )
+        dataset = datasets["test"]
         # -------------------------------------------------------------------------
         # CUSTOM SYNCHRONIZED INFERENCE LOOP
         # -------------------------------------------------------------------------
@@ -2105,6 +2146,24 @@ class LSTMandSpikeNetwork:
             )
 
     def _apply_oversampling_resampling(self, dataset, windowSizeMS, shuffle=True):
+        """
+        Apply oversampling resampling to the training dataset to balance the samples.
+
+        Args:
+            dataset : tf.data.Dataset
+                The training dataset to be resampled.
+            windowSizeMS : int
+                The window size in milliseconds.
+            shuffle : bool, optional
+                Whether to shuffle the dataset after resampling, by default True.
+
+        Returns:
+            tf.data.Dataset
+                The resampled training dataset.
+            counts
+                np.ndarray
+                The counts of samples in each bin before resampling.
+        """
         print("Using oversampling resampling on the training set")
 
         # FIX: make sure GaussianHeatmap is initialized - force it ?
@@ -2236,7 +2295,7 @@ class LSTMandSpikeNetwork:
                     "oversampling_effect.png",
                 ),
             )
-        return dataset
+        return dataset, counts
 
     def get_artificial_spikes(
         self,
@@ -2336,7 +2395,7 @@ class LSTMandSpikeNetwork:
             else f"dataset_stride{windowSizeMS}.tfrec"
         )
 
-        datasets = self._dataset_loading_pipeline(
+        datasets, _ = self._dataset_loading_pipeline(
             filename,
             windowSizeMS,
             behaviorData,
