@@ -891,7 +891,7 @@ class LSTMandSpikeNetwork:
 
         ### Create neccessary arrays
         windowSizeMS = kwargs.pop("windowSizeMS", 36)
-        scheduler = kwargs.get("scheduler", "decay")
+        scheduler = kwargs.get("scheduler", "cosine")
         isPredLoss = kwargs.get("isPredLoss", True)
         earlyStop = kwargs.get("earlyStop", False)
         strideFactor = kwargs.get("strideFactor", 1)
@@ -1087,7 +1087,12 @@ class LSTMandSpikeNetwork:
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
-            LRScheduler = self.LRScheduler(self.params.learningRates)
+            LRScheduler = self.LRScheduler(
+                lrs=self.params.learningRates,
+                total_epochs=self.params.nEpochs,
+                warmup_epochs=kwargs.get("warmup_epochs", 10),
+                min_lr=kwargs.get("min_lr", 1e-6),
+            )
             if scheduler == "fixed":
                 schedule = tf.keras.callbacks.LearningRateScheduler(
                     LRScheduler.schedule_fixed
@@ -1096,8 +1101,14 @@ class LSTMandSpikeNetwork:
                 schedule = tf.keras.callbacks.LearningRateScheduler(
                     LRScheduler.schedule_decay
                 )
+            elif scheduler == "cosine":
+                schedule = tf.keras.callbacks.LearningRateScheduler(
+                    LRScheduler.schedule_cosine
+                )
             else:
-                raise ValueError('Learning rate schedule is either "fixed" or "decay"')
+                raise ValueError(
+                    'Learning rate schedule is either "fixed", "decay" or "cosine"'
+                )
 
             # NOTE: In case you need debugging, toggle this profiling line to True
             is_tbcallback = False
@@ -2490,39 +2501,67 @@ class LSTMandSpikeNetwork:
 
     ########### START OF HELPING LSTMandSpikeNetwork FUNCTIONS#####################
     class LRScheduler:
-        def __init__(self, lrs):
+        def __init__(self, lrs, total_epochs=100, warmup_epochs=10, min_lr=1e-6):
+            """
+            Args:
+                lrs: list of learning rates (lrs[0] is used as initial base LR)
+                total_epochs: total number of training epochs
+                warmup_epochs: number of epochs for linear warmup
+                min_lr: minimum learning rate at the end of training
+            """
             self.lrs = lrs
+            self.initial_lr = lrs[0]
+            self.total_epochs = total_epochs
+            self.warmup_epochs = warmup_epochs
+            self.min_lr = min_lr
 
         def schedule_fixed(self, epoch, lr):
             if len(self.lrs) == 1:
-                print(f"learning rate is {lr}")
                 return self.lrs[0]
             elif len(self.lrs) == 2:
-                if epoch < 10:
-                    return self.lrs[0]
-                else:
-                    return self.lrs[1]
+                return self.lrs[0] if epoch < 10 else self.lrs[1]
             elif len(self.lrs) == 3:
                 if epoch < 10:
                     return self.lrs[0]
-                elif 10 <= epoch < 50:
+                elif epoch < 50:
                     return self.lrs[1]
                 else:
                     return self.lrs[2]
             else:
-                raise ValueError(
-                    "You cannot have more than 3 learning rate values for schedule_fixed"
-                )
+                return lr
 
         def schedule_decay(self, epoch, lr):
             if epoch < 10:
-                print(f"learning rate is {lr}")
                 return lr
             else:
-                new_lr = lr * tf.math.exp(-0.01)
-                new_lr = float(new_lr.numpy())
-                print(f"learning rate is {new_lr}")
-                return new_lr
+                new_lr = lr * np.exp(-0.01)
+                print(f"Epoch {epoch}: learning rate is {new_lr}")
+                return float(new_lr)
+
+        def schedule_cosine_warmup(self, epoch, lr):
+            """
+            Linear warmup followed by Cosine Decay.
+            """
+            # 1. Linear Warmup
+            if epoch < self.warmup_epochs:
+                # Linearly increase from approx 0 to initial_lr
+                alpha = (epoch + 1) / self.warmup_epochs
+                new_lr = self.initial_lr * alpha
+
+            # 2. Cosine Decay
+            else:
+                # Progress from 0.0 to 1.0 during the decay phase
+                decay_steps = self.total_epochs - self.warmup_epochs
+                current_step = min(epoch - self.warmup_epochs, decay_steps)
+
+                # Cosine function varies from 1 to -1, mapped to 1 to 0
+                cosine_decay = 0.5 * (1 + np.cos(np.pi * current_step / decay_steps))
+
+                # Scale between initial_lr and min_lr
+                new_lr = (self.initial_lr - self.min_lr) * cosine_decay + self.min_lr
+
+            print(f"Epoch {epoch}: learning rate is {new_lr:.6f}")
+            return float(new_lr)
 
     def fix_linearizer(self, mazePoints, tsProj):
         ## For the linearization we define two fixed inputs:
