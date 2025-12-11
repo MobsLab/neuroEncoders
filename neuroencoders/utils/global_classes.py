@@ -1715,7 +1715,7 @@ class Params:
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
         self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.04
+            "GaussianSigma", 0.05
         )  # 1/44 ~= 0.023, so it should cover ~3 bins
         self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
         self.GaussianNeg = -50  # value for forbidden zones in the heatmap

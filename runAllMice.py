@@ -20,7 +20,7 @@ win_values = [0.504]  # only kept for new dataset
 win_values = [0.108, 0.252]
 win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
-win_values = [0.252, 0.108, 0.036]  # only kept for new dataset
+win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 # Mice name
 mice_nb = []
 mice_nb = [
@@ -37,8 +37,9 @@ mice_nb = [
     "M1239_PAG",
     "M1199_reversal",
     "M905",
+    "M1199_MFB",
 ]
-nameExp = "unitNorm_CSI_very_small_model_2Transformer"
+nameExp = "unitNorm_GroupAttention_3Transformer"
 nbEpochs = str(200)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -204,22 +205,22 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--gpu",
             "--target",
             target,
-            # "--predicted_loss",
             "--early_stop",
-            # "--transform_w_log",
             "--no_dense",
-            # "--mixed_loss",
-            # "--no_gaussian",
-            # "--contrastive_loss",
             "--n_features",
-            "64",
+            "128",
             "--dim_factor",
             "3",
             "--n_transformers",
-            "2",
+            "3",
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
+            # "--predicted_loss",
+            # "--transform_w_log",
+            # "--mixed_loss",
+            # "--no_gaussian",
+            # "--contrastive_loss",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

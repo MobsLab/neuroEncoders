@@ -1,7 +1,7 @@
 # Load libs
 import gc
 import os
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import psutil
@@ -210,10 +210,275 @@ class spikeNet(tf.keras.layers.Layer):
             )
 
 
+class SpikeNet1D(tf.keras.layers.Layer):
+    """
+    Refined Spike Encoder using per-channel 1D convolutions.
+    Unlike standard Conv2D, this does not convolve across the channel dimension
+    in the early layers, preserving channel independence until the dense stage.
+    """
+
+    def __init__(
+        self,
+        nChannels=4,
+        device="/cpu:0",
+        nFeatures=128,
+        number="",
+        dropout_rate=0.2,
+        **kwargs,
+    ):
+        name = kwargs.pop("name", f"spikeNet1D{number}")
+        self.reduce_dense = kwargs.pop("reduce_dense", False)
+        self.batch_normalization = kwargs.pop("batch_normalization", True)
+        self.no_cnn = kwargs.pop("no_cnn", False)
+        super().__init__(name=name, **kwargs)
+        self.nChannels = nChannels
+        self.nFeatures = nFeatures
+        self.device = device
+
+        with tf.device(self.device):
+            # Layer 1: (1, 3) kernel -> Convolves time (3 bins), independent channels (1)
+            self.conv1 = tf.keras.layers.Conv2D(
+                16, (1, 3), padding="same", activation=None
+            )
+            self.bn1 = tf.keras.layers.BatchNormalization()
+            self.act1 = tf.keras.layers.Activation("relu")
+            self.pool1 = tf.keras.layers.MaxPool2D(
+                (1, 2), padding="same"
+            )  # Pool time only
+
+            # Layer 2
+            self.conv2 = tf.keras.layers.Conv2D(
+                32, (1, 3), padding="same", activation=None
+            )
+            self.bn2 = tf.keras.layers.BatchNormalization()
+            self.act2 = tf.keras.layers.Activation("relu")
+            self.pool2 = tf.keras.layers.MaxPool2D((1, 2), padding="same")
+
+            # Layer 3
+            self.conv3 = tf.keras.layers.Conv2D(
+                64, (1, 3), padding="same", activation=None
+            )
+            self.bn3 = tf.keras.layers.BatchNormalization()
+            self.act3 = tf.keras.layers.Activation("relu")
+            self.pool3 = tf.keras.layers.MaxPool2D((1, 2), padding="same")
+
+            # Dense Projector
+            self.flatten = tf.keras.layers.Flatten()
+            self.dropout = tf.keras.layers.Dropout(dropout_rate)
+
+            # Reduce dimension
+            self.dense1 = tf.keras.layers.Dense(nFeatures * 2, activation="relu")
+            self.dense_out = tf.keras.layers.Dense(
+                nFeatures, activation=None, name=f"outputCNN{number}"
+            )
+            self.unit_norm = tf.keras.layers.UnitNormalization(axis=1)
+
+    def __call__(self, input):
+        return self.apply(input)
+
+    def apply(self, inputs):
+        with tf.device(self.device):
+            # Inputs shape: (Batch, nChannels, TimeBins)
+            # Expand dims to (Batch, nChannels, TimeBins, 1) to treat as "Image"
+            x = kops.expand_dims(inputs, axis=-1)
+
+            # Block 1
+            x = self.conv1(x)  # (B, nCh, T, 16)
+            x = self.bn1(x)
+            x = self.act1(x)
+            x = self.pool1(x)  # (B, nCh, T/2, 16)
+
+            # Block 2
+            x = self.conv2(x)
+            x = self.bn2(x)
+            x = self.act2(x)
+            x = self.pool2(x)
+
+            # Block 3
+            x = self.conv3(x)
+            x = self.bn3(x)
+            x = self.act3(x)
+            x = self.pool3(x)
+
+            # Aggregation
+            x = self.flatten(x)  # Mixes channels and time features here
+            x = self.dense1(x)
+            x = self.dropout(x)
+            x = self.dense_out(x)
+
+            # Normalize embedding
+            x = self.unit_norm(x)
+
+        return x
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "nChannels": self.nChannels,
+                "device": self.device,
+                "nFeatures": self.nFeatures,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        nChannels = config.get("nChannels", 4)
+        device = config.get("device", "/cpu:0")
+        nFeatures = config.get("nFeatures", 128)
+        number = config.get("number", "")
+        batch_normalization = config.get("batch_normalization", True)
+        reduce_dense = config.get("reduce_dense", False)
+        no_cnn = config.get("no_cnn", False)
+        return cls(
+            nChannels=nChannels,
+            device=device,
+            nFeatures=nFeatures,
+            number=number,
+            batch_normalization=batch_normalization,
+            reduce_dense=reduce_dense,
+            no_cnn=no_cnn,
+        )
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        # validate input shape
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected input shape (batch, time, channels), got {input_shape}"
+            )
+        if input_shape[1] != self.nChannels:
+            raise ValueError(
+                f"Expected input shape with {self.nChannels} channels, got {input_shape[1]}"
+            )
+
+    @property
+    def variables(self):
+        vars_list = (
+            self.conv1.variables
+            + self.conv2.variables
+            + self.conv3.variables
+            + self.dense_out.variables
+        )
+        if self.batch_normalization:
+            vars_list += self.bn1.variables + self.bn2.variables + self.bn3.variables
+        return vars_list
+
+    def layers(self):
+        layers_list = (
+            self.conv1,
+            self.conv2,
+            self.conv3,
+            self.dense_out,
+        )
+        if self.batch_normalization:
+            layers_list += (self.bn1, self.bn2, self.bn3)
+        return layers_list
+
+
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 
 
 ########### TRANSFORMER ENCODER CLASS #####################
+class GroupAttentionFusion(tf.keras.layers.Layer):
+    """
+    Fuses features from multiple spike groups using Self-Attention.
+    Instead of concatenating [G1, G2, ...], this layer allows groups to
+    contextualize each other before flattening.
+    """
+
+    def __init__(self, n_groups, embed_dim, num_heads=4, device="/cpu:0", **kwargs):
+        super().__init__(**kwargs)
+        self.n_groups = n_groups
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.device = device
+
+        with tf.device(self.device):
+            self.mha = tf.keras.layers.MultiHeadAttention(
+                num_heads=num_heads, key_dim=embed_dim // num_heads
+            )
+            self.norm = tf.keras.layers.LayerNormalization()
+            self.dropout = tf.keras.layers.Dropout(0.1)
+            self.flatten = tf.keras.layers.Flatten()
+
+    def call(self, inputs):
+        # inputs: List of tensors, each shape (Batch, Time, Features)
+        with tf.device(self.device):
+            # 1. Stack groups: (Batch, Time, Groups, Features)
+            x = tf.stack(inputs, axis=2)
+
+            # 2. Add Group Embeddings
+            # Broadcast embeddings across Batch and Time
+            embeddings = tf.cast(self.group_embeddings, x.dtype)
+            x = x + embeddings
+
+            shape = tf.shape(x)
+            B, T = shape[0], shape[1]
+
+            # 3. Merge Batch and Time for Attention
+            # Attention operates on the 'Groups' dimension (axis 2)
+            # Shape becomes (Batch*Time, Groups, Features)
+            x_reshaped = tf.reshape(x, (B * T, self.n_groups, self.embed_dim))
+
+            # 4. Self-Attention over groups
+            attn_out = self.mha(query=x_reshaped, value=x_reshaped, key=x_reshaped)
+            x_reshaped = self.norm(x_reshaped + self.dropout(attn_out))
+
+            # 5. Restore temporal dimension & Flatten groups
+            # Reshape to (Batch, Time, Groups * Features)
+            # This prepares the tensor for the downstream LSTM/Transformer
+            output = tf.reshape(x_reshaped, (B, T, self.n_groups * self.embed_dim))
+
+        return output
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_groups": self.n_groups,
+                "embed_dim": self.embed_dim,
+                "num_heads": self.num_heads,
+                "device": self.device,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        n_groups = config.get("n_groups", 2)
+        embed_dim = config.get("embed_dim", 64)
+        num_heads = config.get("num_heads", 4)
+        device = config.get("device", "/cpu:0")
+        return cls(
+            n_groups=n_groups, embed_dim=embed_dim, num_heads=num_heads, device=device
+        )
+
+    def build(self, input_shape):
+        """
+        Create learnable group embeddings.
+        input_shape is a list of shapes [(B, T, F), (B, T, F), ...]
+        """
+        # Learnable positional embedding for each group ID
+        # Shape: (1, 1, n_groups, embed_dim) for broadcasting over Batch and Time
+        self.group_embeddings = self.add_weight(
+            name="group_embeddings",
+            shape=(1, 1, self.n_groups, self.embed_dim),
+            initializer="uniform",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+
 class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     """Global Average Pooling that respects masking"""
 
