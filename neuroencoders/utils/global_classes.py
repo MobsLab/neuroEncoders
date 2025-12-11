@@ -1696,7 +1696,7 @@ class Params:
             2 if not self.isTransformer else 4
         )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
-        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.2)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.35)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
