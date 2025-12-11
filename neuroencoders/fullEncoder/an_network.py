@@ -818,14 +818,11 @@ class LSTMandSpikeNetwork:
 
         # Compile the model
         # TODO: use params.optimizer instead of hardcoding RMSprop
-        # self.optimizer = tf.keras.optimizers.RMSprop(
-        #     learning_rate=kwargs.get("lr", self.params.learningRates[0])
-        # )
         self.optimizer = tf.keras.optimizers.AdamW(
             learning_rate=kwargs.get("lr", self.params.learningRates[0]),
             beta_1=0.9,
-            beta_2=0.98,
-            epsilon=1e-09,
+            beta_2=0.999,
+            epsilon=1e-07,
             weight_decay=getattr(self.params, "weight_decay", 1e-4),
             global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
         )
@@ -1345,7 +1342,11 @@ class LSTMandSpikeNetwork:
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
 
-            if shuffle:
+            if key != "test":
+                # handle dataset ran out of data by repeating it
+                dataset = dataset.repeat()
+
+            if key != "test" and shuffle:
                 dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
             dataset = dataset.batch(batchSize, drop_remainder=True)
