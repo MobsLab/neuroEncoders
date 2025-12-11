@@ -963,6 +963,10 @@ class LSTMandSpikeNetwork:
 
         # Manage folders
         os.makedirs(os.path.join(self.folderModels, str(windowSizeMS)), exist_ok=True)
+        os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)), exist_ok=True)
+        os.makedirs(
+            os.path.join(self.folderResultSleep, str(windowSizeMS)), exist_ok=True
+        )
         os.makedirs(
             os.path.join(self.folderModels, str(windowSizeMS), "full"), exist_ok=True
         )
@@ -1844,13 +1848,15 @@ class LSTMandSpikeNetwork:
                 print("Processing spike counts for CSV...")
 
                 # Concatenate the raw indices
-                full_index_raw = np.concatenate(list_index_in_dat_raw, axis=0)
+                full_index_raw = [
+                    row.tolist() for batch in list_index_in_dat_raw for row in batch
+                ]
 
                 # Construct DataFrame directly from the arrays (Much faster than row-loop)
                 data_dict = {
                     "posIndex": full_pos_index,
                     # Convert list of arrays/lists to string or keep as object for indexInDat
-                    "indexInDat": [x.tolist() for x in full_index_raw],
+                    "indexInDat": full_index_raw,
                 }
 
                 # Add group counts

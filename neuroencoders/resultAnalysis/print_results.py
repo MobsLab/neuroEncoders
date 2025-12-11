@@ -138,7 +138,7 @@ def print_results(
                 )
             )
             .values[:, 1]
-            .astype(int)
+            .astype(float)
         )
         try:
             qControl = np.squeeze(
@@ -740,7 +740,7 @@ def overview_fig(
         ax_x_time.scatter(
             timeStepsPred[selection],
             inferring[selection, 0],
-            "r",
+            c="r",
             alpha=0.7,
             label="Predicted X",
         )
@@ -764,7 +764,7 @@ def overview_fig(
         ax_y_time.scatter(
             timeStepsPred[selection],
             inferring[selection, 1],
-            "r",
+            c="r",
             alpha=0.7,
             label="Predicted Y",
         )
@@ -810,14 +810,15 @@ def overview_fig(
         # Summary statistics
         ax_stats = plt.subplot2grid((3, 4), (2, 3))
         ax_stats.axis("off")
-        stats_text = f"""Summary Statistics:
+        stats_text = f"""
+                      Summary Statistics:
 
-Position RMSE: {np.sqrt(np.mean(pos_error**2)):.3f}
-Direction MAE: {np.mean(dir_error):.3f} rad
-Distance MAE: {np.mean(dist_error):.3f}
+                      Position RMSE: {np.sqrt(np.mean(pos_error**2)):.3f}
+                      Direction MAE: {np.mean(dir_error):.3f} rad
+                      Distance MAE: {np.mean(dist_error):.3f}
 
-N samples: {selection.sum()}
-        """
+                      N samples: {selection.sum()}
+                      """
         ax_stats.text(
             0.1,
             0.9,
@@ -848,6 +849,7 @@ N samples: {selection.sum()}
             plt.close(fig)
 
         fig = plt.figure()
+        ax = fig.add_subplot(111)
         scatter = ax.scatter(
             inferring[selection, 0],
             inferring[selection, 1],
@@ -878,6 +880,7 @@ N samples: {selection.sum()}
             )
         if kwargs.get("close", True):
             plt.close(fig)
+        return
 
     elif dimOutput == 2:
         if fig is None:
@@ -1488,7 +1491,7 @@ def fig_interror(
         )
         and not force
     ):
-        return
+        return None, None
     fig, ax = plt.subplots()
     from matplotlib.widgets import Slider
     from mpl_toolkits.axes_grid1 import make_axes_locatable
