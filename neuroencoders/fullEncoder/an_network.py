@@ -745,11 +745,11 @@ class LSTMandSpikeNetwork:
                 regression_loss = self.distance_weighted_nt_xent(
                     z=output,
                     pos=self.truePos,
-                    sigma=5,
+                    sigma=getattr(self.params, "contrastive_sigma", 5.0),
+                    temperature=getattr(self.params, "contrastive_temperature", 0.1),
                 )
-                tempPosLoss += regression_loss * getattr(
-                    self.params, "lambda_contrastive", 0.5
-                )
+                lambda_c = getattr(self.params, "lambda_contrastive", 0.5)
+                tempPosLoss += lambda_c * regression_loss
 
             if self.params.transform_w_log:
                 posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
@@ -3393,64 +3393,73 @@ class LSTMandSpikeNetwork:
         # Get final predictions
         predictions = transformer_model.predict(transformer_inputs)
 
-    def distance_weighted_nt_xent(self, z, pos, sigma=2.0, temperature=0.1, eps=1e-8):
+    def distance_weighted_nt_xent(self, z, pos, sigma=5.0, temperature=0.1, eps=1e-8):
         """
-        z:   (N, D) latent vectors (unnormalized)
-        pos: (N, 2) ground-truth positions (x, y)
-        sigma: spatial kernel width
-        temperature: NT-Xent temperature
+        Contrastive loss based on spatial distance in XY space.
+
+        Args:
+            z: (N, D) latent vectors (from LSTM or Transformer output)
+            pos: (N, dimOutput) ground-truth positions. Will be sliced to (N, 2).
+            sigma: Spatial kernel width.
+                   NOTE: If positions are normalized [0,1], sigma should be small (e.g., 0.1).
+                   If positions are in cm (e.g., 0-100), sigma=5.0 is appropriate.
+            temperature: NT-Xent scaling parameter.
         """
+        # Ensure we operate on float32/float16
+        dtype = z.dtype
 
-        # ---- Normalize latents ----
-        z = tf.keras.layers.UnitNormalization(axis=1)(z)  # (N, D)
+        # 1. Get dynamic batch size (Crucial Fix for "None" error)
+        N = tf.shape(z)[0]
 
-        batch_size, nFeatures = kops.shape(z)[0], kops.shape(z)[1]
+        # 2. Normalize latents to unit length
+        # This ensures dot product = cosine similarity
+        z = tf.math.l2_normalize(z, axis=1)
 
-        # ---- Cosine similarity logits ----
-        logits = kops.matmul(z, kops.transpose(z))  # (N, N)
-        logits = logits / temperature
+        # 3. Compute pairwise Cosine Similarity Logits
+        # Shape: (N, N)
+        logits = tf.matmul(z, z, transpose_b=True)
+        logits = logits / tf.cast(temperature, dtype)
 
-        N = kops.shape(z)[0]
-        print(f"Batch size for loss: {N}")
+        # 4. Compute Pairwise Spatial Distances (only XY)
+        # Slice to keep only x,y columns (assumed to be the first 2)
+        pos_xy = tf.cast(pos[:, :2], dtype=dtype)
 
-        # reshape pos to batch_size, n_dims
-        pos = kops.reshape(pos, (N, kops.shape(pos)[1]))
-
-        # ---- Pairwise Euclidean distance matrix d_ij ----
-        pos_sq = kops.sum(kops.square(pos), axis=1, keepdims=True)  # (N,1)
-        print(f"pos_sq shape: {kops.shape(pos_sq)}")
+        # dist_sq = ||p_i||^2 + ||p_j||^2 - 2 <p_i, p_j>
+        pos_sq = tf.reduce_sum(tf.square(pos_xy), axis=1, keepdims=True)
         d2 = (
             pos_sq
-            + kops.transpose(pos_sq)
-            - 2.0 * kops.matmul(pos, kops.transpose(pos))
-        )  # (N,N)
-        print(f"d2 shape before clamp: {kops.shape(d2)}")
-        d2 = kops.maximum(d2, 0.0)
+            - 2.0 * tf.matmul(pos_xy, pos_xy, transpose_b=True)
+            + tf.transpose(pos_sq)
+        )
+        d2 = tf.maximum(d2, 0.0)  # Clip negative values from precision errors
 
-        d = kops.sqrt(d2 + 1e-12)
+        # 5. Compute Distance Weights (Soft Positives)
+        # w_ij = exp( - dist_ij^2 / (2*sigma^2) )
+        # High weight if spatially close
+        sigma_sq = tf.cast(sigma**2, dtype)
+        w = tf.exp(-0.5 * d2 / sigma_sq)
 
-        # ---- Distance-weighted soft positives ----
-        w = kops.exp(-0.5 * kops.square(d) / (sigma**2))  # (N, N)
-        print(f"Weight matrix shape: {kops.shape(w)}")
+        # 6. Mask Self-Similarity (Diagonal)
+        # We don't want the network to learn "I am similar to myself" (trivial)
+        mask_diag = tf.eye(N, dtype=dtype)
+        w = w * (1.0 - mask_diag)  # Zero out diagonal weights
 
-        # Zero diagonal (no self-positives)
-        w = w * (1.0 - kops.eye(N))
+        # Normalize weights per row so they sum to 1 (conceptually similar to soft labels)
+        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + eps
+        w_norm = w / w_sum
 
-        # Normalize per row
-        w_sum = kops.sum(w, axis=1, keepdims=True) + eps
-        w_norm = w / w_sum  # each row sums to 1
-
-        # ---- Mask self-similarity logits ----
-        mask = 1.0 - kops.eye(N)
-        logits_masked = logits * mask + (-1e9) * (1.0 - mask)
-
-        # ---- Log-softmax over rows ----
+        # 7. Compute Softmax Log-Probabilities
+        # Standard NT-Xent/InfoNCE denominator includes all negatives AND positives
+        # We mask the self-similarity (diagonal) from the logits with a large negative number
+        # so it doesn't affect the softmax denominator.
+        logits_masked = logits + (-1e9) * mask_diag
         log_prob = tf.nn.log_softmax(logits_masked, axis=1)
 
-        # ---- Contrastive loss: weighted NLL ----
-        loss_per_anchor = -kops.sum(w_norm * log_prob, axis=1)
+        # 8. Compute Loss
+        # Cross entropy with soft targets w_norm
+        loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
 
-        return kops.mean(loss_per_anchor)
+        return tf.reduce_mean(loss_per_anchor)
 
     @classmethod
     def clear_session(cls):
