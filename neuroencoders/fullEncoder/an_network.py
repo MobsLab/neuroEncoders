@@ -743,7 +743,9 @@ class LSTMandSpikeNetwork:
                 print("output shape:", output.shape)
                 print("truePos shape:", self.truePos.shape)
                 regression_loss_layer = nnUtils.ContrastiveLossLayer()
-                regression_loss = regression_loss_layer([output, self.truePos])
+                # TODO: make sure the layer exists
+                _, linearized_pos = self.l_function_layer(self.truePos[:, :2])
+                regression_loss = regression_loss_layer([output, linearized_pos])
                 lambda_c = getattr(self.params, "lambda_contrastive", 0.5)
                 tempPosLoss += lambda_c * regression_loss
 
@@ -1152,7 +1154,7 @@ class LSTMandSpikeNetwork:
                     # print(f"starting tensorboard at {self.folderResult}/logs ")
                     run = wandb.init(
                         entity="touseul",
-                        project="encore",
+                        project="ContrastiveLoss",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
