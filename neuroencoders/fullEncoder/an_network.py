@@ -1377,10 +1377,6 @@ class LSTMandSpikeNetwork:
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
 
-            if key != "test":
-                # handle dataset ran out of data by repeating it
-                dataset = dataset.repeat()
-
             if key != "test" and shuffle:
                 dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
@@ -1429,7 +1425,7 @@ class LSTMandSpikeNetwork:
             print(
                 f"finalizing the {key} dataset pipeline... Will move data to {self.deviceName}"
             )
-            dataset = dataset.cache().apply(
+            dataset = dataset.apply(
                 tf.data.experimental.copy_to_device(self.deviceName)
             )
             # WARN: this seems to be cached on CPU RAM, not GPU RAM...
@@ -1458,6 +1454,9 @@ class LSTMandSpikeNetwork:
             options.threading.private_threadpool_size = max(1, os.cpu_count() - 1)
             options.threading.max_intra_op_parallelism = 1
 
+            if key != "test":
+                # handle dataset ran out of data by repeating it
+                dataset = dataset.repeat()
             dataset = dataset.with_options(options).prefetch(tf.data.AUTOTUNE)
 
             datasets[key] = dataset
