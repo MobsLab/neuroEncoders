@@ -3279,6 +3279,101 @@ def _get_loss_function(
         raise ValueError(f"Loss function {loss_name} not recognized")
 
 
+class ContrastiveLossLayer(tf.keras.layers.Layer):
+    def __init__(
+        self,
+        temperature=0.1,
+        sigma=5.0,
+        eps=1e-8,
+        name="contrastive_loss_layer",
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        self.temperature = temperature
+        self.sigma = sigma
+        self.eps = eps
+
+    def call(self, inputs):
+        """
+        Args:
+            inputs: A dictionary with keys:
+                - 'z': (N, D) latent vectors (from LSTM or Transformer output)
+                - 'pos': (N, dimOutput) ground-truth positions. Will be sliced to (N, 2).
+        Returns:
+            Scalar contrastive loss value.
+        """
+        z, pos = inputs
+        return self.distance_weighted_nt_xent(z, pos)
+
+    def distance_weighted_nt_xent(self, z, pos):
+        """
+        Contrastive loss based on spatial distance in XY space.
+
+        Args:
+            z: (N, D) latent vectors (from LSTM or Transformer output)
+            pos: (N, dimOutput) ground-truth positions. Will be sliced to (N, 2).
+            sigma: Spatial kernel width.
+                   NOTE: If positions are normalized [0,1], sigma should be small (e.g., 0.1).
+                   If positions are in cm (e.g., 0-100), sigma=5.0 is appropriate.
+            temperature: NT-Xent scaling parameter.
+        """
+        # Ensure we operate on float32/float16
+        dtype = z.dtype
+
+        # 1. Get dynamic batch size (Crucial Fix for "None" error)
+        N = tf.shape(z)[0]
+
+        # 2. Normalize latents to unit length
+        # This ensures dot product = cosine similarity
+        z = tf.math.l2_normalize(z, axis=1)
+
+        # 3. Compute pairwise Cosine Similarity Logits
+        # Shape: (N, N)
+        logits = tf.matmul(z, z, transpose_b=True)
+        logits = logits / tf.cast(self.temperature, dtype)
+
+        # 4. Compute Pairwise Spatial Distances (only XY)
+        # Slice to keep only x,y columns (assumed to be the first 2)
+        pos_xy = tf.cast(pos[:, :2], dtype=dtype)
+
+        # dist_sq = ||p_i||^2 + ||p_j||^2 - 2 <p_i, p_j>
+        pos_sq = tf.reduce_sum(tf.square(pos_xy), axis=1, keepdims=True)
+        d2 = (
+            pos_sq
+            - 2.0 * tf.matmul(pos_xy, pos_xy, transpose_b=True)
+            + tf.transpose(pos_sq)
+        )
+        d2 = tf.maximum(d2, 0.0)  # Clip negative values from precision errors
+
+        # 5. Compute Distance Weights (Soft Positives)
+        # w_ij = exp( - dist_ij^2 / (2*sigma^2) )
+        # High weight if spatially close
+        sigma_sq = tf.cast(self.sigma**2, dtype)
+        w = tf.exp(-0.5 * d2 / sigma_sq)
+
+        # 6. Mask Self-Similarity (Diagonal)
+        # We don't want the network to learn "I am similar to myself" (trivial)
+        mask_diag = tf.eye(N, dtype=dtype)
+        w = w * (1.0 - mask_diag)  # Zero out diagonal weights
+
+        # Normalize weights per row so they sum to 1 (conceptually similar to soft labels)
+        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + self.eps
+        w_norm = w / w_sum
+
+        # 7. Compute Softmax Log-Probabilities
+        # Standard NT-Xent/InfoNCE denominator includes all negatives AND positives
+        # We mask the self-similarity (diagonal) from the logits with a large negative number
+        # so it doesn't affect the softmax denominator.
+        logits_masked = logits + (-1e9) * mask_diag
+        log_prob = tf.nn.log_softmax(logits_masked, axis=1)
+
+        # 8. Compute Loss
+        # Cross entropy with soft targets w_norm
+        loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
+
+        return tf.reduce_mean(loss_per_anchor)
+
+
 class MultiColumnLossLayer(tf.keras.layers.Layer):
     def __init__(
         self,
