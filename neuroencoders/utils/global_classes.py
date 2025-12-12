@@ -1746,7 +1746,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.001]
+            "learningRates", [0.0007]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet

@@ -978,7 +978,8 @@ class LSTMandSpikeNetwork:
         balanced_size = self.GaussianHeatmap.get_allowed_mask().sum() * max_count
         print("Balanced dataset size would be:", balanced_size)
         steps_per_epoch = np.ceil(
-            balanced_size / (self.params.batchSize * kwargs.get("num_augmentations", 1))
+            (balanced_size * kwargs.get("num_augmentations", 1))
+            / (self.params.batchSize * min(kwargs.get("num_augmentations", 1), 2))
         )
 
         ### Train the model(s)
