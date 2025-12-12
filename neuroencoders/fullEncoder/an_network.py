@@ -472,7 +472,7 @@ class LSTMandSpikeNetwork:
 
         # 4. Pooling and final dense layers
         # size [batch, max_nspikes, nFeatures]
-        mymask = kops.cast(mymask, dtype=tf.float32)
+        mymask = kops.cast(mymask, dtype="float32")
         output = self.lstmsNets[-3](
             output, mask=mymask
         )  # pooling (size [batch, nFeatures*nGroups])
@@ -488,7 +488,7 @@ class LSTMandSpikeNetwork:
         )  # another dense layer after pooling (size [batch, TransformerDenseSize2])
 
         if not getattr(self.params, "GaussianHeatmap", False):
-            x = kops.cast(x, dtype=tf.float32)
+            x = kops.cast(x, dtype="float32")
             myoutputPos = self.denseFeatureOutput(x)
             if "pos" in self.params.target.lower():
                 myoutputPos = self.ProjectionInMazeLayer(
@@ -499,19 +499,19 @@ class LSTMandSpikeNetwork:
                 myoutputPos = self.GaussianHeatmap(
                     x
                 )  # outputs a flattened heatmap for better concatenation afterwards
-                x = kops.cast(x, dtype=tf.float32)  # size [batch, GRID_H * GRID_W]
+                x = kops.cast(x, dtype="float32")  # size [batch, GRID_H * GRID_W]
                 others = self.denseFeatureOutput(x)  # size [batch, dimOutput - 2]
                 # this way we have 2 different outputs in the model: a heatmap and some scalars
                 myoutputPos = tf.keras.layers.Concatenate(name="heatmap_cat_others")(
                     [myoutputPos, others]
                 )
-                myoutputPos = kops.cast(myoutputPos, dtype=tf.float32)
+                myoutputPos = kops.cast(myoutputPos, dtype="float32")
             else:
                 myoutputPos = self.GaussianHeatmap(
                     x, flatten=False
                 )  # we dont need to worry about flattening, it's the only output
                 myoutputPos = kops.cast(
-                    myoutputPos, dtype=tf.float32
+                    myoutputPos, dtype="float32"
                 )  # size [batch, GRID_H, GRID_W]
 
         return myoutputPos, output, sumFeatures
@@ -710,7 +710,7 @@ class LSTMandSpikeNetwork:
                         loss_type=getattr(self.params, "loss_type", "safe_kl"),
                         return_batch=True,
                     )
-                tempPosLoss = kops.cast(tempPosLoss, tf.float32)
+                tempPosLoss = kops.cast(tempPosLoss, "float32")
 
             else:
                 if getattr(self.params, "mixed_loss", False):
@@ -728,7 +728,7 @@ class LSTMandSpikeNetwork:
                 tempPosLoss = loss_function(myoutputPos_weighted, truePos_weighted)[
                     :, tf.newaxis
                 ]
-                tempPosLoss = kops.cast(tempPosLoss, tf.float32)
+                tempPosLoss = kops.cast(tempPosLoss, "float32")
             # for main loss functions:
             # if loss function is mse
             # tempPosLoss is in cm2
