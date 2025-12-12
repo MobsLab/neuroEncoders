@@ -3283,7 +3283,7 @@ class ContrastiveLossLayer(tf.keras.layers.Layer):
     def __init__(
         self,
         temperature=0.1,
-        sigma=5.0,
+        sigma=0.1,
         eps=1e-8,
         name="contrastive_loss_layer",
         **kwargs,
@@ -3311,12 +3311,13 @@ class ContrastiveLossLayer(tf.keras.layers.Layer):
 
         Args:
             z: (N, D) latent vectors (from LSTM or Transformer output)
-            pos: (N, dimOutput) ground-truth positions. Will be sliced to (N, 2).
+            pos: (N, 1) ground-truth linearized positions.
             sigma: Spatial kernel width.
                    NOTE: If positions are normalized [0,1], sigma should be small (e.g., 0.1).
-                   If positions are in cm (e.g., 0-100), sigma=5.0 is appropriate.
+                   If positions are normalized between 0-1 (as they should), a value for sigma like 0.05-0.2 is recommended.
             temperature: NT-Xent scaling parameter.
         """
+
         # Ensure we operate on float32/float16
         dtype = z.dtype
 
@@ -3332,24 +3333,17 @@ class ContrastiveLossLayer(tf.keras.layers.Layer):
         logits = tf.matmul(z, z, transpose_b=True)
         logits = logits / tf.cast(self.temperature, dtype)
 
-        # 4. Compute Pairwise Spatial Distances (only XY)
-        # Slice to keep only x,y columns (assumed to be the first 2)
-        pos_xy = tf.cast(pos[:, :2], dtype=dtype)
+        # 4. Compute Pairwise Spatial Distances (linearized positions)
+        pos_1d = tf.cast(pos, dtype=dtype)
 
-        # dist_sq = ||p_i||^2 + ||p_j||^2 - 2 <p_i, p_j>
-        pos_sq = tf.reduce_sum(tf.square(pos_xy), axis=1, keepdims=True)
-        d2 = (
-            pos_sq
-            - 2.0 * tf.matmul(pos_xy, pos_xy, transpose_b=True)
-            + tf.transpose(pos_sq)
-        )
-        d2 = tf.maximum(d2, 0.0)  # Clip negative values from precision errors
+        # Compute pairwise absolute distances:
+        # d_ij = |pos[i] - pos[j]|
+        d = tf.abs(pos_1d - tf.transpose(pos_1d))  # (N, N)
 
         # 5. Compute Distance Weights (Soft Positives)
-        # w_ij = exp( - dist_ij^2 / (2*sigma^2) )
-        # High weight if spatially close
+        # w_ij = exp( - d_ij^2 / (2*sigma^2) )
         sigma_sq = tf.cast(self.sigma**2, dtype)
-        w = tf.exp(-0.5 * d2 / sigma_sq)
+        w = tf.exp(-0.5 * tf.square(d) / sigma_sq)
 
         # 6. Mask Self-Similarity (Diagonal)
         # We don't want the network to learn "I am similar to myself" (trivial)
@@ -3372,6 +3366,25 @@ class ContrastiveLossLayer(tf.keras.layers.Layer):
         loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
 
         return tf.reduce_mean(loss_per_anchor)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "temperature": self.temperature,
+                "sigma": self.sigma,
+                "eps": self.eps,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(
+            temperature=config.get("temperature", 0.1),
+            sigma=config.get("sigma", 0.1),
+            eps=config.get("eps", 1e-8),
+        )
 
 
 class MultiColumnLossLayer(tf.keras.layers.Layer):
