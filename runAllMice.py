@@ -39,8 +39,8 @@ mice_nb = [
     "M905",
     "M1199_MFB",
 ]
-nameExp = "unitNorm_GroupAttention_3Transformer"
-nbEpochs = str(200)
+nameExp = "long_training_unitNorm_GroupAttention_3Transformer"
+nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
 target_bayes = "pos"

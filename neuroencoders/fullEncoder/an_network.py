@@ -977,7 +977,9 @@ class LSTMandSpikeNetwork:
         # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
         balanced_size = self.GaussianHeatmap.get_allowed_mask().sum() * max_count
         print("Balanced dataset size would be:", balanced_size)
-        steps_per_epoch = np.ceil(balanced_size / self.params.batchSize)
+        steps_per_epoch = np.ceil(
+            balanced_size / (self.params.batchSize * kwargs.get("num_augmentations", 1))
+        )
 
         ### Train the model(s)
         # Train
@@ -1092,7 +1094,7 @@ class LSTMandSpikeNetwork:
             LRScheduler = self.LRScheduler(
                 lrs=self.params.learningRates,
                 total_epochs=self.params.nEpochs,
-                warmup_epochs=kwargs.get("warmup_epochs", 10),
+                warmup_epochs=kwargs.get("warmup_epochs", 4),
                 min_lr=kwargs.get("min_lr", 1e-6),
             )
             if scheduler == "fixed":
