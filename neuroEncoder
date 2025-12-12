@@ -5,17 +5,16 @@
 # t.balenbois@gmail.com; brygalovdm@gmail.com; theotime.decharrin@gmail.com
 
 import os
+import shutil
 import subprocess
 
 # Load standard libs
 import sys
 from warnings import warn
 
-from numpy import max as np_max
 import numpy as np
 import pandas as pd
-import shutil
-
+from numpy import max as np_max
 
 from neuroencoders.importData.epochs_management import inEpochsMask
 
