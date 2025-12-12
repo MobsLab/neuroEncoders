@@ -407,7 +407,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             self.dropout = tf.keras.layers.Dropout(0.1)
             self.flatten = tf.keras.layers.Flatten()
 
-    def call(self, inputs):
+    def call(self, inputs, mask=None):
         # inputs: List of tensors, each shape (Batch, Time, Features)
         with tf.device(self.device):
             # 1. Stack groups: (Batch, Time, Groups, Features)
@@ -426,8 +426,24 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             # Shape becomes (Batch*Time, Groups, Features)
             x_reshaped = tf.reshape(x, (B * T, self.n_groups, self.embed_dim))
 
+            # handle mask if provided
+            mha_mask = None
+            if mask is not None:
+                # mask comes in as shape (Batch, max(nSpikes), n_groups)
+                # we need to reshape it to match x_reshape ie (Batch*Time, n_groups)
+                mask_reshaped = tf.reshape(mask, (B * T, self.n_groups))
+                # now expands dims to (Batch*Time, 1, n_groups) for mha
+                # The shape (B, 1, S) allows broadcasting the mask over the query dimension (dim 1).
+                # Meaning: "For every querying group, here are the keys (target groups) you can attend to."
+                mha_mask = tf.expand_dims(mask_reshaped, axis=1)
+
             # 4. Self-Attention over groups
-            attn_out = self.mha(query=x_reshaped, value=x_reshaped, key=x_reshaped)
+            attn_out = self.mha(
+                query=x_reshaped,
+                value=x_reshaped,
+                key=x_reshaped,
+                attention_mask=mha_mask,
+            )
             x_reshaped = self.norm(x_reshaped + self.dropout(attn_out))
 
             # 5. Restore temporal dimension & Flatten groups
@@ -968,7 +984,7 @@ def parse_serialized_sequence(
                 # store result in tensors
                 tensors[f"group{g}_spikes_count"] = spike_counts
 
-        # even if batched: gather all together, meaning batch and spikes are merged
+        # WARN: even if batched: gather all together, meaning batch and spikes are merged
         tensors["group" + str(g)] = tf.reshape(
             tensors["group" + str(g)], [-1, params.nChannelsPerGroup[g], 32]
         )
