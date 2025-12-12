@@ -491,7 +491,7 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
         with tf.device(self.device):
             if mask is not None:
                 # Convert mask to float and add dimension for broadcasting
-                mask_float = kops.cast(mask, tf.float32)  # [batch, seq_len]
+                mask_float = kops.cast(mask, "float32")  # [batch, seq_len]
                 # expand mask to match input dimensions [batch, seq_len, 1]
                 mask_expanded = kops.expand_dims(mask_float, axis=-1)
 
@@ -541,7 +541,7 @@ def create_attention_mask_from_padding_mask(padding_mask):
         return None
 
     # Convert to float (1.0 for valid, 0.0 for padded)
-    attention_mask = kops.cast(padding_mask, tf.float32)
+    attention_mask = kops.cast(padding_mask, "float32")
 
     # Create 4D mask for attention: [batch_size, 1, seq_len, seq_len]
     mask_shape = kops.shape(attention_mask)
@@ -614,7 +614,6 @@ def safe_mask_creation(batchedInputGroups, pad_value=-1):
     """
     # If input is sparse, convert to dense immediately without intermediate casting
     if isinstance(batchedInputGroups, tf.SparseTensor):
-        print("roh flute")
         # Convert sparse to dense in one operation
         batchedInputGroups = tf.sparse.to_dense(
             batchedInputGroups,
@@ -623,7 +622,7 @@ def safe_mask_creation(batchedInputGroups, pad_value=-1):
 
     # Ensure we're working with float32 from the start
     if batchedInputGroups.dtype != tf.float32:
-        batchedInputGroups = kops.cast(batchedInputGroups, tf.float32)
+        batchedInputGroups = kops.cast(batchedInputGroups, "float32")
 
     # Create mask using only dense operations
     padding_mask = kops.where(
@@ -739,7 +738,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
             attention_mask = None
             if mask is not None:
                 attention_mask = create_attention_mask_from_padding_mask(mask)
-                attention_mask = kops.cast(attention_mask, tf.float32)
+                attention_mask = kops.cast(attention_mask, "float32")
 
             # Multi-head attention with residual connection
             attn_output = self.mha(
@@ -1557,7 +1556,7 @@ class LinearizationLayer(tf.keras.layers.Layer):
         """
         with tf.device(self.device):
             # Ensure consistent dtype
-            euclidean_data = kops.cast(euclidean_data, tf.float32)
+            euclidean_data = kops.cast(euclidean_data, "float32")
 
             # Expand dimensions for broadcasting
             # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
@@ -1576,7 +1575,7 @@ class LinearizationLayer(tf.keras.layers.Layer):
             # Gather results
             projected_pos = kops.take(self.maze_points, best_points)
             linear_pos = kops.take(self.ts_proj, best_points)
-            linear_pos = kops.cast(linear_pos, tf.float32)
+            linear_pos = kops.cast(linear_pos, "float32")
 
         return [projected_pos, linear_pos]
 
@@ -2084,7 +2083,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Apply forbidden mask here too
         allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        allowed_mask = kops.cast(allowed_mask, tf.float32)
+        allowed_mask = kops.cast(allowed_mask, "float32")
         gauss *= allowed_mask
 
         # Safer normalization
@@ -2455,7 +2454,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.l_function_layer = l_function_layer
         self.sinkhorn_eps = sinkhorn_eps
 
-        allowed_mask = kops.cast(self.get_allowed_mask(use_tensorflow=True), tf.float32)
+        allowed_mask = kops.cast(self.get_allowed_mask(use_tensorflow=True), "float32")
         allowed_mask_flat = kops.reshape(allowed_mask, (-1,))  # [H*W]
 
         # keep only allowed coordinates
@@ -2552,7 +2551,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.allowed_mask_tf = kops.cast(
             self.get_allowed_mask(use_tensorflow=True), tf.float32
         )
-        self.forbid_mask_tf = kops.cast(1 - self.allowed_mask_tf, tf.float32)
+        self.forbid_mask_tf = kops.cast(1 - self.allowed_mask_tf, "float32")
 
         self.NEG = tf.constant(self.neg, tf.float32)
         self.EPS = self.eps
@@ -2574,7 +2573,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         if wmap is None:
             wmap = self.WMAP
         weights = kops.expand_dims(wmap, 0) * kops.expand_dims(
-            kops.cast(self.allowed_mask_tf, tf.float32), 0
+            kops.cast(self.allowed_mask_tf, "float32"), 0
         )
 
         se = kops.square(probs - target_hw)
@@ -2611,13 +2610,13 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Process targets with safety checks
         allowed_mask = kops.expand_dims(self.allowed_mask_tf, 0)
-        allowed_mask = kops.cast(allowed_mask, tf.float32)
+        allowed_mask = kops.cast(allowed_mask, "float32")
         P = target_hw * allowed_mask
         P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
         safe_eps = kops.maximum(self.EPS, 1e-8)
 
         uniform_fallback = allowed_mask / kops.sum(
-            kops.cast(self.allowed_mask_tf, tf.float32)
+            kops.cast(self.allowed_mask_tf, "float32")
         )
         P = kops.where(
             P_sum > safe_eps,
@@ -2644,7 +2643,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Apply weighting
         if wmap is not None:
             weights = kops.expand_dims(wmap, 0)
-            valid_mask = kops.cast(weights > 0, tf.float32)
+            valid_mask = kops.cast(weights > 0, "float32")
             kl = kl * weights
             loss_per_sample = kops.sum(kl, axis=[1, 1]) / (
                 kops.sum(weights * valid_mask) + safe_eps
@@ -2676,11 +2675,11 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         """
         batch_size = tf.shape(logits_hw)[0]
         allowed_mask = self.allowed_mask_tf
-        allowed_mask = kops.cast(allowed_mask, tf.float32)
+        allowed_mask = kops.cast(allowed_mask, "float32")
 
         # Clip logits for stability and apply forbid mask
         masked_logits = kops.where(
-            kops.expand_dims(kops.cast(self.forbid_mask_tf, tf.float32), 0) > 0,
+            kops.expand_dims(kops.cast(self.forbid_mask_tf, "float32"), 0) > 0,
             self.NEG,
             logits_hw,
         )
@@ -2708,7 +2707,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Apply weighting map if provided
         if wmap is not None:
             weights = wmap[None]
-            valid_mask = kops.cast(weights > 0, tf.float32)
+            valid_mask = kops.cast(weights > 0, "float32")
             wsum = kops.sum(weights * valid_mask) + self.EPS
             kl = kl * (kops.sum(weights) / wsum)
 
@@ -2790,11 +2789,11 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             alpha = 1  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
-        allowed_mask = kops.cast(self.allowed_mask_tf, tf.float32)
+        allowed_mask = kops.cast(self.allowed_mask_tf, "float32")
 
         # Mask + logits flatten
         masked_logits = kops.where(
-            kops.expand_dims(kops.cast(self.forbid_mask_tf, tf.float32), 0) > 0,
+            kops.expand_dims(kops.cast(self.forbid_mask_tf, "float32"), 0) > 0,
             self.NEG,
             logits_hw,
         )
@@ -3408,7 +3407,7 @@ class MultiColumnLossLayer(tf.keras.layers.Layer):
                 y_pred_cols = tf.gather(y_pred, columns, axis=1)
                 loss_val = loss_fn(y_true_cols, y_pred_cols)
 
-            weight = kops.cast(self.individual_weights[col_spec], dtype=tf.float32)
+            weight = kops.cast(self.individual_weights[col_spec], dtype="float32")
             total_loss += weight * loss_val
 
             # Mark these columns as processed
