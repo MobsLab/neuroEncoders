@@ -407,6 +407,8 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             self.dropout = tf.keras.layers.Dropout(0.1)
             self.flatten = tf.keras.layers.Flatten()
 
+        self.supports_masking = True  # To indicate that this layer supports masking
+
     def call(self, inputs, mask=None):
         # inputs: List of tensors, each shape (Batch, Time, Features)
         with tf.device(self.device):
@@ -493,6 +495,15 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             trainable=True,
         )
         super().build(input_shape)
+
+    def compute_mask(self, inputs, mask=None):
+        # Propagate the input mask to the output
+        return mask
+
+    def compute_output_shape(self, input_shape):
+        # Output shape: (Batch, Time, n_groups * embed_dim)
+        batch_size, time_steps = input_shape[0][0], input_shape[0][1]
+        return (batch_size, time_steps, self.n_groups * self.embed_dim)
 
 
 class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
