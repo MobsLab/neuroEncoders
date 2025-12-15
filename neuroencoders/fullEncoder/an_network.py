@@ -599,41 +599,43 @@ class LSTMandSpikeNetwork:
                 # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
                 allFeatures.append(filledFeatureTrain)
 
-            # # OLD: concatenation over features
-            # allFeatures = tf.tuple(tensors=allFeatures)
-            # # synchronizes the computation of all features (like a join)
-            # # The concatenation is made over axis 2, which is the Feature axis
-            # # So we reserve columns to each output of the spiking networks...
-            # allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+            if getattr(self.params, "use_group_attention_fusion", False):
+                # OLD: concatenation over features
+                allFeatures = tf.tuple(tensors=allFeatures)
+                # synchronizes the computation of all features (like a join)
+                # The concatenation is made over axis 2, which is the Feature axis
+                # So we reserve columns to each output of the spiking networks...
+                allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+            else:
+                print("Using Group Attention Fusion for feature fusion")
+                # NEW: Group Attention Fusion over groups (see nnUtils.GroupAttentionFusion)
+                # Create a mask for Group Attention Fusion
+                # indices[group] == 0 implies it gathered 'zeroForGather' (no spike)
+                # indices[group] > 0 implies it gathered a real spike feature
 
-            # NEW: Group Attention Fusion over groups (see nnUtils.GroupAttentionFusion)
-            # Create a mask for Group Attention Fusion
-            # indices[group] == 0 implies it gathered 'zeroForGather' (no spike)
-            # indices[group] > 0 implies it gathered a real spike feature
+                # 1. Cast indices to the appropriate shape (Batch, Time) match filledFeatureTrain
+                # indices are usually flat, so we reshape them using the same logic as filledFeatureTrain
+                group_masks = []
+                for group in range(self.params.nGroups):
+                    # Get the indices for this group
+                    inds = self.indices[group]
 
-            # 1. Cast indices to the appropriate shape (Batch, Time) match filledFeatureTrain
-            # indices are usually flat, so we reshape them using the same logic as filledFeatureTrain
-            group_masks = []
-            for group in range(self.params.nGroups):
-                # Get the indices for this group
-                inds = self.indices[group]
+                    # Create boolean: True if spike exists, False if zero-padding
+                    is_active = kops.not_equal(inds, 0)
 
-                # Create boolean: True if spike exists, False if zero-padding
-                is_active = kops.not_equal(inds, 0)
+                    # Reshape to (Batch, Time) to match the feature tensors
+                    # We use -1 to infer the time dimension dynamically
+                    is_active = kops.reshape(is_active, (int(batchSize), -1))
 
-                # Reshape to (Batch, Time) to match the feature tensors
-                # We use -1 to infer the time dimension dynamically
-                is_active = kops.reshape(is_active, (int(batchSize), -1))
+                    group_masks.append(is_active)
 
-                group_masks.append(is_active)
-
-            # 2. Stack to shape (Batch, Time, nGroups)
-            # The Attention layer usually expects the mask in this format (or Broadcastable)
-            fusion_mask = kops.stack(group_masks, axis=-1)
-            # --- END OF FIX ---
-            # we pass a list of tensors of shape (NbBatch, NbTotSpikeDetected, nFeatures) for each spike group
-            # the class then applies a multi-head attention mechanism to fuse the information from different groups
-            allFeatures = self.group_fusion(allFeatures, mask=fusion_mask)
+                # 2. Stack to shape (Batch, Time, nGroups)
+                # The Attention layer usually expects the mask in this format (or Broadcastable)
+                fusion_mask = kops.stack(group_masks, axis=-1)
+                # --- END OF FIX ---
+                # we pass a list of tensors of shape (NbBatch, NbTotSpikeDetected, nFeatures) for each spike group
+                # the class then applies a multi-head attention mechanism to fuse the information from different groups
+                allFeatures = self.group_fusion(allFeatures, mask=fusion_mask)
 
             # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
             # We would like to mask timesteps that were added for batching purpose, before running the RNN
