@@ -599,7 +599,7 @@ class LSTMandSpikeNetwork:
                 # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
                 allFeatures.append(filledFeatureTrain)
 
-            if getattr(self.params, "use_group_attention_fusion", False):
+            if not getattr(self.params, "use_group_attention_fusion", False):
                 # OLD: concatenation over features
                 allFeatures = tf.tuple(tensors=allFeatures)
                 # synchronizes the computation of all features (like a join)
