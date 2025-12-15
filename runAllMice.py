@@ -39,7 +39,7 @@ mice_nb = [
     "M905",
     "M1199_MFB",
 ]
-nameExp = "long_training_unitNorm_GroupAttention_3Transformer"
+nameExp = "2Transformer_small_contrastive"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -208,19 +208,19 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--early_stop",
             "--no_dense",
             "--n_features",
-            "128",
+            "64",
             "--dim_factor",
-            "3",
+            "4",
             "--n_transformers",
-            "3",
+            "2",
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
+            "--contrastive_loss",
             # "--predicted_loss",
             # "--transform_w_log",
             # "--mixed_loss",
             # "--no_gaussian",
-            # "--contrastive_loss",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

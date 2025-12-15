@@ -1698,7 +1698,7 @@ class Params:
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
         self.dropoutCNN = kwargs.pop("dropoutCNN", 0.35)
         self.lstmSize = kwargs.pop("lstmSize", 64)
-        default_dropout_lstm = 0.3 if not self.isTransformer else 0.5
+        default_dropout_lstm = 0.3 if not self.isTransformer else 0.35
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
         self.ff_dim1 = kwargs.pop(
             "ff_dim1",
