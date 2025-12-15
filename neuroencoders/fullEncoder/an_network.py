@@ -265,10 +265,10 @@ class LSTMandSpikeNetwork:
                     TransformerEncoderBlock,
                 )
 
-                dim_factor = getattr(
+                self.dim_factor = getattr(
                     self.params, "dim_factor", 1
                 )  # factor to increase the dimension of the transformer if needed
-                print("dim_factor:", dim_factor)
+                print("dim_factor:", self.dim_factor)
                 print(
                     "project transformer:",
                     getattr(self.params, "project_transformer", True),
@@ -277,7 +277,7 @@ class LSTMandSpikeNetwork:
                 self.lstmsNets = (
                     [
                         PositionalEncoding(
-                            d_model=self.params.nFeatures * dim_factor
+                            d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
                             else self.params.nFeatures * self.params.nGroups,
                             # if we dont shrink the feature dimension before feeding to the transformer, we need to account for the nGroups factor
@@ -286,7 +286,7 @@ class LSTMandSpikeNetwork:
                     ]
                     + [
                         TransformerEncoderBlock(
-                            d_model=self.params.nFeatures * dim_factor
+                            d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
                             else self.params.nFeatures * self.params.nGroups,
                             num_heads=self.params.nHeads,
@@ -336,13 +336,13 @@ class LSTMandSpikeNetwork:
                 name="feature_output",
                 kernel_regularizer="l2",
             )
-            dim_factor = getattr(
+            self.dim_factor = getattr(
                 self.params, "dim_factor", 1
             )  # factor to increase the dimension of the transformer if needed
 
             if getattr(self.params, "project_transformer", True):
                 self.transformer_projection_layer = tf.keras.layers.Dense(
-                    self.params.nFeatures * dim_factor,
+                    self.params.nFeatures * self.dim_factor,
                     activation="relu",
                     dtype=tf.float32,
                     name="feature_projection_transformer",
@@ -435,7 +435,11 @@ class LSTMandSpikeNetwork:
             )
         )([mymask, allFeatures_raw])
 
-        if getattr(self.params, "project_transformer", True):
+        if (
+            getattr(self.params, "project_transformer", True)
+            and self.params.nFeatures * self.dim_factor
+            != self.params.nFeatures * self.params.nGroups
+        ):
             # 1. Projection layer
             allFeatures = self.transformer_projection_layer(allFeatures)
             sumFeatures = kops.sum(
@@ -476,9 +480,6 @@ class LSTMandSpikeNetwork:
         output = self.lstmsNets[-3](
             output, mask=mymask
         )  # pooling (size [batch, nFeatures*nGroups])
-
-        # finally, normalize the output on the unit-hypersphere (see FaceNet paper)
-        output = tf.keras.layers.UnitNormalization(axis=-1)(output)
 
         x = self.lstmsNets[-2](
             output
@@ -678,6 +679,8 @@ class LSTMandSpikeNetwork:
                     allFeatures, allFeatures_raw, mymask, **kwargs
                 )  # shape (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
 
+            # finally, normalize the output on the unit-hypersphere (see FaceNet paper)
+            myoutputPos = tf.keras.layers.UnitNormalization(axis=-1)(myoutputPos)
             # Regression loss
             loss_function = self._parse_loss_function_from_params(myoutputPos)
 
@@ -771,7 +774,7 @@ class LSTMandSpikeNetwork:
                 regression_loss_layer = nnUtils.ContrastiveLossLayer()
                 # TODO: make sure the layer exists
                 _, linearized_pos = self.l_function_layer(self.truePos[:, :2])
-                regression_loss = regression_loss_layer([output, linearized_pos])
+                regression_loss = regression_loss_layer([myoutputPos, linearized_pos])
                 lambda_c = getattr(self.params, "lambda_contrastive", 0.5)
                 tempPosLoss += lambda_c * regression_loss
 
@@ -1242,7 +1245,7 @@ class LSTMandSpikeNetwork:
                     epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
-                    steps_per_epoch=steps_per_epoch.astype(int),
+                    # steps_per_epoch=steps_per_epoch.astype(int),
                 )
 
                 self.trainLosses[key] = np.transpose(

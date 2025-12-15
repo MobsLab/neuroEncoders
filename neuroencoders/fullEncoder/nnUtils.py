@@ -271,7 +271,6 @@ class SpikeNet1D(tf.keras.layers.Layer):
             self.dense_out = tf.keras.layers.Dense(
                 nFeatures, activation=None, name=f"outputCNN{number}"
             )
-            self.unit_norm = tf.keras.layers.UnitNormalization(axis=1)
 
     def __call__(self, input):
         return self.apply(input)
@@ -284,19 +283,22 @@ class SpikeNet1D(tf.keras.layers.Layer):
 
             # Block 1
             x = self.conv1(x)  # (B, nCh, T, 16)
-            x = self.bn1(x)
+            if self.batch_normalization:
+                x = self.bn1(x)
             x = self.act1(x)
             x = self.pool1(x)  # (B, nCh, T/2, 16)
 
             # Block 2
             x = self.conv2(x)
-            x = self.bn2(x)
+            if self.batch_normalization:
+                x = self.bn2(x)
             x = self.act2(x)
             x = self.pool2(x)
 
             # Block 3
             x = self.conv3(x)
-            x = self.bn3(x)
+            if self.batch_normalization:
+                x = self.bn3(x)
             x = self.act3(x)
             x = self.pool3(x)
 
@@ -305,9 +307,6 @@ class SpikeNet1D(tf.keras.layers.Layer):
             x = self.dense1(x)
             x = self.dropout(x)
             x = self.dense_out(x)
-
-            # Normalize embedding
-            x = self.unit_norm(x)
 
         return x
 
