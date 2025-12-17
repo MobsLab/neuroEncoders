@@ -690,7 +690,7 @@ def main(args):
             num_augmentations = args.num_augmentations
             print("num_augmentations", num_augmentations)
             if num_augmentations is None:
-                num_augmentations = 9 if args.window < 0.504 else 5
+                num_augmentations = 3 if args.window < 0.504 else 2
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,

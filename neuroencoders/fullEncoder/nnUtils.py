@@ -237,30 +237,22 @@ class SpikeNet1D(tf.keras.layers.Layer):
 
         with tf.device(self.device):
             # Layer 1: (1, 3) kernel -> Convolves time (3 bins), independent channels (1)
-            self.conv1 = tf.keras.layers.Conv2D(
-                16, (1, 3), padding="same", activation=None
-            )
+            self.conv1 = tf.keras.layers.Conv1D(16, 3, padding="same", activation=None)
             self.bn1 = tf.keras.layers.BatchNormalization()
             self.act1 = tf.keras.layers.Activation("relu")
-            self.pool1 = tf.keras.layers.MaxPool2D(
-                (1, 2), padding="same"
-            )  # Pool time only
+            self.pool1 = tf.keras.layers.MaxPool1D(2, padding="same")  # Pool time only
 
             # Layer 2
-            self.conv2 = tf.keras.layers.Conv2D(
-                32, (1, 3), padding="same", activation=None
-            )
+            self.conv2 = tf.keras.layers.Conv1D(32, 3, padding="same", activation=None)
             self.bn2 = tf.keras.layers.BatchNormalization()
             self.act2 = tf.keras.layers.Activation("relu")
-            self.pool2 = tf.keras.layers.MaxPool2D((1, 2), padding="same")
+            self.pool2 = tf.keras.layers.MaxPool1D(2, padding="same")
 
             # Layer 3
-            self.conv3 = tf.keras.layers.Conv2D(
-                64, (1, 3), padding="same", activation=None
-            )
+            self.conv3 = tf.keras.layers.Conv1D(64, 3, padding="same", activation=None)
             self.bn3 = tf.keras.layers.BatchNormalization()
             self.act3 = tf.keras.layers.Activation("relu")
-            self.pool3 = tf.keras.layers.MaxPool2D((1, 2), padding="same")
+            self.pool3 = tf.keras.layers.MaxPool1D(2, padding="same")
 
             # Dense Projector
             self.flatten = tf.keras.layers.Flatten()
