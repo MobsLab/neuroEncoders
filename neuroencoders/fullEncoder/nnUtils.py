@@ -270,8 +270,9 @@ class SpikeNet1D(tf.keras.layers.Layer):
     def apply(self, inputs):
         with tf.device(self.device):
             # Inputs shape: (Batch, nChannels, TimeBins)
-            # Expand dims to (Batch, nChannels, TimeBins, 1) to treat as "Image"
-            x = kops.expand_dims(inputs, axis=-1)
+            # # Expand dims to (Batch, nChannels, TimeBins, 1) to treat as "Image"
+            # x = kops.expand_dims(inputs, axis=-1)
+            x = inputs
 
             # Block 1
             x = self.conv1(x)  # (B, nCh, T, 16)

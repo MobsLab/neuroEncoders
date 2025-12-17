@@ -600,7 +600,7 @@ class LSTMandSpikeNetwork:
                 # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
                 allFeatures.append(filledFeatureTrain)
 
-            if not getattr(self.params, "use_group_attention_fusion", False):
+            if not getattr(self.params, "use_group_attention_fusion", True):
                 # OLD: concatenation over features
                 allFeatures = tf.tuple(tensors=allFeatures)
                 # synchronizes the computation of all features (like a join)
@@ -1046,7 +1046,7 @@ class LSTMandSpikeNetwork:
         # Train
         for key in checkpointPath.keys():
             print("Training the", key, "model")
-            nb_epochs_already_trained = 10
+            nb_epochs_already_trained = 0
             loaded = False
             managed_to_convert = (
                 True  # this way new checkpoints will be saved in keras3 format
@@ -1220,6 +1220,12 @@ class LSTMandSpikeNetwork:
                     wandb_callback = WandbMetricsLogger()
             if key != "predLoss":
                 if earlyStop:
+                    start_from_epoch = (
+                        max(self.params.earlyStop_start - nb_epochs_already_trained, 2),
+                    )
+                    print(
+                        f"will use early stopping starting from epoch {start_from_epoch}"
+                    )
                     es_callback = tf.keras.callbacks.EarlyStopping(
                         monitor="val_loss",
                         patience=2,
