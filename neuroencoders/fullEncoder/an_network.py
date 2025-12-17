@@ -680,7 +680,7 @@ class LSTMandSpikeNetwork:
                 )  # shape (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
 
             # finally, normalize the output on the unit-hypersphere (see FaceNet paper)
-            myoutputPos = tf.keras.layers.UnitNormalization(axis=-1)(myoutputPos)
+            # myoutputPos = tf.keras.layers.UnitNormalization(axis=-1)(myoutputPos)
             # Regression loss
             loss_function = self._parse_loss_function_from_params(myoutputPos)
 
@@ -775,7 +775,7 @@ class LSTMandSpikeNetwork:
                 # TODO: make sure the layer exists
                 _, linearized_pos = self.l_function_layer(self.truePos[:, :2])
                 regression_loss = regression_loss_layer([myoutputPos, linearized_pos])
-                lambda_c = getattr(self.params, "lambda_contrastive", 0.5)
+                lambda_c = getattr(self.params, "lambda_contrastive", 0.2)
                 tempPosLoss += lambda_c * regression_loss
 
             if self.params.transform_w_log:
@@ -1014,10 +1014,29 @@ class LSTMandSpikeNetwork:
         datasets, counts = self._dataset_loading_pipeline(
             filename, windowSizeMS, behaviorData, totMask, augmentation_config, **kwargs
         )
+        import termplotlib as tpl
+
+        count_x, bin_edges = np.histogram(counts["train"], bins=40)
+        fig = tpl.figure()
+        fig.hist(
+            count_x,
+            bin_edges,
+            grid=[15, 25],
+            force_ascii=False,
+        )
+        fig.show()
+
         max_count = counts["train"].max()
         # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
-        balanced_size = self.GaussianHeatmap.get_allowed_mask().sum() * max_count
+        print("Max count per bin in training set:", max_count)
+        print("total len of counts['train']:", len(counts["train"]))
+        print("num_bins:", self.coarse_H * self.coarse_W)
+        balanced_size = max_count * len(counts["train"])
         print("Balanced dataset size would be:", balanced_size)
+        print(
+            "Original training dataset size:",
+            self.GaussianHeatmap.training_positions.shape[0],
+        )
         steps_per_epoch = np.ceil(
             (balanced_size * kwargs.get("num_augmentations", 1))
             / (self.params.batchSize * min(kwargs.get("num_augmentations", 1), 2))
@@ -1136,7 +1155,7 @@ class LSTMandSpikeNetwork:
             LRScheduler = self.LRScheduler(
                 lrs=self.params.learningRates,
                 total_epochs=self.params.nEpochs,
-                warmup_epochs=kwargs.get("warmup_epochs", 4),
+                warmup_epochs=kwargs.get("warmup_epochs", 6),
                 min_lr=kwargs.get("min_lr", 1e-6),
             )
             if scheduler == "fixed":
@@ -1245,7 +1264,7 @@ class LSTMandSpikeNetwork:
                     epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
-                    # steps_per_epoch=steps_per_epoch.astype(int),
+                    steps_per_epoch=int(steps_per_epoch),
                 )
 
                 self.trainLosses[key] = np.transpose(
@@ -1419,6 +1438,7 @@ class LSTMandSpikeNetwork:
                 )
 
             if key != "test" and shuffle:
+                print("Shuffling the", key, "dataset")
                 dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
             dataset = dataset.batch(batchSize, drop_remainder=True)
@@ -2217,7 +2237,7 @@ class LSTMandSpikeNetwork:
         )
         # instead of oversampling on such tiny grid, we take a coarser grid mesh
         stride = 3
-        coarse_H, coarse_W = GRID_H // stride, GRID_W // stride
+        self.coarse_H, self.coarse_W = GRID_H // stride, GRID_W // stride
 
         @tf.autograph.experimental.do_not_convert
         def map_bin_class(ex):
@@ -2247,16 +2267,16 @@ class LSTMandSpikeNetwork:
         y_coarse = y_fine // stride
 
         # Step 3: coarse bin index
-        coarse_bins = y_coarse * coarse_W + x_coarse  # shape same as positions
-        counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
-            np.float32
-        )
+        coarse_bins = y_coarse * self.coarse_W + x_coarse  # shape same as positions
+        counts = np.bincount(
+            coarse_bins, minlength=self.coarse_H * self.coarse_W
+        ).astype(np.float32)
 
         # Flatten FORBID for easy masking
         # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
-        FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
-        for y in range(coarse_H):
-            for x in range(coarse_W):
+        FORBID_coarse = np.zeros((self.coarse_H, self.coarse_W), dtype=bool)
+        for y in range(self.coarse_H):
+            for x in range(self.coarse_W):
                 # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
                 if np.any(
                     self.GaussianHeatmap.forbid_mask_tf[
@@ -2275,7 +2295,7 @@ class LSTMandSpikeNetwork:
         initial_dist = counts / np.maximum(1.0, counts.sum())
         initial_dist = initial_dist[allowed_bins]
         target_dist = np.ones(
-            coarse_H * coarse_W,
+            self.coarse_H * self.coarse_W,
             np.float32,
         )
         target_dist[FORBID_flat] = 0  # forbid forbidden bins

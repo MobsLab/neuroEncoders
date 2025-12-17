@@ -1621,7 +1621,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 14)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 17)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
