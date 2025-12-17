@@ -496,7 +496,7 @@ class AnimatedPositionPlotter:
 
         # First, look for dim in kwargs
         dim = kwargs.get("dim", None)
-        self.dim_name = getattr(self.data_helper, "target", "position").capitalize()
+        self.dim_name = getattr(self.data_helper, "target", "pos").capitalize()
 
         if dim is None:
             if self.data_helper.target == "pos" and self.positions.shape[1] == 2:
@@ -1820,7 +1820,7 @@ class AnimatedPositionPlotter:
         ax.set_xlabel("X Position")
         ax.set_ylabel("Y Position")
 
-        title_text = "Position Trajectory"
+        title_text = f"Position Trajectory ({kwargs.get('which', 'ann')} decoder)"
 
         if not self.very_simple_plot:
             self.artists[name_axis]["pos_title"] = ax.set_title(

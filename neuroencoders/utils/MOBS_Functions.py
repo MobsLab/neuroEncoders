@@ -1475,6 +1475,7 @@ class Mouse_Results(Params, PaperFigures):
         """
         Initialize the plotter for the specified window size.
         """
+        which = kwargs.get("which", "ann")
         if winMS is None:
             win = self.windows[-1]
             winMS = self.windows_values[-1]
@@ -1495,7 +1496,10 @@ class Mouse_Results(Params, PaperFigures):
 
         positions_from_NN = kwargs.pop("positions_from_NN", None)
         if positions_from_NN is None:
-            positions_from_NN = self.resultsNN_phase[phase]["truePos"][idWindow]
+            if which.lower() == "bayes":
+                positions_from_NN = self.resultsBayes_phase[phase]["truePos"][idWindow]
+            else:
+                positions_from_NN = self.resultsNN_phase[phase]["truePos"][idWindow]
             if positions_from_NN is None:
                 raise ValueError(
                     f"True positions not found in resultsNN_phase[{phase}]. Please run load_results first."
@@ -1503,7 +1507,10 @@ class Mouse_Results(Params, PaperFigures):
 
         predicted = kwargs.pop("predicted", None)
         if predicted is None:
-            predicted = self.resultsNN_phase[phase]["fullPred"][idWindow]
+            if which.lower() == "bayes":
+                predicted = self.resultsBayes_phase[phase]["fullPred"][idWindow]
+            else:
+                predicted = self.resultsNN_phase[phase]["fullPred"][idWindow]
 
         speedMaskArray = kwargs.pop("speedMaskArray", None)
         if speedMaskArray is None and kwargs.get("useSpeedMask", False):
@@ -1512,7 +1519,10 @@ class Mouse_Results(Params, PaperFigures):
 
         prediction_time = kwargs.pop("prediction_time", None)
         if prediction_time is None:
-            prediction_time = self.resultsNN_phase[phase]["time"][idWindow]
+            if which.lower() == "bayes":
+                prediction_time = self.resultsBayes_phase[phase]["time"][idWindow]
+            else:
+                prediction_time = self.resultsNN_phase[phase]["time"][idWindow]
 
         posIndex = kwargs.pop("posIndex", None)
         if posIndex is None:
@@ -1521,64 +1531,105 @@ class Mouse_Results(Params, PaperFigures):
         blit = kwargs.pop("blit", True)
         predicted_probs = None
         if kwargs.get("plot_heatmap", False):
-            self.load_trainers(which="ann", **kwargs)
-            if (
-                getattr(self.ann[str(win)].params, "GaussianHeatmap", False)
-                and kwargs.get("predicted_heatmap", None) is None
-                and kwargs.get("plot_heatmap", False)
-            ):
+            if which.lower() == "ann":
+                self.load_trainers(which="ann", **kwargs)
+                if (
+                    getattr(self.ann[str(win)].params, "GaussianHeatmap", False)
+                    and kwargs.get("predicted_heatmap", None) is None
+                    and kwargs.get("plot_heatmap", False)
+                ):
+                    try:
+                        predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
+                            "logits_hw"
+                        ]
+                    except (AttributeError, KeyError, TypeError):
+                        # create an empty list of size windows_values
+                        self.resultsNN_phase_pkl[phase] = [None] * len(
+                            self.windows_values
+                        )
+                        try:
+                            with open(
+                                os.path.join(
+                                    self.projectPath.experimentPath,
+                                    "results",
+                                    str(winMS),
+                                    f"decoding_results{phase}.pkl",
+                                ),
+                                "rb",
+                            ) as f:
+                                results = pickle.load(f)
+                            self.resultsNN_phase_pkl[phase][idWindow] = results
+                            predicted_logits = self.resultsNN_phase_pkl[phase][
+                                idWindow
+                            ]["logits_hw"]
+                        except FileNotFoundError:
+                            print(
+                                f"No decoding_results{phase}.pkl found for window {winMS}."
+                            )
+                            self.ann[str(win)].params.GaussianHeatmap = False
+                            kwargs["predicted_heatmap"] = None
+                            kwargs["plot_heatmap"] = False
+                            predicted_probs = None
+                    if predicted_probs is not None:
+                        try:
+                            predicted_probs = (
+                                self.ann[str(win)]
+                                .GaussianHeatmap.decode_and_uncertainty(
+                                    predicted_logits, return_probs=True
+                                )[-1]
+                                .numpy()
+                            )
+                        except Exception as e:
+                            self.load_trainers(which="ann")
+                            predicted_probs = (
+                                self.ann[str(win)]
+                                .GaussianHeatmap.decode_and_uncertainty(
+                                    predicted_logits, return_probs=True
+                                )[-1]
+                                .numpy()
+                            )
+            else:
                 try:
-                    predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                        "logits_hw"
+                    predicted_map = self.resultsBayes_phase_pkl[phase][idWindow][
+                        "probaMaps"
                     ]
+                    predicted_heatmap = np.array(predicted_map)
+                    kwargs["predicted_heatmap"] = predicted_heatmap
                 except (AttributeError, KeyError, TypeError):
                     # create an empty list of size windows_values
-                    self.resultsNN_phase_pkl[phase] = [None] * len(self.windows_values)
+                    self.resultsBayes_phase_pkl[phase] = [None] * len(
+                        self.windows_values
+                    )
                     try:
                         with open(
                             os.path.join(
                                 self.projectPath.experimentPath,
                                 "results",
                                 str(winMS),
-                                f"decoding_results{phase}.pkl",
+                                f"bayes_decoding_results{phase}.pkl",
                             ),
                             "rb",
                         ) as f:
                             results = pickle.load(f)
-                        self.resultsNN_phase_pkl[phase][idWindow] = results
-                        predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                            "logits_hw"
+                        self.resultsBayes_phase_pkl[phase][idWindow] = results
+                        predicted_map = self.resultsBayes_phase_pkl[phase][idWindow][
+                            "probaMaps"
                         ]
+                        predicted_heatmap = np.array(predicted_map)
                     except FileNotFoundError:
                         print(
-                            f"No decoding_results{phase}.pkl found for window {winMS}."
+                            f"No bayes_decoding_results{phase}.pkl found for window {winMS}."
                         )
-                        self.ann[str(win)].params.GaussianHeatmap = False
                         kwargs["predicted_heatmap"] = None
                         kwargs["plot_heatmap"] = False
                         predicted_probs = None
-                if predicted_probs is not None:
-                    try:
-                        predicted_probs = (
-                            self.ann[str(win)]
-                            .GaussianHeatmap.decode_and_uncertainty(
-                                predicted_logits, return_probs=True
-                            )[-1]
-                            .numpy()
-                        )
-                    except Exception as e:
-                        self.load_trainers(which="ann")
-                        predicted_probs = (
-                            self.ann[str(win)]
-                            .GaussianHeatmap.decode_and_uncertainty(
-                                predicted_logits, return_probs=True
-                            )[-1]
-                            .numpy()
-                        )
 
         predicted_heatmap = kwargs.pop("predicted_heatmap", None)
         if not kwargs.get("plot_heatmap", False):
             predicted_heatmap = None
+
+        if which.lower() == "bayes":
+            data_helper.target = "pos"  # for now we did not try anything else
 
         plotter = AnimatedPositionPlotter(
             data_helper=data_helper,
