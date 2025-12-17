@@ -1529,7 +1529,10 @@ class Params:
             helper = kwargs.pop("helper", None)
 
         if len(args) >= 1:
+            windowSize = args[0]
             args = args[1:]
+        else:
+            windowSize = kwargs.pop("windowSize", None)
 
         if helper is None:
             return super().__new__(cls)
@@ -1540,7 +1543,13 @@ class Params:
             if load_path is not None:
                 params_path = load_path
             else:
-                params_path = os.path.join(helper.resultsPath, "Parameters.pkl")
+                params_path = os.path.join(
+                    helper.resultsPath,
+                    "..",
+                    str(int(windowSize * 1000)),
+                    "Parameters.pkl",
+                )
+                print(f"Looking for existing Params at: {params_path}")
             if os.path.isfile(params_path):
                 # load the params from pickle using the load classmethod
                 loaded = cls.load(params_path)
@@ -1628,7 +1637,7 @@ class Params:
         self._initialize_params_attributes(helper, **kwargs)
         # save those to json file
         if save_json and not os.path.isfile(
-            os.path.join(helper.resultsPath, "params.json")
+            os.path.abspath(os.path.join(self.resultsPath, "params.json"))
         ):
             self.save_params_to_json()
         if not os.path.isfile(os.path.join(self.resultsPath, "Parameters.pkl")):
@@ -1664,7 +1673,11 @@ class Params:
         self.target = (
             helper.target
         )  # target to predict, e.g. "pos", "lin", "direction", etc.
-        self.resultsPath = helper.resultsPath  # path to save results
+        self.resultsPath = os.path.join(
+            helper.resultsPath,
+            "..",
+            str(int(self.windowSizeMS)),
+        )  # path to save results
 
         # regarding data augmentation
         self.dataAugmentation = kwargs.pop("dataAugmentation", True)
@@ -1851,6 +1864,17 @@ class Params:
                 continue
             try:
                 setattr(self, attr_name, getattr(helper, attr_name))
+            except AttributeError:
+                pass  # Skip methods that can't be copied
+
+    def _delete_attr_from_helper(self, helper):
+        """Delete all attributes that originate from a DataHelper instance"""
+        # Copy all attributes from the helper
+        for attr_name in dir(helper):
+            if attr_name.startswith("_") or attr_name in ["load", "save"]:
+                continue
+            try:
+                delattr(self, attr_name)
             except AttributeError:
                 pass  # Skip methods that can't be copied
 
