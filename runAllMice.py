@@ -39,7 +39,7 @@ mice_nb = [
     "M905",
     "M1199_MFB",
 ]
-nameExp = "2Transformer_small"
+nameExp = "2Transformer_small_contrastive_groupFusion"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -216,7 +216,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
-            # "--contrastive_loss",
+            "--contrastive_loss",
             # "--predicted_loss",
             # "--transform_w_log",
             # "--mixed_loss",
