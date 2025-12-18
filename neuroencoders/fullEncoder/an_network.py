@@ -1267,7 +1267,7 @@ class LSTMandSpikeNetwork:
 
                 hist = self.model.fit(
                     datasets["train"],
-                    epochs=self.params.nEpochs - nb_epochs_already_trained + 10,
+                    epochs=self.params.nEpochs - nb_epochs_already_trained,
                     callbacks=callbacks,  # , tb_callback,cp_callback
                     validation_data=datasets["test"],
                     steps_per_epoch=int(steps_per_epoch),
