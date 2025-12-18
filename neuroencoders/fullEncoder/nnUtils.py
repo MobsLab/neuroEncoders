@@ -212,31 +212,35 @@ class spikeNet(tf.keras.layers.Layer):
 
 class SpikeNet1D(tf.keras.layers.Layer):
     """
-    Refined Spike Encoder using per-channel 1D convolutions.
-    Unlike standard Conv2D, this does not convolve across the channel dimension
-    in the early layers, preserving channel independence until the dense stage.
+    Refined Spike Encoder.
+    Input shape: (Batch, Channels, Time) -> e.g., (128, 6, 32)
+    This version transposes the input so Conv1D operates on the Time axis (32)
+    while keeping the 6 channels separate.
     """
 
     def __init__(
         self,
         nChannels=4,
-        device="/cpu:0",
+        device: str = "/cpu:0",
         nFeatures=128,
         number="",
         dropout_rate=0.2,
+        batch_normalization=True,
         **kwargs,
     ):
-        name = kwargs.pop("name", f"spikeNet1D{number}")
+        name = kwargs.pop("name", "spikeNet1D{}".format(number))
+        # TODO: implement reduce_dense and no_cnn options if needed
         self.reduce_dense = kwargs.pop("reduce_dense", False)
-        self.batch_normalization = kwargs.pop("batch_normalization", True)
         self.no_cnn = kwargs.pop("no_cnn", False)
         super().__init__(name=name, **kwargs)
         self.nChannels = nChannels
         self.nFeatures = nFeatures
+        self.batch_normalization = batch_normalization
         self.device = device
+        self.number = number
 
         with tf.device(self.device):
-            # Layer 1: (1, 3) kernel -> Convolves time (3 bins), independent channels (1)
+            # Layer 1: Convolves over time bins
             self.conv1 = tf.keras.layers.Conv1D(16, 3, padding="same", activation=None)
             self.bn1 = tf.keras.layers.BatchNormalization()
             self.act1 = tf.keras.layers.Activation("relu")
@@ -252,56 +256,61 @@ class SpikeNet1D(tf.keras.layers.Layer):
             self.conv3 = tf.keras.layers.Conv1D(64, 3, padding="same", activation=None)
             self.bn3 = tf.keras.layers.BatchNormalization()
             self.act3 = tf.keras.layers.Activation("relu")
-            self.pool3 = tf.keras.layers.MaxPool1D(2, padding="same")
+            self.GlobalPool = tf.keras.layers.GlobalAveragePooling1D()
 
-            # Dense Projector
-            self.flatten = tf.keras.layers.Flatten()
+            self.temporal_extractor = tf.keras.Sequential(
+                [
+                    self.conv1,
+                    self.bn1,
+                    self.act1,
+                    self.pool1,
+                    self.conv2,
+                    self.bn2,
+                    self.act2,
+                    self.pool2,
+                    self.conv3,
+                    self.bn3,
+                    self.act3,
+                    self.GlobalPool,  # result (Batch * nChannels, 64)
+                ]
+            )
+
+            # Aggregation
             self.dropout = tf.keras.layers.Dropout(dropout_rate)
-
-            # Reduce dimension
-            self.dense1 = tf.keras.layers.Dense(nFeatures * 2, activation="relu")
+            self.flatten = tf.keras.layers.Flatten()
+            # Input to dense will be (6 channels * 64 features) = 384
+            self.dense_fusion = tf.keras.layers.Dense(nFeatures * 2, activation="relu")
             self.dense_out = tf.keras.layers.Dense(
                 nFeatures, activation=None, name=f"outputCNN{number}"
             )
 
-    def __call__(self, input):
-        return self.apply(input)
+    def apply(self, x, training=False):
+        return self.call(x, training=training)
 
-    def apply(self, inputs):
+    def call(self, x, training=False):
         with tf.device(self.device):
-            # Inputs shape: (Batch, nChannels, TimeBins)
-            # # Expand dims to (Batch, nChannels, TimeBins, 1) to treat as "Image"
-            # x = kops.expand_dims(inputs, axis=-1)
-            x = inputs
+            # 1. Input is (Batch, Channels, Time) -> (128, 6, 32)
+            shape = tf.shape(x)
+            B, C, T = shape[0], shape[1], shape[2]
 
-            # Block 1
-            x = self.conv1(x)  # (B, nCh, T, 16)
-            if self.batch_normalization:
-                x = self.bn1(x)
-            x = self.act1(x)
-            x = self.pool1(x)  # (B, nCh, T/2, 16)
+            # Step 1: Reshape to process all channels through the SAME backbone
+            # New shape: (Batch * 6, 32, 1)
+            x = tf.reshape(
+                x, [B * self.nChannels, 32, 1]
+            )  # channels_last format for conv1d and global average pooling
 
-            # Block 2
-            x = self.conv2(x)
-            if self.batch_normalization:
-                x = self.bn2(x)
-            x = self.act2(x)
-            x = self.pool2(x)
+            # Step 2: Extract temporal features (Shared Weights)
+            # Output shape: (Batch * 6, 64)
+            x = self.temporal_extractor(x)
 
-            # Block 3
-            x = self.conv3(x)
-            if self.batch_normalization:
-                x = self.bn3(x)
-            x = self.act3(x)
-            x = self.pool3(x)
+            # Step 3: Concatenate channels back together
+            # New shape: (Batch, 6 * 64) -> (128, 384)
+            x = tf.reshape(x, [B, self.nChannels * 64])
 
-            # Aggregation
-            x = self.flatten(x)  # Mixes channels and time features here
-            x = self.dense1(x)
-            x = self.dropout(x)
-            x = self.dense_out(x)
-
-        return x
+            # Step 4: Spatial Interaction (Learning relationships between fixed channels)
+            x = self.dense_fusion(x)
+            x = self.dropout(x, training=training)
+            return self.dense_out(x)
 
     def get_config(self):
         config = super().get_config()
@@ -372,6 +381,9 @@ class SpikeNet1D(tf.keras.layers.Layer):
             layers_list += (self.bn1, self.bn2, self.bn3)
         return layers_list
 
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.nFeatures)
+
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 
@@ -398,8 +410,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             self.norm = tf.keras.layers.LayerNormalization()
             self.dropout = tf.keras.layers.Dropout(0.1)
             self.flatten = tf.keras.layers.Flatten()
-
-        self.supports_masking = True  # To indicate that this layer supports masking
+            self.supports_masking = True  # To indicate that this layer supports masking
 
     def call(self, inputs, mask=None):
         # inputs: List of tensors, each shape (Batch, Time, Features)
@@ -486,6 +497,15 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             initializer="uniform",
             trainable=True,
         )
+        # build sublayers
+        # attention operates on (batch*time, n_groups, embed_dim)
+        self.mha.build(
+            query_shape=(None, self.n_groups, self.embed_dim),
+            value_shape=(None, self.n_groups, self.embed_dim),
+            key_shape=(None, self.n_groups, self.embed_dim),
+        )
+        self.norm.build(input_shape=(None, self.n_groups, self.embed_dim))
+
         super().build(input_shape)
 
     def compute_mask(self, inputs, mask=None):
@@ -3669,3 +3689,5 @@ keras_utils.get_custom_objects()["MemoryUsageCallbackExtended"] = (
     MemoryUsageCallbackExtended
 )
 keras_utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer
+keras_utils.get_custom_objects()["ContrastiveLossLayer"] = ContrastiveLossLayer
+keras_utils.get_custom_objects()["GroupAttentionFusion"] = GroupAttentionFusion

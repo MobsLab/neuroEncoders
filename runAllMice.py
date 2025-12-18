@@ -39,7 +39,7 @@ mice_nb = [
     "M905",
     "M1199_MFB",
 ]
-nameExp = "2Transformer_small_contrastive_groupFusion"
+nameExp = "fixedChannel_concat_2Transformer_small_contrastive_groupFusion"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
