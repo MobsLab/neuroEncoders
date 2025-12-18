@@ -1832,7 +1832,9 @@ class Params:
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
         self.contrastive_loss = kwargs.pop("contrastive_loss", False)
-        self.lambda_contrast = kwargs.pop("lambda_contrast", 1.0)
+        self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.3)
+        self.use_conv2d = kwargs.pop("use_conv2d", False)
+        self.use_group_attention_fusion = kwargs.pop("use_group_attention_fusion", True)
         # enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer
         # except the output for unclear reasons linked to gradient computations

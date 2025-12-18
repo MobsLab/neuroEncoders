@@ -781,7 +781,7 @@ class LSTMandSpikeNetwork:
                 # TODO: make sure the layer exists
                 _, linearized_pos = self.l_function_layer(self.truePos[:, :2])
                 regression_loss = regression_loss_layer([myoutputPos, linearized_pos])
-                lambda_c = getattr(self.params, "lambda_contrastive", 0.2)
+                lambda_c = getattr(self.params, "lambda_contrastive", 0.3)
                 tempPosLoss += lambda_c * regression_loss
 
             if self.params.transform_w_log:
