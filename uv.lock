@@ -2880,6 +2880,23 @@ wheels = [
 ]
 
 [[package]]
+name = "keras-tuner"
+version = "1.4.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "keras" },
+    { name = "kt-legacy" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/44/79b36980769f401ec6e1d6ca72b6c129d3a05a365f00c69ef80335089b37/keras_tuner-1.4.8.tar.gz", hash = "sha256:809e78538ea5c8e048012ef1d680712d56f28cf9dfa4938a2daace1ab30c4828", size = 80348 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/2e/282910a9da95625b4b7cd5c93ce81ee8f0a4fad125e9a2e5c2e249eb8cbb/keras_tuner-1.4.8-py3-none-any.whl", hash = "sha256:53034e71608051a17c7f764f282e1e54b52c4d69c05a30f1e8891c8e5ea7739f", size = 129418 },
+]
+
+[[package]]
 name = "kilosort"
 version = "4.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3007,6 +3024,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/33/01/a8ea7c5ea32a9b45ceeaee051a04c8ed4320f5add3c51bfa20879b765b70/kiwisolver-1.4.9-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:85b5352f94e490c028926ea567fc569c52ec79ce131dadb968d3853e809518c2", size = 80281 },
     { url = "https://files.pythonhosted.org/packages/da/e3/dbd2ecdce306f1d07a1aaf324817ee993aab7aee9db47ceac757deabafbe/kiwisolver-1.4.9-pp311-pypy311_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:464415881e4801295659462c49461a24fb107c140de781d55518c4b80cb6790f", size = 78009 },
     { url = "https://files.pythonhosted.org/packages/da/e9/0d4add7873a73e462aeb45c036a2dead2562b825aa46ba326727b3f31016/kiwisolver-1.4.9-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:fb940820c63a9590d31d88b815e7a3aa5915cad3ce735ab45f0c730b39547de1", size = 73929 },
+]
+
+[[package]]
+name = "kt-legacy"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/1f/d2cd57ea472f935e699e6f79f46f3728634c820ad4ba02a451127789af81/kt-legacy-1.0.5.tar.gz", hash = "sha256:dbbade58f12c6a6da6062f4b045a6395a8d4195815e3e064bc3e609b69c8a26c", size = 6719 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/53/aca9f36da2516db008017db85a1f3cafaee0efc5fc7a25d94c909651792f/kt_legacy-1.0.5-py3-none-any.whl", hash = "sha256:8d5c5b3dccf348367fe9ca5b006e7ad2d1babcce62976cfc199e831ea699dcd3", size = 9606 },
 ]
 
 [[package]]
@@ -4101,6 +4127,7 @@ dev = [
     { name = "dash" },
     { name = "ephyviewer" },
     { name = "imageio", extra = ["ffmpeg", "pyav"] },
+    { name = "keras-tuner" },
     { name = "kilosort" },
     { name = "memory-profiler" },
     { name = "neuroencoders" },
@@ -4184,6 +4211,7 @@ dev = [
     { name = "dash", specifier = ">=3.1.1" },
     { name = "ephyviewer", specifier = ">=1.7.0" },
     { name = "imageio", extras = ["ffmpeg", "pyav"], specifier = ">=2.37.0" },
+    { name = "keras-tuner", specifier = ">=1.4.8" },
     { name = "kilosort", specifier = ">=4.1.1" },
     { name = "memory-profiler", specifier = ">=0.61.0" },
     { name = "neuroencoders", editable = "." },
