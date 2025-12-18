@@ -1543,11 +1543,13 @@ class Params:
             if load_path is not None:
                 params_path = load_path
             else:
-                params_path = os.path.join(
-                    helper.resultsPath,
-                    "..",
-                    str(int(windowSize * 1000)),
-                    "Parameters.pkl",
+                params_path = os.path.abspath(
+                    os.path.join(
+                        helper.resultsPath,
+                        "..",
+                        str(int(windowSize * 1000)),
+                        "Parameters.pkl",
+                    )
                 )
                 print(f"Looking for existing Params at: {params_path}")
             if os.path.isfile(params_path):
@@ -1842,8 +1844,8 @@ class Params:
         Should not be mistaken with the generate_json function for the ann, which is
         called to save the julia thresholds in the datPath.
         """
-        if not os.path.isdir(self.resultsPath):
-            os.makedirs(self.resultsPath)
+        if not os.path.isdir(os.path.abspath(self.resultsPath)):
+            os.makedirs(self.resultsPath, exist_ok=True)
         dict_params = vars(self).copy()
         # datahelper is not serializable, so we remove it
         dict_params.pop("helper")
