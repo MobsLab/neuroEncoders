@@ -218,8 +218,13 @@ class LSTMandSpikeNetwork:
             )  # the actual zero tensor is created in self.create_indices in train/test calls.
 
             # Declare spike nets for the different groups:
+            spikeNet = (
+                nnUtils.SpikeNet1D
+                if not getattr(self.params, "use_conv2d", False)
+                else nnUtils.spikeNet
+            )
             self.spikeNets = [
-                nnUtils.SpikeNet1D(
+                spikeNet(
                     nChannels=self.params.nChannelsPerGroup[group],
                     device=self.deviceName,
                     nFeatures=self.params.nFeatures,
@@ -230,14 +235,15 @@ class LSTMandSpikeNetwork:
                 )
                 for group in range(self.params.nGroups)
             ]
-            # 2. Initialize the Group Attention Fusion layer
-            self.group_fusion = nnUtils.GroupAttentionFusion(
-                n_groups=self.params.nGroups,
-                embed_dim=self.params.nFeatures,
-                num_heads=4,  # You can tune this
-                device=self.deviceName,
-                name="group_fusion",
-            )
+            if getattr(self.params, "use_group_attention_fusion", True):
+                # 2. Initialize the Group Attention Fusion layer
+                self.group_fusion = nnUtils.GroupAttentionFusion(
+                    n_groups=self.params.nGroups,
+                    embed_dim=self.params.nFeatures,
+                    num_heads=4,  # You can tune this
+                    device=self.deviceName,
+                    name="group_fusion",
+                )
             self.dropoutLayer = tf.keras.layers.Dropout(
                 kwargs.get("dropoutCNN", self.params.dropoutCNN)
             )
@@ -571,7 +577,7 @@ class LSTMandSpikeNetwork:
                 # x = TimeDistributed(self.spikeNets[group])(x)  # [batch, max_nSpikes, cnn_dim] --> get rid of the gather, reshape...
                 x = self.inputsToSpikeNets[group]
                 # --> [NbKeptSpike = batchSize * maxNbOfSpikes,nbChannels,31] tensors, created my nnUtils.parse_serialized_sequence(batched = True) in train/test calls.
-                x = self.spikeNets[group].apply(x)
+                x = self.spikeNets[group](x)
                 # outputs a [NbSpikeOfTheGroup = batchSize * maxNbOfSpikes,nFeatures=self.params.nFeatures(default 64)] tensor.
                 # The gather strategy:
                 #   extract the final position of the spikes
@@ -2610,12 +2616,10 @@ class LSTMandSpikeNetwork:
                 pickle.dump(result, f)
 
             if extract_waveforms:
-                out_file = (
-                    os.path.join(
-                        self.folderResult,
-                        str(windowSizeMS),
-                        "artificial_waveforms.pkl",
-                    ),
+                out_file = os.path.join(
+                    self.folderResult,
+                    str(windowSizeMS),
+                    "artificial_waveforms.pkl",
                 )
                 print(f"Saving artificial spikes waveforms to {out_file}...")
                 with open(
@@ -3196,7 +3200,7 @@ class LSTMandSpikeNetwork:
         cnn_outputs = []
         for group in range(self.params.nGroups):
             x = self.inputsToSpikeNets[group]
-            cnn_output = self.spikeNets[group].apply(x)
+            cnn_output = self.spikeNets[group](x)
             cnn_outputs.append(cnn_output)
 
         # Create CNN model
