@@ -240,12 +240,15 @@ class DataHelper(Project):
             target = args[0]
             args = args[1:]
 
+        phase = kwargs.get("phase", None)  # remove from the kwargs
+        suffix = f"_{phase}" if phase is not None else ""
+
         if load_path is None:
             if xmlPath is not None and kwargs.get("nameExp", None) is not None:
                 load_path = os.path.join(
                     os.path.dirname(xmlPath),
                     kwargs.get("nameExp", None),
-                    "DataHelper.pkl",
+                    f"DataHelper{suffix}.pkl",
                 )
             else:
                 return super().__new__(cls)
@@ -372,13 +375,14 @@ class DataHelper(Project):
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, phase=None):
         cls._skip_new = True
+        suffix = f"_{phase}" if phase is not None else ""
         try:
             with open(path, "rb") as f:
                 obj = pickle.load(f)
         except (IsADirectoryError, FileNotFoundError, EOFError):
-            with open(os.path.join(path, "DataHelper.pkl"), "rb") as f:
+            with open(os.path.join(path, f"DataHelper{suffix}.pkl"), "rb") as f:
                 obj = pickle.load(f)
         finally:
             cls._skip_new = False

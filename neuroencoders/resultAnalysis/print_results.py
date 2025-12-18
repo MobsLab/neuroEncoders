@@ -350,10 +350,6 @@ def print_results(
             for i in range(inferring.shape[0])
         ]
     )  # eucledian distance
-    if target.lower() != "pos":
-        warnings.warn(
-            f"You are using a target different from pos, the error will be calculated as the euclidean distance between inferred and true for all dimensions {target=}. You should not expect anything from this error."
-        )
     print(
         "mean eucl. error:",
         np.nanmean(error) * maxPos,
