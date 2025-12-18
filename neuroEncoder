@@ -277,9 +277,10 @@ def main(args):
     save_project_to_pickle(ProjectPath)
 
     # Save DataHelper object to pickle
+    suffix = f"_{args.phase}" if args.phase is not None else ""
     output = os.path.join(
         ProjectPath.experimentPath,
-        "DataHelper.pkl",
+        f"DataHelper{suffix}.pkl",
     )
     save_project_to_pickle(DataHelper, output=output)
 
