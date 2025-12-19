@@ -1578,6 +1578,8 @@ class Params:
                         helper.numChannelsPerGroup()
                     )  # number of channels per "spiking" anatomical group
                     return loaded  # Return the loaded instance
+        else:
+            print("Not loading Params from pickle as per user request.")
 
         return super().__new__(cls)
 
