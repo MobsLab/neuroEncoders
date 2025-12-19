@@ -3225,6 +3225,20 @@ class DenseLossProcessor:
         )
 
 
+class ContrastiveMonitor(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        total = logs.get("posLoss")
+        raw = logs.get("rawPosLoss")
+
+        if total is not None and raw is not None:
+            diff = total - raw
+            print(
+                f"\n[Epoch {epoch + 1}] Contrastive Contribution: {diff:.4f} "
+                f"({(diff / total) * 100:.1f}% of total loss)"
+            )
+
+
 # memory garbage collection class
 class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
     """Monitor memory usage during training, collect garbage."""
@@ -3691,3 +3705,4 @@ keras_utils.get_custom_objects()["MemoryUsageCallbackExtended"] = (
 keras_utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer
 keras_utils.get_custom_objects()["ContrastiveLossLayer"] = ContrastiveLossLayer
 keras_utils.get_custom_objects()["GroupAttentionFusion"] = GroupAttentionFusion
+keras_utils.get_custom_objects()["ContrastiveMonitor"] = ContrastiveMonitor

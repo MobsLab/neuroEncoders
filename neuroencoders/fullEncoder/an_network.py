@@ -31,6 +31,7 @@ import wandb
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.nnUtils import (
+    ContrastiveMonitor,
     GaussianHeatmapLayer,
     GaussianHeatmapLosses,
     LinearPosWeighting,
@@ -374,45 +375,6 @@ class LSTMandSpikeNetwork:
             self.predLossModel = self.compile_model(
                 outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
             )
-
-    def convert_checkpoint_to_keras3(
-        self, model, old_checkpoint_path, new_checkpoint_path
-    ):
-        """Convert old .ckpt format to new .weights.h5 format"""
-        try:
-            # Try to load old weights
-            model.load_weights(old_checkpoint_path)
-
-            # Save in new format
-            model.save_weights(new_checkpoint_path)
-            print(
-                f"Successfully converted {old_checkpoint_path} to {new_checkpoint_path}"
-            )
-
-        except Exception as e:
-            print(f"Failed to convert checkpoint: {e}")
-            return False
-        return True
-
-    def get_theweights(self, behaviorData, windowSizeMS, isPredLoss=0):
-        print("Loading the weights of the trained network")
-        if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
-            self.model.load_weights(
-                os.path.join(
-                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
-                )
-            )
-        else:
-            self.model.load_weights(
-                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
-            )
-        wdata = []
-        for layer in self.model.layers:
-            if hasattr(layer, "get_weights"):
-                wdata.extend(layer.get_weights())
-        # reshaped_w = [tf.reshape(w,(2,3,1,8)) if w.shape == (2,3,8,16) else w for w in wdata]
-        # return reshaped_w
-        return wdata
 
     def apply_transformer_architecture(
         self, allFeatures, allFeatures_raw, mymask, **kwargs
@@ -771,6 +733,8 @@ class LSTMandSpikeNetwork:
             # if loss function is logcosh
             # tempPosLoss is in cm2
 
+            rawPosLoss = tf.keras.layers.Identity(name="rawPosLoss")(tempPosLoss)
+
             if self.params.denseweight:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
             if getattr(self.params, "contrastive_loss", False):
@@ -794,46 +758,13 @@ class LSTMandSpikeNetwork:
             myoutputPos_named = tf.keras.layers.Identity(name="myoutputPos")(
                 myoutputPos
             )
-
-        return myoutputPos_named, posLoss
-
-    def _parse_loss_function_from_params(self, myoutputPos):
-        # TODO: change
-        ### Multi-column loss configuration
-        column_losses = getattr(
-            self.params,
-            "column_losses",
-            {str(i): self.params.loss for i in range(myoutputPos.shape[-1])},
-        )
-        column_weights = getattr(self.params, "column_weights", {})
-        merge_columns = getattr(self.params, "merge_columns", [])
-        merge_losses = getattr(self.params, "merge_losses", [])
-        merge_weights = getattr(self.params, "merge_weights", [])
-
-        # Create the loss instance
-        if len(column_weights) > 1 or any("," in spec for spec in column_losses.keys()):
-            print("Using multi-column loss")
-            self.loss_function = MultiColumnLossLayer(
-                column_losses=column_losses,
-                column_weights=column_weights,
-                merge_columns=merge_columns,
-                merge_losses=merge_losses,
-                merge_weights=merge_weights,
-                alpha=self.params.alpha,
-                delta=self.params.delta,
-                gaussian_layer=getattr(self, "GaussianLoss_layer", None),
-            )  # actually it's more of a layer than a function
-
-        else:
-            # Single loss case
-            self.loss_function = _get_loss_function(
-                self.params.loss,
-                alpha=self.params.alpha,
-                delta=self.params.delta,
-                gaussian_loss_layer=getattr(self, "GaussianLoss_layer", None),
+        if getattr(self.params, "contrastive_loss", False):
+            regression_loss = tf.keras.layers.Identity(name="regressionLoss")(
+                regression_loss
             )
+            return myoutputPos_named, posLoss, rawPosLoss, regression_loss
 
-        return self.loss_function
+        return myoutputPos_named, posLoss, rawPosLoss
 
     def compile_model(
         self, outputs, modelName="FullModel.pdf", predLossOnly=False, **kwargs
@@ -876,18 +807,33 @@ class LSTMandSpikeNetwork:
         # TODO: something with mixed precision and keras policy ?
         if not predLossOnly:
             # Full model
-            self.outNames = ["myoutputPos", "posLoss"]
+            self.outNames = ["myoutputPos", "posLoss", "rawPosLoss"]
+            if getattr(self.params, "contrastive_loss", False):
+                self.outNames.append("regressionLoss")
+
             # TODO: Adam or AdaGrad?
             # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
+            loss_dict = {
+                # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
+                self.outNames[0]: None,
+                self.outNames[1]: pos_loss,
+            }
+            metrics_dict = {
+                self.outNames[1]: [
+                    tf.keras.metrics.MeanMetricWrapper(fn=pos_loss, name="mean")
+                ],
+            }
+            for outName in self.outNames[2:]:
+                loss_dict[outName] = None
+                metrics_dict[outName] = [
+                    tf.keras.metrics.MeanMetricWrapper(fn=pos_loss, name="mean")
+                ]
+
             model.compile(
                 optimizer=self.optimizer,
-                loss={
-                    # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
-                    self.outNames[0]: None,
-                    self.outNames[1]: pos_loss,
-                },
+                loss=loss_dict,
+                metrics=metrics_dict,
                 jit_compile=False,
-                # steps_per_execution=4,
             )
             # Get internal names of losses
         if not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName)):
@@ -1020,6 +966,9 @@ class LSTMandSpikeNetwork:
         datasets, counts = self._dataset_loading_pipeline(
             filename, windowSizeMS, behaviorData, totMask, augmentation_config, **kwargs
         )
+        if kwargs.get("return_datasets", False):
+            return datasets, counts
+
         import termplotlib as tpl
 
         count_x, bin_edges = np.histogram(counts["train"], bins=40)
@@ -1248,6 +1197,7 @@ class LSTMandSpikeNetwork:
                         schedule,
                         es_callback,
                         MemoryUsageCallbackExtended(),
+                        ContrastiveMonitor(),
                     ]
                 else:
                     callbacks = [
@@ -1255,6 +1205,7 @@ class LSTMandSpikeNetwork:
                         cp_callback,
                         schedule,
                         MemoryUsageCallbackExtended(),
+                        ContrastiveMonitor(),
                     ]
 
                 if self.params.reduce_lr_on_plateau:
@@ -1388,15 +1339,12 @@ class LSTMandSpikeNetwork:
 
         @tf.function
         def map_outputs(vals):
-            return (
-                vals,
-                {
-                    self.outNames[0]: tf.zeros(
-                        (batchSize, dim_output), dtype=tf.float32
-                    ),
-                    self.outNames[1]: tf.zeros(batchSize, dtype=tf.float32),
-                },
-            )
+            basic_dict = {
+                self.outNames[0]: tf.zeros((batchSize, dim_output), dtype=tf.float32),
+            }
+            for outname in self.outNames[1:]:
+                basic_dict[outname] = tf.zeros(batchSize, dtype=tf.float32)
+            return (vals, basic_dict)
 
         ndataset = tf.data.TFRecordDataset(
             os.path.join(self.projectPath.dataPath, filename)
@@ -2097,17 +2045,16 @@ class LSTMandSpikeNetwork:
 
             @tf.function
             def map_outputs(vals):
-                return (
-                    vals,
-                    {
-                        self.outNames[0]: tf.zeros(
-                            (self.params.batchSize, dim_output), dtype=tf.float32
-                        ),
-                        self.outNames[1]: tf.zeros(
-                            self.params.batchSize, dtype=tf.float32
-                        ),
-                    },
-                )
+                basic_dict = {
+                    self.outNames[0]: tf.zeros(
+                        (self.params.batchSize, dim_output), dtype=tf.float32
+                    ),
+                }
+                for outname in self.outNames[1:]:
+                    basic_dict[outname] = tf.zeros(
+                        self.params.batchSize, dtype=tf.float32
+                    )
+                return (vals, basic_dict)
 
             dataset = dataset.filter(filter_by_time)
             dataset = dataset.batch(self.params.batchSize, drop_remainder=True)
@@ -2219,6 +2166,83 @@ class LSTMandSpikeNetwork:
             self.saveResults(
                 predictions[key], folderName=folderName, sleep=True, sleepName=key
             )
+
+    def convert_checkpoint_to_keras3(
+        self, model, old_checkpoint_path, new_checkpoint_path
+    ):
+        """Convert old .ckpt format to new .weights.h5 format"""
+        try:
+            # Try to load old weights
+            model.load_weights(old_checkpoint_path)
+
+            # Save in new format
+            model.save_weights(new_checkpoint_path)
+            print(
+                f"Successfully converted {old_checkpoint_path} to {new_checkpoint_path}"
+            )
+
+        except Exception as e:
+            print(f"Failed to convert checkpoint: {e}")
+            return False
+        return True
+
+    def get_theweights(self, behaviorData, windowSizeMS, isPredLoss=0):
+        print("Loading the weights of the trained network")
+        if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
+            self.model.load_weights(
+                os.path.join(
+                    self.folderModels, str(windowSizeMS), "predLoss" + "/cp.ckpt"
+                )
+            )
+        else:
+            self.model.load_weights(
+                os.path.join(self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt")
+            )
+        wdata = []
+        for layer in self.model.layers:
+            if hasattr(layer, "get_weights"):
+                wdata.extend(layer.get_weights())
+        # reshaped_w = [tf.reshape(w,(2,3,1,8)) if w.shape == (2,3,8,16) else w for w in wdata]
+        # return reshaped_w
+        return wdata
+
+    def _parse_loss_function_from_params(self, myoutputPos):
+        # TODO: change
+        ### Multi-column loss configuration
+        column_losses = getattr(
+            self.params,
+            "column_losses",
+            {str(i): self.params.loss for i in range(myoutputPos.shape[-1])},
+        )
+        column_weights = getattr(self.params, "column_weights", {})
+        merge_columns = getattr(self.params, "merge_columns", [])
+        merge_losses = getattr(self.params, "merge_losses", [])
+        merge_weights = getattr(self.params, "merge_weights", [])
+
+        # Create the loss instance
+        if len(column_weights) > 1 or any("," in spec for spec in column_losses.keys()):
+            print("Using multi-column loss")
+            self.loss_function = MultiColumnLossLayer(
+                column_losses=column_losses,
+                column_weights=column_weights,
+                merge_columns=merge_columns,
+                merge_losses=merge_losses,
+                merge_weights=merge_weights,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_layer=getattr(self, "GaussianLoss_layer", None),
+            )  # actually it's more of a layer than a function
+
+        else:
+            # Single loss case
+            self.loss_function = _get_loss_function(
+                self.params.loss,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_loss_layer=getattr(self, "GaussianLoss_layer", None),
+            )
+
+        return self.loss_function
 
     def _apply_oversampling_resampling(self, dataset, windowSizeMS, shuffle=True):
         """
