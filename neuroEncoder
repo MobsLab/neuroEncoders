@@ -14,6 +14,7 @@ from warnings import warn
 
 import numpy as np
 import pandas as pd
+import keras_tuner as kt
 from numpy import max as np_max
 
 from neuroencoders.importData.epochs_management import inEpochsMask
@@ -21,6 +22,7 @@ from neuroencoders.importData.epochs_management import inEpochsMask
 # Load custom code
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import Params, Project, save_project_to_pickle
+import tensorflow as tf
 
 # Meta parameters
 show_figures = False
@@ -248,30 +250,302 @@ def main(args):
             l_function, in_place=True, show=show_figures, speedMask=True
         )
 
-    Parameters = Params(
+    num_augmentations = args.num_augmentations
+    print("num_augmentations", num_augmentations)
+    if num_augmentations is None:
+        num_augmentations = 3 if args.window < 0.504 else 2
+    if args.striding is None and args.striding_factor is None:
+        raise ValueError(
+            "You must provide either a striding (-s) or a striding factor (-sfact) argument."
+        )
+
+    if args.striding_factor is None:
+        windowStride = args.striding
+        strideFactor = round(args.window / windowStride, 4)
+        # check if windowStride is an integer, if not raise an error
+        if not strideFactor.is_integer():
+            raise ValueError(
+                f"The {args.windows}ms window size is not compatible with the {args.striding}ms stride."
+            )
+    else:
+        strideFactor = args.striding_factor
+        windowStride = round(args.window / strideFactor, 4)
+        if windowStride < 0.036:
+            warn(
+                f"The selected striding factor of {strideFactor} is too high for the selected window size of {args.window}s (would make a windowStride of {windowStride}). Setting striding to 36ms."
+            )
+            windowStride = 0.036
+            if args.window == 0.036:
+                # this way we dont have to recreate them.
+                strideFactor = 1
+        # check if windowStride is a valid ms value, if not raise an error
+        if not (1000 * windowStride).is_integer():
+            raise ValueError(
+                f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
+            )
+    # WARN: only for now - maybe need to add another check for floats ?
+    strideFactor = int(strideFactor)
+
+    from neuroencoders.fullEncoder import an_network as Training
+
+    class CustomHyperModel(kt.HyperModel):
+        def __init__(self, helper, win, target, nbEpochs, args):
+            self.helper = helper
+            self.phase = args.phase
+            self.win = win
+            self.target = target
+            self.nbEpochs = nbEpochs
+            self.earlyStop = args.early_stop
+            self.lstm = args.lstm
+            self.args = args
+
+        def build(self, hp):
+            # --- 1. Define the Search Space ---
+
+            # User requested: dim_factor between 1 and 4
+            hp_dim_factor = hp.Int("dim_factor", min_value=1, max_value=4)
+
+            # User requested: nFeatures 16 to 128 in powers of 2
+            hp_n_features = hp.Choice("nFeatures", values=[16, 32, 64, 128])
+
+            # User requested: n_transformers between 1 and 4
+            hp_n_transformers = hp.Int("n_transformers", min_value=1, max_value=6)
+
+            # User requested: contrastive_loss True or False
+            hp_contrastive = hp.Boolean("contrastive_loss")
+            if hp_contrastive:
+                print("Using contrastive loss in this trial.")
+                hp_lambda = hp.Float("contrastive_lambda", 0.1, 1.0, step=0.1)
+            else:
+                hp_lambda = 0.0
+
+            # Standard Tuning Parameters (as discussed previously)
+            hp_lr = hp.Float(
+                "learning_rate", min_value=1e-5, max_value=1e-2, sampling="log"
+            )
+            hp_n_heads = hp.Choice("nHeads", values=[4, 8, 16])
+            hp_drop_lstm = hp.Float("dropoutLSTM", 0.1, 0.5, step=0.05)
+
+            hp_augmentation = hp.Boolean("dataAugmentation")
+
+            # --- 2. Initialize Params with Tuned Values ---
+
+            # Note: ensure 'helper', 'win', and 'target' are accessible in this scope
+            params = Params(
+                helper=DataHelper,
+                windowSize=self.win,
+                nEpochs=self.nbEpochs,
+                phase=self.phase,
+                batchSize=(256 if self.win < 0.252 else 128)
+                if "1230" not in ProjectPath.xml
+                else 128,
+                save_json=True,
+                isTransformer=not self.lstm,
+                transform_w_log=self.args.transform_w_log,
+                denseweight=not self.args.no_dense,
+                mixed_loss=self.args.mixed_loss,
+                GaussianHeatmap=not self.args.no_gaussian,
+                project_transformer=not self.args.no_project_transformer,
+                reduce_dense=self.args.reduce_dense,
+                no_cnn=self.args.no_cnn,
+                all_args=vars(self.args),
+                # Tuned parameters
+                lstmLayers=hp_n_transformers,
+                dim_factor=hp_dim_factor,
+                nFeatures=hp_n_features,
+                contrastive_loss=hp_contrastive,
+                learningRates=[hp_lr],
+                nHeads=hp_n_heads,
+                dropoutLSTM=hp_drop_lstm,
+                lambda_contrastive=hp_lambda,
+                dataAugmentation=hp_augmentation,
+                # Fixed parameters from your cmd_ann
+                loss_type="wasserstein",
+                load_at_init=False,
+            )
+
+            # --- 3. Build and Return Model ---
+
+            # This assumes your main class (e.g., AnNetwork) takes 'params'
+            # and has a .model attribute which is the compiled Keras model.
+            model_container = Training.LSTMandSpikeNetwork(
+                ProjectPath,
+                params,
+                deviceName=deviceName,
+                debug=debug,
+                phase=self.phase,
+                isTransformer=params.isTransformer,
+                verbose=True,
+                behaviorData=DataHelper.fullBehavior,
+                alpha=params.denseweightAlpha,
+                linearizer=Linearizer,
+            )
+            model = model_container.model
+            model.container = model_container  # Keep a reference to the container
+            return model
+
+        def fit(self, hp, model, *args, **kwargs):
+            # You can customize the fit process here if needed
+
+            hp_augmentation = hp.get("dataAugmentation")
+            if hp_augmentation:
+                print("Using data augmentation in this trial.")
+                num_augmentations = 3 if windowSizeMS < 504 else 2
+            else:
+                num_augmentations = 0
+
+            datasets, counts = model.container.train(
+                DataHelper.fullBehavior,
+                windowSizeMS=windowSizeMS,
+                isPredLoss=isPL,
+                earlyStop=self.earlyStop,
+                load_model=True,
+                fine_tune=False,
+                l_function=l_function,
+                num_augmentations=num_augmentations,
+                strideFactor=strideFactor,
+                return_datasets=True,
+            )
+            train_ds = datasets["train"]
+            val_ds = datasets["test"]
+
+            max_count = counts["train"].max()
+            # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
+            print("Max count per bin in training set:", max_count)
+            print("total len of counts['train']:", len(counts["train"]))
+            print("num_bins:", model.container.coarse_H * model.container.coarse_W)
+            balanced_size = max_count * len(counts["train"])
+            print("Balanced dataset size would be:", balanced_size)
+            print(
+                "Original training dataset size:",
+                model.container.GaussianHeatmap.training_positions.shape[0],
+            )
+            steps_per_epoch = np.ceil(
+                (balanced_size * max(num_augmentations, 1))
+                / (model.container.params.batchSize * min(max(num_augmentations, 1), 2))
+            )
+            os.makedirs(
+                os.path.join(model.container.folderModels, str(windowSizeMS), "full"),
+                exist_ok=True,
+            )
+            es_callback = tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=2,
+                min_delta=0.05,
+                verbose=1,
+                restore_best_weights=True,
+                start_from_epoch=max(
+                    model.container.params.earlyStop_start,
+                    2,
+                ),
+            )
+            tf_callback = tf.keras.callbacks.TensorBoard("/tmp/hpo_neuro_logs")
+
+            LRScheduler = model.container.LRScheduler(
+                lrs=model.container.params.learningRates,
+                total_epochs=model.container.params.nEpochs,
+                warmup_epochs=kwargs.get("warmup_epochs", 6),
+                min_lr=kwargs.get("min_lr", 1e-6),
+            )
+            scheduler = "cosine"
+            if scheduler == "fixed":
+                schedule = tf.keras.callbacks.LearningRateScheduler(
+                    LRScheduler.schedule_fixed
+                )
+            elif scheduler == "decay":
+                schedule = tf.keras.callbacks.LearningRateScheduler(
+                    LRScheduler.schedule_decay
+                )
+            elif scheduler == "cosine":
+                schedule = tf.keras.callbacks.LearningRateScheduler(
+                    LRScheduler.schedule_cosine_warmup
+                )
+            else:
+                raise ValueError(
+                    'Learning rate schedule is either "fixed", "decay" or "cosine"'
+                )
+
+            callbacks = kwargs.pop("callbacks", [])
+            if callbacks:
+                print("Adding user-defined callbacks to the fit process.")
+                callbacks.extend([schedule, es_callback, tf_callback])
+            else:
+                callbacks = [schedule, es_callback, tf_callback]
+
+            print(f"callbacks used: {callbacks}")
+            return model.fit(
+                train_ds,
+                validation_data=val_ds,
+                callbacks=callbacks,
+                steps_per_epoch=int(steps_per_epoch),
+                # steps_per_epoch=1,
+                epochs=self.nbEpochs,
+                # epochs=1,
+                *args,
+                **kwargs,
+            )
+
+    hypermodel = CustomHyperModel(
         helper=DataHelper,
-        windowSize=args.window,
-        nEpochs=args.epochs,
-        phase=args.phase,
-        nFeatures=args.n_features,
-        batchSize=(256 if args.window < 0.252 else 128)
-        if "1230" not in ProjectPath.xml
-        else 128,
-        save_json=True,
-        isTransformer=not args.lstm,
-        transform_w_log=args.transform_w_log,
-        denseweight=not args.no_dense,
-        mixed_loss=args.mixed_loss,
-        GaussianHeatmap=not args.no_gaussian,
-        all_args=vars(args),
-        lstmLayers=args.n_transformers,
-        dim_factor=args.dim_factor,
-        loss_type=args.loss_type,
-        project_transformer=not args.no_project_transformer,
-        reduce_dense=args.reduce_dense,
-        no_cnn=args.no_cnn,
-        contrastive_loss=args.contrastive_loss,
+        win=windowSizeMS / 1000,
+        target=args.target,
+        nbEpochs=args.epochs,
+        args=args,
     )
+    # --- 4. Configure the Tuner ---
+    print(
+        f"setting up tuner in {os.path.join(ProjectPath.folderResult, 'hpo_neuro_results')}"
+    )
+    tuner = kt.BayesianOptimization(
+        hypermodel,
+        objective=kt.Objective(
+            "val_rawPosLoss_mean", direction="min"
+        ),  # Target your custom loss layer
+        max_trials=30,
+        directory=os.path.join(ProjectPath.folderResult, "hpo_neuro_results"),
+        project_name="transformer_wasserstein_tuning",
+    )
+    print(tuner.search_space_summary())
+    print("Starting HPO search...")
+
+    # Run the HPO
+    tuner.search(
+        callbacks=[
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_rawPosLoss_mean",
+                patience=5,
+                start_from_epoch=15,
+                verbose=1,
+                mode="min",
+            )
+        ]
+    )
+    print("HPO search complete.")
+    # Get the best model
+    best_model = tuner.get_best_models(num_models=1)[0]
+    print("Best hyperparameters:")
+    best_hyperparameters = tuner.get_best_hyperparameters(num_trials=1)[0]
+    for param in best_hyperparameters.values:
+        print(f"  {param}: {best_hyperparameters.get(param)}")
+
+    print("Saving best model...")
+    os.makedirs(
+        os.path.join(
+            ProjectPath.folderResult,
+            str(windowSizeMS),
+            "savedModels",
+        ),
+        exist_ok=True,
+    )
+    best_model.save_weights(
+        os.path.join(
+            ProjectPath.folderResult,
+            str(windowSizeMS),
+            "savedModels",
+            "best_hpo_model.weights.h5",
+        )
+    )
+    return
 
     # Save ProjectPath object
     save_project_to_pickle(ProjectPath)
