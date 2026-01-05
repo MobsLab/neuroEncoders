@@ -1950,6 +1950,20 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         if isinstance(obj, pd.DataFrame) or isinstance(obj, pd.Series):
             return obj.to_dict()
+        if (
+            isinstance(obj, np.integer)
+            or isinstance(obj, np.int32)
+            or isinstance(obj, np.int64)
+        ):
+            return int(obj)
+        if (
+            isinstance(obj, np.floating)
+            or isinstance(obj, np.float32)
+            or isinstance(obj, np.float64)
+        ):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
         return super().default(obj)
 
 
