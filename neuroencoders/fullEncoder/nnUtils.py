@@ -295,8 +295,9 @@ class SpikeNet1D(tf.keras.layers.Layer):
 
             # Step 1: Reshape to process all channels through the SAME backbone
             # New shape: (Batch * 6, 32, 1)
+            # T is hardcoded to be 32 for now (see tfrec creation via julia)
             x = tf.reshape(
-                x, [B * self.nChannels, 32, 1]
+                x, [B * self.nChannels, T, 1]
             )  # channels_last format for conv1d and global average pooling
 
             # Step 2: Extract temporal features (Shared Weights)
@@ -319,6 +320,10 @@ class SpikeNet1D(tf.keras.layers.Layer):
                 "nChannels": self.nChannels,
                 "device": self.device,
                 "nFeatures": self.nFeatures,
+                "number": self.number,
+                "batch_normalization": self.batch_normalization,
+                "reduce_dense": self.reduce_dense,
+                "no_cnn": self.no_cnn,
             }
         )
         return config
@@ -358,28 +363,23 @@ class SpikeNet1D(tf.keras.layers.Layer):
                 f"Expected input shape with {self.nChannels} channels, got {input_shape[1]}"
             )
 
-    @property
-    def variables(self):
-        vars_list = (
-            self.conv1.variables
-            + self.conv2.variables
-            + self.conv3.variables
-            + self.dense_out.variables
-        )
-        if self.batch_normalization:
-            vars_list += self.bn1.variables + self.bn2.variables + self.bn3.variables
-        return vars_list
+        # ---- Build sub-layers ----
+        # 1. Temporal Extractor
+        # Input to this is (Batch * Channels, Time, 1)
+        time_steps = input_shape[2]
+        self.temporal_extractor.build((None, time_steps, 1))
 
-    def layers(self):
-        layers_list = (
-            self.conv1,
-            self.conv2,
-            self.conv3,
-            self.dense_out,
-        )
-        if self.batch_normalization:
-            layers_list += (self.bn1, self.bn2, self.bn3)
-        return layers_list
+        # 2. Dense Fusion
+        # The extractor outputs 64 features per channel (from the 3rd conv/global pool)
+        # Input shape becomes (Batch, Channels * 64)
+        fusion_input_dim = self.nChannels * 64
+        self.dense_fusion.build((None, fusion_input_dim))
+
+        # 3. Dense Out
+        # Dense fusion outputs (Batch, nFeatures * 2)
+        self.dense_out.build((None, self.nFeatures * 2))
+
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.nFeatures)

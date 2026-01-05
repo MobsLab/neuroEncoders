@@ -18,9 +18,9 @@ win_values = [0.036, 0.108]
 win_values = [0.108, 0.18, 0.252, 0.504]
 win_values = [0.504]  # only kept for new dataset
 win_values = [0.108, 0.252]
-win_values = [0.108]
 win_values = [0.108, 0.252]  # only kept for new dataset
 win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
+win_values = [0.108]
 # Mice name
 mice_nb = []
 mice_nb = [
