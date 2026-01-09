@@ -138,7 +138,7 @@ if __name__ == "__main__":
         try:
             import ephyviewer  # noqa: F401
             import numpy  # noqa: F401
-            import spikeinterface
+            import spikeinterface  # noqa: F401
 
             print(
                 f"All dependencies are installed. You can run the script to visualize data "
