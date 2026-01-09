@@ -8,12 +8,10 @@
 
 import glob
 import os
-from importlib import reload
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
 datadir = os.path.join(os.path.expanduser("~/Documents/Theotime"), "DimaERC2")
 assert os.path.isdir(datadir)
@@ -152,7 +150,6 @@ list_windows = [36, 108, 200, 252, 504]
 # In[15]:
 
 
-from importData.rawdata_parser import DataHelper
 from resultAnalysis.print_results import print_results
 
 # In[16]:
@@ -269,12 +266,9 @@ subresults_df = results_df[results_df["mouse_id"].isin(selected_mice)]
 
 
 import spikeinterface as si
-import spikeinterface.curation as scur
 import spikeinterface.extractors as se
-import spikeinterface.postprocessing as spost
 import spikeinterface.preprocessing as spre
 import spikeinterface.qualitymetrics
-import spikeinterface.widgets as sw
 
 # In[26]:
 
@@ -286,7 +280,6 @@ dirmouse
 
 
 sorting_folder = dict()
-from pathlib import Path
 
 for mouse in selected_mice:
     sorting_folder[mouse] = os.path.join(Path(dirmouse[mouse]).parents[1])

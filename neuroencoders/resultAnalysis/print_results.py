@@ -12,15 +12,14 @@ import numpy.polynomial.polynomial as poly
 import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
-from matplotlib.patches import Circle
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 from neuroencoders.importData.gui_elements import (
     circular_mean_error,
     create_polar_colorbar,
     plot_circular_comparison,
-    plot_horizontal_kde,
     plot_concatenated_bouts,
+    plot_horizontal_kde,
 )
 
 EC = np.array([45, 39])  # range of x and y in cm
