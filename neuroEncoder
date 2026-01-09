@@ -928,10 +928,12 @@ def main(args):
                 mouse_full_name = os.path.basename(
                     os.path.dirname(ProjectPath.baseName)
                 )
+                exp_index = None
             else:
                 mouse_full_name = os.path.basename(
                     os.path.dirname(os.path.dirname(ProjectPath.baseName))
                 )
+                exp_index = os.path.dirname(ProjectPath.baseName).split("exp")[-1]
 
             mouse_name = mouse_full_name.split("_")[0].strip("M")
             manipe = mouse_full_name.split("_")[1]
@@ -940,6 +942,7 @@ def main(args):
                 mouse_name=mouse_name,
                 manipe=manipe,
                 nameExp=args.name,
+                exp_index=exp_index,
                 target=args.target,
                 nEpochs=Parameters.nEpochs,
                 phase=args.phase,
