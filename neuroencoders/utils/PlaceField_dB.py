@@ -7,7 +7,6 @@ Based on the original MATLAB PlaceField_DB function
 @author: corrected version
 """
 
-from math import isnan
 from typing import Dict, List, Tuple, Union
 
 import matplotlib.pyplot as plt

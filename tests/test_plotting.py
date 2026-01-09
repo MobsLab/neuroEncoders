@@ -1,6 +1,8 @@
+
 import pytest
 from unittest.mock import patch
 import numpy as np
+import pytest
 
 # We need to mock matplotlib BEFORE importing modules that might use it
 with patch("matplotlib.pyplot.show"):

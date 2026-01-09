@@ -2,10 +2,10 @@
 import os
 import re
 import sys
-from warnings import warn
 import xml.etree.ElementTree as ET
 from tkinter import Button, Entry, Label, Toplevel
 from typing import Literal, Optional
+from warnings import warn
 
 import matplotlib as mplt
 import matplotlib.pyplot as plt
