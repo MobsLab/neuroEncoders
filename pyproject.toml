@@ -65,6 +65,7 @@ dependencies = [
     "umap-learn[plot]>=0.5.9.post2",
     "wandb>=0.20.1",
     "xlsxwriter>=3.2.5",
+    "torch>=2.0.0",
 ]
 
 [dependency-groups]
@@ -88,6 +89,7 @@ dev = [
     "scipy>=1.15.3",
     "spikeinterface[full]>=0.103.0",
     "xlsxwriter>=3.2.5",
+    "pytest>=7.0.0",
 ]
 
 [tool.ruff]
