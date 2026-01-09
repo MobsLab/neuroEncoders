@@ -1,8 +1,9 @@
-import pytest
 import os
+from unittest.mock import MagicMock
+
 import numpy as np
-from unittest.mock import MagicMock, patch
-from neuroencoders.utils.global_classes import DataHelper, Project, is_in_zone, ZONEDEF
+
+from neuroencoders.utils.global_classes import ZONEDEF, DataHelper, Project, is_in_zone
 
 
 def test_project_init(temp_project_dir):
