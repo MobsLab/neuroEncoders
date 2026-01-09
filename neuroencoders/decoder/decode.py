@@ -8,8 +8,6 @@
 
 import os
 
-import matplotlib.pyplot as plt
-
 # Get common libraries
 import numpy as np
 import pandas as pd
@@ -19,7 +17,6 @@ import tensorflow as tf
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
-from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.utils.global_classes import Params, Project
 
 # We generate a model with the functional Model interface in tensorflow

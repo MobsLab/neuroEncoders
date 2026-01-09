@@ -1,8 +1,6 @@
 import argparse
 
-import ephyviewer
 import neo
-import numpy as np
 from ephyviewer import (
     AnalogSignalFromNeoRawIOSource,
     MainViewer,

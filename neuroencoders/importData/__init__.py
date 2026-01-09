@@ -5,6 +5,5 @@ Exposes:
         - inEpochsMask, get_epochs, merge_intervals, etc. (from epochs_management)
 """
 
-from . import juliaData
-from . import rawdata_parser
-from .epochs_management import inEpochsMask, get_epochs, merge_intervals, inEpochs
+from . import juliaData, rawdata_parser
+from .epochs_management import get_epochs, inEpochs, inEpochsMask, merge_intervals

@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-import glob
 import os
 import sys
 from pathlib import Path
@@ -12,7 +11,7 @@ import spikeinterface.preprocessing as spre
 
 ## import glob
 from probeinterface import generate_linear_probe
-from spikeinterface.sorters import run_sorter_by_property, run_sorter_jobs
+from spikeinterface.sorters import run_sorter_jobs
 
 os.environ["OMP_NUM_THREADS"] = "32"
 si.set_global_job_kwargs(n_jobs=-1, progress_bar=True)
