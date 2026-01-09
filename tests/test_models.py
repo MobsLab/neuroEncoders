@@ -1,8 +1,9 @@
 import os
-import pytest
+from unittest.mock import MagicMock
+
 import numpy as np
+import pytest
 import tensorflow as tf
-from unittest.mock import MagicMock, patch
 
 # Assuming original TF class is importable
 try:
@@ -55,7 +56,6 @@ def mock_project(temp_project_dir):
 
 def test_model_instantiation(mock_params, mock_project):
     behavior_data = get_mock_behavior_data()
-    backend = "tensorflow"
     if TFNet is None:
         pytest.skip("TFNet not available")
     model = TFNet(
@@ -67,13 +67,12 @@ def test_model_instantiation(mock_params, mock_project):
 
 def test_model_forward(mock_params, mock_project):
     behavior_data = get_mock_behavior_data()
-    backend = "tensorflow"
     inputs = get_mock_inputs(
-        backend,
+        "tensorflow",
         batch_size=mock_params.batchSize,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
-        n_features=mock_features if "n_features" in locals() else 64,
+        n_features=64,
     )
 
     if TFNet is None:
@@ -93,9 +92,8 @@ def test_model_forward(mock_params, mock_project):
 
 def test_train_step(mock_params, mock_project):
     behavior_data = get_mock_behavior_data()
-    backend = "tensorflow"
     inputs = get_mock_inputs(
-        backend,
+        "tensorflow",
         batch_size=mock_params.batchSize,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
