@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import numpy as np
 
 # We need to mock matplotlib BEFORE importing modules that might use it
@@ -16,12 +16,16 @@ def test_plotting_imports():
 @patch("matplotlib.pyplot.subplot")
 @patch("matplotlib.pyplot.plot")
 def test_basic_plot_calls(mock_plot, mock_subplot, mock_figure):
-    # Test a simple function that does plotting
-    # Assuming there's a function that takes simple inputs
-
-    # Let's find a simple plotting function in paper_figures
-    # for now we just verify we can mock and call something if it exists.
-    pass
+    """Test that matplotlib mocking works correctly for basic plotting."""
+    import matplotlib.pyplot as plt
+    
+    plt.figure()
+    plt.subplot(1, 1, 1)
+    plt.plot([1, 2, 3], [1, 2, 3])
+    
+    mock_figure.assert_called_once()
+    mock_subplot.assert_called_once()
+    mock_plot.assert_called_once()
 
 
 @patch("matplotlib.pyplot.imshow")
