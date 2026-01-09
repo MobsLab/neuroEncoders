@@ -747,6 +747,7 @@ class Mouse_Results(Params, PaperFigures):
             manipe = kwargs.get("manipe", None)
 
         # Extract optional parameters
+        exp_index = kwargs.get("exp_index", None)
         full_path = kwargs.get("full_path", "")
         phase = kwargs.get("phase", "pre")
         nameExp = kwargs.get("nameExp", "Network")
@@ -774,6 +775,7 @@ class Mouse_Results(Params, PaperFigures):
         self.target = target
         self.phase = phase
         self.which = kwargs.get("which", "all")
+        self.exp_index = exp_index
         if full_path == "":
             self.find_path()
         else:
@@ -1002,22 +1004,36 @@ class Mouse_Results(Params, PaperFigures):
             print("Trainers loaded after pickle load.")
 
     def find_path(self):
-        self.path = (
-            self.Dir[
-                (self.Dir.name.str.lower().str.contains(self.mouse_name.lower()))
-                & (self.Dir.manipe.str.lower().str.contains(self.manipe.lower()))
-            ]
-            .iloc[0]
-            .path
-        )
-        self.network_path = (
-            self.Dir[
-                (self.Dir.name.str.lower().str.contains(self.mouse_name.lower()))
-                & (self.Dir.manipe.str.lower().str.contains(self.manipe.lower()))
-            ]
-            .iloc[0]
-            .network_path
-        )
+        conditions = (
+            self.Dir.name.str.lower().str.contains(self.mouse_name.lower())
+        ) & (self.Dir.manipe.str.lower().str.contains(self.manipe.lower()))
+
+        if not conditions.any():
+            raise ValueError(
+                f"No path found for mouse {self.mouse_name} with manipulation {self.manipe}."
+            )
+
+        if conditions.sum() > 1:
+            if self.exp_index is None:
+                raise ValueError(
+                    f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe}. Please specify exp_index to disambiguate and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
+                )
+            else:
+                # add as a condition that os.path.basename of path contains exp_index
+                suppl_conditions = self.Dir.path.str.contains(f"exp{self.exp_index}")
+                conditions = conditions & suppl_conditions
+
+                if conditions.sum() == 0:
+                    raise ValueError(
+                        f"No path found for mouse {self.mouse_name} with manipulation {self.manipe} and exp_index {self.exp_index}."
+                    )
+                elif conditions.sum() > 1:
+                    raise ValueError(
+                        f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe} and exp_index {self.exp_index}. Please check the exp_index value and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
+                    )
+
+        self.path = self.Dir[conditions].iloc[0].path
+        self.network_path = self.Dir[conditions].iloc[0].network_path
         print(f"Path for {self.mouse_name} found: {self.path}")
 
     def find_xml(self):
