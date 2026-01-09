@@ -211,6 +211,8 @@ class Trainer(SpatialConstraintsMixin):
         positions = speed_filtered_positions[
             ~np.isnan(speed_filtered_positions).any(axis=1)
         ]
+        # allows to work with only the required dimensions (2D position by default here)
+        positions = positions[:, : self.feature_dim]
 
         ### Build global occupation map
         final_occupation, occupation, gridFeature = self._build_occupation_map(
@@ -293,6 +295,10 @@ class Trainer(SpatialConstraintsMixin):
 
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
+        target = kwargs.get("target", self.config.target_bayes)
+
+        if target == "pos":
+            behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
 
         if not hasattr(self, "training_data"):
             # first, save the training data from the behaviorData
@@ -2754,7 +2760,9 @@ class Trainer(SpatialConstraintsMixin):
         ).flatten()
         timeLinear = np.squeeze(behaviorData["positionTime"][timesMask, :])
         linearTraj = linearTraj[timesMask]
-        linSpace = np.arange(min(linearTraj), max(linearTraj), step=0.01)
+        linSpace = np.arange(
+            float(np.nanmin(linearTraj)), float(np.nanmax(linearTraj)), step=0.01
+        )
         histPos, binEdges = np.histogram(linearTraj, bins=linSpace)
 
         for tetrode in range(len(self.clusterData["Spike_times"])):

@@ -2,6 +2,7 @@
 import os
 import platform
 import subprocess
+import warnings
 
 import dill as pickle
 import matplotlib.colors as mcolors
@@ -14,7 +15,7 @@ import seaborn as sns
 import tqdm
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import binned_statistic_2d, sem, zscore
 from statsmodels.stats.proportion import proportions_ztest
 
@@ -962,6 +963,11 @@ class PaperFigures:
         for i, (sess_name, sess_time) in enumerate(
             DataHelper.fullBehavior["Times"]["SessionEpochs"].items()
         ):
+            if not sess_time:
+                warnings.warn(
+                    f"Session {sess_name} has no time epochs, skipping plotting and analysis for this session."
+                )
+                continue  # skip empty sessions
             if sess_name.lower() == "cond":
                 after_cond = True
             # 1. Data Filtering
@@ -1271,6 +1277,10 @@ class PaperFigures:
         Page 1: Behavior & Error Maps
         Page 2+: Trajectories (2 suffixes per page)
         """
+        if kwargs.get("mouse_name", None) is not None:
+            title_content = f"M{kwargs.get('mouse_name')} - "
+        else:
+            title_content = f"{os.path.basename(self.projectPath.experimentPath)} - "
         idWindow = self.timeWindows.index(timeWindow)
 
         # 1. Setup PDF Path
@@ -1348,7 +1358,7 @@ class PaperFigures:
             )
 
             fig1.suptitle(
-                f"Summary: {os.path.basename(self.projectPath.experimentPath)} ({timeWindow}ms)",
+                f"Summary: {title_content} ({timeWindow}ms)",
                 fontsize=14,
             )
             plt.tight_layout()
@@ -1518,9 +1528,19 @@ class PaperFigures:
                 for i in range(2)
                 for j in range(3)
             ]
-            self.bayesian_neurons_summary(
-                fig=bayesian_page, axs=bayesian_axs, show=False, block=False, save=False
-            )
+            try:
+                self.bayesian_neurons_summary(
+                    fig=bayesian_page,
+                    axs=bayesian_axs,
+                    show=False,
+                    block=False,
+                    save=False,
+                )
+            except Exception as e:
+                print(f"Could not generate bayesian summary page: {e}")
+                # delete temp pdf file
+                os.remove(save_path)
+                raise e
             plt.tight_layout()
             pdf.savefig(bayesian_page)
             plt.close(bayesian_page)
@@ -4720,6 +4740,13 @@ class PaperFigures:
         # Plot Peak
         peak_x = results["stats"]["x"]
         peak_y = results["stats"]["y"]
+        # if they are arrays, take the first element
+        if isinstance(peak_x, np.ndarray):
+            peak_x = peak_x[0]
+            peak_x = int(peak_x)
+        if isinstance(peak_y, np.ndarray):
+            peak_y = peak_y[0]
+            peak_y = int(peak_y)
         ax.plot(peak_x, peak_y, "rx", markersize=10, markeredgewidth=2, label="Peak FR")
         ax.text(
             peak_x + 2,
@@ -4750,6 +4777,17 @@ class PaperFigures:
         """
         Summary of the Bayesian neurons.
         Can create its own figure or plot on provided axes.
+
+        Args:
+            axs (array-like, optional): Array of matplotlib axes to plot on. If None, a new figure with 6 subplots will be created.
+            fig (matplotlib.figure.Figure, optional): Figure object to associate with the axes. If None and axs is provided, fig will be inferred from axs.
+            block (bool, optional): Whether to block execution when showing the plot. Default is False.
+            **kwargs: Additional keyword arguments for training and plotting.
+                Supported kwargs:
+                - plot_high_quality (bool): If True, plots only high-quality neurons based on Mutual Information. Default is False.
+                - save (bool): If True, saves the figure. Default is True if axs is None, else False.
+                - show (bool): If True, displays the figure. Default is True if axs is None, else False.
+                - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
         """
         # kwargs processing
         plot_high_quality = kwargs.get("plot_high_quality", False)
@@ -4780,6 +4818,7 @@ class PaperFigures:
         ]
         ordered_mi = np.array(flat_mi)[self.trainerBayes.linearPosArgSort]
 
+        # FIX: check that every neuron fires at least once in the spikeMatLabels (only in training data)
         # --- 2. Identify High-Quality Neurons ---
         thresh = 80
         percentile_val = np.percentile(ordered_mi, thresh)
@@ -4826,43 +4865,79 @@ class PaperFigures:
         ).reshape(-1)
 
         # --- Panel 0: First Ordered Place Field ---
-        neuron_first = (
-            self.trainerBayes.linearPosArgSort[1]
-            if not plot_high_quality
-            else high_quality_indices[0]
-        )
+        for i in range(len(self.trainerBayes.linearPosArgSort)):
+            neuron_first = (
+                self.trainerBayes.linearPosArgSort[i]
+                if not plot_high_quality
+                else high_quality_indices[i]
+            )
+            # check if neuron_first has at least 50 spikes in the wake/training epoch and 100 spikes overall
+            spike_count = np.sum(self.trainerBayes.spikeMatLabels[:, neuron_first])
+            if (
+                spike_count > 100
+                and nap.Ts(
+                    self.trainerBayes.spikeMatTimes[
+                        self.trainerBayes.spikeMatLabels[:, neuron_first] == 1
+                    ].flatten()
+                )
+                .restrict(nap.IntervalSet(epoch))
+                .shape[0]
+                > 50
+            ):
+                break
         self._plot_single_place_field(
             axs[0], neuron_first, pos_x, pos_y, epoch, "First Ordered Place Field"
         )
 
         # --- Pre-calculate Linear Fields ---
         has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
+        scaling_method = kwargs.get("scaling", "minmax")
         norm_fields = None
         if has_linear:
             raw_fields = self.trainerBayes.orderedLinearPlaceFields
-            # Safe Z-score normalization
-            std_val = np.std(raw_fields, axis=0)
-            norm_fields = (raw_fields - np.mean(raw_fields, axis=0)) / (std_val + 1e-8)
+            if scaling_method == "z-score":
+                # Safe Z-score normalization per neuron (row-wise)
+                mean_vals = np.mean(raw_fields, axis=1, keepdims=True)
+                std_val = np.std(raw_fields, axis=1, keepdims=True)
+                norm_fields = (raw_fields - mean_vals) / (std_val + 1e-8)
 
-            linear_bins = np.linspace(0, 1, norm_fields.shape[1])
-            x_ticks = np.arange(0, norm_fields.shape[1], 20)
-            x_labels = np.round(linear_bins[::20], 2)
+                # Plotting Setup for Z-Score
+                cmap = "RdBu_r"
+                v_lim = min(np.percentile(np.abs(norm_fields), 99), 4)
+                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+                cb_label = "Z-Scored FR"
+            elif scaling_method == "minmax":
+                # Min-Max normalization per neuron (row-wise)
+                min_vals = np.min(raw_fields, axis=1, keepdims=True)
+                max_vals = np.max(raw_fields, axis=1, keepdims=True)
+                norm_fields = (raw_fields - min_vals) / (max_vals - min_vals + 1e-8)
+
+                # Plotting Setup for Min-Max
+                cmap = "viridis"
+                norm = mcolors.Normalize(vmin=0, vmax=1)
+                cb_label = "Normalized Firing Rate (0-1)"
+            else:
+                raise ValueError(
+                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
+                )
 
         # --- Panel 1: All Linear Tuning Curves ---
         ax = axs[1]
         if has_linear and norm_fields is not None:
-            norm = mcolors.TwoSlopeNorm(
-                vmin=norm_fields.min(), vcenter=0, vmax=norm_fields.max()
-            )
+            # smooth out the fields for better visualization
+            norm_fields = gaussian_filter1d(norm_fields, sigma=2, axis=1)
             im = ax.imshow(
-                norm_fields, aspect="auto", origin="lower", cmap="coolwarm", norm=norm
+                norm_fields, aspect="auto", origin="lower", cmap=cmap, norm=norm
             )
+            linear_bins = np.linspace(0, 1, norm_fields.shape[1])
+            x_ticks = np.arange(0, norm_fields.shape[1], 20)
+            x_labels = np.round(linear_bins[x_ticks], 2)
             ax.set_xticks(x_ticks)
             ax.set_xticklabels(x_labels)
             ax.set_xlabel("Linear Position")
             ax.set_ylabel("Neuron Index")
             ax.set_title("Linear Tuning Curves")
-            fig.colorbar(im, ax=ax, label="Deviation (Z-score)")
+            fig.colorbar(im, ax=ax, label=cb_label)
         else:
             ax.axis("off")
 
@@ -4889,13 +4964,9 @@ class PaperFigures:
         ax = axs[4]
         if has_linear and norm_fields is not None and high_quality_mask.sum() > 0:
             hq_fields = norm_fields[high_quality_mask]
-            norm = mcolors.TwoSlopeNorm(
-                vmin=hq_fields.min(), vcenter=0, vmax=hq_fields.max()
-            )
             im = ax.imshow(
-                hq_fields, aspect="auto", origin="lower", cmap="coolwarm", norm=norm
+                hq_fields, aspect="auto", origin="lower", cmap=cmap, norm=norm
             )
-
             hq_indices = np.arange(norm_fields.shape[0])[high_quality_mask]
             ax.set_xticks(x_ticks)
             ax.set_xticklabels(x_labels)

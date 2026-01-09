@@ -804,7 +804,7 @@ class Mouse_Results(Params, PaperFigures):
                 # otherwise will be loaded by super init
                 try:
                     self.data_helper[winMS] = DataHelperClass.load(
-                        self.projects[winMS].experimentPath
+                        self.projects[winMS].experimentPath, phase=self.phase
                     )
                 except FileNotFoundError as e:
                     print("did not manage to load DataHelper:", e)
@@ -1031,6 +1031,7 @@ class Mouse_Results(Params, PaperFigures):
         for pattern in [
             "*SpikeRef*.xml",
             f"*{os.path.basename(self.path)[:4]}*.xml",
+            f"*{self.mouse_name}*.xml",
             "*amplifier*.xml",
             "*.xml",
         ]:
