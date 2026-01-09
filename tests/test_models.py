@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from unittest.mock import MagicMock
+
 # Assuming original TF class is importable
 try:
     from neuroencoders.fullEncoder.an_network import LSTMandSpikeNetwork as TFNet
@@ -72,7 +74,8 @@ def test_model_forward(mock_params, mock_project):
         batch_size=mock_params.batchSize,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
-        n_features=64,
+
+        n_features=mock_params.nFeatures,
     )
 
     if TFNet is None:
