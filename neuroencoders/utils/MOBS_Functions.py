@@ -1029,7 +1029,7 @@ class Mouse_Results(Params, PaperFigures):
                     )
                 elif conditions.sum() > 1:
                     raise ValueError(
-                        f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe} and exp_index {self.exp_index}. Please check the exp_index value and choose one of the following paths:\n{self.Dir[conditions][['path']]}"
+                        f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe} and exp_index {self.exp_index}. Please check the exp_index value and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
                     )
 
         self.path = self.Dir[conditions].iloc[0].path
