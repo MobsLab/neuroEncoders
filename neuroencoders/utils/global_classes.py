@@ -1705,7 +1705,7 @@ class Params:
             else kwargs.get("isTransformer", None)
         )  # use transformer instead of LSTM
         self.nHeads = kwargs.pop(
-            "nHeads", 8
+            "nHeads", 4
         )  # number of attention heads in the transformer if used
 
         # changed after CSI - better scaleability + transformer pretraining?
@@ -1719,8 +1719,9 @@ class Params:
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
         self.dropoutCNN = kwargs.pop("dropoutCNN", 0.35)
         self.lstmSize = kwargs.pop("lstmSize", 64)
-        default_dropout_lstm = 0.3 if not self.isTransformer else 0.35
+        default_dropout_lstm = 0.3 if not self.isTransformer else 0.15
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
+        print(f"Using dropoutLSTM = {self.dropoutLSTM}")
         self.ff_dim1 = kwargs.pop(
             "ff_dim1",
             self.nFeatures * 2 * self.dim_factor
@@ -1767,7 +1768,7 @@ class Params:
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
         self.learningRates = kwargs.pop(
-            "learningRates", [0.0007]
+            "learningRates", [0.01]
         )  #  [0.00003, 0.00003, 0.00001]
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
@@ -1838,7 +1839,7 @@ class Params:
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
         self.contrastive_loss = kwargs.pop("contrastive_loss", False)
-        self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.3)
+        self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.7)
         self.use_conv2d = kwargs.pop("use_conv2d", False)
         self.use_group_attention_fusion = kwargs.pop("use_group_attention_fusion", True)
         # enforcing float16 computations whenever possible

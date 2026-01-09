@@ -19,8 +19,8 @@ win_values = [0.108, 0.18, 0.252, 0.504]
 win_values = [0.504]  # only kept for new dataset
 win_values = [0.108, 0.252]
 win_values = [0.108, 0.252]  # only kept for new dataset
-win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 win_values = [0.108]
+win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 # Mice name
 mice_nb = []
 mice_nb = [
@@ -39,7 +39,8 @@ mice_nb = [
     "M905",
     "M1199_MFB",
 ]
-nameExp = "fixedChannel_concat_2Transformer_small_contrastive_groupFusion"
+####
+nameExp = "consensus_v1_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -185,7 +186,20 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             )
             and not lstmAndTransfo
         )
-    ) and (not force):
+    ) and (
+        not force
+        or (
+            os.path.exists(
+                os.path.join(
+                    dir,
+                    nameExp + "_Transformer",
+                    "figures",
+                    f"summary_id_card_{int(win * 1000)}ms.pdf",
+                )
+            )
+            and not lstmAndTransfo
+        )
+    ):
         print(f"featurePred+-{phase}.csv already exists in {dir}. Skipping...")
         return None, None
 
@@ -210,13 +224,14 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--n_features",
             "64",
             "--dim_factor",
-            "4",
+            "3",
             "--n_transformers",
-            "2",
+            "3",
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
             "--contrastive_loss",
+            "--plot_id",
             # "--predicted_loss",
             # "--transform_w_log",
             # "--mixed_loss",

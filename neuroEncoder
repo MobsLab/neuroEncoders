@@ -691,7 +691,7 @@ def main(args):
             num_augmentations = args.num_augmentations
             print("num_augmentations", num_augmentations)
             if num_augmentations is None:
-                num_augmentations = 3 if args.window < 0.504 else 2
+                num_augmentations = 4 if args.window < 0.504 else 2
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -705,7 +705,16 @@ def main(args):
             )
             T = None
 
-        if Parameters.GaussianHeatmap:
+        if Parameters.GaussianHeatmap and (
+            not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResult,
+                    str(windowSizeMS),
+                    "errorFig_2d_NN_training_inferring.png",
+                )
+            )
+            or args.redo
+        ):
             print("Will now run temperature scaling for gaussian heatmap")
             T = NNTrainer.test(
                 DataHelper.fullBehavior,
@@ -899,7 +908,68 @@ def main(args):
                 isPredLoss=isPL,
                 strideFactor=strideFactor,
                 T_scaling=T,
-                # TODO: add windowSizeDecoder --> decode small windows with big window trained model
+                # TODO: add window Size Decoder --> decode small windows with big window trained model
+            )
+
+        if args.plot_id or (
+            not os.path.exists(
+                os.path.join(
+                    ProjectPath.experimentPath,
+                    "figures",
+                    f"summary_id_card_{windowSizeMS}ms.pdf",
+                )
+            )
+            or args.redo
+        ):
+            import neuroencoders.utils.MOBS_Functions as mf
+
+            Dir = mf.path_for_experiments_df("Sub", args.name)
+            if "1199_MFB" not in ProjectPath.baseName:
+                mouse_full_name = os.path.basename(
+                    os.path.dirname(ProjectPath.baseName)
+                )
+            else:
+                mouse_full_name = os.path.basename(
+                    os.path.dirname(os.path.dirname(ProjectPath.baseName))
+                )
+
+            mouse_name = mouse_full_name.split("_")[0].strip("M")
+            manipe = mouse_full_name.split("_")[1]
+            curr = mf.Mouse_Results(
+                Dir,
+                mouse_name=mouse_name,
+                manipe=manipe,
+                nameExp=args.name,
+                target=args.target,
+                nEpochs=Parameters.nEpochs,
+                phase=args.phase,
+                deviceName=deviceName,
+                windows=windowSizeMS,
+                isTransformer=not args.lstm,
+                denseweight=not args.no_dense,
+                transform_w_log=args.transform_w_log,
+                which="both",
+                load_last_bayes=True,
+                load_bayesMatrices=True,
+                isPredLoss=isPL,
+                GaussianHeatmap=Parameters.GaussianHeatmap,
+            )
+            curr.load_data(
+                suffixes=["_pre", "_cond", "_post", "_training"],
+                load_pickle=True,
+                extract_spikes_counts=True,
+            )
+            curr.load_bayes(
+                suffixes=["_pre", "_cond", "_post", "_training"],
+                load_pickle=True,
+                target="pos",
+            )
+            curr.fig_summary_id_card(
+                timeWindow=windowSizeMS,
+                DataHelper=DataHelper,
+                save=True,
+                block=False,
+                mouse_name=curr.mouse_name + curr.manipe,
             )
 
         NNTrainer.clear_session()
@@ -1303,6 +1373,12 @@ if __name__ == "__main__":
                 "--gpu",
                 action="store_true",
                 help="run computations on gpu. Requires specific installation.",
+            )
+            p.add_argument(
+                "-id",
+                "--plot_id",
+                action="store_true",
+                help="plot id card of the mouse at the end of the run.",
             )
 
     args = Parser.parse_args()
