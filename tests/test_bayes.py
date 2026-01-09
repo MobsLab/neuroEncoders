@@ -1,7 +1,6 @@
-import pytest
-import numpy as np
 import os
 from unittest.mock import MagicMock, patch
+
 from neuroencoders.simpleBayes.decode_bayes import Trainer
 
 

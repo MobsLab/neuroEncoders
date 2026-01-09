@@ -1,6 +1,5 @@
 # Import libs
 import random
-from functools import reduce
 
 import numpy as np
 from sklearn.neighbors import KernelDensity

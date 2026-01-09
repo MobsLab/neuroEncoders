@@ -1596,7 +1596,7 @@ class Mouse_Results(Params, PaperFigures):
                                 )[-1]
                                 .numpy()
                             )
-                        except Exception as e:
+                        except Exception:
                             self.load_trainers(which="ann")
                             predicted_probs = (
                                 self.ann[str(win)]

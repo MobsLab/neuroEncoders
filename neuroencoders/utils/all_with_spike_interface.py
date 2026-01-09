@@ -137,11 +137,12 @@ if __name__ == "__main__":
     else:
         try:
             import ephyviewer  # noqa: F401
-            import spikeinterface  # noqa: F401
             import numpy  # noqa: F401
+            import spikeinterface  # noqa: F401
 
             print(
-                "All dependencies are installed. You can run the script to visualize data."
+                f"All dependencies are installed. You can run the script to visualize data "
+                f"(spikeinterface version: {spikeinterface.__version__})."
             )
         except ImportError as e:
             print("Missing dependency:", e.name)
