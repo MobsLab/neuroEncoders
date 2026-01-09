@@ -30,42 +30,28 @@ def test_is_in_zone():
 
 
 def test_dist2wall():
-    # We can mock DataHelper without loading from disk by patching __new__ or __init__?
-    # Or just use a dummy subclass.
+    """Test DataHelper.dist2wall method with mocked instance.
 
-    # Let's create a minimal DataHelper stub that has dist2wall
-    # DataHelper.dist2wall(positions)
-
-    # Creating a minimal instance without calling actual __init__
+    Creates a minimal DataHelper instance without calling __init__ to test
+    the dist2wall functionality. The test sets up positions in different maze
+    regions (lower, upper, and other) to verify that the method correctly
+    computes distances to maze boundaries. The maze is defined with specific
+    coordinates forming a polygon with a hole in the middle, and get_maze_limits
+    is mocked to avoid auto-detection logic affecting the test outcome.
+    """
     dh = DataHelper.__new__(DataHelper)
-    # Positions needs to trigger get_maze_limits logic:
-    # lower_mask = (y < 0.75) & (x < 0.5)
-    # upper_mask = (y < 0.75) & (x > 0.5)
-    # We need points in these regions.
     dh.positions = np.array(
         [
-            [0.1, 0.1],  # Lower region -> sets lower_x
-            [0.9, 0.1],  # Upper region -> sets upper_x
+            [0.1, 0.1],  # Lower region
+            [0.9, 0.1],  # Upper region
             [0.5, 0.8],  # Other
         ]
     )
     dh.old_positions = dh.positions
 
-    # Mock maze limits for standard unit square
-    # We can rely on get_maze_limits to run or just set them?
-    # The failing test called get_maze_limits explicitly implicitly via dist2wall -> get_maze_limits
-    # ensuring get_maze_limits works with above positions.
-
     dh.lower_x = 0.35
     dh.upper_x = 0.65
     dh.ylim = 0.75
-
-    # We also need to mock create_polygon and shapePoints logic if we don't assume real DataHelper methods work fully.
-    # But dist2wall calls them.
-    # We need to make sure global_classes imports standard libs correctly.
-
-    # If we trust get_maze_limits works with above data, we are good.
-    # Let's just mock get_maze_limits to return fixed values to avoid the auto-detection logic being the point of failure for dist2wall test.
 
     dh.get_maze_limits = MagicMock(return_value=([0.35, 0.65], 0.75))
 
@@ -81,16 +67,11 @@ def test_dist2wall():
         [0, 0],
     ]
 
-    # Test valid point
-    pos = np.array([[0.5, 0.8]])  # Center top
-    # The maze has a hole in the middle?
-    # Let's look at `_define_maze_zones`.
-    # It creates a polygon.
-
+    pos = np.array([[0.5, 0.8]])
     dist = dh.dist2wall(pos, show=False)
+    
     assert isinstance(dist, np.ndarray)
     assert dist.shape == (1,)
-    # Should be positive distance to boundary
     assert dist[0] >= 0
 
 
