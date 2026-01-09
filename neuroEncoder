@@ -935,8 +935,17 @@ def main(args):
                 )
                 exp_index = os.path.dirname(ProjectPath.baseName).split("exp")[-1]
 
-            mouse_name = mouse_full_name.split("_")[0].strip("M")
-            manipe = mouse_full_name.split("_")[1]
+            parts = mouse_full_name.split("_")
+            if len(parts) < 2:
+                warn(
+                    f"Unexpected mouse_full_name format '{mouse_full_name}'. "
+                    "Expected at least one underscore to separate mouse_name and manipe."
+                )
+                mouse_name = mouse_full_name.strip("M")
+                manipe = ""
+            else:
+                mouse_name = parts[0].strip("M")
+                manipe = parts[1]
             curr = mf.Mouse_Results(
                 Dir,
                 mouse_name=mouse_name,
