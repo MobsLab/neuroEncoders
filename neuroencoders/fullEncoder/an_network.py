@@ -25,6 +25,7 @@ import tensorflow as tf
 from keras import ops as kops
 from keras.layers import Lambda
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -45,7 +46,6 @@ from neuroencoders.fullEncoder.nnUtils import (
 )
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper, Params, Project
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow

@@ -19,8 +19,8 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     import os
 
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    from tensorflow import config
     import tensorflow as tf
+    from tensorflow import config
 
     # if gpu set memory growth
     if "GPU" in usedDevice.upper():
@@ -40,13 +40,18 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     if usedDevice.upper() == "MULTI-GPU":
         device_phys = config.list_physical_devices("GPU")
         if len(device_phys) > 1:
-            print(f"Initializing Multi-GPU strategy (MirroredStrategy) with {len(device_phys)} GPUs")
+            print(
+                f"Initializing Multi-GPU strategy (MirroredStrategy) with {len(device_phys)} GPUs"
+            )
             strategy = tf.distribute.MirroredStrategy()
             return strategy
         elif len(device_phys) == 1:
             import warnings
-            warnings.warn("MULTI-GPU requested but only one GPU found. Using single GPU mode.")
-            usedDevice = "GPU" # Fallback to single GPU logic below
+
+            warnings.warn(
+                "MULTI-GPU requested but only one GPU found. Using single GPU mode."
+            )
+            usedDevice = "GPU"  # Fallback to single GPU logic below
         else:
             raise ValueError("MULTI-GPU requested but no GPU devices found.")
 
@@ -57,7 +62,9 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
         if int(dev_idx) < len(logical_devices):
             return logical_devices[int(dev_idx)].name
         else:
-            raise ValueError(f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found.")
+            raise ValueError(
+                f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found."
+            )
 
     # get the name of the device
     device = config.list_logical_devices(usedDevice.upper())

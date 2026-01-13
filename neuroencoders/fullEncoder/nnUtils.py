@@ -1,7 +1,7 @@
 # Load libs
+import contextlib
 import gc
 import os
-import contextlib
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -3328,7 +3328,7 @@ def _get_loss_function(
     elif loss_name == "kl_heatmap":
         if gaussian_loss_layer is None:
             raise ValueError("gaussian_layer must be provided for kl_heatmap loss")
-        return nnUtils.KLHeatmapLoss(gaussian_loss_layer, scale=False)
+        return KLHeatmapLoss(gaussian_loss_layer, scale=False)
         # reduction is already none
 
     else:
