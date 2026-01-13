@@ -43,7 +43,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     _get_loss_function,
     create_flatten_augmented_groups_fn,
 )
-from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper, Params, Project
 from wandb.integration.keras import WandbMetricsLogger
 
@@ -1559,6 +1559,8 @@ class LSTMandSpikeNetwork:
             Whether to use the speed filter, by default False.
         useTrain : bool, optional
             Whether to use the training epochs, by default False.
+        useTest : bool, optional
+            Whether to use the testing epochs, by default True.
         onTheFlyCorrection : bool, optional
             Whether to apply on-the-fly correction to the positions, by default False.
         isPredLoss : bool, optional
@@ -1577,6 +1579,7 @@ class LSTMandSpikeNetwork:
         windowSizeMS = kwargs.pop("windowSizeMS", 36)
         useSpeedFilter = kwargs.get("useSpeedFilter", False)
         useTrain = kwargs.get("useTrain", False)
+        useTest = kwargs.get("useTest", True)
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         isPredLoss = kwargs.get("isPredLoss", False)
         speedValue = kwargs.get("speedValue", None)
@@ -1584,7 +1587,6 @@ class LSTMandSpikeNetwork:
         template = kwargs.get("template", None)
         fit_temperature = kwargs.get("fit_temperature", False)
         T_scaling = kwargs.get("T_scaling", None)
-        epochKey = kwargs.get("epochKey", "testEpochs")
         strideFactor = kwargs.get("strideFactor", 1)
         extract_spikes_counts = kwargs.get("extract_spikes_counts", False)
 
@@ -1636,16 +1638,10 @@ class LSTMandSpikeNetwork:
             speedMask = speedValue > speed
         if speedMask.shape[0] != behaviorData["Times"]["speedFilter"].shape[0]:
             warnings.warn("The speed mask must be the same length as the speed filter")
-        if useTrain:
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-            ) + inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
-            )
-        else:
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"][epochKey]
-            )
+        # Manage epoch mask
+        epochMask = get_epochs_mask(
+            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
+        )
         if useSpeedFilter:
             totMask = speedMask * epochMask
         else:
@@ -2405,6 +2401,7 @@ class LSTMandSpikeNetwork:
         windowSizeMS: int = 36,
         useSpeedFilter: bool = False,
         useTrain: bool = False,
+        useTest: bool = True,
         isPredLoss: bool = False,
         strideFactor: int = 1,
         phase: str = "test",
@@ -2472,16 +2469,9 @@ class LSTMandSpikeNetwork:
                     )
 
         # --- Build the same total mask used in test() ---
-        if useTrain:
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-            ) + inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
-            )
-        else:
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
-            )
+        epochMask = get_epochs_mask(
+            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
+        )
 
         if useSpeedFilter:
             speedMask = behaviorData["Times"]["speedFilter"]

@@ -18,7 +18,11 @@ from scipy.ndimage import gaussian_filter1d
 from tqdm import tqdm
 
 from neuroencoders.importData import import_clusters
-from neuroencoders.importData.epochs_management import inEpochs, inEpochsMask
+from neuroencoders.importData.epochs_management import (
+    get_epochs_mask,
+    inEpochs,
+    inEpochsMask,
+)
 
 # Load custom code
 from neuroencoders.simpleBayes import butils
@@ -945,6 +949,7 @@ class Trainer(SpatialConstraintsMixin):
         behaviorData: Dict = None,
         windowSizeMS: int = 36,
         useTrain: bool = False,
+        useTest: bool = True,
         # New parameters for compatibility with new code (fallback from parallel_pred_as_NN)
         timeStepPred=None,
         all_poisson=None,
@@ -999,7 +1004,7 @@ class Trainer(SpatialConstraintsMixin):
             )
         else:
             return self._test_legacy_original_mode(
-                bayesMatrices, behaviorData, windowSizeMS, useTrain
+                bayesMatrices, behaviorData, windowSizeMS, useTrain, useTest
             )
 
     def _test_legacy_fallback_mode(
@@ -1118,7 +1123,7 @@ class Trainer(SpatialConstraintsMixin):
             return (max_probs, max_indices)
 
     def _test_legacy_original_mode(
-        self, bayesMatrices, behaviorData, windowSizeMS, useTrain
+        self, bayesMatrices, behaviorData, windowSizeMS, useTrain, useTest
     ):
         """
         Original legacy decoding implementation (unchanged)
@@ -1128,28 +1133,19 @@ class Trainer(SpatialConstraintsMixin):
 
         print("\nBUILDING POSITION PROBAS")
         # find the spikes times in the test epochs
-        if useTrain:
-            epochsTrain = inEpochs(
-                self.clusterData["Spike_times"][0][:, 0],
-                behaviorData["Times"]["trainEpochs"],
-            )
-            epochsTest = inEpochs(
-                self.clusterData["Spike_times"][0][:, 0],
-                behaviorData["Times"]["testEpochs"],
-            )
-            epochs = np.sort(np.concatenate([epochsTrain[0], epochsTest[0]]))
-        else:
-            epochs = inEpochs(
-                self.clusterData["Spike_times"][0][:, 0],
-                behaviorData["Times"]["testEpochs"],
-            )
+        epochMask = get_epochs_mask(
+            times=self.clusterData["Spike_times"][0][:, 0],
+            behaviorData=behaviorData,
+            useTrain=useTrain,
+            useTest=useTest,
+        )
         guessed_clusters_time = [
-            self.clusterData["Spike_times"][tetrode][epochs]
+            self.clusterData["Spike_times"][tetrode][epochMask]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
         # find the clusters/mua in the test epochs
         guessed_clusters = [
-            self.clusterData["Spike_labels"][tetrode][epochs]
+            self.clusterData["Spike_labels"][tetrode][epochMask]
             for tetrode in range(len(self.clusterData["Spike_times"]))
         ]
 
@@ -1400,6 +1396,7 @@ class Trainer(SpatialConstraintsMixin):
         timeStepPred: np.ndarray,
         windowSizeMS: float = 36,
         useTrain: bool = False,
+        useTest: bool = True,
         sleepEpochs: List = [],
         l_function=None,
         cross_validate: bool = False,
@@ -1418,6 +1415,7 @@ class Trainer(SpatialConstraintsMixin):
             timeStepPred: array, time steps for prediction.
             windowSizeMS: int, size of the window in milliseconds.
             useTrain: bool, whether to use training epochs for prediction.
+            useTest: bool, whether to use testing epochs for prediction.
             sleepEpochs: list, epochs to consider for sleep decoding.
             l_function: callable, optional linearization function.
             cross_validate: bool, whether to perform cross-validation.
@@ -1436,7 +1434,7 @@ class Trainer(SpatialConstraintsMixin):
 
         # Prepare spike data for the specified epochs
         clusters_time, clusters = self._prepare_spike_data(
-            behaviorData, useTrain, sleepEpochs
+            behaviorData, useTrain, useTest, sleepEpochs
         )
 
         # Extract and preprocess Bayesian matrices
@@ -1469,7 +1467,7 @@ class Trainer(SpatialConstraintsMixin):
         if not isSleep:
             # Get ground truth positions
             featureTrue = self._get_ground_truth_positions(
-                timeStepPred, behaviorData, useTrain
+                timeStepPred, behaviorData, useTrain, useTest
             )
 
             # Compute comprehensive performance metrics
@@ -1488,6 +1486,7 @@ class Trainer(SpatialConstraintsMixin):
                     l_function,
                     cv_folds,
                     useTrain,
+                    useTest,
                     sleepEpochs,
                 )
 
@@ -1500,6 +1499,7 @@ class Trainer(SpatialConstraintsMixin):
             "decoding_params": {
                 "windowSizeMS": windowSizeMS,
                 "useTrain": useTrain,
+                "useTest": useTest,
                 "n_time_steps": len(timeStepPred),
                 "n_nan_fixed": processed_results.get("n_nan_fixed", 0),
             },
@@ -1551,6 +1551,7 @@ class Trainer(SpatialConstraintsMixin):
         self,
         behaviorData: Dict,
         useTrain: bool,
+        useTest: bool,
         sleepEpochs: List,
         save_as_pickle: bool = True,
     ) -> Tuple[List, List]:
@@ -1558,6 +1559,7 @@ class Trainer(SpatialConstraintsMixin):
         Args:
             behaviorData: dict, containing the position and time data.
             useTrain: bool, whether to use training epochs for prediction.
+            useTest: bool, whether to use testing epochs for prediction.
             sleepEpochs: list, epochs to consider for sleep decoding.
         """
 
@@ -1566,30 +1568,16 @@ class Trainer(SpatialConstraintsMixin):
         clusters = []
 
         for tetrode in range(n_tetrodes):
-            if useTrain:
-                epochs_train = inEpochsMask(
-                    self.clusterData["Spike_times"][tetrode][:, 0],
-                    behaviorData["Times"]["trainEpochs"],
-                )
-                epochs_test = inEpochsMask(
-                    self.clusterData["Spike_times"][tetrode][:, 0],
-                    behaviorData["Times"]["testEpochs"],
-                )
-                combined_epochs = epochs_train + epochs_test
-            elif len(sleepEpochs) > 0:
-                combined_epochs = inEpochs(
-                    self.clusterData["Spike_times"][tetrode][:, 0], sleepEpochs
-                )
-            else:
-                combined_epochs = inEpochs(
-                    self.clusterData["Spike_times"][tetrode][:, 0],
-                    behaviorData["Times"]["testEpochs"],
-                )
-
-            clusters_time.append(
-                self.clusterData["Spike_times"][tetrode][combined_epochs]
+            epochMask = get_epochs_mask(
+                times=self.clusterData["Spike_times"][tetrode][:, 0],
+                behaviorData=behaviorData,
+                useTrain=useTrain,
+                useTest=useTest,
+                sleepEpochs=sleepEpochs,
             )
-            clusters.append(self.clusterData["Spike_labels"][tetrode][combined_epochs])
+
+            clusters_time.append(self.clusterData["Spike_times"][tetrode][epochMask])
+            clusters.append(self.clusterData["Spike_labels"][tetrode][epochMask])
         if save_as_pickle:
             with open(
                 os.path.join(
@@ -2080,29 +2068,24 @@ class Trainer(SpatialConstraintsMixin):
         return {"position": predicted_position, "confidence": np.max(position_probs)}
 
     def _get_ground_truth_positions(
-        self, timeStepPred: np.ndarray, behaviorData: Dict, useTrain: bool
+        self,
+        timeStepPred: np.ndarray,
+        behaviorData: Dict,
+        useTrain: bool,
+        useTest: bool = True,
     ) -> np.ndarray:
         """Get ground truth positions for evaluation"""
 
         # Get position data for relevant epochs
-        if useTrain:
-            train_mask = inEpochsMask(
-                behaviorData["positionTime"][:, 0],
-                behaviorData["Times"]["trainEpochs"],
-            )
-            test_mask = inEpochsMask(
-                behaviorData["positionTime"][:, 0],
-                behaviorData["Times"]["testEpochs"],
-            )
-            epoch_mask = train_mask + test_mask
-        else:
-            epoch_mask = inEpochsMask(
-                behaviorData["positionTime"][:, 0],
-                behaviorData["Times"]["testEpochs"],
-            )
+        epochMask = get_epochs_mask(
+            times=behaviorData["positionTime"][:, 0],
+            behaviorData=behaviorData,
+            useTrain=useTrain,
+            useTest=useTest,
+        )
 
-        real_positions = behaviorData["Positions"][epoch_mask]
-        real_times = behaviorData["positionTime"][epoch_mask]
+        real_positions = behaviorData["Positions"][epochMask]
+        real_times = behaviorData["positionTime"][epochMask]
 
         # Find nearest position for each prediction time
         featureTrue = np.zeros((len(timeStepPred), self.feature_dim))
@@ -2226,6 +2209,7 @@ class Trainer(SpatialConstraintsMixin):
         l_function,
         cv_folds: int,
         useTrain: bool,
+        useTest: bool,
         sleepEpochs: List,
     ) -> Dict:
         """Perform k-fold cross-validation of the decoder"""
@@ -2310,7 +2294,8 @@ class Trainer(SpatialConstraintsMixin):
                         fold_bayes_matrices,
                         val_times,
                         windowSizeMS=windowSizeMS,
-                        use_train=False,
+                        useTrain=False,
+                        useTest=useTest,
                         sleep_epochs=[],
                         l_function=l_function,
                         cross_validate=False,  # Important: no nested CV

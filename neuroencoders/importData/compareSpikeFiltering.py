@@ -9,7 +9,7 @@ import tensorflow as tf
 from tqdm import tqdm
 
 from neuroencoders.fullEncoder import nnUtils
-from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.utils.global_classes import Params, Project
 
@@ -39,6 +39,7 @@ class WaveFormComparator:
         behavior_data: dict,
         windowSizeMS: int = 36,
         useTrain: bool = True,
+        useTest: bool = True,
         useAll: bool = False,
         sleepName=[],
         **kwargs,
@@ -51,6 +52,7 @@ class WaveFormComparator:
             behavior_data: Dictionary with behavioral data and epochs
             windowSizeMS: Size of the time window in milliseconds (default=36)
             useTrain: If True, use training epochs; else use test epochs (default=True)
+            useTest: If True, use test epochs (default=True)
             useAll: If True, use both training and test epochs (default=False)
             sleepName: Name of the sleep epoch to filter on (default=[])
             **kwargs: Additional arguments, including:
@@ -62,7 +64,15 @@ class WaveFormComparator:
         self.params = params
         self.behavior_data = behavior_data
         self.useTrain = useTrain
+        self.useTest = useTest
         self.useAll = useAll
+        if self.useAll:
+            self.useTrain = True
+            self.useTest = True
+        if self.useTrain and self.useTest and not self.useAll:
+            raise ValueError(
+                "If both useTrain and useTest are True, set useAll to True."
+            )
         self.sleepName = sleepName
         self.windowSizeMS = windowSizeMS
         phase = kwargs.get("phase", None)
@@ -106,19 +116,12 @@ class WaveFormComparator:
             os.makedirs(self.alignedDataPath)
 
         # Manage epochs
-        if self.useTrain:
-            epochMask = inEpochsMask(
-                behavior_data["positionTime"][:, 0],
-                behavior_data["Times"]["trainEpochs"],
+        if self.useTrain or self.useTest:
+            epochMask = get_epochs_mask(
+                behaviorData=behavior_data,
+                useTrain=self.useTrain,
+                useTest=self.useTest,
             )
-            if self.useAll:
-                epochMask = np.logical_or(
-                    epochMask,
-                    inEpochsMask(
-                        behavior_data["positionTime"][:, 0],
-                        behavior_data["Times"]["testEpochs"],
-                    ),
-                )
         else:
             if bool(self.sleepName):
                 idsleep = behavior_data["Times"]["sleepNames"].index(self.sleepName)
@@ -196,7 +199,7 @@ class WaveFormComparator:
         print(f"Dataset {dataset_name} loaded: {self}")
 
     def __repr__(self):
-        return f"WaveFormComparator(projectPath={self.projectPath}, params={self.params}, behavior_data=Dict with keys {list(self.behavior_data.keys())}, windowSizeMS={self.windowSizeMS}, useTrain={self.useTrain}, useAll={self.useAll}, sleepName={self.sleepName}, phase={self.phase})"
+        return f"WaveFormComparator(projectPath={self.projectPath}, params={self.params}, behavior_data=Dict with keys {list(self.behavior_data.keys())}, windowSizeMS={self.windowSizeMS}, useTrain={self.useTrain}, useTest={self.useTest}, useAll={self.useAll}, sleepName={self.sleepName}, phase={self.phase})"
 
     def save_alignment_tools(
         self, trainerBayes, linearizationFunction, windowSizeMS=36, redo=False
@@ -208,6 +211,10 @@ class WaveFormComparator:
             if bool(self.sleepName) and not self.useTrain:
                 foldertosave = os.path.join(self.alignedDataPath, self.sleepName)
             else:
+                if not self.useTest:
+                    raise ValueError(
+                        "Either useTrain or useTest must be True to save alignment tools."
+                    )
                 foldertosave = os.path.join(self.alignedDataPath, "test")
         if not os.path.isdir(foldertosave):
             os.makedirs(foldertosave)

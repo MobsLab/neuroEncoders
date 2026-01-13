@@ -1367,45 +1367,34 @@ class Mouse_Results(Params, PaperFigures):
                             outputs = pickle.load(f)
                     except FileNotFoundError:
                         self.load_trainers(which="bayes", **kwargs)
-                        mask = inEpochsMask(
-                            self.data_helper[win].fullBehavior["positionTime"][:, 0],
-                            self.data_helper[win].fullBehavior["Times"]["testEpochs"],
+                        epochMask = get_epochs_mask(
+                            behaviorData=self.data_helper[win].fullBehavior,
+                            useTrain=phase != self.phase,
+                            useTest=phase != "training",
                         )
-                        if phase == "training":
-                            mask += inEpochsMask(
-                                self.data_helper[win].fullBehavior["positionTime"][
-                                    :, 0
-                                ],
-                                self.data_helper[win].fullBehavior["Times"][
-                                    "trainEpochs"
-                                ],
-                            )
                         timeStepPred = self.data_helper[win].fullBehavior[
                             "positionTime"
-                        ][mask]
+                        ][epochMask]
                         outputs = self.bayes.test_as_NN(
                             self.data_helper[win].fullBehavior,
                             self.bayes_matrices,
                             timeStepPred,
                             windowSizeMS=win_value,
                             l_function=self.l_function,
-                            useTrain=phase == "training",
+                            useTrain=phase != self.phase,
+                            useTest=phase != "training",
                             **kwargs,
                         )
                 else:
                     print(f"Force loading bayesian results for window {win}.")
                     self.load_trainers(which="bayes", **kwargs)
-                    mask = inEpochsMask(
-                        self.data_helper[win].fullBehavior["positionTime"][:, 0],
-                        self.data_helper[win].fullBehavior["Times"]["testEpochs"],
+                    epochMask = get_epochs_mask(
+                        behaviorData=self.data_helper[win].fullBehavior,
+                        useTrain=phase != self.phase,
+                        useTest=phase != "training",
                     )
-                    if phase == "training":
-                        mask += inEpochsMask(
-                            self.data_helper[win].fullBehavior["positionTime"][:, 0],
-                            self.data_helper[win].fullBehavior["Times"]["trainEpochs"],
-                        )
                     timeStepPred = self.data_helper[win].fullBehavior["positionTime"][
-                        mask
+                        epochMask
                     ]
                     outputs = self.bayes.test_as_NN(
                         self.data_helper[win].fullBehavior,
@@ -1413,7 +1402,8 @@ class Mouse_Results(Params, PaperFigures):
                         timeStepPred,
                         windowSizeMS=win_value,
                         l_function=self.l_function,
-                        useTrain=phase == "training",
+                        useTrain=phase != self.phase,
+                        useTest=phase != "training",
                         **kwargs,
                     )
 
@@ -1989,13 +1979,15 @@ class Mouse_Results(Params, PaperFigures):
         Args:
             **kwargs: Additional keyword arguments for spike alignment such as:
                 force (bool): Whether to force re-alignment.
-                useTraining (bool): Whether to use training data for alignment.
+                useTrain (bool): Whether to use training data for alignment.
+                useTest (bool): Whether to use testing data for alignment.
                 sleepName (List[str]): List of sleep names to consider for alignment.
         """
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
         force = kwargs.get("force", False)
         useTrain = kwargs.pop("useTrain", False)
+        useTest = kwargs.pop("useTest", not useTrain)
 
         if not hasattr(self, "waveform_comparators") or force:
             self.waveform_comparators = dict()
@@ -2007,6 +1999,7 @@ class Mouse_Results(Params, PaperFigures):
                     winValue,
                     phase=self.phase,
                     useTrain=useTrain,
+                    useTest=useTest,
                     **kwargs,
                 )
                 self.waveform_comparators[win].save_alignment_tools(

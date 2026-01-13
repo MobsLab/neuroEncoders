@@ -2,6 +2,9 @@
 All functions to deal with Epochs and time data. Mainly inspired from Tsd, and should at some point be integrated with pynapple package.
 """
 
+import warnings
+from typing import Dict, Optional
+
 import numpy as np
 
 ########### Management of epochs ############
@@ -218,6 +221,83 @@ def inEpochsMask(t, epochs):
         axis=0,
     )
     return mask >= 1
+
+
+def get_epochs_mask(
+    times: Optional[np.ndarray] = None,
+    epochs: Optional[np.ndarray] = None,
+    behaviorData: Optional[Dict] = None,
+    useTrain: bool = False,
+    useTest: bool = True,
+    usePredLoss: bool = False,
+    sleepEpochs: Optional = None,
+):
+    """
+    Get the epochs mask for training or testing.
+
+    parameters:
+    ______________________________________________________
+    behaviorData : dict
+        dictionary containing the behavioral data. In particular, it needs to contain the following keys:
+        - Times : dict with trainEpochs and testEpochs keys
+    - positionTime : np.ndarray with time points
+    Otherwise, times and epochs can be provided directly.
+    times : np.ndarray (default=None)
+        time points to consider. If None, will use behaviorData["positionTime"][:, 0]
+    epochs : dict (default=None)
+        dictionary containing the epochs. If None, will use behaviorData["Times"]
+
+    sleepEpochs : list or np.ndarray (default=None)
+        If provided, will return the mask for these epochs only.
+
+    useTrain : bool (default=False)
+    useTest : bool (default=True)
+    usePredLoss : bool (default=False)
+
+    returns:
+    ______________________________________________________
+    epochMask : np.ndarray
+        boolean mask for the epochs to be used.
+    """
+    if times is None and behaviorData is None:
+        raise ValueError("Either behaviorData or times must be provided.")
+    if epochs is None and behaviorData is None:
+        raise ValueError("Either behaviorData or epochs must be provided.")
+
+    if times is None:
+        times = behaviorData["positionTime"][:, 0]
+    if epochs is None:
+        epochs = behaviorData["Times"]
+    epochMask = np.zeros_like(times, dtype=bool)
+
+    if sleepEpochs is not None and len(sleepEpochs) > 0:
+        print("returning sleep epochs for testing")
+        return inEpochsMask(times, sleepEpochs)
+
+    if useTrain:
+        print("Adding train epochs for testing")
+        epochMask += inEpochsMask(times, epochs["trainEpochs"])
+    if useTest:
+        print("Adding test epochs for testing")
+        epochMask += inEpochsMask(times, epochs["testEpochs"])
+    if usePredLoss:
+        print("Adding predLossSet epochs for testing")
+        epochMask += inEpochsMask(
+            times,
+            epochs["lossPredSetEpochs"],
+        )
+
+    # Validate that at least one epoch type is selected
+    # Note: if sleepEpochs was provided, we would have returned early above
+    if not useTrain and not useTest and not usePredLoss:
+        warnings.warn(
+            "All epoch flags (useTrain, useTest, usePredLoss) are False and no sleepEpochs provided. "
+            "Returning an all-False epochMask which will result in empty data selection.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return epochMask
 
 
 def align_timestamps(A, B, tolerance=None):
