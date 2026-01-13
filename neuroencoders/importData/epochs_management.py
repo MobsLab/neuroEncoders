@@ -288,6 +288,7 @@ def get_epochs_mask(
         )
 
     # Validate that at least one epoch type is selected
+    # Note: if sleepEpochs was provided, we would have returned early above
     if not useTrain and not useTest and not usePredLoss:
         warnings.warn(
             "All epoch flags (useTrain, useTest, usePredLoss) are False and no sleepEpochs provided. "
