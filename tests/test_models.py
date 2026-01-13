@@ -5,8 +5,6 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from unittest.mock import MagicMock
-
 # Assuming original TF class is importable
 try:
     from neuroencoders.fullEncoder.an_network import LSTMandSpikeNetwork as TFNet
