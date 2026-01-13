@@ -1131,7 +1131,7 @@ class LSTMandSpikeNetwork:
                 )
 
             # NOTE: In case you need debugging, toggle this profiling line to True
-            is_tbcallback = False
+            is_tbcallback = kwargs.get("tensorboard_callback", False)
             if self.debug:
                 print(
                     "Debugging mode is ON, enabling TensorBoard callback and device placement loggin"
