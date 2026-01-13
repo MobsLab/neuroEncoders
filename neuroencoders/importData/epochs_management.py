@@ -294,7 +294,7 @@ def get_epochs_mask(
             "All epoch flags (useTrain, useTest, usePredLoss) are False and no sleepEpochs provided. "
             "Returning an all-False epochMask which will result in empty data selection.",
             UserWarning,
-            stacklevel=2
+            stacklevel=2,
         )
 
     return epochMask
