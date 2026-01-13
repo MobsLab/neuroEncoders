@@ -62,20 +62,20 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
             raise ValueError(
                 f"Invalid device format '{usedDevice}'. Expected formats like 'GPU:0' or 'CPU:0'."
             )
-        dev_type, dev_idx = usedDevice.split(":")
+        dev_type, dev_idx_str = usedDevice.split(":")
         logical_devices = config.list_logical_devices(dev_type.upper())
         try:
-            dev_idx_int = int(dev_idx)
+            dev_idx = int(dev_idx_str)
         except ValueError:
             raise ValueError(
                 f"Invalid device index in '{usedDevice}'. Expected a non-negative integer after ':'."
             )
-        if dev_idx_int < 0:
+        if dev_idx < 0:
             raise ValueError(
                 f"Invalid device index in '{usedDevice}'. Device index must be non-negative."
             )
-        if dev_idx_int < len(logical_devices):
-            return logical_devices[dev_idx_int].name
+        if dev_idx < len(logical_devices):
+            return logical_devices[dev_idx].name
         else:
             raise ValueError(
                 f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found."
