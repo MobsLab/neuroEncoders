@@ -269,7 +269,7 @@ def get_epochs_mask(
         epochs = behaviorData["Times"]
     epochMask = np.zeros_like(times, dtype=bool)
 
-    if len(sleepEpochs) > 0:
+    if sleepEpochs is not None and len(sleepEpochs) > 0:
         print("returning sleep epochs for testing")
         return inEpochsMask(times, sleepEpochs)
 
