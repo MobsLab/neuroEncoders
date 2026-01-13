@@ -116,11 +116,11 @@ class WaveFormComparator:
             os.makedirs(self.alignedDataPath)
 
         # Manage epochs
-        if self.useTrain:
+        if self.useTrain or self.useTest:
             epochMask = get_epochs_mask(
                 behaviorData=behavior_data,
-                useTrain=True,
-                useTest=False,
+                useTrain=self.useTrain,
+                useTest=self.useTest,
             )
         else:
             if bool(self.sleepName):
