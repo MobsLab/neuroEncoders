@@ -1151,10 +1151,11 @@ class LSTMandSpikeNetwork:
                     ann_config["loaded"] = loaded
 
                     prefix = "LOADED_" if loaded else ""
-                    # wandb.tensorboard.patch(
-                    #     root_logdir=os.path.join(self.folderResult, "logs")
-                    # )
-                    # print(f"starting tensorboard at {self.folderResult}/logs ")
+                    if is_tbcallback:
+                        wandb.tensorboard.patch(
+                            root_logdir=os.path.join(self.folderResult, "logs")
+                        )
+                        print(f"starting tensorboard at {self.folderResult}/logs ")
                     run = wandb.init(
                         entity="touseul",
                         project="ContrastiveLoss",
@@ -1608,7 +1609,7 @@ class LSTMandSpikeNetwork:
                         "full_cp.weights.h5",
                     ),
                 )
-            except:
+            except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
                 try:
                     self.model.load_weights(
@@ -1616,7 +1617,8 @@ class LSTMandSpikeNetwork:
                             self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
                         ),
                     )
-                except:
+                except (FileNotFoundError, ValueError):
+                    print("loading from full checkpoint failed, trying weights.h5")
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -1771,7 +1773,7 @@ class LSTMandSpikeNetwork:
         full_times = np.concatenate(list_times, axis=0).flatten()
         full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
         full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
-        full_index_in_dat = np.concatenate(list_index_in_dat, axis=0)
+        # full_index_in_dat = np.concatenate(list_index_in_dat, axis=0)
 
         # Handle Speed Mask
         # If speedFilter was in dataset, use it. Otherwise compute via lookup
@@ -1984,7 +1986,7 @@ class LSTMandSpikeNetwork:
                         "full_cp.weights.h5",
                     ),
                 )
-            except:
+            except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
                 try:
                     self.model.load_weights(
@@ -1992,7 +1994,7 @@ class LSTMandSpikeNetwork:
                             self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
                         ),
                     )
-                except:
+                except (FileNotFoundError, ValueError):
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2451,7 +2453,7 @@ class LSTMandSpikeNetwork:
                         "full_cp.weights.h5",
                     ),
                 )
-            except:
+            except FileNotFoundError:
                 print("fallback loading full/cp.ckpt")
                 try:
                     self.model.load_weights(
@@ -2459,7 +2461,7 @@ class LSTMandSpikeNetwork:
                             self.folderModels, str(windowSizeMS), "full", "cp.ckpt"
                         ),
                     )
-                except:
+                except (FileNotFoundError, ValueError):
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2847,7 +2849,7 @@ class LSTMandSpikeNetwork:
             max_spikes_per_batch = total_spikes // batch_size
 
             original_groups_flat = original_groups
-            spike_times_flat = spike_times
+            # spike_times_flat = spike_times
             temporal_bin_indices_flat = temporal_bin_indices
             batch_indices = tf.repeat(tf.range(batch_size), max_spikes_per_batch)
 
@@ -2907,9 +2909,9 @@ class LSTMandSpikeNetwork:
 
             # Create linear indices for the temporal structure
             # Total size is now batch_size * n_temporal_bins
-            linear_temporal_positions = (
-                spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
-            )
+            # linear_temporal_positions = (
+            #     spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
+            # )
 
             # Map: for each position in spikePosition, which original spike index to use
             # Build lookup: (batch, temporal_bin) -> original_spike_index
@@ -3474,6 +3476,7 @@ class LSTMandSpikeNetwork:
 
         # Get final predictions
         predictions = transformer_model.predict(transformer_inputs)
+        return predictions
 
     @classmethod
     def clear_session(cls):
