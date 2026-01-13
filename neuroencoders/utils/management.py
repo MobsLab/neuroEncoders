@@ -9,34 +9,67 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     Parameters
     ----------
     usedDevice : str
-        The device to be used, either "CPU" or "GPU".
+        The device to be used, e.g., "CPU", "GPU", "MULTI-GPU", "GPU:0", "GPU:1".
 
     Returns
     -------
-    devicename : str
-        The name of the device being used (in TF nomenclature).
+    device : str or tf.distribute.Strategy
+        The name of the device or a distribution strategy.
     """
     import os
 
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     from tensorflow import config
+    import tensorflow as tf
 
     # if gpu set memory growth
-    if usedDevice == "GPU":
-        device_phys = config.list_physical_devices(usedDevice)
+    if "GPU" in usedDevice.upper():
+        device_phys = config.list_physical_devices("GPU")
         if set_memory_growth:
             if not device_phys:
                 raise ValueError("No GPU devices found.")
             # set memory growth to True
             for device in device_phys:
-                config.experimental.set_memory_growth(device, True)
-                print(f"Memory growth set for device: {device}")
+                try:
+                    config.experimental.set_memory_growth(device, True)
+                    print(f"Memory growth set for device: {device}")
+                except Exception as e:
+                    # Memory growth must be set before GPUs have been initialized
+                    print(f"Warning: Could not set memory growth for {device}: {e}")
+
+    if usedDevice.upper() == "MULTI-GPU":
+        device_phys = config.list_physical_devices("GPU")
+        if len(device_phys) > 1:
+            print(f"Initializing Multi-GPU strategy (MirroredStrategy) with {len(device_phys)} GPUs")
+            strategy = tf.distribute.MirroredStrategy()
+            return strategy
+        elif len(device_phys) == 1:
+            import warnings
+            warnings.warn("MULTI-GPU requested but only one GPU found. Using single GPU mode.")
+            usedDevice = "GPU" # Fallback to single GPU logic below
+        else:
+            raise ValueError("MULTI-GPU requested but no GPU devices found.")
+
+    if ":" in usedDevice:
+        # specific device like GPU:0 or CPU:0
+        dev_type, dev_idx = usedDevice.split(":")
+        logical_devices = config.list_logical_devices(dev_type.upper())
+        if int(dev_idx) < len(logical_devices):
+            return logical_devices[int(dev_idx)].name
+        else:
+            raise ValueError(f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found.")
+
     # get the name of the device
-    device = config.list_logical_devices(usedDevice)
+    device = config.list_logical_devices(usedDevice.upper())
     if device:
         devicename = device[0].name
     else:
-        devicename = device = config.list_logical_devices()[0].name
+        # fallback to first available logical device
+        all_logical = config.list_logical_devices()
+        if all_logical:
+            devicename = all_logical[0].name
+        else:
+            devicename = "/device:CPU:0"
 
     return devicename
 

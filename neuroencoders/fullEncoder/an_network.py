@@ -184,7 +184,7 @@ class LSTMandSpikeNetwork:
 
     def _build_model(self, **kwargs):
         ### Description of layers here
-        with tf.device(self.deviceName):
+        with nnUtils.get_device_scope(self.deviceName):
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
                     shape=(
@@ -530,7 +530,7 @@ class LSTMandSpikeNetwork:
         myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
         """
         # CNN plus dense on every group independently
-        with tf.device(self.deviceName):
+        with nnUtils.get_device_scope(self.deviceName):
             allFeatures = []  # store the result of the CNN computation for each group
             batchSize = kwargs.get("batchSize", self.params.batchSize)
             for group in range(self.params.nGroups):
@@ -1324,7 +1324,7 @@ class LSTMandSpikeNetwork:
 
         @tf.autograph.experimental.do_not_convert
         def _parse_function(*vals):
-            with tf.device(self.deviceName):
+            with nnUtils.get_device_scope(self.deviceName):
                 return nnUtils.parse_serialized_spike(self.featDesc, *vals)
 
         dim_output = (
@@ -1446,9 +1446,10 @@ class LSTMandSpikeNetwork:
             print(
                 f"finalizing the {key} dataset pipeline... Will move data to {self.deviceName}"
             )
-            dataset = dataset.apply(
-                tf.data.experimental.copy_to_device(self.deviceName)
-            )
+            if isinstance(self.deviceName, str):
+                dataset = dataset.apply(
+                    tf.data.experimental.copy_to_device(self.deviceName)
+                )
             # WARN: this seems to be cached on CPU RAM, not GPU RAM...
 
             # now dataset is a tuple (inputsDict, outputsDict)
@@ -3247,7 +3248,7 @@ class LSTMandSpikeNetwork:
             transformer_model: Model that processes CNN features through transformer
         """
 
-        with tf.device(self.deviceName):
+        with nnUtils.get_device_scope(self.deviceName):
             # Create new inputs for transformer model
             cnn_feature_inputs = [
                 tf.keras.Input(shape=(self.params.nFeatures,), name=f"cnn_features_{i}")
