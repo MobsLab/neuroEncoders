@@ -153,3 +153,28 @@ class TestGetEpochsMask:
         # Should only use sleep epochs, not train/test
         assert result.shape == times.shape
         assert result.dtype == bool
+
+    def test_no_warning_when_sleep_epochs_provided_with_all_flags_false(self):
+        """Test that no warning is raised when sleepEpochs is provided even if all flags are False."""
+        times = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+        epochs = {
+            "trainEpochs": np.array([[0.0, 2.0]]),
+            "testEpochs": np.array([[2.0, 4.0]]),
+        }
+        sleep_epochs = np.array([[1.0, 3.0]])
+
+        # Should not raise a warning because sleepEpochs is provided
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # Turn warnings into errors
+            result = get_epochs_mask(
+                times=times,
+                epochs=epochs,
+                useTrain=False,
+                useTest=False,
+                usePredLoss=False,
+                sleepEpochs=sleep_epochs,
+            )
+
+        # Should return mask based on sleep epochs
+        assert result.shape == times.shape
+        assert result.dtype == bool
