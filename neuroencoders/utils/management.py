@@ -62,7 +62,7 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
             raise ValueError(
                 f"Invalid device format '{usedDevice}'. Expected formats like 'GPU:0' or 'CPU:0'."
             )
-        dev_type, dev_idx = usedDevice.split(":", 1)
+        dev_type, dev_idx = usedDevice.split(":")
         logical_devices = config.list_logical_devices(dev_type.upper())
         try:
             dev_idx_int = int(dev_idx)
