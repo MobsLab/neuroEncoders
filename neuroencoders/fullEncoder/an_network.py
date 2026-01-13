@@ -1639,7 +1639,9 @@ class LSTMandSpikeNetwork:
         if speedMask.shape[0] != behaviorData["Times"]["speedFilter"].shape[0]:
             warnings.warn("The speed mask must be the same length as the speed filter")
         # Manage epoch mask
-        epochMask = get_epochs_mask(behaviorData, useTrain=useTrain, useTest=useTest)
+        epochMask = get_epochs_mask(
+            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
+        )
         if useSpeedFilter:
             totMask = speedMask * epochMask
         else:
@@ -2467,7 +2469,9 @@ class LSTMandSpikeNetwork:
                     )
 
         # --- Build the same total mask used in test() ---
-        epochMask = get_epochs_mask(behaviorData, useTrain=useTrain, useTest=useTest)
+        epochMask = get_epochs_mask(
+            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
+        )
 
         if useSpeedFilter:
             speedMask = behaviorData["Times"]["speedFilter"]
