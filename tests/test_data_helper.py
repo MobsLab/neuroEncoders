@@ -70,7 +70,7 @@ def test_dist2wall():
 
     pos = np.array([[0.5, 0.8]])
     dist = dh.dist2wall(pos, show=False)
-    
+
     assert isinstance(dist, np.ndarray)
     assert dist.shape == (1,)
     assert dist[0] >= 0
