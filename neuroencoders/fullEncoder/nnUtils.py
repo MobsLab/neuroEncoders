@@ -1,6 +1,7 @@
 # Load libs
 import contextlib
 import gc
+import logging
 import os
 from typing import Dict, List, Optional
 
@@ -17,10 +18,91 @@ import tensorflow as tf
 from keras import ops as kops
 
 
-def get_device_scope(device):
+def get_device_context(device):
     """
-    Returns a context manager for the specified device or strategy.
+    Return a context manager that controls TensorFlow device or strategy scope.
+
+    Parameters
+    ----------
+    device : None, str, or tf.distribute.Strategy
+        - ``None``:
+            No explicit device placement is requested. A no-op context manager
+            (``contextlib.nullcontext``) is returned, so the caller's existing
+            device/strategy configuration is left unchanged.
+        - ``tf.distribute.Strategy``:
+            A distribution strategy instance. The strategy's scope
+            (``strategy.scope()``) is returned so that any model or variable
+            creation inside the ``with`` block is placed under the strategy.
+        - ``str``:
+            A TensorFlow device specification string, e.g. ``"/CPU:0"``,
+            ``"/GPU:0"``, or ``"/device:GPU:0"``. If no distribution strategy
+            is active, this is passed to :func:`tf.device`. If a distribution
+            strategy is already active, a no-op context is returned instead so
+            that the strategy can manage placement automatically.
+
+    Returns
+    -------
+    context manager
+        A context manager suitable for use in a ``with`` statement:
+
+        - ``contextlib.nullcontext()`` when:
+            * ``device is None``,
+            * a distribution strategy is active and ``device`` is a ``str``,
+            * or ``device`` is an invalid device specification (caught
+              ``ValueError`` or ``TypeError`` from :func:`tf.device`).
+        - ``strategy.scope()`` when ``device`` is an instance of
+          :class:`tf.distribute.Strategy`.
+        - ``tf.device(device)`` when ``device`` is a valid device string and
+          no distribution strategy is active.
+
+    Notes
+    -----
+    This helper centralizes the logic for safely handling device strings and
+    distribution strategies. It intentionally falls back to a no-op context
+    manager for unsupported or invalid configurations instead of raising,
+    making it easier to write higher-level utilities that accept an optional
+    ``device`` argument.
+
+    When a distribution strategy is active and a device string is provided,
+    the device string is ignored with a warning, allowing the strategy to
+    manage device placement automatically.
+
+    Examples
+    --------
+    Use default (no explicit device):
+
+    >>> with get_device_context(None):
+    ...     x = tf.constant(1.0)
+
+    Use a specific device:
+
+    >>> with get_device_context("/GPU:0"):
+    ...     x = tf.constant(1.0)
+
+    Use with a distribution strategy:
+
+    >>> strategy = tf.distribute.MirroredStrategy()
+    >>> with get_device_context(strategy):
+    ...     model = tf.keras.Sequential(...)
+
+    Active strategy with a device string (string is ignored, strategy wins):
+
+    >>> strategy = tf.distribute.MirroredStrategy()
+    >>> with strategy.scope():
+    ...     # Strategy is active here
+    ...     with get_device_context("/GPU:0"):
+    ...         # This inner scope is effectively a no-op; placement is still
+    ...         # controlled by the active strategy.
+    ...         x = tf.constant(1.0)
+
+    Invalid device string (falls back to no-op context):
+
+    >>> with get_device_context("INVALID_DEVICE"):
+    ...     # Falls back to a no-op context; no exception is raised here.
+    ...     x = tf.constant(1.0)
     """
+    logger = logging.getLogger(__name__)
+
     if device is None:
         return contextlib.nullcontext()
     if isinstance(device, tf.distribute.Strategy):
@@ -28,10 +110,16 @@ def get_device_scope(device):
     if tf.distribute.has_strategy() and isinstance(device, str):
         # If a distribution strategy is active, it's generally better to let it
         # handle device placement automatically.
+        logger.warning(
+            f"Distribution strategy is active, ignoring explicit device placement request: {device}"
+        )
         return contextlib.nullcontext()
     try:
         return tf.device(device)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            f"Invalid device specification '{device}': {e}. Falling back to default device placement."
+        )
         return contextlib.nullcontext()
 
 
@@ -77,7 +165,7 @@ class spikeNet(tf.keras.layers.Layer):
         self.nChannels = nChannels
         self.device = device
         self.number = number
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="same")
             self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="same")
             self.convLayer3 = tf.keras.layers.Conv2D(32, [2, 3], padding="same")
@@ -143,7 +231,7 @@ class spikeNet(tf.keras.layers.Layer):
         return self.apply(input)
 
     def apply(self, input):
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             if self.no_cnn:
                 # reshape input directly to dense layer
                 # must be of shape (batch_size, -1)
@@ -258,7 +346,7 @@ class SpikeNet1D(tf.keras.layers.Layer):
         self.device = device
         self.number = number
 
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Layer 1: Convolves over time bins
             self.conv1 = tf.keras.layers.Conv1D(16, 3, padding="same", activation=None)
             self.bn1 = tf.keras.layers.BatchNormalization()
@@ -307,7 +395,7 @@ class SpikeNet1D(tf.keras.layers.Layer):
         return self.call(x, training=training)
 
     def call(self, x, training=False):
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # 1. Input is (Batch, Channels, Time) -> (128, 6, 32)
             shape = tf.shape(x)
             B, C, T = shape[0], shape[1], shape[2]
@@ -422,7 +510,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         self.num_heads = num_heads
         self.device = device
 
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             self.mha = tf.keras.layers.MultiHeadAttention(
                 num_heads=num_heads, key_dim=embed_dim // num_heads
             )
@@ -433,7 +521,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
 
     def call(self, inputs, mask=None):
         # inputs: List of tensors, each shape (Batch, Time, Features)
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # 1. Stack groups: (Batch, Time, Groups, Features)
             x = tf.stack(inputs, axis=2)
 
@@ -546,7 +634,7 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
         self.supports_masking = True
 
     def call(self, inputs, mask=None):
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             if mask is not None:
                 # Convert mask to float and add dimension for broadcasting
                 mask_float = kops.cast(mask, "float32")  # [batch, seq_len]
@@ -636,7 +724,7 @@ class PositionalEncoding(tf.keras.layers.Layer):
         self.pe = tf.constant(pe, dtype=tf.float32)
 
     def call(self, x):
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             seq_len = tf.shape(x)[1]
         return x + self.pe[:seq_len, :]
 
@@ -715,7 +803,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.device = device
 
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Layer normalization at the beginning
             self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
@@ -757,7 +845,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
                 f"Input feature dimension {feature_dim} doesn't match d_model {self.d_model}"
             )
 
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Build layer normalization layers
             self.norm1.build(input_shape)
             self.norm2.build(input_shape)
@@ -788,7 +876,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         return (batch_size, seq_length, self.ff_dim2)
 
     def call(self, x, mask=None, training=False):
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Layer norm at the beginning
             x_norm = self.norm1(x)
 
@@ -1147,7 +1235,7 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with white noise
         """
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             noise = tf.random.normal(
                 shape=tf.shape(neural_data),
                 mean=0.0,
@@ -1167,7 +1255,7 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with constant offset
         """
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Create offset shape - same as neural_data but with 1 along time dimension
             shape = tf.shape(neural_data)
             offset_shape = tf.concat(
@@ -1207,7 +1295,7 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with cumulative noise
         """
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Generate random noise for each time step
             noise_increments = tf.random.normal(
                 shape=tf.shape(neural_data),
@@ -1612,7 +1700,7 @@ class LinearizationLayer(tf.keras.layers.Layer):
         linear_pos : a tensor of shape (N,) that represents linear position.
 
         """
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Ensure consistent dtype
             euclidean_data = kops.cast(euclidean_data, "float32")
 
@@ -1734,7 +1822,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
     def _compute_batch_weights(self, linearized_pos):
         """Compute weights for a batch using fitted DenseWeight"""
         # Convert tensor to numpy for DenseWeight
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             if hasattr(linearized_pos, "numpy"):
                 linearized_np = linearized_pos.numpy()
             else:
@@ -1750,7 +1838,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         """
         Dynamically compute weights for current batch using fitted DenseWeight
         """
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Use tf.py_function to call the fitted DenseWeight
             weights = tf.py_function(
                 func=self._compute_batch_weights, inp=[linearized_pos], Tout=tf.float32
@@ -3161,7 +3249,7 @@ class DenseLossProcessor:
         if self.verbose:
             print("Fitting DenseWeight model on full dataset for imbalance analysis...")
 
-        with get_device_scope(self.device):
+        with get_device_context(self.device):
             # Convert to numpy if needed
             if hasattr(full_training_positions, "numpy"):
                 training_pos_np = full_training_positions.numpy()

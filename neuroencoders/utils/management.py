@@ -14,7 +14,8 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     Returns
     -------
     device : str or tf.distribute.Strategy
-        The name of the device or a distribution strategy.
+        The name of the device string (e.g., "/device:GPU:0") when using single device mode,
+        or a tf.distribute.Strategy instance when "MULTI-GPU" is specified with multiple GPUs available.
     """
     import os
 
@@ -57,10 +58,24 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
 
     if ":" in usedDevice:
         # specific device like GPU:0 or CPU:0
-        dev_type, dev_idx = usedDevice.split(":")
+        if usedDevice.count(":") != 1:
+            raise ValueError(
+                f"Invalid device format '{usedDevice}'. Expected formats like 'GPU:0' or 'CPU:0'."
+            )
+        dev_type, dev_idx_str = usedDevice.split(":")
         logical_devices = config.list_logical_devices(dev_type.upper())
-        if int(dev_idx) < len(logical_devices):
-            return logical_devices[int(dev_idx)].name
+        try:
+            dev_idx = int(dev_idx_str)
+        except ValueError:
+            raise ValueError(
+                f"Invalid device index in '{usedDevice}'. Expected a non-negative integer after ':'."
+            )
+        if dev_idx < 0:
+            raise ValueError(
+                f"Invalid device index in '{usedDevice}'. Device index must be non-negative."
+            )
+        if dev_idx < len(logical_devices):
+            return logical_devices[dev_idx].name
         else:
             raise ValueError(
                 f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found."
