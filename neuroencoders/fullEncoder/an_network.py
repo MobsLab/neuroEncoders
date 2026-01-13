@@ -184,7 +184,7 @@ class LSTMandSpikeNetwork:
 
     def _build_model(self, **kwargs):
         ### Description of layers here
-        with nnUtils.get_device_scope(self.deviceName):
+        with nnUtils.get_device_context(self.deviceName):
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
                     shape=(
@@ -530,7 +530,7 @@ class LSTMandSpikeNetwork:
         myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
         """
         # CNN plus dense on every group independently
-        with nnUtils.get_device_scope(self.deviceName):
+        with nnUtils.get_device_context(self.deviceName):
             allFeatures = []  # store the result of the CNN computation for each group
             batchSize = kwargs.get("batchSize", self.params.batchSize)
             for group in range(self.params.nGroups):
@@ -1325,7 +1325,7 @@ class LSTMandSpikeNetwork:
 
         @tf.autograph.experimental.do_not_convert
         def _parse_function(*vals):
-            with nnUtils.get_device_scope(self.deviceName):
+            with nnUtils.get_device_context(self.deviceName):
                 return nnUtils.parse_serialized_spike(self.featDesc, *vals)
 
         dim_output = (
@@ -3250,7 +3250,7 @@ class LSTMandSpikeNetwork:
             transformer_model: Model that processes CNN features through transformer
         """
 
-        with nnUtils.get_device_scope(self.deviceName):
+        with nnUtils.get_device_context(self.deviceName):
             # Create new inputs for transformer model
             cnn_feature_inputs = [
                 tf.keras.Input(shape=(self.params.nFeatures,), name=f"cnn_features_{i}")
