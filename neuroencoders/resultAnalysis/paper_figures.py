@@ -558,16 +558,25 @@ class PaperFigures:
                     timesToPredict = self.resultsNN_phase[suffix]["time"][i][
                         :, np.newaxis
                     ].astype(np.float64)
-                    useTrain_default = suffix != f"_{self.phase}"
+                    useTrain_default = (
+                        suffix != f"_{self.phase}"
+                    )  # always false except for "test" phase
+                    useTest_default = (
+                        suffix != "_training"
+                    )  # always true except for training phase
                     useTrain = kwargs.get("useTrain", useTrain_default)
+                    useTest = kwargs.get("useTest", useTest_default)
                     if useTrain:
                         print(f"Using training data for {suffix.strip('_')} phase!")
+                    if not useTest:
+                        print(f"Not using testing data for {suffix.strip('_')} phase!")
                     outputsBayes = self.trainerBayes.test_as_NN(
                         self.behaviorData,
                         self.bayesMatrices,
                         timesToPredict,
                         windowSizeMS=ws,
                         useTrain=useTrain,
+                        useTest=useTest,
                         l_function=self.l_function,
                         phase=suffix.strip("_"),
                         folderResult=os.path.join(
@@ -4163,6 +4172,7 @@ class PaperFigures:
         block=False,
         show=False,
         useTrain=False,
+        useTest=False,
         useAll=True,
         strideFactor=1,
     ):
@@ -4172,6 +4182,9 @@ class PaperFigures:
             suffix = self.suffix
         if ws is None:
             ws = self.timeWindows[0]  # default to the first time window
+
+        if useTrain and useTest:
+            useAll = True
 
         dirSave = os.path.join(self.folderFigures, "tuningCurves")
         if not os.path.isdir(dirSave):
