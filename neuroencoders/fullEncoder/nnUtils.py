@@ -1,6 +1,7 @@
 # Load libs
 import contextlib
 import gc
+import logging
 import os
 from typing import Dict, List, Optional
 
@@ -100,8 +101,6 @@ def get_device_context(device):
     ...     # Falls back to a no-op context; no exception is raised here.
     ...     x = tf.constant(1.0)
     """
-    import logging
-
     logger = logging.getLogger(__name__)
 
     if device is None:
