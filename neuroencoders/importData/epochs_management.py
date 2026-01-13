@@ -2,6 +2,7 @@
 All functions to deal with Epochs and time data. Mainly inspired from Tsd, and should at some point be integrated with pynapple package.
 """
 
+import warnings
 from typing import Dict, Optional
 
 import numpy as np
@@ -284,6 +285,16 @@ def get_epochs_mask(
         epochMask += inEpochsMask(
             times,
             epochs["lossPredSetEpochs"],
+        )
+
+    # Validate that at least one epoch type is selected
+    # Note: if sleepEpochs was provided, we would have returned early above
+    if not useTrain and not useTest and not usePredLoss:
+        warnings.warn(
+            "All epoch flags (useTrain, useTest, usePredLoss) are False and no sleepEpochs provided. "
+            "Returning an all-False epochMask which will result in empty data selection.",
+            UserWarning,
+            stacklevel=2,
         )
 
     return epochMask
