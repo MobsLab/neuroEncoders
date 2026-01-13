@@ -3,8 +3,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from unittest.mock import MagicMock
-from neuroencoders.utils.global_classes import DataHelper, Project, is_in_zone, ZONEDEF
+from neuroencoders.utils.global_classes import ZONEDEF, DataHelper, Project, is_in_zone
 
 
 def test_project_init(temp_project_dir):
@@ -71,7 +70,7 @@ def test_dist2wall():
 
     pos = np.array([[0.5, 0.8]])
     dist = dh.dist2wall(pos, show=False)
-    
+
     assert isinstance(dist, np.ndarray)
     assert dist.shape == (1,)
     assert dist[0] >= 0

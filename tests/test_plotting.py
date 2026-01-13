@@ -1,6 +1,5 @@
-
-import pytest
 from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -20,11 +19,11 @@ def test_plotting_imports():
 def test_basic_plot_calls(mock_plot, mock_subplot, mock_figure):
     """Test that matplotlib mocking works correctly for basic plotting."""
     import matplotlib.pyplot as plt
-    
+
     plt.figure()
     plt.subplot(1, 1, 1)
     plt.plot([1, 2, 3], [1, 2, 3])
-    
+
     mock_figure.assert_called_once()
     mock_subplot.assert_called_once()
     mock_plot.assert_called_once()
