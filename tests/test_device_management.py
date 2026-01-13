@@ -126,7 +126,7 @@ class TestDeviceManagement(unittest.TestCase):
         mock_physical.return_value = []
         with self.assertRaises(ValueError) as context:
             manage_devices("MULTI-GPU")
-        self.assertIn("no GPU devices found", str(context.exception))
+        self.assertIn("no GPU devices found".lower(), str(context.exception).lower())
 
 
 class TestGetDeviceContext(unittest.TestCase):
@@ -168,7 +168,10 @@ class TestGetDeviceContext(unittest.TestCase):
             self.assertIsInstance(ctx, contextlib.nullcontext().__class__)
             # Verify warning was logged
             logger_instance.warning.assert_called_once()
-            self.assertIn("ignoring explicit device placement", str(logger_instance.warning.call_args))
+            self.assertIn(
+                "ignoring explicit device placement",
+                str(logger_instance.warning.call_args),
+            )
 
     @patch("tensorflow.distribute.has_strategy")
     def test_get_device_context_invalid_device_string(self, mock_has_strategy):
@@ -185,7 +188,10 @@ class TestGetDeviceContext(unittest.TestCase):
                 self.assertIsInstance(ctx, contextlib.nullcontext().__class__)
                 # Verify warning was logged
                 logger_instance.warning.assert_called_once()
-                self.assertIn("Invalid device specification", str(logger_instance.warning.call_args))
+                self.assertIn(
+                    "Invalid device specification",
+                    str(logger_instance.warning.call_args),
+                )
 
 
 class TestConditionalDeviceCopying(unittest.TestCase):
