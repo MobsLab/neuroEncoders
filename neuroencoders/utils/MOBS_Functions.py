@@ -1213,20 +1213,18 @@ class Mouse_Results(Params, PaperFigures):
                         phase=self.phase,
                         **kwargs,
                     )
-                    try:
-                        with open(
-                            os.path.join(
-                                self.bayes.folderResult,
-                                "bayesMatrices.pkl",
-                            ),
-                            "rb",
-                        ) as f:
-                            bayes_matrices = pickle.load(f)
-                        self.bayes_matrices = bayes_matrices
-                    except (FileNotFoundError, AttributeError):
-                        warn(
-                            "You asked for bayes trainer, but no bayes matrices pickle was found."
-                        )
+                    if kwargs.get("load_bayesMatrices", False):
+                        try:
+                            # allows to initialize bayes matrices if the pickle exists
+                            self.bayes_matrices = self.bayes.train_order_by_pos(
+                                self.data_helper[winMS].fullBehavior,
+                                l_function=self.l_function,
+                                **kwargs,
+                            )
+                        except (FileNotFoundError, AttributeError):
+                            warn(
+                                "You asked for bayes trainer, but no bayes matrices pickle was found."
+                            )
 
     def load_results(
         self,
@@ -2137,7 +2135,7 @@ class Results_Loader:
     def __init__(
         self,
         dir: pd.DataFrame,
-        mice_nb: Optional[List[int]] = None,
+        mice_nb: Optional[List[str]] = None,
         mice_manipes: Optional[List[str]] = None,
         timeWindows: Optional[List[int]] = None,
         phases=None,
@@ -2148,7 +2146,7 @@ class Results_Loader:
 
         Args:
             dir (pd.DataFrame): PathForExperiments DataFrame with columns for folder Results, mouse names, manipes, network paths, etc.
-            mice_nb (List[int]): List of mouse numbers to filter results.
+            mice_nb (List[str]): List of mouse numbers to filter results.
             mice_manipes (List[str]): List of manipes to filter results.
             timeWindows (List[int]): List of time windows in milliseconds to filter results. If None, uses all available windows.
             phase (str or List[str]): Phase of the experiment to filter results. If None, uses 'all' as default.
