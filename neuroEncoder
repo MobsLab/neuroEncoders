@@ -284,6 +284,38 @@ def main(args):
     )
     save_project_to_pickle(DataHelper, output=output)
 
+    if args.striding is None and args.striding_factor is None:
+        raise ValueError(
+            "You must provide either a striding (-s) or a striding factor (-sfact) argument."
+        )
+
+    if args.striding_factor is None:
+        windowStride = args.striding
+        strideFactor = round(args.window / windowStride, 4)
+        # check if windowStride is an integer, if not raise an error
+        if not strideFactor.is_integer():
+            raise ValueError(
+                f"The {args.windows}ms window size is not compatible with the {args.striding}ms stride."
+            )
+    else:
+        strideFactor = args.striding_factor
+        windowStride = round(args.window / strideFactor, 4)
+        if windowStride < 0.036:
+            warn(
+                f"The selected striding factor of {strideFactor} is too high for the selected window size of {args.window}s (would make a windowStride of {windowStride}). Setting striding to 36ms."
+            )
+            windowStride = 0.036
+            if args.window == 0.036:
+                # this way we dont have to recreate them.
+                strideFactor = 1
+        # check if windowStride is a valid ms value, if not raise an error
+        if not (1000 * windowStride).is_integer():
+            raise ValueError(
+                f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
+            )
+    # WARN: only for now - maybe need to add another check for floats ?
+    strideFactor = int(strideFactor)
+
     # Training, testing, and preparing network for online setup
     if mode == "bayes":
         from neuroencoders.simpleBayes import decode_bayes as BayesTraining
@@ -529,17 +561,6 @@ def main(args):
         # Save and create alignment tools
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
-        if args.striding is None and args.striding_factor is None:
-            warn(
-                "You must provide either a striding (-s) or a striding factor (-sfact) argument."
-            )
-            strideFactor = 1
-        strideFactor = (
-            int(args.striding_factor)
-            if args.striding_factor is not None
-            else int(round(args.window / args.striding, 4))
-        )
-
         print(
             f"saving alignment tools with striding factor {strideFactor} for window {windowSizeMS}ms"
         )
@@ -627,38 +648,6 @@ def main(args):
         from neuroencoders.openEphysExport.generate_json import generate_json
 
         folderCode = os.path.dirname(jD.__file__) + os.path.sep
-
-        if args.striding is None and args.striding_factor is None:
-            raise ValueError(
-                "You must provide either a striding (-s) or a striding factor (-sfact) argument."
-            )
-
-        if args.striding_factor is None:
-            windowStride = args.striding
-            strideFactor = round(args.window / windowStride, 4)
-            # check if windowStride is an integer, if not raise an error
-            if not strideFactor.is_integer():
-                raise ValueError(
-                    f"The {args.windows}ms window size is not compatible with the {args.striding}ms stride."
-                )
-        else:
-            strideFactor = args.striding_factor
-            windowStride = round(args.window / strideFactor, 4)
-            if windowStride < 0.036:
-                warn(
-                    f"The selected striding factor of {strideFactor} is too high for the selected window size of {args.window}s (would make a windowStride of {windowStride}). Setting striding to 36ms."
-                )
-                windowStride = 0.036
-                if args.window == 0.036:
-                    # this way we dont have to recreate them.
-                    strideFactor = 1
-            # check if windowStride is a valid ms value, if not raise an error
-            if not (1000 * windowStride).is_integer():
-                raise ValueError(
-                    f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
-                )
-        # WARN: only for now - maybe need to add another check for floats ?
-        strideFactor = int(strideFactor)
 
         print(
             f"Starting julia spike filtering with striding {windowStride}s and window size {args.window}s (stride factor was fixed at {strideFactor})."

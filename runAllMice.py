@@ -271,12 +271,12 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         if useStridingFactor:
             cmd_bayes += ["--striding_factor", str(stridingFactor)]
 
-        if "_test" not in xml_file:
-            cmd_bayes += ["--phase", phase]
         if redo:
             cmd_ann += ["--redo"]
+            cmd_bayes += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
+            cmd_bayes += ["--phase", phase]
         if run_bayes and run_ann and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
         elif run_bayes and run_ann and lstmAndTransfo:
