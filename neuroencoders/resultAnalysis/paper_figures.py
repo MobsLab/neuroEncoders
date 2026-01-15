@@ -22,10 +22,12 @@ from statsmodels.stats.proportion import proportions_ztest
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.resultAnalysis.print_results import overview_fig
-from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
 from neuroencoders.simpleBayes.decode_bayes import (
-    extract_spike_counts,
-    extract_spike_counts_from_matrix,
+    Trainer as TrainerBayes,
+)
+from neuroencoders.simpleBayes.decode_bayes import (
+    extract_spike_counts_keops,
+    extract_spike_counts_matrix_keops,
 )
 from neuroencoders.utils.PlaceField_dB import _run_place_field_analysis
 from neuroencoders.utils.global_classes import (
@@ -524,13 +526,22 @@ class PaperFigures:
                     if kwargs.get("extract_spikes_count", False) or kwargs.get(
                         "extract_spike_counts", False
                     ):
-                        total_count, _ = extract_spike_counts(
+                        if not hasattr(
+                            self.trainerBayes, "spikeMatTimes"
+                        ) or not hasattr(self.trainerBayes, "spikeMat"):
+                            raise ValueError(
+                                """
+                                trainerBayes does not have spikeMatTimes or spikeMat attributes needed to extract spike counts.
+                                Make sure to run decoding with extract_spike_counts=True first. You can run trainerBayes.train_order_by_pos.
+                                """
+                            )
+                        total_count, _ = extract_spike_counts_keops(
                             timesBayes[-1], self.trainerBayes.spikeMatTimes, ws / 1000
                         )
                         total_spikes_count.append(total_count)
-                        matrix_count, _ = extract_spike_counts_from_matrix(
+                        matrix_count, _ = extract_spike_counts_matrix_keops(
                             timesBayes[-1],
-                            self.trainerBayes.spikeMat,
+                            self.trainerBayes.spikeMatLabels,
                             self.trainerBayes.spikeMatTimes,
                             ws / 1000,
                         )

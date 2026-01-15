@@ -301,8 +301,7 @@ class Trainer(SpatialConstraintsMixin):
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         target = kwargs.get("target", self.config.target_bayes)
 
-        if target == "pos":
-            behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
+        behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
 
         if not hasattr(self, "training_data"):
             # first, save the training data from the behaviorData
@@ -319,7 +318,7 @@ class Trainer(SpatialConstraintsMixin):
                 f"Training data saved with {full_training_true_positions.shape} valid positions."
             )
 
-        if not hasattr(self, "spikeMatLabels"):
+        if not hasattr(self, "spikeMatLabels") or not hasattr(self, "spikeMatTimes"):
             self.logger.info(
                 f"Initializing spike matrices for {len(self.clusterData['Spike_labels'])} tetrodes..."
             )
@@ -416,6 +415,9 @@ class Trainer(SpatialConstraintsMixin):
                     save=kwargs.pop("save", True),
                     **kwargs,
                 )
+        else:
+            bayesMatrices = kwargs.get("bayesMatrices")
+            self.logger.info("Using provided Bayesian matrices for ordering.")
 
         # Use linear tuning curves for more accurate ordering
         self.logger.info("Computing linear tuning curves for ordering...")
