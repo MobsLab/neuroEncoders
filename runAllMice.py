@@ -188,7 +188,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         )
     ) and (
         not force
-        or (
+        and (
             os.path.exists(
                 os.path.join(
                     dir,
@@ -258,7 +258,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             nbEpochs,
             "--target",
             target_bayes,
-            "--flat_prior",
+            # "--flat_prior",
             "--striding",
             str(win),
         ]
