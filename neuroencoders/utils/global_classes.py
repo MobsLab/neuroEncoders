@@ -256,8 +256,11 @@ class DataHelper(Project):
             obj = cls.load(load_path)
             if (
                 ("_loaded_from_pickle" in dir(obj))
-                and (obj.mode == mode)
-                and (obj.target == target)
+                and (
+                    obj.target.lower() == target.lower()
+                    or target.lower()
+                    == "pos"  # prepare for bayesian decoding where target can change (pos by default)
+                )
             ):
                 print(f"Loading DataHelper from {load_path}")
                 # if loaded successfully, return the object, simply changing old_positions by positions
@@ -268,7 +271,7 @@ class DataHelper(Project):
                 return obj
             else:
                 raise ValueError(
-                    "DataHelper load failed, incompatible mode/target or not loaded from pickle"
+                    "DataHelper load failed, incompatible target or not loaded from pickle"
                 )
         return super().__new__(cls)
 
