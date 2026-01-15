@@ -295,7 +295,7 @@ def main(args):
         # check if windowStride is an integer, if not raise an error
         if not strideFactor.is_integer():
             raise ValueError(
-                f"The {args.windows}ms window size is not compatible with the {args.striding}ms stride."
+                f"The {args.window}ms window size is not compatible with the {args.striding}ms stride."
             )
     else:
         strideFactor = args.striding_factor
@@ -311,7 +311,7 @@ def main(args):
         # check if windowStride is a valid ms value, if not raise an error
         if not (1000 * windowStride).is_integer():
             raise ValueError(
-                f"The {args.windows}ms window size is not compatible with the {strideFactor} striding factor."
+                f"The {args.window}ms window size is not compatible with the {strideFactor} striding factor."
             )
     # WARN: only for now - maybe need to add another check for floats ?
     strideFactor = int(strideFactor)
