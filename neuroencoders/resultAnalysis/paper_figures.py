@@ -2574,7 +2574,7 @@ class PaperFigures:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')
 
         # Figure 4:
-        cols = plt.get_cmap("terrain")
+        plt.get_cmap("terrain")
         fig, ax = plt.subplots(1, len(self.timeWindows))
         if len(self.timeWindows) == 1:
             ax = [ax]  # compatibility move
@@ -2821,12 +2821,12 @@ class PaperFigures:
         mazeBorder = np.array(
             [[0, 0, 1, 1, 0.63, 0.63, 0.35, 0.35, 0], [0, 1, 1, 0, 0, 0.75, 0.75, 0, 0]]
         )
-        ts = [
+        [
             self.resultsNN_phase[suffix]["time"][iw][mask[iw]]
             for iw in range(len(self.timeWindows))
         ]
         # Trajectory figure
-        cm = plt.get_cmap("turbo")
+        plt.get_cmap("turbo")
         fig, ax = plt.subplots(1, len(self.timeWindows))
         if len(self.timeWindows) == 1:
             ax = [ax]  # compatibility move
@@ -3423,7 +3423,7 @@ class PaperFigures:
                 predPos = self.resultsNN_phase[phase]["fullPred"][idWindow][speedMask][
                     :, :2
                 ]
-                target_hw = self.ann[
+                self.ann[
                     str(winMS)
                 ].GaussianHeatmap.gaussian_heatmap_targets(truePos)
                 probs = (
@@ -3620,7 +3620,7 @@ class PaperFigures:
 
                 extent = (0, 1, 0, 1)
                 ax1 = axs[i, j * (3 if plot_kl else 2)]
-                im1 = ax1.imshow(
+                ax1.imshow(
                     mean_probs,
                     origin="lower",
                     extent=extent,
@@ -3630,7 +3630,7 @@ class PaperFigures:
                 ax1.set_title(f"{phase[1:]}-{speed}-Proba")
                 # plt.colorbar(im1, ax=ax1)
                 ax2 = axs[i, j * (3 if plot_kl else 2) + 1]
-                im2 = ax2.imshow(
+                ax2.imshow(
                     zmap,
                     origin="lower",
                     cmap="coolwarm",
@@ -3654,7 +3654,7 @@ class PaperFigures:
                             Q > 0, Q * np.log((Q + 1e-12) / (P + 1e-12)), 0
                         )
                     # Compute mean bias vector in each bin
-                    im3 = ax3.imshow(
+                    ax3.imshow(
                         kl_map,
                         cmap="magma",
                         origin="lower",
@@ -3716,7 +3716,7 @@ class PaperFigures:
             * np.less_equal(self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw])
             for iw in range(len(self.timeWindows))
         ]
-        filters_bayes = [
+        [
             np.ones(self.resultsBayes_phase[suffix]["time"][iw].shape).astype(bool)
             * np.greater_equal(
                 self.resultsBayes_phase[suffix]["predLoss"][iw], threshBayes[iw]
@@ -4252,7 +4252,8 @@ class PaperFigures:
             : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow]), :
         ]
         predLoss = self.resultsNN_phase[suffix]["predLoss"][iwindow]
-        normalize = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x))
+        def normalize(x):
+            return (x - np.min(x)) / (np.max(x) - np.min(x))
 
         for icell, tuningCurve in enumerate(linearTuningCurves):
             pcId = np.where(np.equal(placeFieldSort, icell))[0][0]
