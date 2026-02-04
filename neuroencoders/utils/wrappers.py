@@ -82,7 +82,7 @@ def loadSpikeData(path, index=None, fs=20000):
                     )
                 shank = spikes.columns.get_level_values(0).values[:, np.newaxis]
                 return toreturn, shank
-            except:
+            except (OSError, KeyError):
                 spikes = pd.HDFStore(final_path, "r")
                 shanks = spikes["/shanks"]
                 toreturn = {}
@@ -148,7 +148,7 @@ def loadSpikeData(path, index=None, fs=20000):
     shank = []
     for s in spikes:
         shank.append(s.columns.get_level_values(0).values)
-        sh = np.unique(shank[-1])[0]
+        np.unique(shank[-1])[0]
         for i, j in s:
             toreturn[j] = nts.Ts(
                 t=s[(i, j)].replace(0, np.nan).dropna().index.values, time_units="s"
@@ -277,7 +277,7 @@ def downsampleDatFile(path, n_channels, fs):
     endoffile = f.seek(0, 2)
     bytes_size = 2
     n_samples = int((endoffile - startoffile) / n_channels / bytes_size)
-    duration = n_samples / fs
+    n_samples / fs
     f.close()
 
     chunksize = 100000
@@ -397,9 +397,9 @@ def makePositions(
         print("The path " + path + " doesn't exist; Exiting ...")
         sys.exit()
     files = os.listdir(path)
-    for f in file_order:
-        if not np.any([f + ".csv" in g for g in files]):
-            print("Could not find " + f + ".csv; Exiting ...")
+    for file in file_order:
+        if not np.any([file + ".csv" in g for g in files]):
+            print("Could not find " + file + ".csv; Exiting ...")
             sys.exit()
     path = os.path.join(path, "Analysis/")
     if not os.path.exists(path):
@@ -416,8 +416,8 @@ def makePositions(
 
     frames = []
 
-    for i, f in enumerate(file_order):
-        csv_file = os.path.join(path, "".join(s for s in files if f + ".csv" in s))
+    for i, file in enumerate(file_order):
+        csv_file = os.path.join(path, "".join(s for s in files if file + ".csv" in s))
         position = pd.read_csv(csv_file, header=[4, 5], index_col=1)
         if 1 in position.columns:
             position = position.drop(labels=1, axis=1)
@@ -517,11 +517,11 @@ def loadEpoch(path, epoch, episodes=None):
             if "sleepPreEp" in behepochs.keys():
                 sleep_pre_ep = behepochs["sleepPreEp"][0][0]
                 sleep_pre_ep = np.hstack([sleep_pre_ep[1], sleep_pre_ep[2]])
-                sleep_pre_ep_index = behepochs["sleepPreEpIx"][0]
+                behepochs["sleepPreEpIx"][0]
             if "sleepPostEp" in behepochs.keys():
                 sleep_post_ep = behepochs["sleepPostEp"][0][0]
                 sleep_post_ep = np.hstack([sleep_post_ep[1], sleep_post_ep[2]])
-                sleep_post_ep_index = behepochs["sleepPostEpIx"][0]
+                behepochs["sleepPostEpIx"][0]
             if len(sleep_pre_ep) and len(sleep_post_ep):
                 sleep_ep = np.vstack((sleep_pre_ep, sleep_post_ep))
             elif len(sleep_pre_ep):
@@ -535,15 +535,15 @@ def loadEpoch(path, epoch, episodes=None):
         elif epoch == "sws":
             sampling_freq = 1250
             new_listdir = os.listdir(path)
-            for f in new_listdir:
-                if "sts.SWS" in f:
-                    sws = np.genfromtxt(os.path.join(path, f)) / float(sampling_freq)
+            for file in new_listdir:
+                if "sts.SWS" in file:
+                    sws = np.genfromtxt(os.path.join(path, file)) / float(sampling_freq)
                     return nts.IntervalSet.drop_short_intervals(
                         nts.IntervalSet(sws[:, 0], sws[:, 1], time_units="s"), 0.0
                     )
 
-                elif "-states.mat" in f:
-                    sws = scipy.io.loadmat(os.path.join(path, f))["states"][0]
+                elif "-states.mat" in file:
+                    sws = scipy.io.loadmat(os.path.join(path, file))["states"][0]
                     index = np.logical_or(sws == 2, sws == 3) * 1.0
                     index = index[1:] - index[0:-1]
                     start = np.where(index == 1)[0] + 1
@@ -556,15 +556,15 @@ def loadEpoch(path, epoch, episodes=None):
         elif epoch == "rem":
             sampling_freq = 1250
             new_listdir = os.listdir(path)
-            for f in new_listdir:
-                if "sts.REM" in f:
-                    rem = np.genfromtxt(os.path.join(path, f)) / float(sampling_freq)
+            for file in new_listdir:
+                if "sts.REM" in file:
+                    rem = np.genfromtxt(os.path.join(path, file)) / float(sampling_freq)
                     return nts.IntervalSet(
                         rem[:, 0], rem[:, 1], time_units="s"
                     ).drop_short_intervals(0.0)
 
                 elif "-states/m" in listdir:
-                    rem = scipy.io.loadmat(path + f)["states"][0]
+                    rem = scipy.io.loadmat(path + file)["states"][0]
                     index = (rem == 5) * 1.0
                     index = index[1:] - index[0:-1]
                     start = np.where(index == 1)[0] + 1
@@ -677,7 +677,7 @@ def loadAuxiliary(path, fs=20000):
     else:
         aux_files = np.sort([f for f in os.listdir(path) if "auxiliary" in f])
         if len(aux_files) == 0:
-            print("Could not find " + f + "_auxiliary.dat; Exiting ...")
+            print("Could not find any file in" + path + "_auxiliary.dat; Exiting ...")
             sys.exit()
         accel = []
         sample_size = []
@@ -688,7 +688,7 @@ def loadAuxiliary(path, fs=20000):
             endoffile = f.seek(0, 2)
             bytes_size = 2
             n_samples = int((endoffile - startoffile) / 3 / bytes_size)
-            duration = n_samples / fs
+            n_samples / fs
             f.close()
             tmp = np.fromfile(open(path, "rb"), np.uint16).reshape(n_samples, 3)
             accel.append(tmp)
@@ -773,8 +773,8 @@ def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"
         endoffile = f.seek(0, 2)
         bytes_size = 2
         n_samples = int((endoffile - startoffile) / n_channels / bytes_size)
-        duration = n_samples / frequency
-        interval = 1 / frequency
+        n_samples / frequency
+        1 / frequency
         f.close()
         with open(path, "rb") as f:
             data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]
@@ -787,7 +787,7 @@ def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"
         bytes_size = 2
 
         n_samples = int((endoffile - startoffile) / n_channels / bytes_size)
-        duration = n_samples / frequency
+        n_samples / frequency
         f.close()
         with open(path, "rb") as f:
             data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]

@@ -27,6 +27,7 @@ from sklearn.metrics import (
 )
 
 from neuroencoders.importData import epochs_management as ep
+from neuroencoders.utils.global_classes import DataHelper
 from neuroencoders.utils.viz_params import (
     ALL_STIMS_COLOR,
     ALPHA_DELTA_LINE,
@@ -87,7 +88,7 @@ class AnimatedPositionPlotter:
 
     def __init__(
         self,
-        data_helper,
+        data_helper: DataHelper,
         trail_length: int = 30,
         lin_movie_duration: int = 500,
         figsize: Tuple[float, float] = (16, 9),
@@ -953,7 +954,8 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.data_helper.direction
                 dim = dim = dim[self.totMask][self.true_valid_indices]
-            except:
+            # except masking issues (wrong length), fallback to computing from linpositions
+            except IndexError:
                 dim = self.data_helper._get_traveling_direction(self.linpositions)
             if self.predicted is not None:
                 predicted_dim = self.data_helper._get_traveling_direction(
@@ -973,7 +975,7 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.predicted_dim_please
                 dim = dim[self.totMask][self.true_valid_indices]
-            except:
+            except IndexError:
                 print("Using speed mask from random.")
                 dim = self.speed_mask
 
@@ -2429,7 +2431,7 @@ class AnimatedPositionPlotter:
                         continue
                     try:
                         mask = indices == frame
-                    except:
+                    except (TypeError, AttributeError):
                         continue
                     if np.any(mask):
                         x_data = self.positions[indices[mask], 0]
@@ -2666,7 +2668,7 @@ class AnimatedPositionPlotter:
                 continue
             try:
                 mask = indices == frame
-            except:
+            except (TypeError, AttributeError):
                 continue
 
             if np.any(mask):
@@ -3756,7 +3758,7 @@ def lighten_color(color, amount=0.5):
 
     try:
         c = mc.cnames[color]
-    except:
+    except KeyError:
         c = color
     c = colorsys.rgb_to_hls(*mc.to_rgb(c))
     crgb = np.array(list(colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])))
@@ -4089,117 +4091,3 @@ def plot_spikes_sequence(proto_example, nChannelsPerGroup):
     plt.suptitle("First 50 spikes from the sequence, separated by channel")
     plt.tight_layout()
     plt.show()
-
-
-if __name__ == "__main__":
-    # Run demonstration
-    try:
-        print("=" * 60)
-        print("ANIMATED POSITION PLOTTER DEMO")
-        print("=" * 60)
-        print(f"Backend in use: {matplotlib.get_backend()}")
-
-        plotter, anim = demo_animated_plot()
-        print("\nAnimation created successfully!")
-
-        # Keep the plot alive for Qt backends
-        backend = matplotlib.get_backend()
-        if "Qt" in backend:
-            print("\nQt backend detected - plot window should stay interactive")
-            print("Close the plot window to continue...")
-            try:
-                # For Qt backends, ensure event loop runs
-                if hasattr(plotter.fig.canvas, "start_main_loop"):
-                    plotter.fig.canvas.start_main_loop()
-            except:
-                pass
-
-    except Exception as e:
-        print(f"Error running demonstration: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-    # Show usage examples
-    print("\n" + "=" * 60)
-    print("USAGE WITH YOUR DATA:")
-    print("=" * 60)
-    print(f"Current backend: {matplotlib.get_backend()}")
-    print("""
-# Plot your MATLAB maze shape:
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
-               [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.setup_plot(
-    custom_lines=[maze_coords],     # Your maze shape
-    custom_line_colors='black',     # Maze color
-    custom_line_styles='-',         # Solid lines
-    custom_line_widths=3            # Thick walls
-)
-plotter.show()
-
-# Multiple custom shapes:
-maze = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0], [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-shock_zone = [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7], [0.3, 0.3]]  # Square shock zone
-
-plotter.setup_plot(
-    custom_lines=[maze, shock_zone],
-    custom_line_colors=['black', 'red'],    # Different colors
-    custom_line_styles=['-', '--'],         # Different styles
-    custom_line_widths=[3, 2]               # Different widths
-)
-
-# Alternative: Use helper function
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
-               [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-custom_lines = create_maze_from_matlab(maze_coords)
-
-plotter = create_plotter_for_data(
-    your_data_helper,
-    custom_lines=custom_lines
-)
-
-# Mix with other reference lines:
-plotter.setup_plot(
-    binary_colors=True,
-    custom_lines=[maze_coords],          # Maze walls
-    hlines=[0.5],                        # Center horizontal line
-    vlines=[0.5],                        # Center vertical line
-    custom_line_colors='black',          # Maze color
-    line_colors='gray'                   # Reference line color
-)
-
-# Force Qt backend:
-plotter = create_qt_plotter(your_data_helper, trail_length=40)
-
-# In Jupyter notebook:
-%matplotlib widget  # or %matplotlib qt
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.show()
-
-# Save as video:
-plotter = AnimatedPositionPlotter(your_data_helper)
-anim = plotter.create_animation(save_path='trajectory.mp4')
-
-# Manual backend control:
-import matplotlib
-matplotlib.use('Qt5Agg')  # Before importing pyplot
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.show()
-""")
-
-    print("\nAvailable backends on your system:")
-    try:
-        import matplotlib.backend_bases
-
-        backends = []
-        for backend in ["Qt5Agg", "Qt4Agg", "TkAgg", "GTK3Agg", "WXAgg"]:
-            try:
-                matplotlib.use(backend, force=False)
-                backends.append(backend)
-            except:
-                pass
-        print(f"Compatible backends: {backends}")
-    except:
-        print("Could not detect available backends")

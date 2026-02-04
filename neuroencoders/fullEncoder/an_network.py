@@ -3221,9 +3221,7 @@ class LSTMandSpikeNetwork:
 
             # Create linear indices for the temporal structure
             # Total size is now batch_size * n_temporal_bins
-            (
-                spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
-            )
+            (spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1])
 
             # Map: for each position in spikePosition, which original spike index to use
             # Build lookup: (batch, temporal_bin) -> original_spike_index

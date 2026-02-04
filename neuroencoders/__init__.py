@@ -22,12 +22,26 @@ except PackageNotFoundError:
     __version__ = "0.0.0"  # fallback if not installed
 
 from . import (
-    decoder,
-    fullEncoder,
-    importData,
-    openEphysExport,
-    resultAnalysis,
-    simpleBayes,
-    transformData,
-    utils,
+    decoder as decoder,
+)
+from . import (
+    fullEncoder as fullEncoder,
+)
+from . import (
+    importData as importData,
+)
+from . import (
+    openEphysExport as openEphysExport,
+)
+from . import (
+    resultAnalysis as resultAnalysis,
+)
+from . import (
+    simpleBayes as simpleBayes,
+)
+from . import (
+    transformData as transformData,
+)
+from . import (
+    utils as utils,
 )

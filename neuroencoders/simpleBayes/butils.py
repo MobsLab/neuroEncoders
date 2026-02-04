@@ -88,7 +88,7 @@ def hist_2d(feature, nbins=None):
     """
     A simple 2D histogram estimate
     """
-    if nbins == None:
+    if nbins is None:
         nbins = [45 for j in range(feature.shape[1])]
     # create grid of sample locations (default: 150x150x...x150)
     lspace = [

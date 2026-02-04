@@ -20,7 +20,7 @@ from scipy.stats import pearsonr, spearmanr
 from statannotations.Annotator import Annotator
 from tqdm import tqdm
 
-from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.resultAnalysis import print_results
 from neuroencoders.resultAnalysis.paper_figures import PaperFigures
 from neuroencoders.transformData.linearizer import UMazeLinearizer
@@ -80,7 +80,7 @@ def Load_LFP(LFP_path, time_unit="us", frequency=1250.0):
     from pynapple import Tsd, TsdFrame
     from scipy.io import loadmat
 
-    if type(LFP_path) == str:
+    if isinstance(LFP_path, str):
         try:
             LFP = loadmat(LFP_path, squeeze_me=True)
         except FileNotFoundError:
@@ -4065,9 +4065,7 @@ class Results_Loader:
                 raise ValueError("against must be 'entropy', 'maxp' or 'error'")
 
             # --- load spikes ---
-            os.path.join(
-                mouse_results.folderResult, "clusters_pre_wTrain_False.pkl"
-            )
+            os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
             clusters_time_file = os.path.join(
                 mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
             )
@@ -4077,7 +4075,7 @@ class Results_Loader:
                     #     clusters = pickle.load(f)
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
-                except:
+                except FileNotFoundError:
                     os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
@@ -4281,9 +4279,7 @@ class Results_Loader:
                 raise ValueError("against must be 'entropy', 'maxp' or 'error'")
 
             # --- load spikes ---
-            os.path.join(
-                mouse_results.folderResult, "clusters_pre_wTrain_False.pkl"
-            )
+            os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
             clusters_time_file = os.path.join(
                 mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
             )
@@ -4293,7 +4289,7 @@ class Results_Loader:
                     #     clusters = pickle.load(f)
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
-                except:
+                except FileNotFoundError:
                     os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
@@ -4697,7 +4693,7 @@ class Results_Loader:
                 continue
             try:
                 ann_vals = decoding_results[ann_var].flatten()
-            except:
+            except KeyError:
                 ann_vals = row[ann_var]
 
             # --- apply speed mask if needed ---

@@ -12,6 +12,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import spikeinterface as si
+import spikeinterface.extractors as se
+import spikeinterface.preprocessing as spre
+import spikeinterface.qualitymetrics
+
+## import glob
+from probeinterface import generate_linear_probe
+from resultAnalysis.print_results import print_results
+from spikeinterface.sorters import read_sorter_folder, run_sorter
 
 datadir = os.path.join(os.path.expanduser("~/Documents/Theotime"), "DimaERC2")
 assert os.path.isdir(datadir)
@@ -150,8 +159,6 @@ list_windows = [36, 108, 200, 252, 504]
 # In[15]:
 
 
-from resultAnalysis.print_results import print_results
-
 # In[16]:
 
 
@@ -265,11 +272,6 @@ subresults_df = results_df[results_df["mouse_id"].isin(selected_mice)]
 # In[25]:
 
 
-import spikeinterface as si
-import spikeinterface.extractors as se
-import spikeinterface.preprocessing as spre
-import spikeinterface.qualitymetrics
-
 # In[26]:
 
 
@@ -299,10 +301,6 @@ si.set_global_job_kwargs(n_jobs=-1, progress_bar=True)
 
 # In[63]:
 
-
-## import glob
-from probeinterface import generate_linear_probe
-from spikeinterface.sorters import read_sorter_folder, run_sorter
 
 required_extensions = [
     "random_spikes",

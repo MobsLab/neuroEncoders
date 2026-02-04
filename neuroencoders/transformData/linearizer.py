@@ -331,7 +331,7 @@ class UMazeLinearizer:
                 id, bId = tpl
                 try:
                     l0s[id].remove()
-                except:
+                except (KeyError, AttributeError):
                     None
                 l0s[id] = ax[0].scatter(
                     euclidData[bId, 0], euclidData[bId, 1], c=[cm(id)]
@@ -361,7 +361,7 @@ class UMazeLinearizer:
             try:
                 self.lPoints.remove()
                 fig.canvas.draw()
-            except:
+            except (AttributeError, KeyError):
                 pass
             self.l0s = try_linearization(ax, self.l0s)
             self.lPoints = ax[0].scatter(
@@ -437,7 +437,7 @@ class UMazeLinearizer:
                 try:
                     self.lPoints.remove()
                     fig.canvas.draw()
-                except:
+                except (AttributeError, KeyError):
                     pass
                 if len(self.nnPoints) > 2:
                     self.n_points = len(self.nnPoints)
@@ -590,15 +590,9 @@ class UMazeLinearizer:
         if self.phase is not None:
             filename = os.path.join(folder, "nnBehavior_" + self.phase + ".mat")
             if not os.path.exists(filename):
-                assert tables.is_hdf5_file(folder + "nnBehavior.mat")
-                import shutil
-
-                print("weird to copy that file now")
-
-                shutil.copyfile(
-                    folder + "nnBehavior.mat",
-                    folder + "nnBehavior_" + phase + ".mat",
-                    follow_symlinks=True,
+                raise ValueError(
+                    "Are you sure you want to use phase-specific linearization? The file does not exist: ",
+                    folder + "nnBehavior_" + self.phase + ".mat",
                 )
         # Extract basic behavior
         with tables.open_file(filename, "a") as f:

@@ -1,7 +1,6 @@
 # Load libs
 import os
 import re
-import sys
 import xml.etree.ElementTree as ET
 from tkinter import Button, Entry, Label, Toplevel
 from typing import Literal, Optional
@@ -35,11 +34,7 @@ def get_params(pathToXml):
     listChannels = []
     samplingRate = None
     nChannels = None
-    try:
-        tree = ET.parse(pathToXml)
-    except:
-        print("impossible to open xml file:", pathToXml)
-        sys.exit(1)
+    tree = ET.parse(pathToXml)
     root = tree.getroot()
     for br1Elem in root:
         if br1Elem.tag != "spikeDetection":
@@ -209,12 +204,12 @@ def get_behavior(
         sleepPeriods = f.root.behavior.sleepPeriods[:]
         if np.sum(sleepPeriods) > 0:  # If sleepPeriods exist
             sleepNames = [
-                "".join([chr(c) for c in l[0][:, 0]])
-                for l in f.root.behavior.sessionSleepNames[:, 0]
+                "".join([chr(c) for c in sleepName[0][:, 0]])
+                for sleepName in f.root.behavior.sessionSleepNames[:, 0]
             ]
             sessionNames = [
-                "".join([chr(c) for c in l[0][:, 0]])
-                for l in f.root.behavior.SessionNames[:, 0]
+                "".join([chr(c) for c in sessName[0][:, 0]])
+                for sessName in f.root.behavior.SessionNames[:, 0]
             ]
             if sessionNames[0] != "Recording":
                 sessionStart = f.root.behavior.SessionStart[:, :][:, 0]
@@ -457,8 +452,8 @@ def speed_filter(
         speed = f.root.behavior.speed
         positionTime = f.root.behavior.position_time
         sessionNames = [
-            "".join([chr(c) for c in l[0][:, 0]])
-            for l in f.root.behavior.SessionNames[:, 0]
+            "".join([chr(c) for c in sessName[0][:, 0]])
+            for sessName in f.root.behavior.SessionNames[:, 0]
         ]
         if sessionNames[0] != "Recording":
             IsMultiSessions = True
@@ -901,8 +896,8 @@ def select_epochs(
             )
         # We extract session names:
         sessionNames = [
-            "".join([chr(c) for c in l[0][:, 0]])
-            for l in f.root.behavior.SessionNames[:, 0]
+            "".join([chr(c) for c in sessName[0][:, 0]])
+            for sessName in f.root.behavior.SessionNames[:, 0]
         ]
         if sessionNames[0] != "Recording":
             IsMultiSessions = True
@@ -1575,12 +1570,12 @@ def select_epochs(
                             if SetData["useLossPredTrainSet"]:
                                 try:
                                     ls[dim][2][iaxis].remove()
-                                except:
+                                except (AttributeError, KeyError):
                                     pass
                             else:
                                 try:
                                     ls[dim][2][iaxis].remove()
-                                except:
+                                except (AttributeError, KeyError):
                                     pass
                         if SetData["useLossPredTrainSet"]:
                             ls[dim][2] = ax[dim].scatter(
@@ -1625,7 +1620,7 @@ def select_epochs(
                         if SetData["useLossPredTrainSet"]:
                             try:
                                 ls[dim][2].remove()
-                            except:
+                            except (AttributeError, KeyError):
                                 pass
                             ls[dim][2] = ax[dim].scatter(
                                 timeToShow[
@@ -1640,7 +1635,7 @@ def select_epochs(
                         else:
                             try:
                                 l3.remove()
-                            except:
+                            except (AttributeError, KeyError):
                                 pass
 
                     # modify the xlim of the axes according to the changed epochs
