@@ -1066,6 +1066,7 @@ def parse_serialized_sequence(
         params: parameters of the network
         tensors: parsed tensors from the TFRecord example
         batched: Whether data is batched
+        count_spikes: Whether to count spikes
 
     Returns:
         Parsed tensors with reshaped spike data.
