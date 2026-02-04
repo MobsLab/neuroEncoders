@@ -245,7 +245,7 @@ def main(args):
 
         # Now that we have the linearization function, we can get the true target
         helper.get_true_target(
-            l_function, in_place=True, show=show_figures, speedMask=True
+            windowSizeMS, l_function, in_place=True, show=show_figures, speedMask=True
         )
 
     Parameters = Params(
@@ -687,9 +687,10 @@ def main(args):
             or args.redo
         ):
             num_augmentations = args.num_augmentations
-            print("num_augmentations", num_augmentations)
-            if num_augmentations is None:
-                num_augmentations = 4 if args.window < 0.504 else 2
+            if Parameters.dataAugmentation:
+                print("num_augmentations", num_augmentations)
+                if num_augmentations is None:
+                    num_augmentations = 4 if args.window < 0.504 else 2
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
