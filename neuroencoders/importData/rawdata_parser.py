@@ -392,6 +392,7 @@ def speed_filter(
     # Parameters
     window_len = 14  # changed following Dima's advice
     window_idx = 0  # index of the window to show
+    copied = False
     from neuroencoders.utils.global_classes import MAZE_COORDS
 
     filename = os.path.join(folder, "nnBehavior.mat")
@@ -411,6 +412,7 @@ def speed_filter(
                 folder + "nnBehavior_" + phase + ".mat",
                 follow_symlinks=True,
             )
+            copied = True
     # Extract basic behavior
     speedOG = None
     with tables.open_file(filename, "a") as f:
@@ -616,7 +618,6 @@ def speed_filter(
         )
         ax4.set_ylabel("speed Threshold")
         ax5.set_ylabel("window range")
-        ax = [ax0, ax1, ax2, ax3, ax4, ax5]
 
         # create scatter plot of environmental variable depending on speed
         fig2d, ax2d = plt.subplots()
@@ -696,8 +697,8 @@ def speed_filter(
             )
             l4.set_ydata(speedToshowSm[speedFilter])
             l4.set_xdata(timeToShow[speedFilter])
-            l5.set_xdata(slider.val)
-            l6.set_xdata(np.exp(slider.val))
+            l5.set_xdata([slider.val])
+            l6.set_xdata([np.exp(slider.val)])
             ax3.set_xlabel(f"raw speed ({np.exp(slider.val):.2f} cm/s)")
 
             fig2d.suptitle(
@@ -714,20 +715,20 @@ def speed_filter(
                 else np.ones_like(idxs, dtype=bool)
             )
 
-            newfilter = speedFilter & to_show
-            pos2d.set_xdata(behToShow[newfilter, 0])
-            pos2d.set_ydata(behToShow[newfilter, 1])
+            new_filter = speedFilter & to_show
+            pos2d.set_xdata(behToShow[new_filter, 0])
+            pos2d.set_ydata(behToShow[new_filter, 1])
             sc.set_offsets(
                 np.transpose(
                     np.stack(
                         [
-                            behToShow[newfilter, 0],
-                            behToShow[newfilter, 1],
+                            behToShow[new_filter, 0],
+                            behToShow[new_filter, 1],
                         ]
                     )
                 )
             )
-            sc.set_array(speedToshowSm[newfilter])
+            sc.set_array(speedToshowSm[new_filter])
 
             fig.canvas.draw_idle()
             fig2d.canvas.draw_idle()
@@ -785,6 +786,30 @@ def speed_filter(
             if "positions" in children:
                 f.remove_node("/behavior", "positions")
             f.create_array("/behavior", "positions", np.swapaxes(positions, 1, 0))
+        if "testEpochs" in children and copied:
+            f.remove_node("/behavior", "testEpochs")
+        if "trainEpochs" in children and copied:
+            f.remove_node("/behavior", "trainEpochs")
+        if "keptSession" in children and copied:
+            f.remove_node("/behavior", "keptSession")
+        if "lossPredSetEpochs" in children and copied:
+            f.remove_node("/behavior", "lossPredSetEpochs")
+        if "ref" in children and copied:
+            f.remove_node("/behavior", "ref")
+        if "xyOutput" in children and copied:
+            f.remove_node("/behavior", "xyOutput")
+        if "shock_zone" in children and copied:
+            f.remove_node("/behavior", "shock_zone")
+        if "shock_zone_mask" in children and copied:
+            f.remove_node("/behavior", "shock_zone_mask")
+        if "aligned_ref" in children and copied:
+            f.remove_node("/behavior", "aligned_ref")
+        if "ratioIMAonREAL" in children and copied:
+            f.remove_node("/behavior", "ratioIMAonREAL")
+        if "M" in children and copied:
+            f.remove_node("/behavior", "M")
+        if "outputSize" in children and copied:
+            f.remove_node("/behavior", "outputSize")
 
         f.flush()
         f.close()
@@ -966,14 +991,13 @@ def select_epochs(
         speedMaskToShow = speedMask[maskToShow]
         speedMaskToShowPRE = speedMaskToShow
         timeToShowPRE = timeToShow
-        speedsToShowPRE = speedsToShow
         xmin, xmax = timeToShow[0], timeToShow[-1]
         sessionValue_toshow = sessionValue[maskToShow]
 
         if phase is not None:
             maskToShowPRE = ep.inEpochsMask(positionTime[:, 0], epochToSelectPRE)
             timeToShowPRE = positionTime[maskToShowPRE, 0]
-            speedsToShowPRE = speeds[maskToShowPRE]
+            speeds[maskToShowPRE]
             speedMaskToShowPRE = speedMask[maskToShowPRE]
             xmin, xmax = timeToShowPRE[0], timeToShowPRE[-1]
 
@@ -1011,7 +1035,7 @@ def select_epochs(
                 else:
                     st = st[:-1]
             assert st.shape[0] % 2 == 0
-            showtimes = tuple(zip(st[::2], st[1::2]))
+            tuple(zip(st[::2], st[1::2]))
 
         # Default train and test sets
         sizeTest = (
@@ -1151,16 +1175,16 @@ def select_epochs(
             )
 
             if IsMultiSessions:
-                ax = [
-                    fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
-                ]  # ax for feature display
-                ax[0].get_shared_x_axes().join(ax[0], ax[1])
-                # ax = [brokenaxes(xlims=showtimes, subplot_spec=gs[id,:]) for id in range(positions.shape[1])] #ax for feature display
+                ax = []
+                for i in range(positions.shape[1]):
+                    # Create the subplot. If it's not the first one, share x with ax[0]
+                    new_ax = fig.add_subplot(gs[i, :], sharex=ax[0] if i > 0 else None)
+                    ax.append(new_ax)
             else:
                 ax = [
                     fig.add_subplot(gs[id, :]) for id in range(positions.shape[1])
                 ]  # ax for feature display
-                ax[0].get_shared_x_axes().join(ax[0], ax[1])
+                ax[1].sharex(ax[0])
 
             ax += [
                 fig.add_subplot(gs[-5, id]) for id in range(len(sessionNames))
