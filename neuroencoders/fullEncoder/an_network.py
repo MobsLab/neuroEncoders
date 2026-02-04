@@ -14,7 +14,7 @@ import os
 import warnings
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
@@ -361,6 +361,7 @@ class LSTMandSpikeNetwork:
             )
 
             # Gather the full model
+            self.generate_kwargs = kwargs
             outputs = self.generate_model(**kwargs)
             # Build two models
             # One just described, with two objective functions corresponding
@@ -1309,7 +1310,9 @@ class LSTMandSpikeNetwork:
         """
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         shuffle = kwargs.get("shuffle", True)
+        random_spiking = kwargs.get("random_spiking", False)
         batchSize = kwargs.get("batch_size", self.params.batchSize)
+        speedMask = kwargs.get("speedMask", None)
 
         @tf.autograph.experimental.do_not_convert
         def filter_by_pos_index(x):
@@ -1340,12 +1343,22 @@ class LSTMandSpikeNetwork:
 
         @tf.function
         def map_outputs(vals):
+            input_shape = tf.shape(vals["pos"])[:-1]
+            if len(input_shape) == 0:
+                batch_size = 1
+            else:
+                batch_size = input_shape[0]
+
             basic_dict = {
-                self.outNames[0]: tf.zeros((batchSize, dim_output), dtype=tf.float32),
+                self.outNames[0]: tf.zeros((batch_size, dim_output), dtype=tf.float32)
             }
             for outname in self.outNames[1:]:
-                basic_dict[outname] = tf.zeros(batchSize, dtype=tf.float32)
+                basic_dict[outname] = tf.zeros(batch_size, dtype=tf.float32)
             return (vals, basic_dict)
+
+        @tf.autograph.experimental.do_not_convert
+        def create_indices(vals):
+            return self.create_indices(vals=vals, shuffle=random_spiking)
 
         ndataset = tf.data.TFRecordDataset(
             os.path.join(self.projectPath.dataPath, filename)
@@ -1362,6 +1375,14 @@ class LSTMandSpikeNetwork:
                 {"test": totMask_backup}
                 if kwargs.get("inference_mode", False)
                 else {"train": totMask_backup}
+            )
+        if not isinstance(speedMask, dict):
+            # it means we have just one set of keys
+            speedMask_backup = speedMask.copy()
+            speedMask = (
+                {"test": speedMask_backup}
+                if kwargs.get("inference_mode", False)
+                else {"train": speedMask_backup}
             )
         datasets = {}
         counts = {}
@@ -1390,6 +1411,8 @@ class LSTMandSpikeNetwork:
             # posFeature is already of shape (N,dimOutput) because we ran data_helper.get_true_target before.
             dataset = ndataset.filter(filter_by_pos_index)
             dataset = dataset.map(nnUtils.import_true_pos(posFeature))
+            if speedMask is not None and key in speedMask:
+                dataset = dataset.map(nnUtils.import_speed_mask(speedMask[key]))
             dataset = dataset.filter(filter_nan_pos)
 
             # now that we have clean positions, we can resample if needed
@@ -1402,7 +1425,11 @@ class LSTMandSpikeNetwork:
                 print("Shuffling the", key, "dataset")
                 dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
-            dataset = dataset.batch(batchSize, drop_remainder=True)
+            batch_dataset = kwargs.get("batch", key == "training")
+            if batch_dataset:
+                dataset = dataset.batch(batchSize, drop_remainder=True)
+            else:
+                dataset = dataset.batch(1, drop_remainder=False)
 
             if (
                 not self.params.dataAugmentation
@@ -1413,6 +1440,7 @@ class LSTMandSpikeNetwork:
                 optimized_parse_fn = self.create_optimized_parse_function(
                     augmentation=False,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
+                    batched=batch_dataset,
                 )
                 dataset = dataset.map(
                     optimized_parse_fn,
@@ -1426,6 +1454,7 @@ class LSTMandSpikeNetwork:
                     augmentation=True,
                     augmentation_config=augmentation_config,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
+                    batched=batch_dataset,
                 )
 
                 dataset = dataset.map(
@@ -1439,9 +1468,7 @@ class LSTMandSpikeNetwork:
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
             # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
-            dataset = dataset.map(
-                self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
-            )
+            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
             # cache only once, after all the preprocessing
             print(
@@ -1489,16 +1516,110 @@ class LSTMandSpikeNetwork:
                 else None
             )
 
-        if self.params.OversamplingResampling:
-            return datasets, counts
-        else:
-            return datasets, None
+        # Save parsed datasets to new TFRecord files if requested
+        save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
+        save_parsed_parquet = kwargs.get("save_parsed_parquet", None)
+
+        # The user mentioned useSpeedMask, but the code often uses useSpeedFilter.
+        # We handle both, defaulting to the condition that saving only happens when speed masking is NOT applied during loading (i.e. we want the "raw" but cropped data).
+        useSpeedMask = kwargs.get("useSpeedMask", kwargs.get("useSpeedFilter", False))
+        should_save = not useSpeedMask
+
+        if save_parsed_tfrec is not None:
+            if should_save:
+                print(
+                    f"Saving parsed datasets to TFRecord files with base path: {save_parsed_tfrec}"
+                )
+                self._save_datasets_to_tfrec(datasets, save_parsed_tfrec)
+            else:
+                print(
+                    f"Skipping TFRecord saving because speed masking is active (useSpeedMask/Filter={useSpeedMask})"
+                )
+
+        if save_parsed_parquet is not None:
+            if should_save:
+                print(
+                    f"Saving parsed datasets to Parquet files with base path: {save_parsed_parquet}"
+                )
+                self._save_datasets_to_parquet(datasets, save_parsed_parquet)
+            else:
+                print(
+                    f"Skipping Parquet saving because speed masking is active (useSpeedMask/Filter={useSpeedMask})"
+                )
+
+        return datasets, counts if self.params.OversamplingResampling else None
+
+    def load_parsed_dataset(
+        self, base_path: str, keys: List[str] = ["train", "test"], featDesc: Dict = None
+    ) -> Dict[str, tf.data.Dataset]:
+        """
+        Load datasets that were previously saved using _save_datasets_to_tfrec.
+
+        Parameters
+        ----------
+        base_path : str
+            Base path for the TFRecord files.
+        keys : list of str
+            The dataset keys to load (e.g., ['train', 'test']).
+        featDesc : dict, optional
+            The feature description to use for parsing. If None, uses a default that
+            handles variable position dimensions.
+
+        Returns
+        -------
+        datasets : dict
+            Dictionary of loaded tf.data.Dataset objects.
+        """
+        if featDesc is None:
+            # Default featDesc that handles variable length pos and groups
+            featDesc = {
+                "pos_index": tf.io.FixedLenFeature([], tf.int64),
+                "pos": tf.io.VarLenFeature(tf.float32),
+                "length": tf.io.FixedLenFeature([], tf.int64),
+                "groups": tf.io.VarLenFeature(tf.int64),
+                "time": tf.io.FixedLenFeature([], tf.float32),
+                "time_behavior": tf.io.FixedLenFeature([], tf.float32),
+                "indexInDat": tf.io.VarLenFeature(tf.int64),
+            }
+            for g in range(self.params.nGroups):
+                featDesc[f"group{g}"] = tf.io.VarLenFeature(tf.float32)
+
+        datasets = {}
+        for key in keys:
+            file_path = f"{base_path}_{key}.tfrec"
+            if not os.path.exists(file_path):
+                print(f"Warning: File {file_path} does not exist. Skipping.")
+                continue
+
+            print(f"Loading {key} dataset from {file_path}...")
+
+            raw_dataset = tf.data.TFRecordDataset(file_path)
+
+            @tf.autograph.experimental.do_not_convert
+            def _parse_function(example_proto):
+                return tf.io.parse_single_example(example_proto, featDesc)
+
+            dataset = raw_dataset.map(
+                _parse_function, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            # Re-apply the parsing logic to get the correct shapes (e.g., reshaping groups)
+            dataset = dataset.map(
+                lambda x: nnUtils.parse_serialized_sequence(
+                    self.params, x, batched=False
+                ),
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
+
+            datasets[key] = dataset
+
+        return datasets
 
     def create_optimized_parse_function(
         self,
         augmentation: bool = False,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
         count_spikes=False,
+        batched=True,
     ):
         """
         Create optimized parsing function that respects spike data structure
@@ -1520,7 +1641,7 @@ class LSTMandSpikeNetwork:
                     self.params,
                     processed_batch,  # Pass the copy
                     augmentation_config=augmentation_config,
-                    batched=True,
+                    batched=batched,
                     count_spikes=count_spikes,
                 )
 
@@ -1537,11 +1658,143 @@ class LSTMandSpikeNetwork:
                 return nnUtils.parse_serialized_sequence(
                     self.params,
                     processed_batch,
-                    batched=True,
+                    batched=batched,
                     count_spikes=count_spikes,
                 )
 
             return optimized_parse_standard
+
+    def _save_datasets_to_tfrec(self, datasets, base_path):
+        """
+        Save parsed datasets to new TFRecord files.
+
+        Parameters
+        ----------
+        datasets : dict
+            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
+        base_path : str
+            Base path for saved TFRecord files. Files will be saved as:
+            {base_path}_train.tfrec, {base_path}_test.tfrec, etc.
+        """
+
+        def serialize_example(example_dict):
+            """Serialize a single example to TFRecord format"""
+            # Create feature dict for serialization
+            feature_dict = {}
+
+            for key, value in example_dict.items():
+                if isinstance(value, tf.Tensor):
+                    value = value.numpy()
+
+                # Handle different data types
+                if isinstance(value, np.ndarray):
+                    if value.dtype in [np.float32, np.float64]:
+                        feature_dict[key] = tf.train.Feature(
+                            float_list=tf.train.FloatList(value=value.flatten())
+                        )
+                    elif value.dtype in [np.int32, np.int64]:
+                        feature_dict[key] = tf.train.Feature(
+                            int64_list=tf.train.Int64List(value=value.flatten())
+                        )
+                    else:
+                        # For other types, convert to bytes
+                        feature_dict[key] = tf.train.Feature(
+                            bytes_list=tf.train.BytesList(value=[value.tobytes()])
+                        )
+                elif isinstance(value, (int, np.integer)):
+                    feature_dict[key] = tf.train.Feature(
+                        int64_list=tf.train.Int64List(value=[int(value)])
+                    )
+                elif isinstance(value, (float, np.floating)):
+                    feature_dict[key] = tf.train.Feature(
+                        float_list=tf.train.FloatList(value=[float(value)])
+                    )
+                elif isinstance(value, (str, bytes)):
+                    if isinstance(value, str):
+                        value = value.encode()
+                    feature_dict[key] = tf.train.Feature(
+                        bytes_list=tf.train.BytesList(value=[value])
+                    )
+
+            # Create an Example proto
+            example_proto = tf.train.Example(
+                features=tf.train.Features(feature=feature_dict)
+            )
+            return example_proto.SerializeToString()
+
+        # Save each dataset
+        for key, dataset in datasets.items():
+            output_path = f"{base_path}_{key}.tfrec"
+            print(f"Saving {key} dataset to {output_path}...")
+
+            writer = tf.io.TFRecordWriter(os.path.abspath(output_path))
+
+            try:
+                for batch in tqdm(dataset, desc=f"Writing {key} to TFRecord"):
+                    if isinstance(batch, tuple):
+                        inputs, _ = batch  # Usually (inputs, targets)
+                    else:
+                        inputs = batch
+
+                    serialized = serialize_example(inputs)
+                    writer.write(serialized)
+            finally:
+                writer.close()
+
+            print(f"Successfully saved {key} dataset to {output_path}")
+
+    def _save_datasets_to_parquet(self, datasets, base_path):
+        """
+        Save parsed datasets to Parquet files using pandas logic.
+
+        Parameters
+        ----------
+        datasets : dict
+            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
+        base_path : str
+            Base path for saved Parquet files. Files will be saved as:
+            {base_path}_{key}.parquet
+        """
+
+        for key, dataset in datasets.items():
+            output_path = f"{base_path}_{key}.parquet"
+            print(f"Saving {key} dataset to {output_path}...")
+
+            df = self.convert_tfrec_to_pandas(
+                dataset, desc=f"Converting {key} to Pandas"
+            )
+
+            if df.shape[0] > 0:
+                # Some columns might still be lists, which Parquet handles fine as nesting or objects.
+                df.to_parquet(output_path)
+                print(f"Successfully saved {key} dataset to {output_path}")
+            else:
+                print(f"No data to save for {key}")
+
+    def convert_tfrec_to_pandas(
+        self, dataset, flatten=True, desc="Converting to Pandas"
+    ):
+        all_data = []
+        for example in tqdm(dataset, desc=desc):
+            if isinstance(example, tuple):
+                inputs, _ = example
+            else:
+                inputs = example
+
+            row_data = {}
+            for k, v in inputs.items():
+                val = v.numpy()
+                # Parquet (via Arrow) doesn't like multidimensional arrays in object columns.
+                # We flatten arrays with ndim > 1 to ensure compatibility.
+                if val.ndim > 1 and flatten:
+                    # Store as a flattened 1D array inside the cell
+                    row_data[k] = [val.reshape(-1)]
+                else:
+                    # For 1D or scalars, wrap in list for 1-row DataFrame construction
+                    row_data[k] = [val] if val.ndim == 1 else val
+
+            all_data.append(pd.DataFrame(row_data))
+        return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
     def test(self, behaviorData, **kwargs):
         """
@@ -1681,9 +1934,26 @@ class LSTMandSpikeNetwork:
             inference_mode=True,
             onTheFlyCorrection=onTheFlyCorrection,
             shuffle=False,
+            speedMask=speedMask,
             **kwargs,
         )
         dataset = datasets["test"]
+
+        save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
+        if save_parsed_tfrec is not None:
+            assert not useSpeedFilter, (
+                "Cannot use speed filter when saving parsed TFRecord"
+            )
+            # save final speedMask
+            pos_index = np.arange(len(behaviorData["Positions"]))
+            # final speedMask is an 2D array with shape (N,2) where N is the number of timepoints
+            final_speedMask = np.zeros((len(pos_index), 2), dtype=np.float32)
+            final_speedMask[:, 0] = pos_index
+            final_speedMask[:, 1] = speedMask
+            np.save(f"{save_parsed_tfrec}_speedMask_{phase}.npy", final_speedMask)
+
+            return
+
         # -------------------------------------------------------------------------
         # CUSTOM SYNCHRONIZED INFERENCE LOOP
         # -------------------------------------------------------------------------
@@ -1702,6 +1972,7 @@ class LSTMandSpikeNetwork:
         list_speed_filter = []
         list_index_in_dat = []
         list_index_in_dat_raw = []
+        list_groups = []
 
         # Spike Counts (Dynamic dict to handle variable groups)
         dict_spike_counts = {
@@ -1743,6 +2014,7 @@ class LSTMandSpikeNetwork:
             list_times_behavior.append(inputs["time_behavior"].numpy())
             list_pos_index.append(inputs["pos_index"].numpy())
             list_index_in_dat.append(inputs["indexInDat"].numpy())
+            list_groups.append(inputs["groups"].numpy())
 
             # Optional keys (use .get or check)
             if "speedFilter" in inputs:
@@ -1769,6 +2041,7 @@ class LSTMandSpikeNetwork:
         full_times = np.concatenate(list_times, axis=0).flatten()
         full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
         full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
+        full_groups = np.concatenate(list_groups, axis=0).flatten()
         # full_index_in_dat = np.concatenate(list_index_in_dat, axis=0)
 
         # Handle Speed Mask
@@ -1879,6 +2152,7 @@ class LSTMandSpikeNetwork:
                     "posIndex": full_pos_index,
                     # Convert list of arrays/lists to string or keep as object for indexInDat
                     "indexInDat": full_index_raw,
+                    "groups": full_groups,
                 }
 
                 # Add group counts
@@ -1981,6 +2255,7 @@ class LSTMandSpikeNetwork:
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
+                    skip_mismatch=True,
                 )
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
@@ -2449,6 +2724,7 @@ class LSTMandSpikeNetwork:
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
+                    skip_mismatch=True,
                 )
             except FileNotFoundError:
                 print("fallback loading full/cp.ckpt")
@@ -2457,6 +2733,7 @@ class LSTMandSpikeNetwork:
                         os.path.join(
                             self.folderModels, str(windowSizeMS), "full", "cp.ckpt"
                         ),
+                        skip_mismatch=True,
                     )
                 except (FileNotFoundError, ValueError):
                     self.model.load_weights(
@@ -2466,6 +2743,7 @@ class LSTMandSpikeNetwork:
                             "full",
                             "cp.weights.h5",
                         ),
+                        skip_mismatch=True,
                     )
 
         # --- Build the same total mask used in test() ---
@@ -2827,7 +3105,6 @@ class LSTMandSpikeNetwork:
             max_spikes_per_batch = original_shape[1]
             # Flatten for processing
             original_groups_flat = tf.reshape(original_groups, [-1])
-            spike_times_flat = tf.reshape(spike_times, [-1])
             temporal_bin_indices_flat = tf.reshape(temporal_bin_indices, [-1])
 
             # Create batch indices
@@ -2839,7 +3116,6 @@ class LSTMandSpikeNetwork:
             max_spikes_per_batch = total_spikes // batch_size
 
             original_groups_flat = original_groups
-            # spike_times_flat = spike_times
             temporal_bin_indices_flat = temporal_bin_indices
             batch_indices = tf.repeat(tf.range(batch_size), max_spikes_per_batch)
 
@@ -2899,9 +3175,9 @@ class LSTMandSpikeNetwork:
 
             # Create linear indices for the temporal structure
             # Total size is now batch_size * n_temporal_bins
-            # linear_temporal_positions = (
-            #     spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
-            # )
+            (
+                spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
+            )
 
             # Map: for each position in spikePosition, which original spike index to use
             # Build lookup: (batch, temporal_bin) -> original_spike_index
