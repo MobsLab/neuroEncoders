@@ -162,6 +162,24 @@ class Trainer(SpatialConstraintsMixin):
         self.ordered_neurons = None
         self.place_fields = None
 
+    def _load_linear_spike_sorting(self):
+        """Load spike sorting data from project path. Bulk, not tetrode-wise."""
+        self.logger.info("Loading linear spike sorting data...")
+        cluster_data = import_clusters._load_linear_spike_sorting_from_clu(
+            self.projectPath, flatten=True
+        )
+        self.linear_spike_labels = cluster_data["Spike_labels"]
+        self.linear_spike_index = cluster_data["Spike_index"]
+
+    def _load_shankwise_spike_sorting(self):
+        """Load spike sorting data from project path. Bulk, not tetrode-wise."""
+        self.logger.info("Loading linear spike sorting data...")
+        cluster_data = import_clusters._load_linear_spike_sorting_from_clu(
+            self.projectPath, flatten=False
+        )
+        self.spike_labels = cluster_data["Spike_labels"]
+        self.spike_index = cluster_data["Spike_index"]
+
     def train(
         self, behaviorData: Dict, onTheFlyCorrection=False, save=True, **kwargs
     ) -> Dict:
