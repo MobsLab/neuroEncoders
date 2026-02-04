@@ -377,6 +377,39 @@ class LSTMandSpikeNetwork:
                 outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
             )
 
+    def rebuild_model(self, **kwargs):
+        """
+        Regenerate the model with the current parameters.
+
+        Returns
+        -------
+        None
+        """
+        self.clear_session()
+        outputs = self.generate_model(**kwargs)
+        self.model = self.compile_model(outputs, modelName="FullModel.pdf", **kwargs)
+        self.predLossModel = self.compile_model(
+            outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
+        )
+
+    def change_batch_size(self, new_batch_size, **kwargs):
+        """
+        Change the batch size of the model.
+
+        Parameters
+        ----------
+        new_batch_size : int
+            The new batch size to set.
+
+        Returns
+        -------
+        None
+        """
+        default_kwargs = self.generate_kwargs.copy()
+        default_kwargs["batchSize"] = new_batch_size
+        default_kwargs.update(kwargs)
+        self.rebuild_model(**default_kwargs)
+
     def apply_transformer_architecture(
         self, allFeatures, allFeatures_raw, mymask, **kwargs
     ):
@@ -740,7 +773,7 @@ class LSTMandSpikeNetwork:
                 tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
             if getattr(self.params, "contrastive_loss", False):
                 print("Using contrastive loss")
-                print("output shape:", output.shape)
+                print("output shape:", myoutputPos.shape)
                 print("truePos shape:", self.truePos.shape)
                 regression_loss_layer = nnUtils.ContrastiveLossLayer()
                 # TODO: make sure the layer exists
@@ -1863,6 +1896,7 @@ class LSTMandSpikeNetwork:
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
+                    skip_mismatch=True,
                 )
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
@@ -3001,7 +3035,7 @@ class LSTMandSpikeNetwork:
         self.tsProjTensor = tf.convert_to_tensor(tsProj[None, :], dtype=tf.float32)
 
     # used in the data pipepline
-    def create_indices(self, vals, addLinearizationTensor=False):
+    def create_indices(self, vals, addLinearizationTensor=False, shuffle=False):
         """
         Create indices for gathering spikes from each group.
         The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
@@ -3009,11 +3043,17 @@ class LSTMandSpikeNetwork:
         Args:
             vals (dict): A dictionary containing the input tensors, including "groups" and "group{n}" for each group.
             addLinearizationTensor (bool): Whether to add linearization tensors to the output.
+            shuffle (bool): Whether to shuffle the indices within each group for null hypothesis/control.
         Returns:
             dict: Updated dictionary with indices for each group and optional linearization tensors. The indices are stored under the keys "indices{n}" for each group and represent the positions to gather spikes from each group.
 
         See self.indices in the model definition for more details on usage.
         """
+        if shuffle:
+            print(
+                "Shuffling spike indices within each group for null hypothesis/control."
+            )
+
         for group in range(self.params.nGroups):
             spikePosition = tf.where(tf.equal(vals["groups"], group))
             # Note: inputGroups is already filled with -1 at position that correspond to filling
@@ -3022,7 +3062,13 @@ class LSTMandSpikeNetwork:
             # We therefore need to set indices[spikePosition[i]] to i so that it is effectively gathered
             # We need to wrap the use of sparse tensor (tensorflow error otherwise)
             # The sparse tensor allows us to get the list of indices for the gather quite easily
-            rangeIndices = tf.range(tf.shape(vals["group" + str(group)])[0]) + 1
+            numSpikesInGroup = tf.shape(vals["group" + str(group)])[0]
+            rangeIndices = tf.range(numSpikesInGroup) + 1
+
+            if shuffle:
+                # shuffle the rangeIndices to have random mapping
+                rangeIndices = tf.random.shuffle(rangeIndices)
+
             indices = tf.sparse.SparseTensor(
                 spikePosition, rangeIndices, [tf.shape(vals["groups"])[0]]
             )
