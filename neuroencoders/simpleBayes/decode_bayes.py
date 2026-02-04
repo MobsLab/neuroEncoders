@@ -317,7 +317,7 @@ class Trainer(SpatialConstraintsMixin):
 
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
-        target = kwargs.get("target", self.config.target_bayes)
+        kwargs.get("target", self.config.target_bayes)
 
         behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
 
@@ -1195,11 +1195,14 @@ class Trainer(SpatialConstraintsMixin):
         ]
         cumTimeEachTestEpoch = np.cumsum(timeEachTestEpoch)
         cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
+
         # a function that given the bin indicates the bin index:
-        binToEpoch = lambda x: np.where(
-            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
-            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
-        )[0][0]
+        def binToEpoch(x):
+            return np.where(
+                ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
+                * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+            )[0][0]
+
         binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
         firstBinEpoch = [
             np.min(np.where(np.equal(binToEpochArray, epochId))[0])
@@ -3566,11 +3569,14 @@ class LegacyTrainer:
         ]
         cumTimeEachTestEpoch = np.cumsum(timeEachTestEpoch)
         cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
+
         # a function that given the bin indicates the bin index:
-        binToEpoch = lambda x: np.where(
-            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
-            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
-        )[0][0]
+        def binToEpoch(x):
+            return np.where(
+                ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
+                * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+            )[0][0]
+
         binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
         firstBinEpoch = [
             np.min(np.where(np.equal(binToEpochArray, epochId))[0])
@@ -3788,14 +3794,12 @@ class LegacyTrainer:
                 )
             log_RF.append(temp)
 
-        n_bins = timeStepPred.shape[0]
+        timeStepPred.shape[0]
         ### Decoding loop
         position_probas = []
-        nSpikes = []
         for bin in tqdm(timeStepPred):
             bin_start_time = bin
             bin_stop_time = bin_start_time + windowSize
-            binSpikes = 0
             tetrodes_contributions = []
             tetrodes_contributions.append(All_Poisson_term)
             for tetrode in range(len(guessed_clusters)):

@@ -109,12 +109,11 @@ class Project:
         else:
             self.dat = datPath
         self.fil = self.dat[:-4] + ".fil"
+
         # Folders
-        findFolder = (
-            lambda path: path
-            if path[-1] == "/" or len(path) == 0
-            else findFolder(path[:-1])
-        )
+        def findFolder(path):
+            return path if path[-1] == "/" or len(path) == 0 else findFolder(path[:-1])
+
         self.folder = findFolder(self.dat)
         self.dataPath = os.path.join(self.folder, "dataset")
         # Allows change at every experiment
@@ -599,7 +598,7 @@ class DataHelper(Project):
                 prediction_time=data_helper.fullBehavior["positionTime"],
                 **kwargs,
             )
-            anim = plotter.show(interval=1, repeat=True, block=True, blit=False)
+            plotter.show(interval=1, repeat=True, block=True, blit=False)
 
         if in_place:
             if not hasattr(self, "old_positions"):

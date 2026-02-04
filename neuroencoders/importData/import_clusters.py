@@ -59,8 +59,8 @@ def getSpikesfromClu(
                     np.array(
                         [
                             [
-                                1.0 if int(cluStr[n + 1]) == l else 0.0
-                                for l in range(1, nClu + 1)
+                                1.0 if int(cluStr[n + 1]) == cluster_idx else 0.0
+                                for cluster_idx in range(1, nClu + 1)
                             ]
                             for n in range(len(cluStr) - 1)
                         ]
@@ -126,21 +126,27 @@ def getSpikesfromClu(
         cluster_save_path = os.path.join(projectPath.folder, "dataset", "clusterData")
         if not os.path.isdir(cluster_save_path):
             os.makedirs(cluster_save_path)
-        for l in range(len(labels)):
-            df = pd.DataFrame(labels[l])
-            df.to_csv(os.path.join(cluster_save_path, "Spike_labels" + str(l) + ".csv"))
-            df = pd.DataFrame(spikeTime[l])
-            df.to_csv(os.path.join(cluster_save_path, "spike_time" + str(l) + ".csv"))
-            df = pd.DataFrame(spikePositions[l])
+        for shank in range(len(labels)):
+            df = pd.DataFrame(labels[shank])
             df.to_csv(
-                os.path.join(cluster_save_path, "spike_positions" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "Spike_labels" + str(shank) + ".csv")
             )
-            df = pd.DataFrame(spikePosIndex[l])
+            df = pd.DataFrame(spikeTime[shank])
             df.to_csv(
-                os.path.join(cluster_save_path, "spike_pos_index" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_time" + str(shank) + ".csv")
             )
-            df = pd.DataFrame(spikeSpeed[l])
-            df.to_csv(os.path.join(cluster_save_path, "spike_speed" + str(l) + ".csv"))
+            df = pd.DataFrame(spikePositions[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_positions" + str(shank) + ".csv")
+            )
+            df = pd.DataFrame(spikePosIndex[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_pos_index" + str(shank) + ".csv")
+            )
+            df = pd.DataFrame(spikeSpeed[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_speed" + str(shank) + ".csv")
+            )
     return cluster_data
 
 
@@ -244,25 +250,25 @@ def load_spike_sorting(projectPath: Project, phase=None) -> dict:
             "Spike_pos_index": [],
         }
         print("Reading saved cluster csv file")
-        for l in tqdm.tqdm(range(num_files)):
+        for shank in tqdm.tqdm(range(num_files)):
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "Spike_labels" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "Spike_labels" + str(shank) + ".csv")
             )
             cluster_data["Spike_labels"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_time" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_time" + str(shank) + ".csv")
             )
             cluster_data["Spike_times"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_positions" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_positions" + str(shank) + ".csv")
             )
             cluster_data["Spike_positions"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_pos_index" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_pos_index" + str(shank) + ".csv")
             )
             cluster_data["Spike_pos_index"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_speed" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_speed" + str(shank) + ".csv")
             )
             cluster_data["Spike_speed"].append(df.values[:, 1:])
 

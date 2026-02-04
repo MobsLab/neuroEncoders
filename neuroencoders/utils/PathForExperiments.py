@@ -67,9 +67,8 @@ def path_for_experiments(
     PFC = list(range(6, 15)) + list(range(16, 19)) + [21]  # [6:14 16:18 21]
 
     # All groups
-    LFP_All = list(range(1, 22))  # 1:21
-    Neurons_All = [1] + [6, 7, 8, 10] + list(range(12, 22))  # [1 6 7 8 10 12:21]
-    ECG_All = [1, 3, 5, 6, 9, 10, 14, 15]  # [1 3 5 6 9 10 14 15]
+    list(range(1, 22))  # 1:21
+    [1] + [6, 7, 8, 10] + list(range(12, 22))  # [1 6 7 8 10 12:21]
 
     # Define experiment categories
     MFB_keys = [
@@ -416,7 +415,7 @@ def path_for_experiments(
     for i, path in enumerate(Dir["path"]):
         try:
             Dir["manipe"].append(Dir["expe_info"][i]["SessionType"].item(0)[0])
-        except:
+        except KeyError:
             Dir["manipe"].append(experiment_name)
 
         # Adjust manipe for sub experiments

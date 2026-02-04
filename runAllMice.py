@@ -11,18 +11,8 @@ import psutil
 
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
-win_values = [2.16]
-win_values = [0.036, 0.108, 0.18, 0.252, 0.504, 1.08, 2.16]
-win_values = [0.18, 2.16]
-win_values = [0.036, 0.108]
-win_values = [0.108, 0.18, 0.252, 0.504]
-win_values = [0.504]  # only kept for new dataset
-win_values = [0.108, 0.252]
-win_values = [0.108, 0.252]  # only kept for new dataset
-win_values = [0.108]
 win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 # Mice name
-mice_nb = []
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
@@ -375,7 +365,7 @@ if __name__ == "__main__":
     # print(f"Found directories: {dirs}")
     mouse_commands = {}
     for dir in dirs:
-        if any(mouse in dir for mouse in mice_nb) or not mice_nb:
+        if any((mouse in dir or mouse[:-1] in dir) for mouse in mice_nb) or not mice_nb:
             if "M1199_MFB" not in dir:
                 mouse_commands[dir] = []
                 for win in win_values:
@@ -403,7 +393,14 @@ if __name__ == "__main__":
                             mouse_commands[dir].append(cmd_bayes)
             else:
                 print(f"Processing M1199MFB mouse in directory: {dir}")
-                for dirmfb in ["exp1", "exp2"]:
+                list_exps = []
+                if any("MFB1" in mouse for mouse in mice_nb):
+                    list_exps.append("exp1")
+                if any("MFB2" in mouse for mouse in mice_nb):
+                    list_exps.append("exp2")
+                if not list_exps:
+                    list_exps = ["exp1", "exp2"]
+                for dirmfb in list_exps:
                     mouse_commands[os.path.join(dir, dirmfb)] = []
                     for win in win_values:
                         cmd_ann, cmd_bayes = process_directory(
@@ -435,13 +432,15 @@ if __name__ == "__main__":
                         SOURCE,
                         DESTINATION,
                         "--force",
+                        "--dry-run",
                     ]
                     if "M1199_MFB" not in dir:
                         mouse_commands[dir].append(runNasCMD)
                     else:
                         for dirmfb in ["exp1", "exp2"]:
                             mouse_commands[os.path.join(dir, dirmfb)].append(runNasCMD)
-                except:
+                except Exception as e:
+                    print(f"Error finding mouse in PathForExperiments: {e}")
                     pass
 
     if mode == "sequential":

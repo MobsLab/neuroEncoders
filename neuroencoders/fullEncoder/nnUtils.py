@@ -1058,8 +1058,9 @@ def serialize_single_spike(clu, spike):
 
 # @tf.function
 def parse_serialized_sequence(
-    params, tensors, batched=False, count_spikes=False
+    params, tensors, batched=False, count_spikes=False, sorted_indices=None
 ):  # featDesc, ex_proto,
+    # TODO: use sorted indices to subset the given tensors to only the desired spikes (ie for example only the spikes that are also in the spike sorting)
     """
     Parse a serialized spike sequence example.
     Args:

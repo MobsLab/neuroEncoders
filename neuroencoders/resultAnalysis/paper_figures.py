@@ -3423,9 +3423,7 @@ class PaperFigures:
                 predPos = self.resultsNN_phase[phase]["fullPred"][idWindow][speedMask][
                     :, :2
                 ]
-                self.ann[
-                    str(winMS)
-                ].GaussianHeatmap.gaussian_heatmap_targets(truePos)
+                self.ann[str(winMS)].GaussianHeatmap.gaussian_heatmap_targets(truePos)
                 probs = (
                     self.ann[str(winMS)]
                     .GaussianHeatmap.decode_and_uncertainty(
@@ -4252,6 +4250,7 @@ class PaperFigures:
             : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow]), :
         ]
         predLoss = self.resultsNN_phase[suffix]["predLoss"][iwindow]
+
         def normalize(x):
             return (x - np.min(x)) / (np.max(x) - np.min(x))
 
