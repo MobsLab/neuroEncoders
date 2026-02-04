@@ -331,11 +331,6 @@ class DataHelper(Project):
 
         super().__init__(xmlPath, *args, **kwargs)
 
-        self.resultsPath = os.path.join(
-            self.experimentPath,
-            "results",
-            str(int(self.windowSizeMS)),
-        )
         self.suffix = f"_{self.phase}" if self.phase is not None else ""
 
         self.list_channels, self.samplingRate, self.nChannels = get_params(self.xml)
@@ -411,7 +406,9 @@ class DataHelper(Project):
         """
 
         maxPos = np.max(
-            self.positions[np.logical_not(np.isnan(np.sum(self.positions, axis=1)))],
+            self.positions[
+                np.logical_not(np.isnan(np.sum(self.positions, axis=1))), :2
+            ],
             axis=0,
         )
         return maxPos if self.mode != "decode" else 1
@@ -437,11 +434,14 @@ class DataHelper(Project):
         assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
         self.thresholds = [i for d in thresholds for i in d]
 
-    def get_true_target(self, l_function=None, in_place=False, show=False, **kwargs):
+    def get_true_target(
+        self, windowSizeMS=108, l_function=None, in_place=False, show=False, **kwargs
+    ):
         """
         Returns the true target of interest by looking and modifying the positions array.
 
         Args:
+        - windowSizeMS: the window size in milliseconds, defaults to 108 (for speed smoothing)
         - l_function: a function that takes a position and returns the linearized position
         - in_place: whether to modify the positions array in place
         - show: whether to show the distance to the wall
@@ -517,7 +517,7 @@ class DataHelper(Project):
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
             self.speed = self._get_speed(
-                self.positions, interval=1 / (15 // self.windowSizeMS)
+                self.positions, interval=1 / (15 // windowSizeMS)
             )
             positions = np.concatenate(
                 (positions.reshape(-1, 1), self.speed.reshape(-1, 1)), axis=1
@@ -599,7 +599,7 @@ class DataHelper(Project):
                 prediction_time=data_helper.fullBehavior["positionTime"],
                 **kwargs,
             )
-            anim = plotter.show(interval=1, repeat=True, block=True)
+            anim = plotter.show(interval=1, repeat=True, block=True, blit=False)
 
         if in_place:
             if not hasattr(self, "old_positions"):
@@ -838,14 +838,14 @@ class DataHelper(Project):
                     f"Using the first session that contains {phase}: {session_names[idx[0]]}"
                 )
                 idx = idx[0]
-                root = f["behavResources"]
+            root = f["behavResources"]
         else:
             idx = 0
             root = f
 
         try:
-            self.ref = root["ref"][0][idx]
             idx_shock = list(root["ZoneLabels"][0][idx][0]).index("Shock")
+            self.ref = root["ref"][0][idx]
             self.shock_zone_mask = root["Zone"][0][idx][0][idx_shock]
             Xdata = root["Xtsd"][0][idx][0][0][-2].flatten()
             Ydata = root["Ytsd"][0][idx][0][0][-2].flatten()
@@ -863,7 +863,7 @@ class DataHelper(Project):
 
         positions = np.array([Xdata, Ydata]).T
 
-        self.xyOutput = self._get_XYOutput_morph_maze(
+        self.xyOutput, positions = self._get_XYOutput_morph_maze(
             positions, self.shock_zone_mask, self.ref, self.ratioIMAonREAL
         )
 
@@ -967,6 +967,11 @@ class DataHelper(Project):
         reset_button = Button(
             ax_reset, "Reset", color="lightgoldenrodyellow", hovercolor="0.975"
         )
+        # Add rotate button
+        ax_rotate = plt.axes([0.6, 0.025, 0.1, 0.04])
+        rotate_button = Button(
+            ax_rotate, "Rotate XY", color="lightgoldenrodyellow", hovercolor="0.975"
+        )
 
         # Coordinates storage
         coords = []
@@ -988,8 +993,18 @@ class DataHelper(Project):
             # Redraw canvas
             fig.canvas.draw_idle()
 
+        def rotate_positions(event):
+            # simply swap x and y axes
+            positions[:, [0, 1]] = positions[:, [1, 0]]
+            scatter.set_data(
+                positions[:, 1] * Ratio_IMAonREAL,
+                positions[:, 0] * Ratio_IMAonREAL,
+            )
+            fig.canvas.draw_idle()
+
         slider.on_changed(update)
         reset_button.on_clicked(reset)
+        rotate_button.on_clicked(rotate_positions)
 
         # Restrict ginput to the plot area and add red stars
         def on_click(event):
@@ -1010,7 +1025,7 @@ class DataHelper(Project):
             x, y = zip(*coords)
             XYOutput = np.array([y, x])
             plt.close(fig)
-            return XYOutput
+            return XYOutput, positions
 
     def _transform_coordinates_and_image(
         self,
@@ -1552,8 +1567,7 @@ class Params:
             else:
                 params_path = os.path.abspath(
                     os.path.join(
-                        helper.resultsPath,
-                        "..",
+                        helper.folderResult,
                         str(int(windowSize * 1000)),
                         "Parameters.pkl",
                     )
@@ -1685,13 +1699,12 @@ class Params:
             helper.target
         )  # target to predict, e.g. "pos", "lin", "direction", etc.
         self.resultsPath = os.path.join(
-            helper.resultsPath,
-            "..",
+            helper.folderResult,
             str(int(self.windowSizeMS)),
         )  # path to save results
 
         # regarding data augmentation
-        self.dataAugmentation = kwargs.pop("dataAugmentation", True)
+        self.dataAugmentation = kwargs.pop("dataAugmentation", False)
 
         # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???

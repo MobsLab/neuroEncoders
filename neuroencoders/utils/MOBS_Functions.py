@@ -791,8 +791,6 @@ class Mouse_Results(Params, PaperFigures):
         self.find_window_size(**kwargs)
         self.parameters = dict()
         self.projects = dict()
-        self.data_helper = dict()
-        self.linearizer = dict()
 
         for i, winMS in enumerate(self.windows):
             try:
@@ -805,12 +803,12 @@ class Mouse_Results(Params, PaperFigures):
                 )
                 # otherwise will be loaded by super init
                 try:
-                    self.data_helper[winMS] = DataHelperClass.load(
+                    self.data_helper = DataHelperClass.load(
                         self.projects[winMS].experimentPath, phase=self.phase
                     )
                 except FileNotFoundError as e:
                     print("did not manage to load DataHelper:", e)
-                    self.data_helper[winMS] = DataHelperClass(
+                    self.data_helper = DataHelperClass(
                         self.projects[winMS].xml,
                         mode="compare",
                         windowSize=int(winMS) / 1000,
@@ -830,14 +828,16 @@ class Mouse_Results(Params, PaperFigures):
                     windowSize=int(winMS) / 1000,
                     **kwargs,
                 )
-                self.data_helper[winMS] = DataHelperClass(
-                    self.xml,
-                    mode="compare",
-                    windowSize=int(winMS) / 1000,
-                    **kwargs,
-                )
-                # we need that before loading params to have the right target
-                self.data_helper[winMS].get_true_target(in_place=True, **kwargs)
+                if i == 0:
+                    self.data_helper = DataHelperClass(
+                        self.xml,
+                        mode="compare",
+                        **kwargs,
+                    )
+                    # we need that before loading params to have the right target
+                    self.data_helper.get_true_target(
+                        windowSizeMS=int(winMS), in_place=True, **kwargs
+                    )
                 if os.path.exists(
                     os.path.join(self.folderResult, winMS, "params.json")
                 ):
@@ -858,36 +858,39 @@ class Mouse_Results(Params, PaperFigures):
                             params_dict[key] = value
                     del params_dict["windowSize"]
                 self.parameters[winMS] = Params(
-                    self.data_helper[winMS],
+                    self.data_helper,
                     windowSize=int(winMS) / 1000,
                     save_json=True,
                     **kwargs,
                 )
 
-            self.linearizer[winMS] = UMazeLinearizer(
-                self.projects[winMS].folder,
-                data_helper=self.data_helper[winMS],
-                **kwargs,
-            )
-            self.linearizer[winMS].verify_linearization(
-                self.data_helper[winMS].positions / self.data_helper[winMS].maxPos(),
-                self.projects[winMS].folder,
-            )
-
-            if kwargs.get("keops_linearization", False):
-                self.l_function = self.linearizer[winMS].pykeops_linearization
-            else:
-                self.l_function = self.cpu_linearization
-
-            self.data_helper[winMS].get_true_target(
-                self.l_function, in_place=True, show=kwargs.get("show", False)
-            )
             if i == 0:
+                self.linearizer = UMazeLinearizer(
+                    self.projects[winMS].folder,
+                    data_helper=self.data_helper,
+                    **kwargs,
+                )
+                self.linearizer.verify_linearization(
+                    self.data_helper.positions[:, :2] / self.data_helper.maxPos(),
+                    self.projects[winMS].folder,
+                )
+
+                if kwargs.get("keops_linearization", False):
+                    self.l_function = self.linearizer.pykeops_linearization
+                else:
+                    self.l_function = self.cpu_linearization
+
+                self.data_helper.get_true_target(
+                    l_function=self.l_function,
+                    in_place=True,
+                    show=kwargs.get("show", False),
+                )
+
                 # Initialize the first window as the main one
-                self.DataHelper = self.data_helper[winMS]
+                self.DataHelper = self.data_helper
                 self.Params = self.parameters[winMS]
                 self.Project = self.projects[winMS]
-                self.Linearizer = self.linearizer[winMS]
+                self.Linearizer = self.linearizer
 
                 # construct from Params
                 Params.__init__(
@@ -916,8 +919,8 @@ class Mouse_Results(Params, PaperFigures):
         print(self)
 
     def cpu_linearization(self, x):
-        winMS = self.windows[0]
-        return self.linearizer[winMS].apply_linearization(x, keops=False)
+        self.windows[0]
+        return self.linearizer.apply_linearization(x, keops=False)
 
     def __getstate__(self):
         """
@@ -1157,23 +1160,21 @@ class Mouse_Results(Params, PaperFigures):
             self.deviceName = deviceName
 
         phase = kwargs.pop("phase", self.phase)
-        if not hasattr(self, "ann"):
-            self.ann = {}
         isTransformer = kwargs.pop("isTransformer", self.Params.isTransformer)
         transform_w_log = kwargs.pop("transform_w_log", self.Params.transform_w_log)
         denseweight = kwargs.pop("denseweight", self.Params.denseweight)
 
         for i, winMS in enumerate(self.windows):
-            if which.lower() in ["ann", "both"]:
-                if not self.ann.get(winMS):
-                    self.ann[winMS] = NNTrainer(
+            if i == 0 and which.lower() in ["ann", "both"]:
+                if not hasattr(self, "ann"):
+                    self.ann = NNTrainer(
                         self.projects[winMS],
                         self.parameters[winMS],
                         deviceName=deviceName,
                         phase=phase,
                         isTransformer=isTransformer,
-                        linearizer=self.linearizer[winMS],
-                        behaviorData=self.data_helper[winMS].fullBehavior,
+                        linearizer=self.linearizer,
+                        behaviorData=self.data_helper.fullBehavior,
                         alpha=self.parameters[winMS].denseweightAlpha,
                         # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask,
                         transform_w_log=transform_w_log,
@@ -1217,7 +1218,7 @@ class Mouse_Results(Params, PaperFigures):
                         try:
                             # allows to initialize bayes matrices if the pickle exists
                             self.bayes_matrices = self.bayes.train_order_by_pos(
-                                self.data_helper[winMS].fullBehavior,
+                                self.data_helper.fullBehavior,
                                 l_function=self.l_function,
                                 **kwargs,
                             )
@@ -1293,7 +1294,7 @@ class Mouse_Results(Params, PaperFigures):
                 if not redo:
                     try:
                         suffix = f"_{phase}" if phase is not None else ""
-                        pos = pd.read_csv(
+                        pd.read_csv(
                             os.path.expanduser(
                                 os.path.join(
                                     self.folderResult,
@@ -1304,8 +1305,8 @@ class Mouse_Results(Params, PaperFigures):
                         ).values[:, 1:]
                     except FileNotFoundError:
                         self.load_trainers(which="ann", **kwargs)
-                        self.ann[win].test(
-                            self.data_helper[win].fullBehavior,
+                        self.ann.test(
+                            self.data_helper.fullBehavior,
                             windowSizeMS=win_value,
                             phase=phase,
                             l_function=self.l_function,
@@ -1315,8 +1316,8 @@ class Mouse_Results(Params, PaperFigures):
                     print(f"Force loading ann results for window {win}.")
                     self.load_trainers(which="ann", **kwargs)
                     try:
-                        self.ann[win].test(
-                            self.data_helper[win].fullBehavior,
+                        self.ann.test(
+                            self.data_helper.fullBehavior,
                             windowSizeMS=win_value,
                             phase=phase,
                             l_function=self.l_function,
@@ -1340,7 +1341,7 @@ class Mouse_Results(Params, PaperFigures):
                         target=self.target,
                         phase=phase,
                         typeDec="NN",
-                        training_data=self.ann[win].training_data,
+                        training_data=self.ann.training_data,
                         l_function=self.l_function,
                         show=show,
                         **kwargs,
@@ -1366,15 +1367,15 @@ class Mouse_Results(Params, PaperFigures):
                     except FileNotFoundError:
                         self.load_trainers(which="bayes", **kwargs)
                         epochMask = get_epochs_mask(
-                            behaviorData=self.data_helper[win].fullBehavior,
+                            behaviorData=self.data_helper.fullBehavior,
                             useTrain=phase != self.phase,
                             useTest=phase != "training",
                         )
-                        timeStepPred = self.data_helper[win].fullBehavior[
-                            "positionTime"
-                        ][epochMask]
+                        timeStepPred = self.data_helper.fullBehavior["positionTime"][
+                            epochMask
+                        ]
                         outputs = self.bayes.test_as_NN(
-                            self.data_helper[win].fullBehavior,
+                            self.data_helper.fullBehavior,
                             self.bayes_matrices,
                             timeStepPred,
                             windowSizeMS=win_value,
@@ -1387,15 +1388,13 @@ class Mouse_Results(Params, PaperFigures):
                     print(f"Force loading bayesian results for window {win}.")
                     self.load_trainers(which="bayes", **kwargs)
                     epochMask = get_epochs_mask(
-                        behaviorData=self.data_helper[win].fullBehavior,
+                        behaviorData=self.data_helper.fullBehavior,
                         useTrain=phase != self.phase,
                         useTest=phase != "training",
                     )
-                    timeStepPred = self.data_helper[win].fullBehavior["positionTime"][
-                        epochMask
-                    ]
+                    timeStepPred = self.data_helper[epochMask]
                     outputs = self.bayes.test_as_NN(
-                        self.data_helper[win].fullBehavior,
+                        self.data_helper.fullBehavior,
                         self.bayes_matrices,
                         timeStepPred,
                         windowSizeMS=win_value,
@@ -1457,11 +1456,11 @@ class Mouse_Results(Params, PaperFigures):
 
     def show_results(self, winMS=None, phase=None, **kwargs):
         if winMS is None:
-            win = self.windows[-1]
+            self.windows[-1]
             winMS = self.windows_values[-1]
         else:
             idx = self.windows_values.index(winMS)
-            win = self.windows[idx]
+            self.windows[idx]
 
         if phase is None:
             phase = self.phase
@@ -1471,7 +1470,7 @@ class Mouse_Results(Params, PaperFigures):
             windowSizeMS=winMS,
             target=kwargs.pop("target", self.target),
             phase=phase,
-            training_data=self.ann[win].training_data,
+            training_data=self.ann.training_data,
             l_function=self.l_function,
             **kwargs,
         )
@@ -1482,11 +1481,11 @@ class Mouse_Results(Params, PaperFigures):
         """
         which = kwargs.get("which", "ann")
         if winMS is None:
-            win = self.windows[-1]
+            self.windows[-1]
             winMS = self.windows_values[-1]
 
         idWindow = self.timeWindows.index(int(winMS))
-        win = self.windows[idWindow]
+        self.windows[idWindow]
 
         phase = kwargs.get("phase", self.phase)
         phase = (
@@ -1497,7 +1496,7 @@ class Mouse_Results(Params, PaperFigures):
 
         data_helper = kwargs.pop("data_helper", None)
         if data_helper is None:
-            data_helper = self.data_helper[win]
+            data_helper = self.data_helper
 
         positions_from_NN = kwargs.pop("positions_from_NN", None)
         if positions_from_NN is None:
@@ -1539,7 +1538,7 @@ class Mouse_Results(Params, PaperFigures):
             if which.lower() == "ann":
                 self.load_trainers(which="ann", **kwargs)
                 if (
-                    getattr(self.ann[str(win)].params, "GaussianHeatmap", False)
+                    getattr(self.ann.params, "GaussianHeatmap", False)
                     and kwargs.get("predicted_heatmap", None) is None
                     and kwargs.get("plot_heatmap", False)
                 ):
@@ -1571,27 +1570,23 @@ class Mouse_Results(Params, PaperFigures):
                             print(
                                 f"No decoding_results{phase}.pkl found for window {winMS}."
                             )
-                            self.ann[str(win)].params.GaussianHeatmap = False
+                            self.ann.params.GaussianHeatmap = False
                             kwargs["predicted_heatmap"] = None
                             kwargs["plot_heatmap"] = False
                             predicted_probs = None
                     if predicted_probs is not None:
                         try:
                             predicted_probs = (
-                                self.ann[str(win)]
-                                .GaussianHeatmap.decode_and_uncertainty(
+                                self.ann.GaussianHeatmap.decode_and_uncertainty(
                                     predicted_logits, return_probs=True
-                                )[-1]
-                                .numpy()
+                                )[-1].numpy()
                             )
                         except Exception:
                             self.load_trainers(which="ann")
                             predicted_probs = (
-                                self.ann[str(win)]
-                                .GaussianHeatmap.decode_and_uncertainty(
+                                self.ann.GaussianHeatmap.decode_and_uncertainty(
                                     predicted_logits, return_probs=True
-                                )[-1]
-                                .numpy()
+                                )[-1].numpy()
                             )
             else:
                 try:
@@ -1678,7 +1673,7 @@ class Mouse_Results(Params, PaperFigures):
         """
         block = kwargs.pop("block", True)
         plotter = self.init_plotter(winMS, **kwargs)
-        anim = plotter.show(
+        plotter.show(
             block=block,
             show=True,
             **kwargs,
@@ -1885,8 +1880,8 @@ class Mouse_Results(Params, PaperFigures):
         windows, winValues = self._select_window(window)
         for win, win_val in zip(windows, winValues):
             if which.lower() in ["ann", "both"]:
-                self.ann[win].train(
-                    self.data_helper[win].fullBehavior,
+                self.ann.train(
+                    self.data_helper.fullBehavior,
                     windowSizeMS=win_val,
                     l_function=self.l_function,
                     **kwargs,
@@ -1993,7 +1988,7 @@ class Mouse_Results(Params, PaperFigures):
                 self.waveform_comparators[win] = WaveFormComparator(
                     self.projects[win],
                     self.parameters[win],
-                    self.data_helper[win].fullBehavior,
+                    self.data_helper.fullBehavior,
                     winValue,
                     phase=self.phase,
                     useTrain=useTrain,
@@ -2030,8 +2025,8 @@ class Mouse_Results(Params, PaperFigures):
                 phase_name = suffix.strip("_") if suffix else "all"
 
                 for id, win in enumerate(self.windows_values):
-                    win_str = str(win)
-                    data_helper_win = self.data_helper[win_str]
+                    str(win)
+                    data_helper_win = self.data_helper
                     resultsNN_suffix = self.resultsNN_phase[suffix]
 
                     # Extract posIndex once
@@ -2139,6 +2134,7 @@ class Results_Loader:
         mice_manipes: Optional[List[str]] = None,
         timeWindows: Optional[List[int]] = None,
         phases=None,
+        exp_indices: Optional[List[int]] = None,
         **kwargs,
     ):
         """
@@ -2180,6 +2176,9 @@ class Results_Loader:
             self.phases = None
         else:
             self.phases = phases
+
+        if exp_indices is None:
+            exp_indices = np.zeros(len(dir), dtype=bool).tolist()
         if not isinstance(self.phases, List):
             self.phases = [self.phases]
         if not isinstance(self.timeWindows, List):
@@ -2199,6 +2198,7 @@ class Results_Loader:
         self.mice_names = [
             f"M{nb}{manipe}" for nb, manipe in zip(mice_nb, mice_manipes)
         ]
+        self.exp_indices = exp_indices
         if kwargs.get("dict", None) is None:
             self.results_dict = {}
         else:
@@ -2217,26 +2217,39 @@ class Results_Loader:
         found_training = False
 
         if kwargs.get("dict", None) is None:
-            for mouse_nb, manipe, mouse_full_name in zip(
-                self.mice_nb, self.mice_manipes, self.mice_names
+            for mouse_nb, manipe, mouse_full_name, exp_index in zip(
+                self.mice_nb, self.mice_manipes, self.mice_names, self.exp_indices
             ):
                 mouse_nb = str(mouse_nb)
-                if not any(
-                    (self.Dir.name.str.lower().str.contains(mouse_nb.lower()))
-                    & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
-                ):
+                if exp_index is not None and exp_index != 0:
+                    exp_index = int(exp_index)
+                    mouse_full_name = f"{mouse_full_name}_exp{exp_index}"
+                conditions = (
+                    self.Dir.name.str.lower().str.contains(mouse_nb.lower())
+                ) & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
+                if not conditions.any():
                     raise ValueError(
                         f"Mouse {mouse_nb} with manipe {manipe} not found in the directory."
                     )
                 window_tmp = []
-                path = (
-                    self.Dir[
-                        (self.Dir.name.str.lower().str.contains(mouse_nb.lower()))
-                        & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
-                    ]
-                    .iloc[0]
-                    .path
-                )
+                if conditions.sum() > 1:
+                    if exp_index is None or exp_index == 0:
+                        raise ValueError(
+                            f"Multiple entries found for mouse {mouse_nb} with manipe {manipe}. Please provide exp_index to disambiguate."
+                        )
+                    else:
+                        suppl_conditions = self.Dir.path.str.contains(f"exp{exp_index}")
+                        conditions = conditions & suppl_conditions
+                        if not conditions.any():
+                            raise ValueError(
+                                f"Mouse {mouse_nb} with manipe {manipe} and exp_index {exp_index} not found in the directory."
+                            )
+                        elif conditions.sum() > 1:
+                            raise ValueError(
+                                f"Multiple entries found for mouse {mouse_nb} with manipe {manipe} and exp_index {exp_index}. Please check the directory."
+                            )
+
+                path = self.Dir[conditions].iloc[0].path
                 nameExp = os.path.basename(
                     self.Dir[
                         (self.Dir.name.str.lower().str.contains(mouse_nb.lower()))
@@ -2289,6 +2302,7 @@ class Results_Loader:
                         manipe=manipe,
                         nameExp=nameExp,
                         phase=suffix.strip("_"),
+                        exp_index=exp_index,
                         isTransformer=isTransformer
                         if isTransformer is not None
                         else "transformer" in nameExp.lower(),
@@ -2568,166 +2582,107 @@ class Results_Loader:
 
     def apply_analysis(self, redo=False):
         """
-        Apply some usual ML operations on the results df.
+        Apply common analysis metrics to the results DataFrame.
         """
-        if "mean_speed" in self.results_df.columns:
+        if "mean_speed" in self.results_df.columns and not redo:
             print("Analysis already applied to the DataFrame.")
-            if not redo:
-                return self.results_df
+            return self.results_df
 
-        self.results_df["mean_speed"] = self.results_df.apply(
-            lambda row: np.nanmean(row["alignedSpeed"])
-            if row["alignedSpeed"] is not None
-            else np.nan,
-            axis=1,
-        )
-        self.results_df["mean_error"] = self.results_df.apply(
-            lambda row: np.nanmean(
-                np.linalg.norm(row["fullPred"] - row["truePos"], axis=1)
+        def process_row(row):
+            res = {}
+
+            # 1. Base Errors and Speed
+            res["mean_speed"] = (
+                np.nanmean(row["alignedSpeed"])
+                if row["alignedSpeed"] is not None
+                else np.nan
             )
-            if row["fullPred"] is not None and row["truePos"] is not None
-            else None,
-            axis=1,
-        )
-        self.results_df["error"] = self.results_df.apply(
-            lambda row: np.linalg.norm(row["fullPred"] - row["truePos"], axis=1)
-            if row["fullPred"] is not None and row["truePos"] is not None
-            else None,
-            axis=1,
-        )
-        self.results_df["mean_lin_error"] = self.results_df.apply(
-            lambda row: np.nanmean(np.abs(row["linPred"] - row["linTruePos"]))
-            if row["linPred"] is not None and row["linTruePos"] is not None
-            else None,
-            axis=1,
-        )
-        self.results_df["lin_error"] = self.results_df.apply(
-            lambda row: np.abs(row["linPred"] - row["linTruePos"])
-            if row["linPred"] is not None and row["linTruePos"] is not None
-            else None,
-            axis=1,
-        )
 
-        # add the selected mean error and lin error to the dataframe
-        # we defined the selected prediction as the prediction with the predLoss being amongs the lowest 20% for this row.
-        self.results_df["predLossThreshold"] = self.results_df.apply(
-            lambda row: np.quantile(row["predLoss"], 0.2)
-            if row["predLoss"] is not None
-            else None,
-            axis=1,
-        )
-        # we use the predLossThreshold to select the mean_error and lin_error
-        self.results_df["mean_error_selected"] = self.results_df.apply(
-            lambda row: np.nanmean(
-                np.linalg.norm(
-                    row["fullPred"][row["predLoss"] <= row["predLossThreshold"]]
-                    - row["truePos"][row["predLoss"] <= row["predLossThreshold"]],
-                    axis=1,
-                )
-            )
-            if row["fullPred"] is not None and row["truePos"] is not None
-            else None,
-            axis=1,
-        )
+            has_pred = row["fullPred"] is not None and row["truePos"] is not None
+            has_lin = row["linPred"] is not None and row["linTruePos"] is not None
+            has_loss = row["predLoss"] is not None
 
-        self.results_df["lin_error_selected"] = self.results_df.apply(
-            lambda row: np.abs(
-                row["linPred"][row["predLoss"] <= row["predLossThreshold"]]
-                - row["linTruePos"][row["predLoss"] <= row["predLossThreshold"]]
-            )
-            if row["linPred"] is not None and row["linTruePos"] is not None
-            else None,
-            axis=1,
-        )
-        self.results_df["mean_lin_error_selected"] = self.results_df.apply(
-            lambda row: np.nanmean(
-                np.abs(
-                    row["linPred"][row["predLoss"] <= row["predLossThreshold"]]
-                    - row["linTruePos"][row["predLoss"] <= row["predLossThreshold"]]
-                )
-            )
-            if row["linPred"] is not None and row["linTruePos"] is not None
-            else None,
-            axis=1,
-        )
+            if has_pred:
+                errors = np.linalg.norm(row["fullPred"] - row["truePos"], axis=1)
+                res["error"] = errors
+                res["mean_error"] = np.nanmean(errors)
 
-        self.results_df["asymmetry_index_on_predicted"] = self.results_df.apply(
-            lambda row: row["results"].get_training_imbalance(positions=row["fullPred"])
-            if row["fullPred"] is not None
-            else None,
-            axis=1,
-        )
+            if has_lin:
+                lin_errors = np.abs(row["linPred"] - row["linTruePos"])
+                res["lin_error"] = lin_errors
+                res["mean_lin_error"] = np.nanmean(lin_errors)
 
-        self.results_df["asymmetry_index_on_selected_predicted"] = (
-            self.results_df.apply(
-                lambda row: row["results"].get_training_imbalance(
-                    positions=row["fullPred"][
-                        row["predLoss"] <= row["predLossThreshold"]
-                    ]
-                )
-                if row["fullPred"] is not None
-                else None,
-                axis=1,
-            )
-        )
+            # 2. Selected metrics (lowest 20% loss)
+            if has_loss:
+                threshold = np.quantile(row["predLoss"], 0.2)
+                res["predLossThreshold"] = threshold
+                mask = row["predLoss"] <= threshold
 
+                if has_pred:
+                    res["mean_error_selected"] = np.nanmean(errors[mask])
+                    res["asymmetry_index_on_selected_predicted"] = row[
+                        "results"
+                    ].get_training_imbalance(positions=row["fullPred"][mask])
+                if has_lin:
+                    res["lin_error_selected"] = lin_errors[mask]
+                    res["mean_lin_error_selected"] = np.nanmean(lin_errors[mask])
+
+            # 3. Indices and Directions
+            if has_pred:
+                res["asymmetry_index_on_predicted"] = row[
+                    "results"
+                ].get_training_imbalance(positions=row["fullPred"])
+
+            if has_lin:
+                res["true_binary_direction"] = row[
+                    "results"
+                ].data_helper._get_traveling_direction(row["linTruePos"])
+                res["predicted_binary_direction"] = row[
+                    "results"
+                ].data_helper._get_traveling_direction(row["linPred"])
+
+            return pd.Series(res)
+
+        # Apply processing in a single pass
+        analysis_columns = self.results_df.apply(process_row, axis=1)
+
+        # Update DataFrame with new columns efficiently
+        for col in analysis_columns.columns:
+            self.results_df[col] = analysis_columns[col]
+
+        # 4. Vectorized Ratio Calculations (fast operations)
         training_values = (
-            self.results_df[self.results_df["phase"] == "training"].groupby(
-                ["nameExp", "mouse", "winMS"]
-            )[
-                "asymmetry_index"
-            ]  # or .mean(), depending on what you want if multiple rows exist
-        ).first()
+            self.results_df[self.results_df["phase"] == "training"]
+            .groupby(["nameExp", "mouse_name", "manipe", "winMS"])["asymmetry_index"]
+            .first()
+        )
 
         self.results_df["training_asymmetry_index"] = self.results_df.set_index(
-            ["nameExp", "mouse", "winMS"]
+            ["nameExp", "mouse_name", "manipe", "winMS"]
         ).index.map(training_values)
 
+        # Safeguard division by zero for ratios
+        train_idx = self.results_df["training_asymmetry_index"].replace(0, np.nan)
+
         self.results_df["real_asymmetry_ratio"] = (
-            self.results_df["asymmetry_index"]
-            / self.results_df["training_asymmetry_index"]
+            self.results_df["asymmetry_index"] / train_idx
         )
-        self.results_df["predicted_asymmetry_ratio"] = self.results_df.apply(
-            lambda row: row["asymmetry_index_on_predicted"]
-            / row["training_asymmetry_index"]
-            if row["training_asymmetry_index"] != 0
-            else None,
-            axis=1,
+        self.results_df["predicted_asymmetry_ratio"] = (
+            self.results_df["asymmetry_index_on_predicted"] / train_idx
         )
         self.results_df["predicted_asymmetry_ratio_on_selected"] = (
-            self.results_df.apply(
-                lambda row: row["asymmetry_index_on_selected_predicted"]
-                / row["training_asymmetry_index"]
-                if row["training_asymmetry_index"] != 0
-                else None,
-                axis=1,
-            )
-        )
-        self.results_df["predicted_asymmetry_ratio_normalized"] = (
-            self.results_df["asymmetry_index_on_predicted"]
-            / self.results_df["real_asymmetry_ratio"]
-        )
-        self.results_df["selected_predicted_asymmetry_ratio_normalized"] = (
-            self.results_df["asymmetry_index_on_selected_predicted"]
-            / self.results_df["real_asymmetry_ratio"]
+            self.results_df["asymmetry_index_on_selected_predicted"] / train_idx
         )
 
-        self.results_df["true_binary_direction"] = self.results_df.apply(
-            lambda row: row["results"]
-            .data_helper[str(row["winMS"])]
-            ._get_traveling_direction(row["linTruePos"])
-            if row["linTruePos"] is not None
-            else None,
-            axis=1,
+        real_ratio = self.results_df["real_asymmetry_ratio"].replace(0, np.nan)
+        self.results_df["predicted_asymmetry_ratio_normalized"] = (
+            self.results_df["asymmetry_index_on_predicted"] / real_ratio
         )
-        self.results_df["predicted_binary_direction"] = self.results_df.apply(
-            lambda row: row["results"]
-            .data_helper[str(row["winMS"])]
-            ._get_traveling_direction(row["linPred"])
-            if row["linPred"] is not None
-            else None,
-            axis=1,
+        self.results_df["selected_predicted_asymmetry_ratio_normalized"] = (
+            self.results_df["asymmetry_index_on_selected_predicted"] / real_ratio
         )
+
+        return self.results_df
 
     @classmethod
     def from_dict_and_df(
@@ -2823,15 +2778,14 @@ class Results_Loader:
             linTrue_fast = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
-                mouse_val = row["mouse"]
-                mouse_manipe = row["manipe"]
+                row["mouse"]
+                row["manipe"]
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
                     )["results"]
                     .values[0]
-                    .data_helper[str(winMS)]
-                    .fullBehavior["Times"]["speedFilter"]
+                    .data_helper.fullBehavior["Times"]["speedFilter"]
                     .flatten()[row["posIndex_NN"]]
                 )
 
@@ -2842,8 +2796,7 @@ class Results_Loader:
                             "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
                         )["results"]
                         .values[0]
-                        .data_helper[str(winMS)]
-                        .fullBehavior["Times"]["trainEpochs"]
+                        .data_helper.fullBehavior["Times"]["trainEpochs"]
                     )
 
                     epochMask = inEpochsMask(row["timeNN"], real_train)
@@ -2887,15 +2840,14 @@ class Results_Loader:
             linTrue = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
-                mouse_val = row["mouse"]
-                mouse_manipe = row["manipe"]
+                row["mouse"]
+                row["manipe"]
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
                     )["results"]
                     .values[0]
-                    .data_helper[str(winMS)]
-                    .fullBehavior["Times"]["speedFilter"]
+                    .data_helper.fullBehavior["Times"]["speedFilter"]
                     .flatten()[row["posIndex_NN"]]
                 )
 
@@ -2906,8 +2858,7 @@ class Results_Loader:
                             "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
                         )["results"]
                         .values[0]
-                        .data_helper[str(winMS)]
-                        .fullBehavior["Times"]["trainEpochs"]
+                        .data_helper.fullBehavior["Times"]["trainEpochs"]
                     )
 
                     epochMask = inEpochsMask(row["timeNN"], real_train)
@@ -2975,30 +2926,14 @@ class Results_Loader:
         suffixes = suffixes or getattr(self, "suffixes", [""])
         # Try to get ANN loss layer
         try:
-            loss_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianLoss_layer
-            )
-            logits_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianHeatmap
-            )
+            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
         except Exception:
             print("Trying to load ANN trainers...")
             try:
                 self.results_df["results"][0].load_trainers(which="ann")
-                loss_layer = (
-                    self.results_df["results"][0]
-                    .ann[str(self.timeWindows[0])]
-                    .GaussianLoss_layer
-                )
-                logits_layer = (
-                    self.results_df["results"][0]
-                    .ann[str(self.timeWindows[0])]
-                    .GaussianHeatmap
-                )
+                loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+                logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
             except Exception as e2:
                 print(f"Could not get ANN loss layer: {e2}")
                 raise
@@ -3124,29 +3059,13 @@ class Results_Loader:
 
         # --- Try to get ANN loss layer once ---
         try:
-            loss_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianLoss_layer
-            )
-            logits_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianHeatmap
-            )
+            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
         except Exception:
             print("Trying to load ANN trainers...")
             self.results_df["results"][0].load_trainers(which="ann")
-            loss_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianLoss_layer
-            )
-            logits_layer = (
-                self.results_df["results"][0]
-                .ann[str(self.timeWindows[0])]
-                .GaussianHeatmap
-            )
+            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
 
         # --- loop over suffixes ---
         for suffix in suffixes:
@@ -3682,10 +3601,8 @@ class Results_Loader:
 
                     times = decoding_results["times"].flatten()
 
-                    tRipples = (
-                        mouse_results.data_helper[str(winMS)]
-                        .fullBehavior["Times"]
-                        .get("tRipples", None)
+                    tRipples = mouse_results.data_helper.fullBehavior["Times"].get(
+                        "tRipples", None
                     )
                     if tRipples is None or len(tRipples) == 0:
                         print(
@@ -3822,10 +3739,8 @@ class Results_Loader:
                         raise ValueError("against must be 'entropy' or 'maxp'")
 
                     times = decoding_results["times"].flatten()
-                    tRipples = (
-                        mouse_results.data_helper[str(winMS)]
-                        .fullBehavior["Times"]
-                        .get("tRipples", None)
+                    tRipples = mouse_results.data_helper.fullBehavior["Times"].get(
+                        "tRipples", None
                     )
                     if tRipples is None or len(tRipples) == 0:
                         continue
@@ -4150,7 +4065,7 @@ class Results_Loader:
                 raise ValueError("against must be 'entropy', 'maxp' or 'error'")
 
             # --- load spikes ---
-            clusters_file = os.path.join(
+            os.path.join(
                 mouse_results.folderResult, "clusters_pre_wTrain_False.pkl"
             )
             clusters_time_file = os.path.join(
@@ -4163,7 +4078,7 @@ class Results_Loader:
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
                 except:
-                    clusters_file = os.path.abspath(
+                    os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
                             "..",
@@ -4366,7 +4281,7 @@ class Results_Loader:
                 raise ValueError("against must be 'entropy', 'maxp' or 'error'")
 
             # --- load spikes ---
-            clusters_file = os.path.join(
+            os.path.join(
                 mouse_results.folderResult, "clusters_pre_wTrain_False.pkl"
             )
             clusters_time_file = os.path.join(
@@ -4379,7 +4294,7 @@ class Results_Loader:
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
                 except:
-                    clusters_file = os.path.abspath(
+                    os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
                             "..",
@@ -4886,8 +4801,7 @@ class Results_Loader:
                 return None
             return (
                 res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["speedFilter"]
+                .data_helper.fullBehavior["Times"]["speedFilter"]
                 .flatten()[row.posIndex_NN]
             )
 
@@ -4899,11 +4813,7 @@ class Results_Loader:
             )["results"]
             if len(res) == 0:
                 return None
-            train_mask = (
-                res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["trainEpochs"]
-            )
+            train_mask = res.iloc[0].data_helper.fullBehavior["Times"]["trainEpochs"]
             return inEpochsMask(row.timeNN, train_mask)
 
         # --- compute mean errors ---
@@ -4980,7 +4890,7 @@ class Results_Loader:
         coords = {}
         x_ticks = stride_list if stride_list is not None else ["1", "2", "4"]
         phases = phase_list if phase_list is not None else ["training", "pre"]
-        n_hues = len(phases)
+        len(phases)
 
         for i, (stride, phase) in enumerate([(s, p) for s in x_ticks for p in phases]):
             coll = paths[i]
@@ -5187,8 +5097,7 @@ class Results_Loader:
                 return None
             return (
                 res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["speedFilter"]
+                .data_helper.fullBehavior["Times"]["speedFilter"]
                 .flatten()[row.posIndex_NN]
             )
 
@@ -5200,11 +5109,7 @@ class Results_Loader:
             )["results"]
             if len(res) == 0:
                 return None
-            train_mask = (
-                res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["trainEpochs"]
-            )
+            train_mask = res.iloc[0].data_helper.fullBehavior["Times"]["trainEpochs"]
             return inEpochsMask(row.timeNN, train_mask)
 
         # --- compute errors using reduce_fn ---
@@ -5279,7 +5184,7 @@ class Results_Loader:
         coords = {}
         x_ticks = stride_list if stride_list is not None else ["1", "2", "4"]
         winMSs = winMS_list if winMS_list is not None else ["36", "108", "252"]
-        n_hues = len(winMSs)
+        len(winMSs)
 
         for i, (stride, winMS) in enumerate([(s, p) for s in x_ticks for p in winMSs]):
             coll = paths[i]
@@ -5376,7 +5281,7 @@ class Results_Loader:
         # --- outlier labeling ---
         df_winMS = err_df.copy()
         df_winMS = df_winMS.rename(columns={"mouse_manipe": "mouse"})
-        df_metric = df_winMS[
+        df_winMS[
             ["stride", "mouse", "mean_error" if reduce_fn == "mean" else "median_error"]
         ].dropna()
 
@@ -5495,8 +5400,7 @@ class Results_Loader:
                 return None
             return (
                 res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["speedFilter"]
+                .data_helper.fullBehavior["Times"]["speedFilter"]
                 .flatten()
                 .reshape(-1)[row.posIndex_NN]
                 .flatten()
@@ -5512,8 +5416,7 @@ class Results_Loader:
                 return None
             speed_mask = (
                 res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["speedFilter"]
+                .data_helper.fullBehavior["Times"]["speedFilter"]
                 .flatten()
                 .reshape(-1)[good_row["posIndex_NN"].iloc[0]]
                 .flatten()
@@ -5566,7 +5469,7 @@ class Results_Loader:
             ) as f:
                 decoding_results = pickle.load(f)
             speed_mask = decoding_results["speed_mask"].flatten()
-            phase_value = row["phase"]
+            row["phase"]
             res = df.query(
                 "mouse_manipe == @row.mouse_manipe and phase == @phase_value "
                 "and winMS == @row.winMS and stride == @row.stride"
@@ -5588,11 +5491,9 @@ class Results_Loader:
             ) as f:
                 decoding_results = pickle.load(f)
             times = decoding_results["times"].reshape(-1)
-            trainEpochs = (
-                row["results"]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["trainEpochs"]
-            )
+            trainEpochs = row["results"].data_helper.fullBehavior["Times"][
+                "trainEpochs"
+            ]
             del decoding_results
             return inEpochsMask(times, trainEpochs).flatten()
 
@@ -5604,11 +5505,7 @@ class Results_Loader:
             )["results"]
             if len(res) == 0:
                 return None
-            train_mask = (
-                res.iloc[0]
-                .data_helper[str(row.winMS)]
-                .fullBehavior["Times"]["trainEpochs"]
-            )
+            train_mask = res.iloc[0].data_helper.fullBehavior["Times"]["trainEpochs"]
             return inEpochsMask(row.timeNN, train_mask).flatten()
 
         # --- compute median errors ---
