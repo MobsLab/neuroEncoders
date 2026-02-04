@@ -56,7 +56,6 @@ def mock_project(temp_project_dir):
 
 def test_model_instantiation(mock_params, mock_project):
     behavior_data = get_mock_behavior_data()
-    backend = "tensorflow"
     if TFNet is None:
         pytest.skip("TFNet not available")
     model = TFNet(

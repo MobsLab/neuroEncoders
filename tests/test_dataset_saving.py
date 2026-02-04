@@ -1,9 +1,11 @@
 import os
+from unittest.mock import MagicMock
+
 import numpy as np
+import pandas as pd
 import pytest
 import tensorflow as tf
-import pandas as pd
-from unittest.mock import MagicMock
+
 from neuroencoders.fullEncoder.an_network import LSTMandSpikeNetwork as TFNet
 
 
