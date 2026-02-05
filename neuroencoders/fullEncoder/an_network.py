@@ -187,60 +187,54 @@ class LSTMandSpikeNetwork:
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
                     shape=(
+                        None,  # maxNbOfSpikes in group
                         self.params.nChannelsPerGroup[group],
                         32,
-                    ),  # + batch size, which will be batchSize * maxNbOfSpikes
-                    # the shape is N, 32 bc the voltage values are discretized over 32 time bins for each channel (4 most of the time)
-                    # of each spike of a given group in the window
-                    # we measure the voltage in 32 time steps windows. See the julia code.
+                    ),
                     name="group" + str(group),
                     dtype=tf.float16 if self.params.usingMixedPrecision else tf.float32,
-                    # If we use mixed precision, we need to specify the type of the inputs
-                    # We use float16 for the inputs to the spike nets
                 )
                 for group in range(self.params.nGroups)
             ]
 
-            self.inputGroups = tf.keras.layers.Input(shape=(), name="groups")
+            self.inputGroups = tf.keras.layers.Input(
+                shape=(None,), name="groups", dtype=tf.int32
+            )
             self.indices = [
                 tf.keras.layers.Input(
-                    shape=(), name="indices" + str(group), dtype=tf.int32
+                    shape=(None,), name="indices" + str(group), dtype=tf.int32
                 )
                 for group in range(self.params.nGroups)
             ]
 
-            # The spike nets acts on each group separately; to reorganize all these computations we use
-            # an identity matrix which shape is the total number of spike measured (over all groups)
-            self.zeroForGather = tf.keras.layers.Input(
-                shape=(self.params.nFeatures,),
-                name="zeroForGather",
-                dtype=tf.float16 if self.params.usingMixedPrecision else tf.float32,
-            )  # the actual zero tensor is created in self.create_indices in train/test calls.
-
             # Declare spike nets for the different groups:
-            spikeNet = (
+            spikeNetClass = (
                 nnUtils.SpikeNet1D
                 if not getattr(self.params, "use_conv2d", False)
                 else nnUtils.spikeNet
             )
             self.spikeNets = [
-                spikeNet(
-                    nChannels=self.params.nChannelsPerGroup[group],
-                    device=self.deviceName,
-                    nFeatures=self.params.nFeatures,
-                    number=str(group),
-                    batch_normalization=False,
-                    reduce_dense=getattr(self.params, "reduce_dense", False),
-                    no_cnn=getattr(self.params, "no_cnn", False),
+                tf.keras.layers.TimeDistributed(
+                    spikeNetClass(
+                        nChannels=self.params.nChannelsPerGroup[group],
+                        device=self.deviceName,
+                        nFeatures=self.params.nFeatures,
+                        number=str(group),
+                        batch_normalization=False,
+                        reduce_dense=getattr(self.params, "reduce_dense", False),
+                        no_cnn=getattr(self.params, "no_cnn", False),
+                    ),
+                    name=f"timedist_spikeNet_{group}",
                 )
                 for group in range(self.params.nGroups)
             ]
+
             if getattr(self.params, "use_group_attention_fusion", True):
                 # 2. Initialize the Group Attention Fusion layer
                 self.group_fusion = nnUtils.GroupAttentionFusion(
                     n_groups=self.params.nGroups,
                     embed_dim=self.params.nFeatures,
-                    num_heads=4,  # You can tune this
+                    num_heads=4,
                     device=self.deviceName,
                     name="group_fusion",
                 )
@@ -567,89 +561,48 @@ class LSTMandSpikeNetwork:
             allFeatures = []  # store the result of the CNN computation for each group
             batchSize = kwargs.get("batchSize", self.params.batchSize)
             for group in range(self.params.nGroups):
-                # FIX: otherwise just use TimeDistributed layer
-                # keep self.inputsToSpikeNets[group] in [batch, nSpikes, nChannels, 32] and then
-                # x = TimeDistributed(self.spikeNets[group])(x)  # [batch, max_nSpikes, cnn_dim] --> get rid of the gather, reshape...
-                x = self.inputsToSpikeNets[group]
-                # --> [NbKeptSpike = batchSize * maxNbOfSpikes,nbChannels,31] tensors, created my nnUtils.parse_serialized_sequence(batched = True) in train/test calls.
-                x = self.spikeNets[group](x)
-                # outputs a [NbSpikeOfTheGroup = batchSize * maxNbOfSpikes,nFeatures=self.params.nFeatures(default 64)] tensor.
-                # The gather strategy:
-                #   extract the final position of the spikes
-                # Note: inputGroups is already filled with -1 at position that correspond to filling
-                # for batch issues
-                # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
-                # We therefore need to    indices[spikePosition[i]] to i  so that it is effectively gather
-                # We then gather either a value of
-                filledFeatureTrain = kops.take(
-                    kops.concatenate([self.zeroForGather, x], axis=0),
-                    self.indices[
-                        group
-                    ],  # self.indices[group] contains the indices where to put the spikes of the group in the final tensor - created by self.create_indices in train/test calls.
-                    axis=0,
-                )  # give time sense
-                # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
-                # where we have filled lines corresponding to spike time of the group
-                # with the feature computed by the spike net; and let other time with a value of 0:
-                # The index of spike detected then become similar to a time value...
-                filledFeatureTrain = kops.reshape(
-                    filledFeatureTrain,
-                    (int(batchSize), -1, self.params.nFeatures),
-                )
-                # Reshaping the result of the spike net as batchSize:MaxNbTotSpikeDetected:nFeatures
-                # this allow to separate spikes from the same window or from the same batch.
-                # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
-                allFeatures.append(filledFeatureTrain)
+                # Process all spikes in the group through the spike net
+                x = self.spikeNets[group](self.inputsToSpikeNets[group])
+                # x shape: (batch, n_spikes_in_group, nFeatures)
+
+                # The "Null Spike" Trick:
+                # Add a row of zeros at index 0 for each example in the batch.
+                # When index_inputs[g] is 0 (padding), tf.gather will pick up these zeros.
+                full_emb = tf.keras.layers.Lambda(
+                    lambda e: kops.concatenate(
+                        [kops.zeros_like(e[:, :1, :]), e], axis=1
+                    ),
+                    name=f"null_spike_g{group}",
+                )(x)
+
+                # Gather spikes into the global sequence: (batch, seqLen, nFeatures)
+                # batch_dims=1 enables parallel gathering across the batch
+                gathered = tf.keras.layers.Lambda(
+                    lambda args: tf.gather(args[0], args[1], batch_dims=1),
+                    output_shape=(None, self.params.nFeatures),
+                    name=f"gather_g{group}",
+                )([full_emb, self.indices[group]])
+
+                allFeatures.append(gathered)
 
             if not getattr(self.params, "use_group_attention_fusion", True):
                 # OLD: concatenation over features
-                allFeatures = tf.tuple(tensors=allFeatures)
-                # synchronizes the computation of all features (like a join)
-                # The concatenation is made over axis 2, which is the Feature axis
-                # So we reserve columns to each output of the spiking networks...
-                allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+                allFeatures = kops.concatenate(allFeatures, axis=2)
             else:
                 print("Using Group Attention Fusion for feature fusion")
-                # NEW: Group Attention Fusion over groups (see nnUtils.GroupAttentionFusion)
-                # Create a mask for Group Attention Fusion
-                # indices[group] == 0 implies it gathered 'zeroForGather' (no spike)
-                # indices[group] > 0 implies it gathered a real spike feature
-
-                # 1. Cast indices to the appropriate shape (Batch, Time) match filledFeatureTrain
-                # indices are usually flat, so we reshape them using the same logic as filledFeatureTrain
-                group_masks = []
-                for group in range(self.params.nGroups):
-                    # Get the indices for this group
-                    inds = self.indices[group]
-
-                    # Create boolean: True if spike exists, False if zero-padding
-                    is_active = kops.not_equal(inds, 0)
-
-                    # Reshape to (Batch, Time) to match the feature tensors
-                    # We use -1 to infer the time dimension dynamically
-                    is_active = kops.reshape(is_active, (int(batchSize), -1))
-
-                    group_masks.append(is_active)
-
-                # 2. Stack to shape (Batch, Time, nGroups)
-                # The Attention layer usually expects the mask in this format (or Broadcastable)
+                # NEW: Group Attention Fusion over groups
+                # Create masks based on indices (0 means no spike)
+                group_masks = [
+                    kops.not_equal(self.indices[group], 0)
+                    for group in range(self.params.nGroups)
+                ]
                 fusion_mask = kops.stack(group_masks, axis=-1)
-                # --- END OF FIX ---
-                # we pass a list of tensors of shape (NbBatch, NbTotSpikeDetected, nFeatures) for each spike group
-                # the class then applies a multi-head attention mechanism to fuse the information from different groups
                 allFeatures = self.group_fusion(allFeatures, mask=fusion_mask)
 
             # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
             # We would like to mask timesteps that were added for batching purpose, before running the RNN
-            batchedInputGroups = kops.reshape(
-                self.inputGroups,
-                (
-                    batchSize,
-                    -1,
-                ),  # self.inputGroups has shape (BatchSize * NbTotalSpikes) and is filled with group indices or -1
-            )
             mymask = nnUtils.safe_mask_creation(
-                batchedInputGroups
+                self.inputGroups
             )  # [batch, max_n_spikes] (True for real spikes, False for padded values)
 
             masked_features = Lambda(
@@ -820,7 +773,7 @@ class LSTMandSpikeNetwork:
         model = tf.keras.Model(
             inputs=self.inputsToSpikeNets
             + self.indices
-            + [self.truePos, self.inputGroups, self.zeroForGather],
+            + [self.truePos, self.inputGroups],
             outputs=outputs,
         )
 
@@ -1375,11 +1328,13 @@ class LSTMandSpikeNetwork:
 
         @tf.function
         def map_outputs(vals):
-            input_shape = tf.shape(vals["pos"])[:-1]
-            if len(input_shape) == 0:
+            # When batched, pos has shape (batchSize, targetDim)
+            # When unbatched, pos has shape (targetDim,)
+            pos_shape = tf.shape(vals["pos"])
+            if len(pos_shape) == 1:
                 batch_size = 1
             else:
-                batch_size = input_shape[0]
+                batch_size = pos_shape[0]
 
             basic_dict = {
                 self.outNames[0]: tf.zeros((batch_size, dim_output), dtype=tf.float32)
@@ -1453,54 +1408,96 @@ class LSTMandSpikeNetwork:
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
 
+            # now that we have clean positions, we can resample if needed
+            if self.params.OversamplingResampling and key == "train":
+                dataset, count_tmp = self._apply_oversampling_resampling(
+                    dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
+                )
+
             if key != "test" and shuffle:
                 print("Shuffling the", key, "dataset")
                 dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
-            batch_dataset = kwargs.get("batch", key == "training")
-            if batch_dataset:
-                dataset = dataset.batch(batchSize, drop_remainder=True)
-            else:
-                dataset = dataset.batch(1, drop_remainder=False)
+            # --- 1. Optimized Parsing (Unbatched) ---
+            print(f"Applying optimized parsing for {key} dataset")
+            optimized_parse_fn = self.create_optimized_parse_function(
+                augmentation=False,
+                count_spikes=kwargs.get("extract_spikes_counts", False),
+            )
+            dataset = dataset.map(
+                optimized_parse_fn,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
 
+            # --- 2. Data Augmentation ---
             if (
-                not self.params.dataAugmentation
-                or key == "test"
-                or kwargs.get("inference_mode", False)
+                self.params.dataAugmentation
+                and key != "test"
+                and not kwargs.get("inference_mode", False)
             ):
-                print("No data augmentation for", key, "dataset")
-                optimized_parse_fn = self.create_optimized_parse_function(
-                    augmentation=False,
-                    count_spikes=kwargs.get("extract_spikes_counts", False),
-                    batched=batch_dataset,
-                )
-                dataset = dataset.map(
-                    optimized_parse_fn,
-                    num_parallel_calls=tf.data.AUTOTUNE,
-                )  # self.featDesc, *
-            else:
-                # this way the data augmentation is applied after resampling and batching.
-                print("Applying data augmentation to", key, "dataset with config:")
-                print(augmentation_config)
+                print(f"Applying data augmentation to {key} dataset")
+                # We reuse the optimized_aug_fn logic but adapted for unbatched
                 optimized_aug_fn = self.create_optimized_parse_function(
                     augmentation=True,
                     augmentation_config=augmentation_config,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
-                    batched=batch_dataset,
                 )
-
                 dataset = dataset.map(
                     optimized_aug_fn,
                     num_parallel_calls=tf.data.AUTOTUNE,
-                )  # self.featDesc, *
+                )
                 flatten_fn = create_flatten_augmented_groups_fn(
                     self.params, augmentation_config.num_augmentations
                 )
-                dataset = dataset.flat_map(flatten_fn)  # Flatten the augmented groups
+                dataset = dataset.flat_map(flatten_fn)
+
+            # Pad and Batch logic
+            padded_shapes = {
+                "groups": [None],
+                "pos": [self.params.dimOutput],
+                "indexInDat": [None],
+                "time": [],
+                "length": [],
+                "pos_index": [],
+                "time_behavior": [],
+            }
+            padding_values = {
+                "groups": tf.constant(-1, dtype=tf.int32),
+                "pos": tf.constant(0.0, dtype=tf.float32),
+                "indexInDat": tf.constant(-1, dtype=tf.int64),
+                "time": tf.constant(0.0, dtype=tf.float32),
+                "length": tf.constant(0, dtype=tf.int64),
+                "pos_index": tf.constant(-1, dtype=tf.int64),
+                "time_behavior": tf.constant(0.0, dtype=tf.float32),
+            }
+            if kwargs.get("extract_spikes_counts", False):
+                for g in range(self.params.nGroups):
+                    padded_shapes[f"group{g}_spikes_count"] = []
+                    padding_values[f"group{g}_spikes_count"] = tf.constant(
+                        0, dtype=tf.int32
+                    )
+
+            for g in range(self.params.nGroups):
+                padded_shapes[f"group{g}"] = [
+                    None,  # spikes
+                    self.params.nChannelsPerGroup[g],
+                    32,
+                ]
+                padded_shapes[f"indices{g}"] = [None]
+                padding_values[f"group{g}"] = tf.constant(0.0, dtype=tf.float32)
+                padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
+
+            # Map create_indices BEFORE batching (per-example)
+            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+
+            dataset = dataset.padded_batch(
+                batchSize,
+                padded_shapes=padded_shapes,
+                padding_values=padding_values,
+                drop_remainder=True,
+            )
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
-            # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
-            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
             dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
             # cache only once, after all the preprocessing
             print(
@@ -1636,9 +1633,7 @@ class LSTMandSpikeNetwork:
             )
             # Re-apply the parsing logic to get the correct shapes (e.g., reshaping groups)
             dataset = dataset.map(
-                lambda x: nnUtils.parse_serialized_sequence(
-                    self.params, x, batched=False
-                ),
+                lambda x: nnUtils.parse_serialized_sequence(self.params, x),
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
 
@@ -1651,7 +1646,6 @@ class LSTMandSpikeNetwork:
         augmentation: bool = False,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
         count_spikes=False,
-        batched=True,
     ):
         """
         Create optimized parsing function that respects spike data structure
@@ -1673,7 +1667,6 @@ class LSTMandSpikeNetwork:
                     self.params,
                     processed_batch,  # Pass the copy
                     augmentation_config=augmentation_config,
-                    batched=batched,
                     count_spikes=count_spikes,
                 )
 
@@ -1690,7 +1683,6 @@ class LSTMandSpikeNetwork:
                 return nnUtils.parse_serialized_sequence(
                     self.params,
                     processed_batch,
-                    batched=batched,
                     count_spikes=count_spikes,
                 )
 
@@ -3036,7 +3028,7 @@ class LSTMandSpikeNetwork:
     # used in the data pipepline
     def create_indices(self, vals, addLinearizationTensor=False, shuffle=False):
         """
-        Create indices for gathering spikes from each group.
+        Create relative indices for gathering spikes from each group.
         The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
 
         Args:
@@ -3044,58 +3036,52 @@ class LSTMandSpikeNetwork:
             addLinearizationTensor (bool): Whether to add linearization tensors to the output.
             shuffle (bool): Whether to shuffle the indices within each group for null hypothesis/control.
         Returns:
-            dict: Updated dictionary with indices for each group and optional linearization tensors. The indices are stored under the keys "indices{n}" for each group and represent the positions to gather spikes from each group.
-
-        See self.indices in the model definition for more details on usage.
+            dict: Updated dictionary with indices for each group. The indices are stored under the keys "indices{n}" for each group.
         """
         if shuffle:
             print(
                 "Shuffling spike indices within each group for null hypothesis/control."
             )
 
+        groups = vals["groups"]
         for group in range(self.params.nGroups):
-            spikePosition = tf.where(tf.equal(vals["groups"], group))
-            # Note: inputGroups is already filled with -1 at position that correspond to filling
-            # for batch issues
-            # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
-            # We therefore need to set indices[spikePosition[i]] to i so that it is effectively gathered
-            # We need to wrap the use of sparse tensor (tensorflow error otherwise)
-            # The sparse tensor allows us to get the list of indices for the gather quite easily
-            numSpikesInGroup = tf.shape(vals["group" + str(group)])[0]
-            rangeIndices = tf.range(numSpikesInGroup) + 1
+            # Find positions of spikes belonging to this group
+            spike_mask = tf.equal(groups, group)
+            spike_positions = tf.where(spike_mask)
+
+            # Number of spikes in this group for this example
+            num_spikes_in_group = tf.shape(vals[f"group{group}"])[0]
+
+            # Sequential indices starting at 1 (0 is reserved for padding/null spike)
+            relative_indices = tf.range(num_spikes_in_group) + 1
 
             if shuffle:
-                # shuffle the rangeIndices to have random mapping
-                rangeIndices = tf.random.shuffle(rangeIndices)
+                relative_indices = tf.random.shuffle(relative_indices)
 
-            indices = tf.sparse.SparseTensor(
-                spikePosition, rangeIndices, [tf.shape(vals["groups"])[0]]
+            # Create a dense tensor of indices mapping back to the global sequence
+            # We use a SparseTensor to scatter the relative_indices into the global sequence shape
+            scattered_indices = tf.sparse.SparseTensor(
+                indices=spike_positions,
+                values=relative_indices,
+                dense_shape=tf.cast(tf.shape(groups), tf.int64),
             )
-            indices = tf.cast(tf.sparse.to_dense(indices), dtype=tf.int32)
-            vals.update({"indices" + str(group): indices})
+            # Convert to dense, padding with 0 (null spike index)
+            indices_tensor = tf.cast(
+                tf.sparse.to_dense(scattered_indices, default_value=0), dtype=tf.int32
+            )
+            vals[f"indices{group}"] = indices_tensor
 
+            # Mixed precision casting for spike data
             if self.params.usingMixedPrecision:
-                zeroForGather = tf.zeros([1, self.params.nFeatures], dtype=tf.float16)
-            else:
-                zeroForGather = tf.zeros([1, self.params.nFeatures])
-            vals.update({"zeroForGather": zeroForGather})
+                vals[f"group{group}"] = tf.cast(vals[f"group{group}"], dtype=tf.float16)
 
-            # changing the dtype to allow faster computations
-            if self.params.usingMixedPrecision:
-                vals.update(
-                    {
-                        "group" + str(group): tf.cast(
-                            vals["group" + str(group)], dtype=tf.float16
-                        )
-                    }
-                )
-
-            if addLinearizationTensor:
-                vals.update({"mazePoints": self.mazePoints_tensor})
-                vals.update({"tsProj": self.tsProjTensor})
+        if addLinearizationTensor:
+            vals.update({"mazePoints": self.mazePoints_tensor})
+            vals.update({"tsProj": self.tsProjTensor})
 
         if self.params.usingMixedPrecision:
-            vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
+            vals["pos"] = tf.cast(vals["pos"], dtype=tf.float16)
+
         return vals
 
     # used in the data pipepline some day?

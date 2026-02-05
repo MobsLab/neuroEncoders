@@ -13,21 +13,29 @@ except ImportError:
 
 
 def get_mock_inputs(
-    backend, batch_size=2, n_groups=2, n_channels=[2, 2], n_features=64
+    backend, batch_size=2, n_groups=2, n_channels=[2, 2], seq_len=10, max_spikes=20
 ):
     """Generates mock inputs for the specified backend."""
     inputs = {}
 
     if backend == "tensorflow":
         for g in range(n_groups):
-            # Group voltage inputs: (Batch, Channels, Time)
-            inputs[f"group{g}"] = tf.random.normal((batch_size, n_channels[g], 32))
-            # Indices for gathering: (Batch,)
-            inputs[f"indices{g}"] = tf.zeros((batch_size,), dtype=tf.int32)
+            # Group voltage inputs: (Batch, MaxSpikes, Channels, Time)
+            inputs[f"group{g}"] = np.random.normal(
+                size=(batch_size, max_spikes, n_channels[g], 32)
+            ).astype(np.float32)
+            # Indices for gathering: (Batch, SeqLen)
+            # Indices should be between 0 and max_spikes (0 is null spike)
+            inputs[f"indices{g}"] = np.random.randint(
+                0, max_spikes + 1, size=(batch_size, seq_len)
+            ).astype(np.int32)
 
-        inputs["groups"] = tf.zeros((batch_size,), dtype=tf.int32)
-        inputs["zeroForGather"] = tf.zeros((batch_size, n_features))
-        inputs["pos"] = tf.zeros((batch_size, 2))
+        # Groups indicator: (Batch, SeqLen)
+        inputs["groups"] = np.random.randint(
+            0, n_groups, size=(batch_size, seq_len)
+        ).astype(np.int32)
+        # Ground truth pos for internal loss: (Batch, 2)
+        inputs["pos"] = np.random.normal(size=(batch_size, 2)).astype(np.float32)
 
     return inputs
 
@@ -73,7 +81,6 @@ def test_model_forward(mock_params, mock_project):
         batch_size=mock_params.batchSize,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
-        n_features=64,
     )
 
     if TFNet is None:
@@ -99,7 +106,6 @@ def test_train_step(mock_params, mock_project):
         batch_size=mock_params.batchSize,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
-        n_features=64,
     )
 
     if TFNet is None:
