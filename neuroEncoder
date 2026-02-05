@@ -551,7 +551,7 @@ def main(args):
             ):
                 print("Testing sleep set")
                 # Test sleep as NN
-                outputs_sleep = TrainerBayes.test_sleep_as_NN(
+                TrainerBayes.test_sleep_as_NN(
                     DataHelper.fullBehavior,
                     bayesMatrices,
                     windowSizeMS=windowSizeMS,

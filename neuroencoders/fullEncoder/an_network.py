@@ -22,11 +22,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import wandb
 from keras import ops as kops
 from keras.layers import Lambda
 from tqdm import tqdm
-
-import wandb
+from wandb.integration.keras import WandbMetricsLogger
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
@@ -45,7 +45,6 @@ from neuroencoders.fullEncoder.nnUtils import (
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper, Params, Project
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
