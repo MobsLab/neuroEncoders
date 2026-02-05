@@ -557,7 +557,6 @@ def main(args):
                     windowSizeMS=windowSizeMS,
                     l_function=l_function,
                 )
-                print(outputs_sleep)
 
         # Save and create alignment tools
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator

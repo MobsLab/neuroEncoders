@@ -1392,7 +1392,7 @@ class Mouse_Results(Params, PaperFigures):
                         useTrain=phase != self.phase,
                         useTest=phase != "training",
                     )
-                    timeStepPred = self.data_helper[epochMask]
+                    timeStepPred = self.data_helper.fullBehavior["positionTime"][epochMask]
                     outputs = self.bayes.test_as_NN(
                         self.data_helper.fullBehavior,
                         self.bayes_matrices,

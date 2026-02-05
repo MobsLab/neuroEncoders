@@ -248,7 +248,6 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             nbEpochs,
             "--target",
             target_bayes,
-            # "--flat_prior",
             "--striding",
             str(win),
         ]
@@ -432,7 +431,6 @@ if __name__ == "__main__":
                         SOURCE,
                         DESTINATION,
                         "--force",
-                        "--dry-run",
                     ]
                     if "M1199_MFB" not in dir:
                         mouse_commands[dir].append(runNasCMD)
@@ -440,8 +438,8 @@ if __name__ == "__main__":
                         for dirmfb in ["exp1", "exp2"]:
                             mouse_commands[os.path.join(dir, dirmfb)].append(runNasCMD)
                 except Exception as e:
+                    # Exception is expected when mouse directory structure is non-standard
                     print(f"Error finding mouse in PathForExperiments: {e}")
-                    pass
 
     if mode == "sequential":
         run_commands_sequentially(mouse_commands)
