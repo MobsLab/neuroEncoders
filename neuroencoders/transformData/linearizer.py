@@ -362,6 +362,8 @@ class UMazeLinearizer:
                 self.lPoints.remove()
                 fig.canvas.draw()
             except (AttributeError, KeyError):
+                # Previous scatter points may not exist or may have already been removed;
+                # in that case there is nothing to clean up before redrawing.
                 pass
             self.l0s = try_linearization(ax, self.l0s)
             self.lPoints = ax[0].scatter(
@@ -438,6 +440,8 @@ class UMazeLinearizer:
                     self.lPoints.remove()
                     fig.canvas.draw()
                 except (AttributeError, KeyError):
+                    # Previous linearization points may not exist or may have already been
+                    # removed; in that case there is nothing to clean up before re-drawing.
                     pass
                 if len(self.nnPoints) > 2:
                     self.n_points = len(self.nnPoints)

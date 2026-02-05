@@ -1409,7 +1409,7 @@ class LSTMandSpikeNetwork:
                 if kwargs.get("inference_mode", False)
                 else {"train": totMask_backup}
             )
-        if not isinstance(speedMask, dict):
+        if speedMask is not None and not isinstance(speedMask, dict):
             # it means we have just one set of keys
             speedMask_backup = speedMask.copy()
             speedMask = (
