@@ -1571,11 +1571,15 @@ def select_epochs(
                                 try:
                                     ls[dim][2][iaxis].remove()
                                 except (AttributeError, KeyError):
+                                    # Scatter plot may not exist yet or may have been removed;
+                                    # safely ignore and continue to create new plot.
                                     pass
                             else:
                                 try:
                                     ls[dim][2][iaxis].remove()
                                 except (AttributeError, KeyError):
+                                    # Scatter plot may not exist yet or may have been removed;
+                                    # safely ignore and continue to create new plot.
                                     pass
                         if SetData["useLossPredTrainSet"]:
                             ls[dim][2] = ax[dim].scatter(
@@ -1621,6 +1625,8 @@ def select_epochs(
                             try:
                                 ls[dim][2].remove()
                             except (AttributeError, KeyError):
+                                # Scatter plot may not exist yet or may have been removed;
+                                # safely ignore and continue to create new plot.
                                 pass
                             ls[dim][2] = ax[dim].scatter(
                                 timeToShow[
@@ -1636,6 +1642,8 @@ def select_epochs(
                             try:
                                 l3.remove()
                             except (AttributeError, KeyError):
+                                # Scatter plot may not exist yet or may have been removed;
+                                # safely ignore and continue to create new plot.
                                 pass
 
                     # modify the xlim of the axes according to the changed epochs

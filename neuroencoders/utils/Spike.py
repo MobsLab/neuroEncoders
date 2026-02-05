@@ -95,23 +95,24 @@ class SpikeData:
                 else:
                     L = []
                     openstruc(spikes[k], k, L)
-                    for shank in L:
-                        if shank.endswith("_intset"):
-                            shank = shank[0:-7]
-                            start = np.squeeze(spikes[shank]["start"][:])
-                            stop = np.squeeze(spikes[shank]["stop"][:])
-                            self.info[shank] = nts.IntervalSet(
+                    for shank_key in L:
+                        if shank_key.endswith("_intset"):
+                            # Remove the "_intset" suffix to get the actual shank name
+                            shank_name = shank_key[0:-7]
+                            start = np.squeeze(spikes[shank_name]["start"][:])
+                            stop = np.squeeze(spikes[shank_name]["stop"][:])
+                            self.info[shank_name] = nts.IntervalSet(
                                 start, stop, time_units=time_unit
                             )
                         elif isinstance(
-                            np.squeeze(spikes[shank][:])[0], h5py.h5r.Reference
+                            np.squeeze(spikes[shank_key][:])[0], h5py.h5r.Reference
                         ):
-                            self.info[shank] = ref2str(
-                                np.squeeze(spikes[shank][:]), spikes
+                            self.info[shank_key] = ref2str(
+                                np.squeeze(spikes[shank_key][:]), spikes
                             )
 
                         else:
-                            self.info[shank] = np.squeeze(spikes[shank][:])
+                            self.info[shank_key] = np.squeeze(spikes[shank_key][:])
 
     def get_spikes(self, idx=None):
         import numpy as np
