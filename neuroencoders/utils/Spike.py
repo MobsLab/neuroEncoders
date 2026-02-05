@@ -97,10 +97,11 @@ class SpikeData:
                     openstruc(spikes[k], k, L)
                     for shank_key in L:
                         if shank_key.endswith("_intset"):
-                            shank = shank_key[0:-7]
-                            start = np.squeeze(spikes[shank]["start"][:])
-                            stop = np.squeeze(spikes[shank]["stop"][:])
-                            self.info[shank] = nts.IntervalSet(
+                            # Remove the "_intset" suffix to get the actual shank name
+                            shank_name = shank_key[0:-7]
+                            start = np.squeeze(spikes[shank_name]["start"][:])
+                            stop = np.squeeze(spikes[shank_name]["stop"][:])
+                            self.info[shank_name] = nts.IntervalSet(
                                 start, stop, time_units=time_unit
                             )
                         elif isinstance(

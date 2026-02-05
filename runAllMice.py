@@ -437,8 +437,9 @@ if __name__ == "__main__":
                     else:
                         for dirmfb in ["exp1", "exp2"]:
                             mouse_commands[os.path.join(directory, dirmfb)].append(runNasCMD)
-                except Exception as e:
+                except (IndexError, KeyError) as e:
                     # Exception is expected when mouse directory structure is non-standard
+                    # or when mouse is not found in PathForExperiments
                     print(f"Error finding mouse in PathForExperiments: {e}")
 
     if mode == "sequential":
