@@ -4265,16 +4265,16 @@ class Results_Loader:
 
             # --- load spikes ---
             os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
-                    os.path.abspath(
-                        os.path.join(
-                            mouse_results.folderResult,
-                            "..",
-                            "..",
-                            "last_bayes",
-                            "results",
-                            f"clusters_pre_wTrain_{'True' if row['phase'] == 'training' else 'False'}.pkl",
-                        )
-                    )
+            clusters_time_file = os.path.join(
+                mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
+            )
+            try:
+                try:
+                    # with open(clusters_file, "rb") as f:
+                    #     clusters = pickle.load(f)
+                    with open(clusters_time_file, "rb") as f:
+                        clusters_time = pickle.load(f)
+                except FileNotFoundError:
                     clusters_time_file = os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
