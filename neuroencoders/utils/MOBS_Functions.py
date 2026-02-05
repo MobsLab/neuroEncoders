@@ -2025,7 +2025,6 @@ class Mouse_Results(Params, PaperFigures):
                 phase_name = suffix.strip("_") if suffix else "all"
 
                 for id, win in enumerate(self.windows_values):
-                    str(win)
                     data_helper_win = self.data_helper
                     resultsNN_suffix = self.resultsNN_phase[suffix]
 
@@ -2778,8 +2777,6 @@ class Results_Loader:
             linTrue_fast = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
-                row["mouse"]
-                row["manipe"]
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
@@ -2840,8 +2837,6 @@ class Results_Loader:
             linTrue = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
-                row["mouse"]
-                row["manipe"]
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
@@ -4076,16 +4071,6 @@ class Results_Loader:
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
                 except FileNotFoundError:
-                    os.path.abspath(
-                        os.path.join(
-                            mouse_results.folderResult,
-                            "..",
-                            "..",
-                            "last_bayes",
-                            "results",
-                            f"clusters_pre_wTrain_{'True' if row['phase'] == 'training' else 'False'}.pkl",
-                        )
-                    )
                     clusters_time_file = os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
@@ -4280,16 +4265,6 @@ class Results_Loader:
 
             # --- load spikes ---
             os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
-            clusters_time_file = os.path.join(
-                mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
-            )
-            try:
-                try:
-                    # with open(clusters_file, "rb") as f:
-                    #     clusters = pickle.load(f)
-                    with open(clusters_time_file, "rb") as f:
-                        clusters_time = pickle.load(f)
-                except FileNotFoundError:
                     os.path.abspath(
                         os.path.join(
                             mouse_results.folderResult,
@@ -5277,7 +5252,8 @@ class Results_Loader:
         # --- outlier labeling ---
         df_winMS = err_df.copy()
         df_winMS = df_winMS.rename(columns={"mouse_manipe": "mouse"})
-        df_winMS[
+        # Filter the dataframe to relevant columns
+        df_winMS = df_winMS[
             ["stride", "mouse", "mean_error" if reduce_fn == "mean" else "median_error"]
         ].dropna()
 
