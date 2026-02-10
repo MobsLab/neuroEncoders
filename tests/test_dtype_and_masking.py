@@ -44,13 +44,13 @@ def test_lambda_masking():
     allFeatures = tf.random.normal((2, 2, 128))
 
     # Wrap in a layer that supports masking
-    l = Lambda(
+    lambda_layer = Lambda(
         lambda t: kops.where(
             kops.expand_dims(t[0], axis=-1), t[1], kops.zeros_like(t[1])
         )
     )
-    l.supports_masking = True
+    lambda_layer.supports_masking = True
 
     # This should pass without warning about destroying mask if implemented correctly
-    output = l([mymask, allFeatures])
+    output = lambda_layer([mymask, allFeatures])
     assert output.shape == allFeatures.shape

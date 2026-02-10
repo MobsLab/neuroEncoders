@@ -24,10 +24,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import wandb
 from keras import ops as kops
 from tqdm import tqdm
-from wandb.integration.keras import WandbMetricsLogger
+
+import wandb
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
@@ -48,6 +48,7 @@ from neuroencoders.fullEncoder.nnUtils import (
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import DataHelper, Params, Project
+from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -1368,15 +1369,6 @@ class LSTMandSpikeNetwork:
         datasets = {}
         counts = {}
         for key in totMask.keys():
-            mask_tensor = tf.constant(totMask[key], dtype=tf.float32)
-            # creates a lookup table to filter by pos index, and by totMask (speed + epoch)
-            # table = tf.lookup.StaticHashTable(
-            #     tf.lookup.KeyValueTensorInitializer(
-            #         tf.constant(np.arange(len(totMask[key])), dtype=tf.int64),
-            #         tf.constant(totMask[key], dtype=tf.float32),
-            #     ),
-            #     default_value=0,
-            # )
             # This is just max normalization to use if the behavioral data have not been normalized yet
             if onTheFlyCorrection:
                 maxPos = np.nanmax(
@@ -2448,16 +2440,6 @@ class LSTMandSpikeNetwork:
                     self.params, *vals, batched=True
                 )
 
-            dim_output = (
-                self.params.dimOutput
-                if not getattr(self.params, "GaussianHeatmap", False)
-                else (
-                    self.params.dimOutput
-                    - 2
-                    + self.params.GaussianGridSize[0] * self.params.GaussianGridSize[1]
-                )
-            )
-
             @tf.function
             def map_outputs(vals):
                 # Move 'pos' to targets, rest stay in inputs
@@ -2569,11 +2551,7 @@ class LSTMandSpikeNetwork:
 
             if getattr(self.params, "GaussianHeatmap", False):
                 # add uncertainty and confidence metrics to output dict
-                predictions[sleepName]["logits_hw"] = output_logits
-                predictions[sleepName]["var_total"] = var_total
-                predictions[sleepName]["Hn"] = Hn
-                predictions[sleepName]["maxp"] = maxp
-                predictions[sleepName]["T_scaling"] = T_scaling
+                print("Not implemented yet")
 
         # Save the results
         for key in predictions.keys():
