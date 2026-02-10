@@ -5,5 +5,5 @@ Exposes:
         - Decoder (from decode)
 """
 
-from . import decode
-from .decode import Decoder
+from . import decode as decode
+from .decode import Decoder as Decoder

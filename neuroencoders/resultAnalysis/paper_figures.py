@@ -22,10 +22,12 @@ from statsmodels.stats.proportion import proportions_ztest
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.resultAnalysis.print_results import overview_fig
-from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
 from neuroencoders.simpleBayes.decode_bayes import (
-    extract_spike_counts,
-    extract_spike_counts_from_matrix,
+    Trainer as TrainerBayes,
+)
+from neuroencoders.simpleBayes.decode_bayes import (
+    extract_spike_counts_keops,
+    extract_spike_counts_matrix_keops,
 )
 from neuroencoders.utils.PlaceField_dB import _run_place_field_analysis
 from neuroencoders.utils.global_classes import (
@@ -524,13 +526,22 @@ class PaperFigures:
                     if kwargs.get("extract_spikes_count", False) or kwargs.get(
                         "extract_spike_counts", False
                     ):
-                        total_count, _ = extract_spike_counts(
+                        if not hasattr(
+                            self.trainerBayes, "spikeMatTimes"
+                        ) or not hasattr(self.trainerBayes, "spikeMat"):
+                            raise ValueError(
+                                """
+                                trainerBayes does not have spikeMatTimes or spikeMat attributes needed to extract spike counts.
+                                Make sure to run decoding with extract_spike_counts=True first. You can run trainerBayes.train_order_by_pos.
+                                """
+                            )
+                        total_count, _ = extract_spike_counts_keops(
                             timesBayes[-1], self.trainerBayes.spikeMatTimes, ws / 1000
                         )
                         total_spikes_count.append(total_count)
-                        matrix_count, _ = extract_spike_counts_from_matrix(
+                        matrix_count, _ = extract_spike_counts_matrix_keops(
                             timesBayes[-1],
-                            self.trainerBayes.spikeMat,
+                            self.trainerBayes.spikeMatLabels,
                             self.trainerBayes.spikeMatTimes,
                             ws / 1000,
                         )
@@ -2563,7 +2574,7 @@ class PaperFigures:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')
 
         # Figure 4:
-        cols = plt.get_cmap("terrain")
+        plt.get_cmap("terrain")
         fig, ax = plt.subplots(1, len(self.timeWindows))
         if len(self.timeWindows) == 1:
             ax = [ax]  # compatibility move
@@ -2810,12 +2821,12 @@ class PaperFigures:
         mazeBorder = np.array(
             [[0, 0, 1, 1, 0.63, 0.63, 0.35, 0.35, 0], [0, 1, 1, 0, 0, 0.75, 0.75, 0, 0]]
         )
-        ts = [
+        [
             self.resultsNN_phase[suffix]["time"][iw][mask[iw]]
             for iw in range(len(self.timeWindows))
         ]
         # Trajectory figure
-        cm = plt.get_cmap("turbo")
+        plt.get_cmap("turbo")
         fig, ax = plt.subplots(1, len(self.timeWindows))
         if len(self.timeWindows) == 1:
             ax = [ax]  # compatibility move
@@ -3412,9 +3423,7 @@ class PaperFigures:
                 predPos = self.resultsNN_phase[phase]["fullPred"][idWindow][speedMask][
                     :, :2
                 ]
-                target_hw = self.ann[
-                    str(winMS)
-                ].GaussianHeatmap.gaussian_heatmap_targets(truePos)
+                self.ann[str(winMS)].GaussianHeatmap.gaussian_heatmap_targets(truePos)
                 probs = (
                     self.ann[str(winMS)]
                     .GaussianHeatmap.decode_and_uncertainty(
@@ -3609,7 +3618,7 @@ class PaperFigures:
 
                 extent = (0, 1, 0, 1)
                 ax1 = axs[i, j * (3 if plot_kl else 2)]
-                im1 = ax1.imshow(
+                ax1.imshow(
                     mean_probs,
                     origin="lower",
                     extent=extent,
@@ -3619,7 +3628,7 @@ class PaperFigures:
                 ax1.set_title(f"{phase[1:]}-{speed}-Proba")
                 # plt.colorbar(im1, ax=ax1)
                 ax2 = axs[i, j * (3 if plot_kl else 2) + 1]
-                im2 = ax2.imshow(
+                ax2.imshow(
                     zmap,
                     origin="lower",
                     cmap="coolwarm",
@@ -3643,7 +3652,7 @@ class PaperFigures:
                             Q > 0, Q * np.log((Q + 1e-12) / (P + 1e-12)), 0
                         )
                     # Compute mean bias vector in each bin
-                    im3 = ax3.imshow(
+                    ax3.imshow(
                         kl_map,
                         cmap="magma",
                         origin="lower",
@@ -3705,7 +3714,7 @@ class PaperFigures:
             * np.less_equal(self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw])
             for iw in range(len(self.timeWindows))
         ]
-        filters_bayes = [
+        [
             np.ones(self.resultsBayes_phase[suffix]["time"][iw].shape).astype(bool)
             * np.greater_equal(
                 self.resultsBayes_phase[suffix]["predLoss"][iw], threshBayes[iw]
@@ -4241,7 +4250,9 @@ class PaperFigures:
             : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow]), :
         ]
         predLoss = self.resultsNN_phase[suffix]["predLoss"][iwindow]
-        normalize = lambda x: (x - np.min(x)) / (np.max(x) - np.min(x))
+
+        def normalize(x):
+            return (x - np.min(x)) / (np.max(x) - np.min(x))
 
         for icell, tuningCurve in enumerate(linearTuningCurves):
             pcId = np.where(np.equal(placeFieldSort, icell))[0][0]

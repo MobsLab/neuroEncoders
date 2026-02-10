@@ -286,7 +286,7 @@ def fig_eucl_error_filtered(
         }
     )
     fig, ax = plt.subplots()
-    myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
+    {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
     sns.boxplot(
         data=datToPlot,
         x="timeWindow (ms)",

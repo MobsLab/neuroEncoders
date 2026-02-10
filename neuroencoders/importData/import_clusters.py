@@ -59,8 +59,8 @@ def getSpikesfromClu(
                     np.array(
                         [
                             [
-                                1.0 if int(cluStr[n + 1]) == l else 0.0
-                                for l in range(1, nClu + 1)
+                                1.0 if int(cluStr[n + 1]) == cluster_idx else 0.0
+                                for cluster_idx in range(1, nClu + 1)
                             ]
                             for n in range(len(cluStr) - 1)
                         ]
@@ -126,21 +126,102 @@ def getSpikesfromClu(
         cluster_save_path = os.path.join(projectPath.folder, "dataset", "clusterData")
         if not os.path.isdir(cluster_save_path):
             os.makedirs(cluster_save_path)
-        for l in range(len(labels)):
-            df = pd.DataFrame(labels[l])
-            df.to_csv(os.path.join(cluster_save_path, "Spike_labels" + str(l) + ".csv"))
-            df = pd.DataFrame(spikeTime[l])
-            df.to_csv(os.path.join(cluster_save_path, "spike_time" + str(l) + ".csv"))
-            df = pd.DataFrame(spikePositions[l])
+        for shank in range(len(labels)):
+            df = pd.DataFrame(labels[shank])
             df.to_csv(
-                os.path.join(cluster_save_path, "spike_positions" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "Spike_labels" + str(shank) + ".csv")
             )
-            df = pd.DataFrame(spikePosIndex[l])
+            df = pd.DataFrame(spikeTime[shank])
             df.to_csv(
-                os.path.join(cluster_save_path, "spike_pos_index" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_time" + str(shank) + ".csv")
             )
-            df = pd.DataFrame(spikeSpeed[l])
-            df.to_csv(os.path.join(cluster_save_path, "spike_speed" + str(l) + ".csv"))
+            df = pd.DataFrame(spikePositions[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_positions" + str(shank) + ".csv")
+            )
+            df = pd.DataFrame(spikePosIndex[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_pos_index" + str(shank) + ".csv")
+            )
+            df = pd.DataFrame(spikeSpeed[shank])
+            df.to_csv(
+                os.path.join(cluster_save_path, "spike_speed" + str(shank) + ".csv")
+            )
+    return cluster_data
+
+
+def _load_linear_spike_sorting_from_clu(projectPath: Project, flatten=True) -> dict:
+    """
+    Load spike sorting data from the original klustakwik files and linearize them in time.
+
+    Parameters
+    ----------
+    projectPath : Project object
+
+    Returns
+    -------
+    cluster_data : dict
+    """
+    # Get parameters
+    listChannels, samplingRate, _ = rawdata_parser.get_params(projectPath.xml)
+    # Allocate
+    labels = []
+    indexInDat = []
+
+    nTetrodes = len(listChannels)
+    last_n_clu = 0
+    for tetrode in tqdm.tqdm(range(nTetrodes)):
+        print(
+            f"Importing sorted spikes from Neuroscope files from electrodes group #{tetrode}"
+        )
+        if os.path.isfile(projectPath.clu(tetrode)):
+            with (
+                open(projectPath.clu(tetrode), "r") as fClu,
+                open(projectPath.res(tetrode), "r") as fRes,
+            ):  # open(projectPath.spk(tetrode), 'rb') as fSpk
+                cluStr = fClu.readlines()
+                resStr = fRes.readlines()
+                clu = np.array(
+                    [int(cluStr[n + 1]) + last_n_clu for n in range(len(cluStr) - 1)]
+                )
+                # Clusters only with labels >= 1
+                labels_mask = clu >= 1 + last_n_clu
+                labels_temp = clu[labels_mask]
+
+                # turn spike times from str to float
+                index = np.array([int(x.strip()) for x in resStr])
+                index_temp = index[labels_mask]
+
+                indexInDat.append(index_temp)
+                labels.append(labels_temp)
+                last_n_clu += int(cluStr[0]) - 1
+
+        else:
+            print("File " + projectPath.clu(tetrode) + " not found.")
+            continue
+        sys.stdout.write("File from tetrode " + " has been successfully opened. ")
+        sys.stdout.write("Processing ...")
+        sys.stdout.write("\r")
+        sys.stdout.flush()
+
+    if flatten:
+        # Now sort all spikes in time
+        all_index = np.concatenate(indexInDat)
+        sort_idx = np.argsort(all_index)
+        all_labels = np.concatenate(labels)
+        labels = all_labels[sort_idx]
+        indexInDat = all_index[sort_idx]
+
+    sys.stdout.write(
+        "We have imported linear-time clusters.                                                           "
+    )
+    sys.stdout.write("\r")
+    sys.stdout.flush()
+
+    cluster_data = {
+        "Spike_labels": labels,
+        "Spike_index": indexInDat,
+    }
     return cluster_data
 
 
@@ -169,25 +250,25 @@ def load_spike_sorting(projectPath: Project, phase=None) -> dict:
             "Spike_pos_index": [],
         }
         print("Reading saved cluster csv file")
-        for l in tqdm.tqdm(range(num_files)):
+        for shank in tqdm.tqdm(range(num_files)):
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "Spike_labels" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "Spike_labels" + str(shank) + ".csv")
             )
             cluster_data["Spike_labels"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_time" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_time" + str(shank) + ".csv")
             )
             cluster_data["Spike_times"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_positions" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_positions" + str(shank) + ".csv")
             )
             cluster_data["Spike_positions"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_pos_index" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_pos_index" + str(shank) + ".csv")
             )
             cluster_data["Spike_pos_index"].append(df.values[:, 1:])
             df = pd.read_csv(
-                os.path.join(cluster_save_path, "spike_speed" + str(l) + ".csv")
+                os.path.join(cluster_save_path, "spike_speed" + str(shank) + ".csv")
             )
             cluster_data["Spike_speed"].append(df.values[:, 1:])
 

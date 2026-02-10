@@ -12,7 +12,7 @@ def openstruc(struc, name, L):
 
     import h5py
 
-    if type(struc) != h5py._hl.dataset.Dataset:
+    if not isinstance(struc, h5py._hl.dataset.Dataset):
         if "start" in list(struc.keys()):
             for i in range(len(L)):
                 if L[i].endswith(name):
@@ -32,10 +32,10 @@ def ref2str(ref, file):
     for i in range(len(ref)):
         try:
             L = list(np.squeeze(file[ref[i]][:]))
-            if type(L[0]) == int:
+            if isinstance(L[0], int):
                 S = ""
-                for l in L:
-                    S += chr(l)
+                for shank in L:
+                    S += chr(shank)
                     out.append(S)
             else:
                 out.append(L)
@@ -84,9 +84,9 @@ class SpikeData:
             self.Nb_clusters = Nb_clusters
             self.info = {}
             for k in keys:
-                if type(spikes[k]) == h5py._hl.dataset.Dataset:
+                if isinstance(spikes[k], h5py._hl.dataset.Dataset):
                     try:
-                        if type(np.squeeze(spikes[k][:])[0]) == h5py.h5r.Reference:
+                        if isinstance(np.squeeze(spikes[k][:])[0], h5py.h5r.Reference):
                             self.info[k] = ref2str(np.squeeze(spikes[k][:]), spikes)
                         else:
                             self.info[k] = np.squeeze(spikes[k][:])
@@ -95,32 +95,37 @@ class SpikeData:
                 else:
                     L = []
                     openstruc(spikes[k], k, L)
-                    for l in L:
-                        if l.endswith("_intset"):
-                            l = l[0:-7]
-                            start = np.squeeze(spikes[l]["start"][:])
-                            stop = np.squeeze(spikes[l]["stop"][:])
-                            self.info[l] = nts.IntervalSet(
+                    for shank_key in L:
+                        if shank_key.endswith("_intset"):
+                            # Remove the "_intset" suffix to get the actual shank name
+                            shank_name = shank_key[0:-7]
+                            start = np.squeeze(spikes[shank_name]["start"][:])
+                            stop = np.squeeze(spikes[shank_name]["stop"][:])
+                            self.info[shank_name] = nts.IntervalSet(
                                 start, stop, time_units=time_unit
                             )
-                        elif type(np.squeeze(spikes[l][:])[0]) == h5py.h5r.Reference:
-                            self.info[l] = ref2str(np.squeeze(spikes[l][:]), spikes)
+                        elif isinstance(
+                            np.squeeze(spikes[shank_key][:])[0], h5py.h5r.Reference
+                        ):
+                            self.info[shank_key] = ref2str(
+                                np.squeeze(spikes[shank_key][:]), spikes
+                            )
 
                         else:
-                            self.info[l] = np.squeeze(spikes[l][:])
+                            self.info[shank_key] = np.squeeze(spikes[shank_key][:])
 
     def get_spikes(self, idx=None):
         import numpy as np
 
-        if type(idx) == np.ndarray:
+        if isinstance(idx, np.ndarray):
             idx = list(idx)
         if idx is None:
             return self.S
-        elif type(idx) == int:
+        elif isinstance(idx, int):
             return self.S[idx]
-        elif type(idx) == list:
+        elif isinstance(idx, list):
             return [self.S[i] for i in idx]
-        elif type(idx[0]) == np.bool_:
+        elif isinstance(idx[0], np.bool_):
             return [self.S[i] for i in range(len(idx)) if idx[i]]
 
     def features(self):
