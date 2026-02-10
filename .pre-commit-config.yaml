@@ -1,25 +1,25 @@
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-    -   id: trailing-whitespace
-        files: .*.py$           
-    -   id: end-of-file-fixer
+      - id: trailing-whitespace
         files: .*.py$
-    -   id: check-yaml
-    -   id: check-added-large-files
-    -   id: check-toml
+      - id: end-of-file-fixer
+        files: .*.py$
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-toml
 
--   repo: https://github.com/astral-sh/ruff-pre-commit
+  - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.8
     hooks:
       - id: ruff
-        args: [ --fix, --exit-zero ]
+        args: [--fix]
       - id: ruff-format
 
--   repo: local
+  - repo: local
     hooks:
-    -   id: pytest
+      - id: pytest
         name: pytest
         entry: uv run pytest tests/
         language: system

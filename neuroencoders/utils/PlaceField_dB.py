@@ -259,7 +259,7 @@ def get_time_range(tsd_obj):
                 return support.values[0, 0], support.values[0, 1]
             else:
                 return np.min(support), np.max(support)
-        except:
+        except AttributeError:
             pass
 
     # Fallback: use time range from timestamps
@@ -286,7 +286,7 @@ def realign_spikes(pos_tsd, spike_tsd, method="closest"):
         # Try restrict method
         try:
             return spike_tsd.restrict(pos_tsd, align=method)
-        except:
+        except AttributeError:
             pass
 
     # Manual interpolation fallback
@@ -309,7 +309,7 @@ def realign_spikes(pos_tsd, spike_tsd, method="closest"):
     if HAS_NEUROSERIES:
         try:
             return nts.Tsd(spike_times, spike_pos)
-        except:
+        except AttributeError:
             pass
 
     # Return as simple object with times and values
@@ -392,7 +392,7 @@ def PlaceField_DB(
         try:
             t_start, t_end = get_time_range(pos_x)
             total_time = t_end - t_start
-        except:
+        except AttributeError:
             # Fallback time calculation
             if hasattr(pos_x, "times"):
                 times = pos_x.times()
@@ -414,7 +414,7 @@ def PlaceField_DB(
             if HAS_NEUROSERIES:
                 try:
                     poisson_spike_times = nts.Tsd(poisson_times_abs, poisson_times_abs)
-                except:
+                except AttributeError:
                     # Fallback: simple object
                     class SimpleTsd:
                         def __init__(self, times):
@@ -447,7 +447,7 @@ def PlaceField_DB(
             if HAS_NEUROSERIES:
                 try:
                     poisson_spike_times = nts.Tsd(np.array([]), np.array([]))
-                except:
+                except AttributeError:
 
                     class SimpleTsd:
                         def __init__(self):
@@ -713,13 +713,13 @@ def _run_place_field_analysis(
                 epoch_length = epoch.tot_length()
             else:
                 epoch_length = np.sum(epoch[:, 1] - epoch[:, 0])
-        except:
+        except AttributeError:
             epoch_length = get_time_range(pos_x)[1] - get_time_range(pos_x)[0]
     else:
         try:
             t_start, t_end = get_time_range(pos_x)
             epoch_length = t_end - t_start
-        except:
+        except AttributeError:
             epoch_length = 1.0  # Fallback
 
     results["firing_rate"] = len(spike_times) / epoch_length if epoch_length > 0 else 0

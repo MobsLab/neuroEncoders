@@ -245,7 +245,7 @@ def main(args):
 
         # Now that we have the linearization function, we can get the true target
         helper.get_true_target(
-            l_function, in_place=True, show=show_figures, speedMask=True
+            windowSizeMS, l_function, in_place=True, show=show_figures, speedMask=True
         )
 
     Parameters = Params(
@@ -551,7 +551,7 @@ def main(args):
             ):
                 print("Testing sleep set")
                 # Test sleep as NN
-                outputs_sleep = TrainerBayes.test_sleep_as_NN(
+                TrainerBayes.test_sleep_as_NN(
                     DataHelper.fullBehavior,
                     bayesMatrices,
                     windowSizeMS=windowSizeMS,
@@ -687,9 +687,10 @@ def main(args):
             or args.redo
         ):
             num_augmentations = args.num_augmentations
-            print("num_augmentations", num_augmentations)
-            if num_augmentations is None:
-                num_augmentations = 4 if args.window < 0.504 else 2
+            if Parameters.dataAugmentation:
+                print("num_augmentations", num_augmentations)
+                if num_augmentations is None:
+                    num_augmentations = 4 if args.window < 0.504 else 2
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -750,22 +751,19 @@ def main(args):
                 strideFactor=strideFactor,
                 extract_spikes_counts=True,
             )
-            try:
-                print_results.print_results(
-                    NNTrainer.folderResult,
-                    windowSizeMS=windowSizeMS,
-                    show=show_figures,
-                    lossSelection=0.5,
-                    euclidean=False,
-                    target=args.target,
-                    phase="training",
-                    useSpeedMask=True,
-                    training_data=NNTrainer.training_data,
-                    force=args.redo,
-                    l_function=l_function,
-                )
-            except:
-                pass
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.5,
+                euclidean=False,
+                target=args.target,
+                phase="training",
+                useSpeedMask=True,
+                training_data=NNTrainer.training_data,
+                force=args.redo,
+                l_function=l_function,
+            )
 
         if (
             not os.path.exists(
@@ -792,22 +790,19 @@ def main(args):
                 strideFactor=strideFactor,
                 extract_spikes_counts=True,
             )
-            try:
-                print_results.print_results(
-                    NNTrainer.folderResult,
-                    windowSizeMS=windowSizeMS,
-                    show=show_figures,
-                    lossSelection=0.5,
-                    euclidean=False,
-                    force=args.redo,
-                    target=args.target,
-                    phase=args.phase,
-                    training_data=NNTrainer.training_data,
-                    useSpeedMask=True,
-                    l_function=l_function,
-                )
-            except:
-                pass
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.5,
+                euclidean=False,
+                force=args.redo,
+                target=args.target,
+                phase=args.phase,
+                training_data=NNTrainer.training_data,
+                useSpeedMask=True,
+                l_function=l_function,
+            )
 
         if (
             not os.path.exists(
@@ -834,22 +829,19 @@ def main(args):
                 extract_spikes_counts=True,
             )
 
-            try:
-                print_results.print_results(
-                    NNTrainer.folderResult,
-                    windowSizeMS=windowSizeMS,
-                    show=show_figures,
-                    lossSelection=0.5,
-                    euclidean=False,
-                    target=args.target,
-                    phase="cond",
-                    training_data=NNTrainer.training_data,
-                    useSpeedMask=True,
-                    l_function=l_function,
-                    force=args.redo,
-                )
-            except:
-                pass
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.5,
+                euclidean=False,
+                target=args.target,
+                phase="cond",
+                training_data=NNTrainer.training_data,
+                useSpeedMask=True,
+                l_function=l_function,
+                force=args.redo,
+            )
 
         if (
             not os.path.exists(
@@ -876,22 +868,19 @@ def main(args):
                 extract_spikes_counts=True,
             )
 
-            try:
-                print_results.print_results(
-                    NNTrainer.folderResult,
-                    windowSizeMS=windowSizeMS,
-                    show=show_figures,
-                    lossSelection=0.5,
-                    euclidean=False,
-                    target=args.target,
-                    phase="post",
-                    training_data=NNTrainer.training_data,
-                    useSpeedMask=True,
-                    l_function=l_function,
-                    force=args.redo,
-                )
-            except:
-                pass
+            print_results.print_results(
+                NNTrainer.folderResult,
+                windowSizeMS=windowSizeMS,
+                show=show_figures,
+                lossSelection=0.5,
+                euclidean=False,
+                target=args.target,
+                phase="post",
+                training_data=NNTrainer.training_data,
+                useSpeedMask=True,
+                l_function=l_function,
+                force=args.redo,
+            )
 
         if args.test_sleep and (
             not os.path.exists(

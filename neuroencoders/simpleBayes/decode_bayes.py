@@ -162,6 +162,24 @@ class Trainer(SpatialConstraintsMixin):
         self.ordered_neurons = None
         self.place_fields = None
 
+    def _load_linear_spike_sorting(self):
+        """Load spike sorting data from project path. Bulk, not tetrode-wise."""
+        self.logger.info("Loading linear spike sorting data...")
+        cluster_data = import_clusters._load_linear_spike_sorting_from_clu(
+            self.projectPath, flatten=True
+        )
+        self.linear_spike_labels = cluster_data["Spike_labels"]
+        self.linear_spike_index = cluster_data["Spike_index"]
+
+    def _load_shankwise_spike_sorting(self):
+        """Load spike sorting data from project path. Bulk, not tetrode-wise."""
+        self.logger.info("Loading linear spike sorting data...")
+        cluster_data = import_clusters._load_linear_spike_sorting_from_clu(
+            self.projectPath, flatten=False
+        )
+        self.spike_labels = cluster_data["Spike_labels"]
+        self.spike_index = cluster_data["Spike_index"]
+
     def train(
         self, behaviorData: Dict, onTheFlyCorrection=False, save=True, **kwargs
     ) -> Dict:
@@ -299,10 +317,9 @@ class Trainer(SpatialConstraintsMixin):
 
         # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
-        target = kwargs.get("target", self.config.target_bayes)
+        kwargs.get("target", self.config.target_bayes)
 
-        if target == "pos":
-            behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
+        behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
 
         if not hasattr(self, "training_data"):
             # first, save the training data from the behaviorData
@@ -319,7 +336,7 @@ class Trainer(SpatialConstraintsMixin):
                 f"Training data saved with {full_training_true_positions.shape} valid positions."
             )
 
-        if not hasattr(self, "spikeMatLabels"):
+        if not hasattr(self, "spikeMatLabels") or not hasattr(self, "spikeMatTimes"):
             self.logger.info(
                 f"Initializing spike matrices for {len(self.clusterData['Spike_labels'])} tetrodes..."
             )
@@ -416,6 +433,9 @@ class Trainer(SpatialConstraintsMixin):
                     save=kwargs.pop("save", True),
                     **kwargs,
                 )
+        else:
+            bayesMatrices = kwargs.get("bayesMatrices")
+            self.logger.info("Using provided Bayesian matrices for ordering.")
 
         # Use linear tuning curves for more accurate ordering
         self.logger.info("Computing linear tuning curves for ordering...")
@@ -1175,11 +1195,14 @@ class Trainer(SpatialConstraintsMixin):
         ]
         cumTimeEachTestEpoch = np.cumsum(timeEachTestEpoch)
         cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
+
         # a function that given the bin indicates the bin index:
-        binToEpoch = lambda x: np.where(
-            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
-            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
-        )[0][0]
+        def binToEpoch(x):
+            return np.where(
+                ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
+                * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+            )[0][0]
+
         binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
         firstBinEpoch = [
             np.min(np.where(np.equal(binToEpochArray, epochId))[0])
@@ -3546,11 +3569,14 @@ class LegacyTrainer:
         ]
         cumTimeEachTestEpoch = np.cumsum(timeEachTestEpoch)
         cumTimeEachTestEpoch = np.concatenate([[0], cumTimeEachTestEpoch])
+
         # a function that given the bin indicates the bin index:
-        binToEpoch = lambda x: np.where(
-            ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
-            * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
-        )[0][0]
+        def binToEpoch(x):
+            return np.where(
+                ((x * windowSize - cumTimeEachTestEpoch[0:-1]) >= 0)
+                * ((x * windowSize - cumTimeEachTestEpoch[1:]) < 0)
+            )[0][0]
+
         binToEpochArray = [binToEpoch(bins) for bins in range(n_bins)]
         firstBinEpoch = [
             np.min(np.where(np.equal(binToEpochArray, epochId))[0])
@@ -3768,14 +3794,12 @@ class LegacyTrainer:
                 )
             log_RF.append(temp)
 
-        n_bins = timeStepPred.shape[0]
+        timeStepPred.shape[0]
         ### Decoding loop
         position_probas = []
-        nSpikes = []
         for bin in tqdm(timeStepPred):
             bin_start_time = bin
             bin_stop_time = bin_start_time + windowSize
-            binSpikes = 0
             tetrodes_contributions = []
             tetrodes_contributions.append(All_Poisson_term)
             for tetrode in range(len(guessed_clusters)):

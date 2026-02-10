@@ -398,7 +398,7 @@ class SpikeNet1D(tf.keras.layers.Layer):
         with get_device_context(self.device):
             # 1. Input is (Batch, Channels, Time) -> (128, 6, 32)
             shape = tf.shape(x)
-            B, C, T = shape[0], shape[1], shape[2]
+            B, _C, T = shape[0], shape[1], shape[2]
 
             # Step 1: Reshape to process all channels through the SAME backbone
             # New shape: (Batch * 6, 32, 1)
@@ -1058,14 +1058,16 @@ def serialize_single_spike(clu, spike):
 
 # @tf.function
 def parse_serialized_sequence(
-    params, tensors, batched=False, count_spikes=False
+    params, tensors, batched=False, count_spikes=False, sorted_indices=None
 ):  # featDesc, ex_proto,
+    # TODO: use sorted indices to subset the given tensors to only the desired spikes (ie for example only the spikes that are also in the spike sorting)
     """
     Parse a serialized spike sequence example.
     Args:
         params: parameters of the network
         tensors: parsed tensors from the TFRecord example
         batched: Whether data is batched
+        count_spikes: Whether to count spikes
 
     Returns:
         Parsed tensors with reshaped spike data.
@@ -1073,6 +1075,9 @@ def parse_serialized_sequence(
         If batched, the shape should be [batchSize, num_spikes_per_batch, nChannelsPerGroup[g], 32] but is then reshaped to merge batch and spikes, giving:
         [batchSize * num_spikes_per_batch, nChannelsPerGroup[g], 32].
     """
+    if isinstance(tensors["pos"], tf.SparseTensor):
+        tensors["pos"] = tf.sparse.to_dense(tensors["pos"])
+
     tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
     # Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
     # Probably because he wanted a variable length <> inputs sequences
@@ -1113,6 +1118,11 @@ def parse_serialized_sequence(
 
                 # store result in tensors
                 tensors[f"group{g}_spikes_count"] = spike_counts
+        else:
+            # add batch dimension of 1
+            tensors["group" + str(g)] = tf.expand_dims(
+                tensors["group" + str(g)], axis=0
+            )  # shape becomes (1, num_spikes, nChannelsPerGroup[g], 32)
 
         # WARN: even if batched: gather all together, meaning batch and spikes are merged
         tensors["group" + str(g)] = tf.reshape(
@@ -1168,6 +1178,18 @@ def import_true_pos(feature):
 
     def change_feature(vals):
         vals["pos"] = tf.gather(feature, vals["pos_index"])
+        return vals
+
+    return change_feature
+
+
+def import_speed_mask(speed_mask):
+    """
+    Returns a function that adds speed mask to the parsed tensors.
+    """
+
+    def change_feature(vals):
+        vals["speedMask"] = tf.gather(speed_mask, vals["pos_index"])
         return vals
 
     return change_feature
@@ -1403,7 +1425,7 @@ def parse_serialized_sequence_with_augmentation(
         tensors: Dictionary of parsed tensors from TFRecord
         augmentation_config: Optional augmentation configuration
         batched: Whether data is batched
-
+        count_spikes: Whether to count spikes
     Returns:
         Dictionary of parsed and optionally augmented tensors
     """
@@ -1657,7 +1679,7 @@ def parse_tfrecord_with_augmentation(
     )  # [time_steps, channels]
 
     # Extract labels
-    labels = parsed_features.get("labels", None)
+    parsed_features.get("labels", None)
 
     # Apply augmentation
     augmented_data = augmentation_config.create_augmented_copies(neural_data)
@@ -1845,7 +1867,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
             )
 
             # Set shape (tf.py_function loses shape info)
-            batch_size = tf.shape(linearized_pos)[0]
+            tf.shape(linearized_pos)[0]
             weights.set_shape([None])
 
         return weights
@@ -1876,7 +1898,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         fitted_dw_config = config.get("fitted_dw_alpha")
         training_data = config.get("training_data")
         fitted_dw = DenseWeight(fitted_dw_config)
-        device = config.get("device", "/cpu:0")
+        config.get("device", "/cpu:0")
         if training_data is not None:
             fitted_dw.fit(training_data)
         # return cls(fitted_denseweight=fitted_dw, device=device)
@@ -2383,8 +2405,8 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
                 tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
             )
             W64 = tf.cast(W, tf.int64)
-            iy = idx // W64  # for debugging
-            ix = idx % W64
+            idx // W64  # for debugging
+            idx % W64
             ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
             ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
         else:
@@ -2970,7 +2992,6 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         kl = ce - entropy  # [B]
 
         # small numeric epsilon
-        tiny = 1e-9
 
         # --- Wasserstein penalty ---
         if alpha > 0.0:

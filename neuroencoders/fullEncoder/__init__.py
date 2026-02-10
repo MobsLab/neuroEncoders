@@ -6,5 +6,5 @@ Exposes:
         - an_network (module containing neural network architectures)
 """
 
-from . import an_network
-from .an_network import LSTMandSpikeNetwork
+from . import an_network as an_network
+from .an_network import LSTMandSpikeNetwork as LSTMandSpikeNetwork

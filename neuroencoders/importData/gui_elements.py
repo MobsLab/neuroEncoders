@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-from datetime import timedelta
 from pathlib import Path
 from typing import Optional, Tuple
 from warnings import warn
@@ -17,7 +16,7 @@ from matplotlib.colors import LinearSegmentedColormap, ListedColormap, NoNorm, N
 from matplotlib.legend_handler import HandlerTuple
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from scipy.stats import gaussian_kde
 from sklearn.metrics import (
     accuracy_score,
@@ -28,6 +27,7 @@ from sklearn.metrics import (
 )
 
 from neuroencoders.importData import epochs_management as ep
+from neuroencoders.utils.global_classes import DataHelper
 from neuroencoders.utils.viz_params import (
     ALL_STIMS_COLOR,
     ALPHA_DELTA_LINE,
@@ -59,12 +59,26 @@ from neuroencoders.utils.viz_params import (
 )
 
 
-def time_formatter(x, pos):
-    td = timedelta(seconds=x)
-    h, rem = divmod(int(td.total_seconds()), 3600)
+def _time_format_logic(x):
+    """Internal logic for a single scalar value"""
+    # Split whole seconds and fractional part
+    whole_seconds = int(x)
+    # Extract ms (round to 3 decimal places)
+    ms = int(round((x - whole_seconds) * 1000))
+
+    # Handle rollover
+    if ms >= 1000:
+        whole_seconds += 1
+        ms -= 1000
+
+    h, rem = divmod(whole_seconds, 3600)
     m, s = divmod(rem, 60)
-    ms = int((x % 1) * 1000)
-    return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+# This makes the function work on single values OR arrays automatically
+time_formatter_vec = np.vectorize(lambda x, pos=None: _time_format_logic(x))
 
 
 class AnimatedPositionPlotter:
@@ -74,7 +88,7 @@ class AnimatedPositionPlotter:
 
     def __init__(
         self,
-        data_helper,
+        data_helper: DataHelper,
         trail_length: int = 30,
         lin_movie_duration: int = 500,
         figsize: Tuple[float, float] = (16, 9),
@@ -164,7 +178,11 @@ class AnimatedPositionPlotter:
             self.predicted_dim_please = kwargs.pop("predicted_dim_please")
 
         self.positions = self.positions_from_NN
-        self.positionTime = self.prediction_positionTime
+        self.positionTime = (
+            self.prediction_positionTime.flatten()
+            if self.prediction_positionTime is not None
+            else self.data_helper.fullBehavior["Times"]["positionTime"].flatten()
+        )
         self.plot_all_stims = kwargs.get("plot_all_stims", False)
         # we setup a "true" positionTime to use for precise plotting such as stims...
         # same for "true" positions, which are the original positions for each and every timepoint
@@ -531,7 +549,11 @@ class AnimatedPositionPlotter:
                 self.dim = np.array(self.data_helper.direction)
                 self.dim_name = "direction"
                 # get rid of NaN values in directions
-                self.dim = self.dim[self.posIndex]
+                if self.posIndex is not None:
+                    self.dim = self.dim[self.posIndex]
+                else:
+                    self.dim = self.dim[self.totMask]
+                    self.dim = self.dim[self.true_valid_indices]
             elif dim == "distance" or dim == "thigmo":
                 if not hasattr(self.data_helper, "thigmo"):
                     self.data_helper.thigmo = np.array(
@@ -539,16 +561,28 @@ class AnimatedPositionPlotter:
                     )
                 self.dim = np.array(self.data_helper.thigmo)
                 self.dim_name = "dist2wall"
-                self.dim = self.dim[self.posIndex]
+                if self.posIndex is not None:
+                    self.dim = self.dim[self.posIndex]
+                else:
+                    self.dim = self.dim[self.totMask]
+                    self.dim = self.dim[self.true_valid_indices]
             elif dim == "PosHDSpeed":
                 self.dim = np.array(self.data_helper.positions)
                 self.dim_name = "PosHDSpeed"
-                self.dim = self.dim[self.posIndex]
+                if self.posIndex is not None:
+                    self.dim = self.dim[self.posIndex]
+                else:
+                    self.dim = self.dim[self.totMask]
+                    self.dim = self.dim[self.true_valid_indices]
             elif dim == "Head Direction":
-                self.dim = np.array(self.data_helper.positions[:, 3])
+                self.dim = np.array(self.data_helper.positions[:, 3]).flatten()
                 self.dim_name = "Head Direction"
                 # self.lin_dim = self.data_helper.positions[:, 2]
-                self.dim = self.dim[self.posIndex]
+                if self.posIndex is not None:
+                    self.dim = self.dim[self.posIndex]
+                else:
+                    self.dim = self.dim[self.totMask]
+                    self.dim = self.dim[self.true_valid_indices]
                 # self.lin_dim = self.lin_dim[self.totMask][self.true_valid_indices]
                 self.positions = self.positions[:, :2]
         elif isinstance(dim, np.ndarray):
@@ -920,7 +954,8 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.data_helper.direction
                 dim = dim = dim[self.totMask][self.true_valid_indices]
-            except:
+            # except masking issues (wrong length), fallback to computing from linpositions
+            except IndexError:
                 dim = self.data_helper._get_traveling_direction(self.linpositions)
             if self.predicted is not None:
                 predicted_dim = self.data_helper._get_traveling_direction(
@@ -940,7 +975,7 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.predicted_dim_please
                 dim = dim[self.totMask][self.true_valid_indices]
-            except:
+            except IndexError:
                 print("Using speed mask from random.")
                 dim = self.speed_mask
 
@@ -986,11 +1021,11 @@ class AnimatedPositionPlotter:
 
         Possibility to provide additional arguments such as the cmap for the points, size of the points, and alpha.
         """
-        true_color = kwargs.get("true_color", TRUE_COLOR)
+        kwargs.get("true_color", TRUE_COLOR)
         true_line_color = kwargs.get("true_line_color", TRUE_LINE_COLOR)
         predicted_color = kwargs.get("predicted_color", PREDICTED_COLOR)
         predicted_line_color = kwargs.get("predicted_line_color", PREDICTED_LINE_COLOR)
-        colors_style = kwargs.get("colors_style", None)
+        kwargs.get("colors_style", None)
 
         self.axes["linpos_movie"] = self.fig.add_subplot(gs[1, :])
         ax = self.axes["linpos_movie"]
@@ -1141,8 +1176,9 @@ class AnimatedPositionPlotter:
         )
         ax.legend(ax_handles, ax_labels, loc="lower left", fontsize=10, framealpha=0.5)
         ax.xaxis.set_major_formatter(
-            FuncFormatter(time_formatter)
+            FuncFormatter(time_formatter_vec)
         )  # Format x-axis as time
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
 
     def _setup_polar_panel(self, gs, **kwargs):
         """Setup polar heading direction panel."""
@@ -2095,14 +2131,14 @@ class AnimatedPositionPlotter:
             # Get trail data
             trail_positions = self.positions[start_idx:end_idx]
             trail_directions = self.dims[name_axis][start_idx:end_idx]
-            trail_times = self.positionTime[start_idx:end_idx]
+            self.positionTime[start_idx:end_idx]
 
             if self.predicted is not None:
                 trail_predicted = self.predicted[start_idx:end_idx]
                 trail_directions_predicted = self.predicted_dims[name_axis][
                     start_idx:end_idx
                 ]
-                trail_predicted_times = self.positionTime[start_idx:end_idx]
+                self.positionTime[start_idx:end_idx]
                 assert trail_predicted.shape[0] == trail_directions_predicted.shape[0]
             else:
                 trail_predicted = None
@@ -2395,7 +2431,7 @@ class AnimatedPositionPlotter:
                         continue
                     try:
                         mask = indices == frame
-                    except:
+                    except (TypeError, AttributeError):
                         continue
                     if np.any(mask):
                         x_data = self.positions[indices[mask], 0]
@@ -2468,26 +2504,29 @@ class AnimatedPositionPlotter:
 
             # Update title with current frame info and direction
             if not self.be_fast:
-                if self.binary_colors[name_axis]:
-                    zone_name = "Shock Zone" if current_dir == 0 else "Safe Zone"
-                    title_text = f"Position Trajectory - Frame {frame + 1}/{self.total_frames} - {zone_name} @{timedelta(seconds=self.positionTime[frame].astype(float))}"
-                else:
-                    title_text = f"Position Trajectory - Frame {frame + 1}/{self.total_frames} @{timedelta(seconds=self.positionTime[frame].astype(float))}"
-                    # nice but very slow  @{timedelta(seconds=time[-1])}
+                if (frame + 1) % 30 == 0 or frame == self.total_frames - 1:
+                    if self.binary_colors[name_axis]:
+                        zone_name = "Shock Zone" if current_dir == 0 else "Safe Zone"
+                        title_text = f"Position Trajectory - Frame {frame + 1}/{self.total_frames} - {zone_name} @{_time_format_logic(float(self.positionTime[frame]))}"
+                    else:
+                        title_text = f"Position Trajectory - Frame {frame + 1}/{self.total_frames} @{_time_format_logic(float(self.positionTime[frame]))}"
 
-                # In analysis mode, also show position error
-                if self.predicted is not None:
-                    pos_error = np.nanmean(
-                        np.linalg.norm(
-                            self.predicted[: frame + 1] - self.positions[: frame + 1],
-                            axis=1,
+                    # In analysis mode, also show position error
+                    if self.predicted is not None:
+                        pos_error = np.nanmean(
+                            np.linalg.norm(
+                                self.predicted[: frame + 1]
+                                - self.positions[: frame + 1],
+                                axis=1,
+                            )
                         )
-                    )
-                    title_text = f"Position error: {pos_error:.2f} cm | " + title_text
-                if not self.very_simple_plot:
-                    self.artists[name_axis]["pos_title"].set_text(title_text)
-                else:
-                    self.artists["fig_title"].set_text(title_text)
+                        title_text = (
+                            f"Position error: {pos_error:.2f} cm | " + title_text
+                        )
+                    if not self.very_simple_plot:
+                        self.artists[name_axis]["pos_title"].set_text(title_text)
+                    else:
+                        self.artists["fig_title"].set_text(title_text)
 
     def _update_polar_panel(self, frame):
         """Update the polar heading panel."""
@@ -2602,17 +2641,21 @@ class AnimatedPositionPlotter:
                 )
                 self.artists["linpos_pred_points"].set_color(colors)
 
+        time_to_show_min = time.min()
+        # adjust xlim to show some future points at the beginning of the movie (ie a buffer of 20 frames or half the movie duration)
+        time_to_show_max = max(
+            self.positionTime[min(end_idx + 20, self.positionTime.size - 1)],
+            self.positionTime[
+                min(
+                    start_idx + self.lin_movie_duration // 2,
+                    self.positionTime.size - 1,
+                )
+            ],
+        )
+        padding = max((time_to_show_max - time_to_show_min) * 0.05, 0.01)
         self.axes["linpos_movie"].set_xlim(
-            self.positionTime[start_idx],
-            max(
-                self.positionTime[min(end_idx + 20, self.positionTime.size - 1)],
-                self.positionTime[
-                    min(
-                        start_idx + self.lin_movie_duration // 2,
-                        self.positionTime.size - 1,
-                    )
-                ],
-            ),
+            time_to_show_min - padding,
+            time_to_show_max + padding,
         )
 
         # update stims, freezing, and ripples markers
@@ -2625,7 +2668,7 @@ class AnimatedPositionPlotter:
                 continue
             try:
                 mask = indices == frame
-            except:
+            except (TypeError, AttributeError):
                 continue
 
             if np.any(mask):
@@ -2688,6 +2731,8 @@ class AnimatedPositionPlotter:
                         self.artists[name].set_xdata(xdata)
                         self.artists[name].set_ydata(ydata)
 
+        return self.flatten_artists()
+
     def create_animation(
         self,
         interval: int = 50,
@@ -2713,7 +2758,7 @@ class AnimatedPositionPlotter:
         # Default kwargs for better Qt compatibility
         anim_kwargs = {
             "blit": kwargs.get(
-                "blit", True
+                "blit", False
             ),  # Better compatibility with Qt if set False
             "cache_frame_data": kwargs.get(
                 "cache_frame_data", False
@@ -2887,7 +2932,6 @@ class ModelPerformanceVisualizer:
         # Create error type visualization
         y_pos = np.zeros(self.n_points)
         colors = []
-        labels = []
 
         for i in range(self.n_points):
             if self.true_positives[i]:
@@ -3083,7 +3127,7 @@ class ModelPerformanceVisualizer:
         # Add text annotations
         for i in range(4):
             for j in range(n_windows):
-                text = ax.text(
+                ax.text(
                     j,
                     i,
                     f"{window_errors_norm[i, j]:.2f}",
@@ -3714,7 +3758,7 @@ def lighten_color(color, amount=0.5):
 
     try:
         c = mc.cnames[color]
-    except:
+    except KeyError:
         c = color
     c = colorsys.rgb_to_hls(*mc.to_rgb(c))
     crgb = np.array(list(colorsys.hls_to_rgb(c[0], 1 - amount * (1 - c[1]), c[2])))
@@ -3997,115 +4041,53 @@ def plot_concatenated_bouts(
     return x_contiguous
 
 
-if __name__ == "__main__":
-    # Run demonstration
-    try:
-        print("=" * 60)
-        print("ANIMATED POSITION PLOTTER DEMO")
-        print("=" * 60)
-        print(f"Backend in use: {matplotlib.get_backend()}")
+def plot_spikes_sequence(proto_example, nChannelsPerGroup):
+    # for each index, the corresponding spike is in index "indicesX" where X is the group number (0, 1, 2, or 3)
+    # e.g., if index 5 is in group 2, then the spike is in df["spikes2"][0][5 - 1] (subtract 1 for zeroForGather masking)
+    # plot the first 50 spikes of the sequence, on a single figure
+    import seaborn as sns
 
-        plotter, anim = demo_animated_plot()
-        print("\nAnimation created successfully!")
-
-        # Keep the plot alive for Qt backends
-        backend = matplotlib.get_backend()
-        if "Qt" in backend:
-            print("\nQt backend detected - plot window should stay interactive")
-            print("Close the plot window to continue...")
-            try:
-                # For Qt backends, ensure event loop runs
-                if hasattr(plotter.fig.canvas, "start_main_loop"):
-                    plotter.fig.canvas.start_main_loop()
-            except:
-                pass
-
-    except Exception as e:
-        print(f"Error running demonstration: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-    # Show usage examples
-    print("\n" + "=" * 60)
-    print("USAGE WITH YOUR DATA:")
-    print("=" * 60)
-    print(f"Current backend: {matplotlib.get_backend()}")
-    print("""
-# Plot your MATLAB maze shape:
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
-               [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.setup_plot(
-    custom_lines=[maze_coords],     # Your maze shape
-    custom_line_colors='black',     # Maze color
-    custom_line_styles='-',         # Solid lines
-    custom_line_widths=3            # Thick walls
-)
-plotter.show()
-
-# Multiple custom shapes:
-maze = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0], [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-shock_zone = [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7], [0.3, 0.3]]  # Square shock zone
-
-plotter.setup_plot(
-    custom_lines=[maze, shock_zone],
-    custom_line_colors=['black', 'red'],    # Different colors
-    custom_line_styles=['-', '--'],         # Different styles
-    custom_line_widths=[3, 2]               # Different widths
-)
-
-# Alternative: Use helper function
-maze_coords = [[0, 0], [0, 1], [1, 1], [1, 0], [0.63, 0],
-               [0.63, 0.75], [0.35, 0.75], [0.35, 0], [0, 0]]
-custom_lines = create_maze_from_matlab(maze_coords)
-
-plotter = create_plotter_for_data(
-    your_data_helper,
-    custom_lines=custom_lines
-)
-
-# Mix with other reference lines:
-plotter.setup_plot(
-    binary_colors=True,
-    custom_lines=[maze_coords],          # Maze walls
-    hlines=[0.5],                        # Center horizontal line
-    vlines=[0.5],                        # Center vertical line
-    custom_line_colors='black',          # Maze color
-    line_colors='gray'                   # Reference line color
-)
-
-# Force Qt backend:
-plotter = create_qt_plotter(your_data_helper, trail_length=40)
-
-# In Jupyter notebook:
-%matplotlib widget  # or %matplotlib qt
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.show()
-
-# Save as video:
-plotter = AnimatedPositionPlotter(your_data_helper)
-anim = plotter.create_animation(save_path='trajectory.mp4')
-
-# Manual backend control:
-import matplotlib
-matplotlib.use('Qt5Agg')  # Before importing pyplot
-plotter = AnimatedPositionPlotter(your_data_helper)
-plotter.show()
-""")
-
-    print("\nAvailable backends on your system:")
-    try:
-        import matplotlib.backend_bases
-
-        backends = []
-        for backend in ["Qt5Agg", "Qt4Agg", "TkAgg", "GTK3Agg", "WXAgg"]:
-            try:
-                matplotlib.use(backend, force=False)
-                backends.append(backend)
-            except:
-                pass
-        print(f"Compatible backends: {backends}")
-    except:
-        print("Could not detect available backends")
+    fig, _axs = plt.subplots(1, 1, figsize=(10, 6), sharex=True)
+    axs = [_axs, _axs, _axs, _axs]  # hack to have 4 axs in a single plot
+    palette0 = sns.color_palette("Set1", nChannelsPerGroup[0])
+    palette1 = sns.color_palette("Set2", nChannelsPerGroup[1])
+    palette2 = sns.color_palette("Set3", nChannelsPerGroup[2])
+    palette3 = sns.color_palette("husl", nChannelsPerGroup[3])
+    for i in range(min(proto_example["indices0"][0].shape[0], 30)):
+        is_group0 = proto_example["indices0"][0][i] != 0
+        is_group1 = proto_example["indices1"][0][i] != 0
+        is_group2 = proto_example["indices2"][0][i] != 0
+        is_group3 = proto_example["indices3"][0][i] != 0
+        if is_group0:
+            # reshape the spikes to its correct shape : [nChannels, 32 timebins]
+            spike = proto_example["group0"][0].reshape(-1, nChannelsPerGroup[0], 32)[
+                proto_example["indices0"][0][i] - 1
+            ]
+            ax_to_plot = 0
+            palette = palette0
+        if is_group1:
+            spike = proto_example["group1"][0].reshape(-1, nChannelsPerGroup[1], 32)[
+                proto_example["indices1"][0][i] - 1
+            ]
+            ax_to_plot = 1
+            palette = palette1
+        if is_group2:
+            spike = proto_example["group2"][0].reshape(-1, nChannelsPerGroup[2], 32)[
+                proto_example["indices2"][0][i] - 1
+            ]
+            ax_to_plot = 2
+            palette = palette2
+        if is_group3:
+            spike = proto_example["group3"][0].reshape(-1, nChannelsPerGroup[3], 32)[
+                proto_example["indices3"][0][i] - 1
+            ]
+            ax_to_plot = 3
+            palette = palette3
+        for ch in range(spike.shape[0]):
+            axs[ax_to_plot].plot(
+                np.arange(32 * i, 32 * (i + 1)), spike[ch] + ch * 2, c=palette[ch]
+            )  # offset each spike for visibility
+    plt.xlabel("Timebins")
+    plt.suptitle("First 50 spikes from the sequence, separated by channel")
+    plt.tight_layout()
+    plt.show()

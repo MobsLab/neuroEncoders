@@ -142,7 +142,7 @@ class TestGetDeviceContext(unittest.TestCase):
         strategy = MagicMock(spec=tf.distribute.Strategy)
         strategy.scope.return_value = contextlib.nullcontext()
 
-        ctx = get_device_context(strategy)
+        get_device_context(strategy)
         strategy.scope.assert_called_once()
 
     @patch("tensorflow.distribute.has_strategy")
@@ -152,7 +152,7 @@ class TestGetDeviceContext(unittest.TestCase):
 
         with patch("tensorflow.device") as mock_device:
             mock_device.return_value = contextlib.nullcontext()
-            ctx = get_device_context("/GPU:0")
+            get_device_context("/GPU:0")
             mock_device.assert_called_once_with("/GPU:0")
 
     @patch("tensorflow.distribute.has_strategy")
