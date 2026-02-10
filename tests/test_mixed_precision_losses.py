@@ -6,11 +6,8 @@ from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.an_network import LinearizationLayer
 
 # Set mixed precision policy if possible
-try:
-    policy = tf.keras.mixed_precision.Policy("mixed_bfloat16")
-    tf.keras.mixed_precision.set_global_policy(policy)
-except:
-    pass
+policy = tf.keras.mixed_precision.Policy("mixed_bfloat16")
+tf.keras.mixed_precision.set_global_policy(policy)
 
 
 @pytest.fixture
@@ -69,6 +66,7 @@ def test_multi_column_loss_layer_mp(gaussian_params, mock_l_layer):
     multi_loss = nnUtils.MultiColumnLossLayer(
         column_losses={"0": "mse", "1": "kl_heatmap"}, gaussian_loss_layer=gh_losses
     )
+    print(f"managed to instantiate MultiColumnLossLayer with kl_heatmap: {multi_loss}")
 
     batch_size = 4
     y_true = tf.random.uniform((batch_size, 2), dtype=tf.bfloat16)

@@ -367,7 +367,10 @@ if __name__ == "__main__":
     # print(f"Found directories: {dirs}")
     mouse_commands = {}
     for directory in dirs:
-        if any((mouse in directory or mouse[:-1] in directory) for mouse in mice_nb) or not mice_nb:
+        if (
+            any((mouse in directory or mouse[:-1] in directory) for mouse in mice_nb)
+            or not mice_nb
+        ):
             if "M1199_MFB" not in directory:
                 mouse_commands[directory] = []
                 for win in win_values:
@@ -388,7 +391,9 @@ if __name__ == "__main__":
                             if cmd_bayes:
                                 mouse_commands[directory].append(cmd_bayes)
                     else:
-                        cmd_ann, cmd_bayes = process_directory(directory, win, force, redo)
+                        cmd_ann, cmd_bayes = process_directory(
+                            directory, win, force, redo
+                        )
                         if cmd_ann:
                             mouse_commands[directory].append(cmd_ann)
                         if cmd_bayes:
@@ -409,9 +414,13 @@ if __name__ == "__main__":
                             os.path.join(directory, dirmfb), win, force, redo
                         )
                         if cmd_ann:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(cmd_ann)
+                            mouse_commands[os.path.join(directory, dirmfb)].append(
+                                cmd_ann
+                            )
                         if cmd_bayes:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(cmd_bayes)
+                            mouse_commands[os.path.join(directory, dirmfb)].append(
+                                cmd_bayes
+                            )
 
             if rsync:
                 PathForExperiments["realPath"] = PathForExperiments["path"].apply(
@@ -439,7 +448,9 @@ if __name__ == "__main__":
                         mouse_commands[directory].append(runNasCMD)
                     else:
                         for dirmfb in ["exp1", "exp2"]:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(runNasCMD)
+                            mouse_commands[os.path.join(directory, dirmfb)].append(
+                                runNasCMD
+                            )
                 except (IndexError, KeyError) as e:
                     # Exception is expected when mouse directory structure is non-standard
                     # or when mouse is not found in PathForExperiments

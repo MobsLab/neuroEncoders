@@ -13,7 +13,7 @@ def mock_mat_file(tmp_path):
     """Creates a mock nnBehavior.mat file."""
     mat_path = tmp_path / "nnBehavior.mat"
     with tables.open_file(str(mat_path), mode="w") as f:
-        behavior = f.create_group("/", "behavior")
+        f.create_group("/", "behavior")
         # Add some mock data if needed, but UMazeLinearizer can generate its own
     return str(tmp_path)
 
@@ -83,6 +83,10 @@ def test_pykeops_linearization():
     """Test KeOps-based linearization if available."""
     try:
         import pykeops
+
+        print(
+            f"PyKeOps v{pykeops.__version__} is available, running KeOps linearization test."
+        )
     except ImportError:
         pytest.skip("PyKeOps not installed")
 
