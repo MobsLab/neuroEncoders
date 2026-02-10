@@ -180,61 +180,85 @@ class Trainer(SpatialConstraintsMixin):
         self.spike_labels = cluster_data["Spike_labels"]
         self.spike_index = cluster_data["Spike_index"]
 
+    def _save_training_data(self, behaviorData: Dict) -> None:
+        """Saves valid training positions from behaviorData."""
+        if hasattr(self, "training_data"):
+            return
+
+        speedMask = behaviorData["Times"]["speedFilter"]
+        epochMask = inEpochsMask(
+            behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+        )
+        totMask = speedMask * epochMask
+        full_training_true_positions = behaviorData["Positions"][
+            totMask, : self.feature_dim
+        ]
+        self.training_data = full_training_true_positions
+        self.logger.info(
+            f"Training data saved with {full_training_true_positions.shape} valid positions."
+        )
+
+    def _get_training_filepath(self, is_predicted: bool, winMS: Optional[int]) -> str:
+        """Returns the filepath for saving Bayes matrices."""
+        if is_predicted and winMS is None:
+            raise ValueError("winMS must be provided when is_predicted is True.")
+
+        filename = (
+            f"bayesMatrices_predicted_{winMS}.pkl"
+            if is_predicted
+            else "bayesMatrices.pkl"
+        )
+        return os.path.join(self.folderResult, filename)
+
+    def _prepare_filtered_positions(
+        self, behaviorData: Dict, onTheFlyCorrection: bool
+    ) -> Tuple[np.ndarray, float]:
+        """Prepares speed-filtered and normalized positions for training."""
+        if "Bandwidth" in behaviorData:
+            self.config.fullBehaviorBandwidth = behaviorData["Bandwidth"]
+
+        speed_filtered_indices = reduce(
+            np.intersect1d,
+            (
+                np.where(behaviorData["Times"]["speedFilter"]),
+                inEpochs(
+                    behaviorData["positionTime"][:, 0],
+                    behaviorData["Times"]["trainEpochs"],
+                ),
+            ),
+        )
+        speed_filtered_positions = behaviorData["Positions"][speed_filtered_indices]
+
+        maxPos = np.max(
+            behaviorData["Positions"][
+                ~np.isnan(np.sum(behaviorData["Positions"], axis=1))
+            ]
+        )
+
+        if onTheFlyCorrection:
+            speed_filtered_positions = speed_filtered_positions / maxPos
+
+        positions = speed_filtered_positions[
+            ~np.isnan(speed_filtered_positions).any(axis=1)
+        ]
+        return positions[:, : self.feature_dim], maxPos
+
     def train(
         self, behaviorData: Dict, onTheFlyCorrection=False, save=True, **kwargs
     ) -> Dict:
         """
         Main training function to build the Bayesian matrices.
         """
+        is_predicted = kwargs.get("is_predicted", False)
+        winMS = kwargs.get("winMS")
+        filepath = self._get_training_filepath(is_predicted, winMS)
 
-        if not hasattr(self, "training_data"):
-            # first, save the training data from the behaviorData
-            speedMask = behaviorData["Times"]["speedFilter"]
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-            )
-            totMask = speedMask * epochMask
-            full_training_true_positions = behaviorData["Positions"][
-                totMask, : self.feature_dim
-            ]
-            self.training_data = full_training_true_positions
-            self.logger.info(
-                f"Training data saved with {full_training_true_positions.shape} valid positions."
-            )
+        self._save_training_data(behaviorData)
         self.logger.info("Starting Bayesian training process...")
 
-        # look for bandwidth in behaviorData. If it is found compare it with the one in config
-        if "Bandwidth" in behaviorData:
-            self.config.fullBehaviorBandwidth = behaviorData["Bandwidth"]
-        # Work with position coordinates
-        speed_filtered_positions = behaviorData["Positions"][
-            reduce(
-                np.intersect1d,
-                (
-                    np.where(behaviorData["Times"]["speedFilter"]),
-                    inEpochs(
-                        behaviorData["positionTime"][:, 0],
-                        behaviorData["Times"]["trainEpochs"],
-                    ),
-                ),
-            )
-        ]  # Get speed-filtered coordinates from train epoch
-
-        maxPos = np.max(
-            behaviorData["Positions"][
-                np.logical_not(np.isnan(np.sum(behaviorData["Positions"], axis=1)))
-            ]
+        positions, maxPos = self._prepare_filtered_positions(
+            behaviorData, onTheFlyCorrection
         )
-        if (
-            onTheFlyCorrection
-        ):  # setting the position to be between 0 and 1 if necessary
-            speed_filtered_positions = speed_filtered_positions / maxPos
-
-        positions = speed_filtered_positions[
-            ~np.isnan(speed_filtered_positions).any(axis=1)
-        ]
-        # allows to work with only the required dimensions (2D position by default here)
-        positions = positions[:, : self.feature_dim]
 
         ### Build global occupation map
         final_occupation, occupation, gridFeature = self._build_occupation_map(
@@ -242,7 +266,7 @@ class Trainer(SpatialConstraintsMixin):
         )
 
         ### Align the positions time with the spike_times so we can speed filter each spike time (long step)
-        speed_filters = self._align_speed_filters(behaviorData)
+        speed_filters = self._align_speed_filters(behaviorData, **kwargs)
 
         nTetrodes = len(self.clusterData["Spike_labels"])
         assert len(speed_filters) == nTetrodes, (
@@ -296,194 +320,241 @@ class Trainer(SpatialConstraintsMixin):
 
         if save:
             # save the bayes matrices
-            with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
+            with open(filepath, "wb") as f:
                 pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
             self.logger.info("Bayesian matrices saved successfully.")
 
         self.logger.info("Training completed successfully.")
         return bayesMatrices
 
+    def _init_spike_matrices(self) -> None:
+        """Initializes and populates consolidated spike label and time matrices."""
+        if hasattr(self, "spikeMatLabels") and hasattr(self, "spikeMatTimes"):
+            return
+
+        self.logger.info(
+            f"Initializing spike matrices for {len(self.clusterData['Spike_labels'])} tetrodes..."
+        )
+
+        labels_list = self.clusterData["Spike_labels"]
+        times_list = self.clusterData["Spike_times"]
+
+        nbSpikes = [a.shape[0] for a in labels_list]
+        nbNeurons = [a.shape[1] for a in labels_list]
+
+        total_spikes = sum(nbSpikes)
+        total_neurons = sum(nbNeurons)
+
+        spikeMatLabels = np.zeros((total_spikes, total_neurons))
+        spikeMatTimes = np.zeros((total_spikes, 1))
+
+        curr_spike = 0
+        curr_neuron = 0
+
+        for labels, times in zip(labels_list, times_list):
+            n_s, n_n = labels.shape
+            spikeMatLabels[
+                curr_spike : curr_spike + n_s, curr_neuron : curr_neuron + n_n
+            ] = labels
+            spikeMatTimes[curr_spike : curr_spike + n_s, :] = times
+            curr_spike += n_s
+            curr_neuron += n_n
+
+        spikeorder = np.argsort(spikeMatTimes[:, 0])
+        self.spikeMatLabels = spikeMatLabels[spikeorder, :]
+        self.spikeMatTimes = spikeMatTimes[spikeorder, :]
+
+    def _try_load_bayes_matrices(
+        self, filepath: str, filename: str, redo: bool, load_last_bayes: bool
+    ) -> Optional[Dict]:
+        """Attempts to load existing Bayesian matrices from local or fallback locations."""
+        if redo:
+            self.logger.info("Redundant training requested, skipping load.")
+            return None
+
+        # Try local results folder
+        if os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                matrices = pickle.load(f)
+            self.logger.info("Loaded existing Bayesian matrices.")
+            return matrices
+
+        # Try fallback 'last_bayes' folder
+        if load_last_bayes or self.config.extra_kwargs.get("load_last_bayes", False):
+            fallback_path = os.path.join(
+                self.projectPath.experimentPath, "..", "last_bayes", "results", filename
+            )
+            if os.path.exists(fallback_path):
+                with open(fallback_path, "rb") as f:
+                    matrices = pickle.load(f)
+                self.logger.info(
+                    f"Loaded Bayesian matrices from fallback: {fallback_path}. Copying to local results."
+                )
+                with open(filepath, "wb") as f:
+                    pickle.dump(matrices, f, pickle.HIGHEST_PROTOCOL)
+                return matrices
+
+        return None
+
     def train_order_by_pos(self, behaviorData: Dict, l_function, **kwargs) -> Dict:
         """
         Train the model and order the clusters by their preferred position.
-        Args:
-            behaviorData: dict, containing the position and time data.
-            l_function: callable, linearization function.
-            **kwargs: additional arguments including onTheFlyCorrection, bayesMatrices, redo.
-
-        Returns:
-            bayesMatrices: dict, containing the trained matrices for Bayesian inference.
         """
-
-        # Get normalization setting from kwargs
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
-        kwargs.get("target", self.config.target_bayes)
+        is_predicted = kwargs.get("is_predicted", False)
+        winMS = kwargs.get("winMS")
+        redo = kwargs.get("redo", False)
+        load_last_bayes = kwargs.get("load_last_bayes", False)
+
+        filepath = self._get_training_filepath(is_predicted, winMS)
+        filename = os.path.basename(filepath)
 
         behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
 
-        if not hasattr(self, "training_data"):
-            # first, save the training data from the behaviorData
-            speedMask = behaviorData["Times"]["speedFilter"]
-            epochMask = inEpochsMask(
-                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
-            )
-            totMask = speedMask * epochMask
-            full_training_true_positions = behaviorData["Positions"][
-                totMask, : self.feature_dim
-            ]
-            self.training_data = full_training_true_positions
-            self.logger.info(
-                f"Training data saved with {full_training_true_positions.shape} valid positions."
+        self._save_training_data(behaviorData)
+        self._init_spike_matrices()
+
+        # Try loading existing matrices
+        bayesMatrices = kwargs.get("bayesMatrices")
+        if bayesMatrices is None:
+            bayesMatrices = self._try_load_bayes_matrices(
+                filepath, filename, redo, load_last_bayes
             )
 
-        if not hasattr(self, "spikeMatLabels") or not hasattr(self, "spikeMatTimes"):
-            self.logger.info(
-                f"Initializing spike matrices for {len(self.clusterData['Spike_labels'])} tetrodes..."
-            )
-            # Gather all spikes in large array and sort it in time - We will need this when comparing waveforms and plotting pc
-            nbSpikes = [a.shape[0] for a in self.clusterData["Spike_labels"]]
-            nbNeurons = [a.shape[1] for a in self.clusterData["Spike_labels"]]
-            spikeMatLabels = np.zeros([np.sum(nbSpikes), np.sum(nbNeurons)])
-            spikeMatTimes = np.zeros([np.sum(nbSpikes), 1])
-            cnbSpikes = np.cumsum(nbSpikes)
-            cnbNeurons = np.cumsum(nbNeurons)
-
-            for id in range(len(nbSpikes)):
-                if id > 0:
-                    spikeMatLabels[
-                        cnbSpikes[id - 1] : cnbSpikes[id],
-                        cnbNeurons[id - 1] : cnbNeurons[id],
-                    ] = self.clusterData["Spike_labels"][id]
-                    spikeMatTimes[cnbSpikes[id - 1] : cnbSpikes[id], :] = (
-                        self.clusterData["Spike_times"][id]
-                    )
+        if bayesMatrices is not None:
+            # Check if ordering is already present
+            if "orderedLinearPlaceFields" in bayesMatrices:
+                if not is_predicted:
+                    self.linearPreferredPos = bayesMatrices["linearPreferredPos"]
+                    self.linearPosArgSort = bayesMatrices["linearPosArgSort"]
+                    self.orderedPlaceFields = bayesMatrices["orderedPlaceFields"]
+                    self.orderedLinearPlaceFields = bayesMatrices[
+                        "orderedLinearPlaceFields"
+                    ]
+                    self.logger.info("Using pre-existing linear ordering of neurons.")
+                    return bayesMatrices
                 else:
-                    spikeMatLabels[0 : cnbSpikes[id], 0 : cnbNeurons[id]] = (
-                        self.clusterData["Spike_labels"][id]
+                    self.predicted_linearPreferredPos = bayesMatrices[
+                        "linearPreferredPos"
+                    ]
+                    self.predicted_linearPosArgSort = bayesMatrices["linearPosArgSort"]
+                    self.predicted_orderedPlaceFields = bayesMatrices[
+                        "orderedPlaceFields"
+                    ]
+                    self.predicted_orderedLinearPlaceFields = bayesMatrices[
+                        "orderedLinearPlaceFields"
+                    ]
+                    self.logger.info(
+                        "Using pre-existing linear ordering of neurons for predicted data."
                     )
-                    spikeMatTimes[0 : cnbSpikes[id], :] = self.clusterData[
-                        "Spike_times"
-                    ][id]
-
-            spikeorder = np.argsort(spikeMatTimes[:, 0])
-            self.spikeMatLabels = spikeMatLabels[spikeorder, :]
-            self.spikeMatTimes = spikeMatTimes[spikeorder, :]
-
-        ### Perform training (build marginal and local rate functions) ONLY IF bayesMatrices is not provided/pre-existing
-        if kwargs.get("bayesMatrices", None) is None:
-            try:
-                if not kwargs.get("redo", False):
-                    try:
-                        with open(
-                            os.path.join(self.folderResult, "bayesMatrices.pkl"), "rb"
-                        ) as f:
-                            bayesMatrices = pickle.load(f)
-                        self.logger.info("Loaded existing Bayesian matrices.")
-                    except FileNotFoundError:
-                        if kwargs.get(
-                            "load_last_bayes", False
-                        ) or self.config.extra_kwargs.get("load_last_bayes", False):
-                            with open(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "..",
-                                    "last_bayes",
-                                    "results",
-                                    "bayesMatrices.pkl",
-                                ),
-                                "rb",
-                            ) as f:
-                                bayesMatrices = pickle.load(f)
-                            self.logger.info(
-                                "Loaded existing Bayesian matrices from last_bayes folder. Copying it to current results folder."
-                            )
-                            with open(
-                                os.path.join(self.folderResult, "bayesMatrices.pkl"),
-                                "wb",
-                            ) as f:
-                                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
-                        else:
-                            raise FileNotFoundError(
-                                f"No existing Bayesian matrices found in {self.folderResult}."
-                            )
-
-                    # Check if the matrices are already saved with linear ordering
-                    if "orderedLinearPlaceFields" in bayesMatrices:
-                        self.linearPreferredPos = bayesMatrices["linearPreferredPos"]
-                        self.linearPosArgSort = bayesMatrices["linearPosArgSort"]
-                        self.orderedPlaceFields = bayesMatrices["orderedPlaceFields"]
-                        self.orderedLinearPlaceFields = bayesMatrices[
-                            "orderedLinearPlaceFields"
-                        ]
-                        self.logger.info(
-                            "Using pre-existing linear ordering of neurons found in pickle file."
-                        )
-                        return bayesMatrices
-                else:
-                    raise FileNotFoundError(
-                        "Redundant training requested, re-training Bayesian matrices."
-                    )
-            except FileNotFoundError:
-                self.logger.info(
-                    "Training and ordering neurons by position preference..."
-                )
-                bayesMatrices = self.train(
-                    behaviorData,
-                    onTheFlyCorrection=onTheFlyCorrection,
-                    save=kwargs.pop("save", True),
-                    **kwargs,
-                )
+                    return bayesMatrices
         else:
-            bayesMatrices = kwargs.get("bayesMatrices")
-            self.logger.info("Using provided Bayesian matrices for ordering.")
+            # Training required
+            self.logger.info("Training and ordering neurons by position preference...")
+            bayesMatrices = self.train(
+                behaviorData,
+                onTheFlyCorrection=onTheFlyCorrection,
+                save=kwargs.get("save", True),
+                **kwargs,
+            )
 
-        # Use linear tuning curves for more accurate ordering
+        # Compute linear tuning curves and ordering
         self.logger.info("Computing linear tuning curves for ordering...")
         linear_place_fields, bin_edges = self.calculate_linear_tuning_curve(
-            l_function, behaviorData
+            l_function, behaviorData, **kwargs
         )
 
-        # Find preferred position for each neuron from linear tuning curve
+        self._determine_neuron_ordering(
+            bayesMatrices, linear_place_fields, bin_edges, **kwargs
+        )
+
+        if kwargs.get("save", True):
+            self._save_ordered_matrices(bayesMatrices, filepath, **kwargs)
+
+        return bayesMatrices
+
+    def _determine_neuron_ordering(
+        self,
+        bayesMatrices: Dict,
+        linear_place_fields: List,
+        bin_edges: np.ndarray,
+        **kwargs,
+    ) -> None:
+        """Determines neuron ordering based on linear preferred positions."""
+        is_predicted = kwargs.get("is_predicted", False)
+
         preferred_linear_positions = []
         for tuning_curve in linear_place_fields:
             if np.any(tuning_curve > 0):
-                # Find peak of tuning curve
                 peak_idx = np.argmax(tuning_curve)
-                # Convert bin index to position (center of bin)
                 preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
                 preferred_linear_positions.append(preferred_pos)
             else:
-                # No spikes - assign to beginning
                 preferred_linear_positions.append(bin_edges[0])
 
         preferred_linear_positions = np.array(preferred_linear_positions)
 
-        # Create ordering
-        self.linearPosArgSort = np.argsort(preferred_linear_positions)
-        self.linearPreferredPos = preferred_linear_positions[self.linearPosArgSort]
-
-        # Store ordered place fields (both 2D and linear)
-        place_fields = []
-        for rate_group in bayesMatrices["rateFunctions"]:
-            place_fields.extend(rate_group)
-        self.orderedPlaceFields = np.array(place_fields)[self.linearPosArgSort]
-        self.orderedLinearPlaceFields = np.array(linear_place_fields)[
-            self.linearPosArgSort
+        place_fields = [
+            rf for tetrode_rf in bayesMatrices["rateFunctions"] for rf in tetrode_rf
         ]
 
-        self.logger.info(
-            f"Ordered {len(self.linearPosArgSort)} neurons by linear tuning curve"
-        )
-        if kwargs.get("save", True):
-            # save new attributes to bayesMatrices
-            bayesMatrices["linearPosArgSort"] = self.linearPosArgSort
-            bayesMatrices["linearPreferredPos"] = self.linearPreferredPos
-            bayesMatrices["orderedPlaceFields"] = self.orderedPlaceFields
-            bayesMatrices["orderedLinearPlaceFields"] = self.orderedLinearPlaceFields
-            with open(os.path.join(self.folderResult, "bayesMatrices.pkl"), "wb") as f:
-                pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+        if not is_predicted:
+            self.linearPosArgSort = np.argsort(preferred_linear_positions)
+            self.linearPreferredPos = preferred_linear_positions[self.linearPosArgSort]
+            self.placeFields = np.array(place_fields)
+            self.linearPlaceFields = np.array(linear_place_fields)
+            self.orderedPlaceFields = self.placeFields[self.linearPosArgSort]
+            self.orderedLinearPlaceFields = self.linearPlaceFields[
+                self.linearPosArgSort
+            ]
+        else:
+            self.predicted_linearPosArgSort = np.argsort(preferred_linear_positions)
+            self.predicted_linearPreferredPos = preferred_linear_positions[
+                self.predicted_linearPosArgSort
+            ]
+            self.predicted_placeFields = np.array(place_fields)
+            self.predicted_linearPlaceFields = np.array(linear_place_fields)
+            self.predicted_orderedPlaceFields = self.predicted_placeFields[
+                self.predicted_linearPosArgSort
+            ]
+            self.predicted_orderedLinearPlaceFields = self.predicted_linearPlaceFields[
+                self.predicted_linearPosArgSort
+            ]
 
-        return bayesMatrices
+        self.logger.info(
+            f"Ordered {len(self.linearPosArgSort)} neurons by linear tuning curve."
+        )
+
+    def _save_ordered_matrices(
+        self, bayesMatrices: Dict, filepath: str, **kwargs
+    ) -> None:
+        """Saves ordering information into the Bayesian matrices file."""
+        is_predicted = kwargs.get("is_predicted", False)
+        bayesMatrices.update(
+            {
+                "linearPosArgSort": self.linearPosArgSort
+                if not is_predicted
+                else self.predicted_linearPosArgSort,
+                "linearPreferredPos": self.linearPreferredPos
+                if not is_predicted
+                else self.predicted_linearPreferredPos,
+                "orderedPlaceFields": self.orderedPlaceFields
+                if not is_predicted
+                else self.predicted_orderedPlaceFields,
+                "orderedLinearPlaceFields": self.orderedLinearPlaceFields
+                if not is_predicted
+                else self.predicted_orderedLinearPlaceFields,
+                "PlaceFields": self.placeFields
+                if not is_predicted
+                else self.predicted_placeFields,
+                "LinearPlaceFields": self.linearPlaceFields
+                if not is_predicted
+                else self.predicted_linearPlaceFields,
+            }
+        )
+        with open(filepath, "wb") as f:
+            pickle.dump(bayesMatrices, f, pickle.HIGHEST_PROTOCOL)
+        self.logger.info(f"Ordered matrices saved to {filepath}.")
 
     def _extract_preferred_positions(self, bayesMatrices: Dict) -> np.ndarray:
         """Extract preferred positions from rate functions"""
@@ -658,20 +729,26 @@ class Trainer(SpatialConstraintsMixin):
 
         return rate_map
 
-    def _align_speed_filters(self, behaviorData: Dict) -> List[np.ndarray]:
+    def _align_speed_filters(self, behaviorData: Dict, **kwargs) -> List[np.ndarray]:
         """
         Align speed filters with spike times using PyKeops for efficient computation.
         """
         # convert position times to pykeops symbolic tensor (row vectors)
-        pos_times = pykeops.numpy.Vj(behaviorData["positionTime"][:, 0][:, None])
+        pos_times = pykeops.numpy.Vj(
+            behaviorData["positionTime"][:, 0][:, None].astype(np.float64)
+        )
         speed_filters = []
+        matching_pos_indices_all = []
 
         self.logger.info("Aligning speed-filter with spike times using PyKeops")
 
         for tetrode_idx in tqdm(range(len(self.clusterData["Spike_labels"]))):
             # Convert spike times to PyKeops LazyTensor (column vectors with axis=0)
             spike_times = pykeops.numpy.LazyTensor(
-                self.clusterData["Spike_times"][tetrode_idx][:, 0][:, None], axis=0
+                self.clusterData["Spike_times"][tetrode_idx][:, 0][:, None].astype(
+                    np.float64
+                ),
+                axis=0,
             )
             # find nearest position time for each spike time
             # matrix nb_spikes x nb_pos_times
@@ -680,9 +757,24 @@ class Trainer(SpatialConstraintsMixin):
             )
             # get corresponding speed filter values
             speed_mask = behaviorData["Times"]["speedFilter"][matching_pos_indices]
-            speed_filters += [speed_mask]
+            speed_filters += [speed_mask.astype(bool)]
+            matching_pos_indices_all.append(matching_pos_indices)
 
         self.logger.info("Speed filters aligned successfully")
+
+        # save matching_pos_indices_all for later use in decoding
+        is_predicted = kwargs.get("is_predicted", False)
+        winMS = kwargs.get("winMS", None)
+        if is_predicted and winMS is None:
+            raise ValueError("winMS must be provided when is_predicted is True.")
+        filename = (
+            f"matching_pos_indices_all_predicted_{winMS}.pkl"
+            if is_predicted
+            else "matching_pos_indices_all.pkl"
+        )
+
+        with open(os.path.join(self.folderResult, filename), "wb") as f:
+            pickle.dump(matching_pos_indices_all, f)
 
         return speed_filters
 
@@ -842,7 +934,6 @@ class Trainer(SpatialConstraintsMixin):
             mutual_info_method.lower() == "skaggs"
             or mutual_info_method.lower() == "i_spike"
         ):  # bits/spike
-            print("Using Skaggs' method for mutual information (bits/spike)")
             mi = np.sum(
                 occupation[valid_mask]
                 * rate_function[valid_mask]
@@ -850,14 +941,12 @@ class Trainer(SpatialConstraintsMixin):
                 * np.log2(rate_function[valid_mask] / mean_rate)
             )
         elif mutual_info_method.lower() == "i_sec":  # bits/sec
-            print("Using I_sec method for mutual information (bits/sec)")
             mi = np.sum(
                 occupation[valid_mask]
                 * rate_function[valid_mask]
                 * np.log2(rate_function[valid_mask] / mean_rate)
             )
         elif mutual_info_method.lower() == "shannon":  # raw-sample Shannon MI
-            print("Using Shannon's method for mutual information (bits)")
             rate_flat = rate_function.flatten()
             occ_flat = occupation.flatten()
             valid_mask = (rate_flat > 0) & (occ_flat > 0)
@@ -2729,7 +2818,12 @@ class Trainer(SpatialConstraintsMixin):
         return inferResultsDic
 
     def calculate_linear_tuning_curve(
-        self, linearization_function, behaviorData, min_occ=5, sampling_rate=None
+        self,
+        l_function,
+        behaviorData,
+        min_occ=5,
+        sampling_rate=None,
+        **kwargs,
     ):
         """
         Calculate the linear tuning curve for each cell based on spike times and position data.
@@ -2743,6 +2837,18 @@ class Trainer(SpatialConstraintsMixin):
             linearPlaceFields: list of linear tuning curves for each cell
             binEdges: edges of the bins used for histogramming
         """
+        is_predicted = kwargs.get("is_predicted", False)
+        use_speed_filter = kwargs.get("use_speed_filter", True)
+        print(f"using speed filter: {use_speed_filter}")
+
+        winMS = kwargs.get("winMS", None)
+        if is_predicted and winMS is None:
+            raise ValueError("winMS must be provided when is_predicted is True.")
+        filename = (
+            f"matching_pos_indices_all_predicted_{winMS}.pkl"
+            if is_predicted
+            else "matching_pos_indices_all.pkl"
+        )
         linearPlaceFields = []
         # Create one large epoch that comprises both train and test dataset
         minTime = np.min(
@@ -2762,23 +2868,58 @@ class Trainer(SpatialConstraintsMixin):
             )
         )
         epochForField = np.array([minTime, maxTime])
-        _, linearTraj = linearization_function(behaviorData["Positions"][:, :2])
+        _, linearTraj = l_function(behaviorData["Positions"][:, :2])
         timesMask = inEpochsMask(
             np.squeeze(behaviorData["positionTime"]), epochForField
         ).flatten()
-        timeLinear = np.squeeze(behaviorData["positionTime"][timesMask, :])
-        linearTraj = linearTraj[timesMask]
+        if use_speed_filter:
+            speedMask = behaviorData["Times"]["speedFilter"].flatten()
+            totMask = np.logical_and(timesMask, speedMask)
+        else:
+            totMask = timesMask
+        timeLinear = np.squeeze(behaviorData["positionTime"][totMask, :])
+        linearTraj = linearTraj[totMask]
         linSpace = np.arange(
             float(np.nanmin(linearTraj)), float(np.nanmax(linearTraj)), step=0.01
         )
         histPos, binEdges = np.histogram(linearTraj, bins=linSpace)
 
+        if use_speed_filter:
+            # load speed mask in neuron's timedomain
+            try:
+                if kwargs.get("redo", False):
+                    print("Forcing recomputation of speed mask as redo=True.")
+                    raise FileNotFoundError(
+                        "Forcing recomputation of speed mask as redo=True."
+                    )
+                with open(os.path.join(self.folderResult, filename), "rb") as f:
+                    matching_pos_indices = pickle.load(f)
+
+                speed_filters = []
+                for matching_idx in matching_pos_indices:
+                    speed_filters += [
+                        behaviorData["Times"]["speedFilter"][matching_idx].astype(bool)
+                    ]
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"Matching position indices file not found: {filename}. Speed mask will be recomputed now, which might take time."
+                )
+                speed_filters = self._align_speed_filters(
+                    behaviorData=behaviorData, **kwargs
+                )
+
         for tetrode in range(len(self.clusterData["Spike_times"])):
             spikeTimesTetrode = np.squeeze(self.clusterData["Spike_times"][tetrode])
             for icell in range(self.clusterData["Spike_labels"][tetrode].shape[1]):
                 cellMask = self.clusterData["Spike_labels"][tetrode][:, icell] == 1
-                spikeTimes = spikeTimesTetrode[cellMask]
-                spikeTimes = spikeTimes[inEpochs(spikeTimes, epochForField)]
+                if use_speed_filter:
+                    speedMask = speed_filters[tetrode].flatten()
+                    totMask = np.logical_and(cellMask, speedMask)
+                else:
+                    totMask = cellMask
+                spikeTimes = spikeTimesTetrode[totMask]
+                epochMask = inEpochsMask(spikeTimes, epochForField).flatten()
+                spikeTimes = spikeTimes[epochMask]
 
                 # Find position of the animal at the time of each spike
                 if spikeTimes.any() and len(spikeTimes) > min_occ:

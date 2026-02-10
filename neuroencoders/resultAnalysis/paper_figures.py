@@ -3,8 +3,10 @@ import os
 import platform
 import subprocess
 import warnings
+from typing import Callable, Dict, List, Optional, Union
 
 import dill as pickle
+import matplotlib.axes
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -15,7 +17,7 @@ import seaborn as sns
 import tqdm
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats
-from scipy.ndimage import gaussian_filter, gaussian_filter1d
+from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d, sem, zscore
 from statsmodels.stats.proportion import proportions_ztest
 
@@ -53,9 +55,9 @@ class PaperFigures:
         self,
         projectPath: Project,
         behaviorData: dict,
-        trainerBayes: TrainerBayes,
-        l_function,
-        bayesMatrices: dict = {},
+        trainerBayes: Optional[TrainerBayes],
+        l_function: Optional[Callable],
+        bayesMatrices: Optional[dict] = {},
         timeWindows=[36],
         phase=None,
         sleep=False,
@@ -85,7 +87,9 @@ class PaperFigures:
         self.resultsNN_phase_pkl = dict()
         self.resultsBayes_phase_pkl = dict()
         if sleep:
-            from resultAnalysis.paper_figures_sleep import PaperFiguresSleep
+            from neuroencoders.resultAnalysis.paper_figures_sleep import (
+                PaperFiguresSleep,
+            )
 
             self.sleepFigures = PaperFiguresSleep(
                 projectPath,
@@ -96,777 +100,665 @@ class PaperFigures:
                 timeWindows=timeWindows,
             )
 
+    def _load_csv_result(
+        self, base_path: str, ws: int, prefix: str, suffix: str, dtype=np.float32
+    ) -> Optional[np.ndarray]:
+        """Helper to load a CSV result file and return as numpy array."""
+        filepath = os.path.join(base_path, str(ws), f"{prefix}{suffix}.csv")
+        if not os.path.exists(filepath):
+            return None
+        try:
+            data = pd.read_csv(filepath).values[:, 1:]
+            return np.array(data, dtype=dtype)
+        except Exception as e:
+            self.logger.warning(f"Error loading {filepath}: {e}")
+            return None
+
+    def _prepare_suffixes(self, suffixes: Optional[Union[str, List[str]]]) -> List[str]:
+        """Unified suffix list preparation."""
+        if suffixes is None:
+            suffixes = [self.suffix] if not hasattr(self, "suffixes") else self.suffixes
+        if isinstance(suffixes, str):
+            suffixes = [suffixes]
+
+        if "_training" in suffixes:
+            suffixes.remove("_training")
+            suffixes.insert(0, "_training")
+        return suffixes
+
+    def _extract_bayes_spike_counts(self, times, ws):
+        """Internal helper for spike count extraction in load_bayes."""
+        if not hasattr(self.trainerBayes, "spikeMatTimes") or not hasattr(
+            self.trainerBayes, "spikeMatLabels"
+        ):
+            raise ValueError(
+                "trainerBayes missing spike data. Run train_order_by_pos with extract_spike_counts=True."
+            )
+
+        total_count, _ = extract_spike_counts_keops(
+            times, self.trainerBayes.spikeMatTimes, ws / 1000
+        )
+        matrix_count, _ = extract_spike_counts_matrix_keops(
+            times,
+            self.trainerBayes.spikeMatLabels,
+            self.trainerBayes.spikeMatTimes,
+            ws / 1000,
+        )
+        return total_count, matrix_count
+
+    def _perform_bayes_test_fallback(self, suffix, ws, i, kwargs):
+        """Helper to perform Bayesian testing if results are missing."""
+        timesToPredict = self.resultsNN_phase[suffix]["time"][i][:, np.newaxis].astype(
+            np.float64
+        )
+        useTrain = kwargs.get("useTrain", suffix != f"_{self.suffix.strip('_')}")
+        useTest = kwargs.get("useTest", suffix != "_training")
+
+        outputsBayes = self.trainerBayes.test_as_NN(
+            self.behaviorData,
+            self.bayesMatrices,
+            timesToPredict,
+            windowSizeMS=ws,
+            useTrain=useTrain,
+            useTest=useTest,
+            l_function=self.l_function,
+            phase=suffix.strip("_"),
+            folderResult=os.path.join(self.projectPath.experimentPath, "results"),
+        )
+
+        f_pred = outputsBayes["featurePred"]
+        f_true = outputsBayes["featureTrue"]
+        l_pred = outputsBayes.get(
+            "linearPred", self.l_function(f_pred[:, :2])[1]
+        ).flatten()
+        l_true = outputsBayes.get(
+            "linearTrue", self.l_function(f_true[:, :2])[1]
+        ).flatten()
+
+        return {
+            "lPredPos": l_pred,
+            "lTruePos": l_true,
+            "proba": outputsBayes["proba"].flatten(),
+            "fPred": f_pred,
+            "fTrue": f_true,
+            "posLoss": outputsBayes["posLoss"].flatten(),
+            "time": outputsBayes["times"].flatten(),
+        }
+
+    def _plot_prediction(self, ax, time, true_pos, pred_pos, color, label):
+        """Helper to plot ground truth lines and scattered predictions."""
+        ax.plot(time, true_pos, c="black", alpha=0.3)
+        ax.scatter(time, pred_pos, c=color, alpha=0.9, label=label, s=1)
+
+    def _save_fig(self, fig, filename_base, block=False):
+        """Helper to save figure in PNG and SVG formats."""
+        fig.tight_layout()
+        plt.show(block=block)
+        for ext in [".png", ".svg"]:
+            fig.savefig(os.path.join(self.folderFigures, f"{filename_base}{ext}"))
+
     def load_data(self, suffixes=None, **kwargs):
         """
         Method to load the results of the neural network prediction.
-        It loads the results from the csv files saved in the results folder of the experiment path.
-        It prepares the data in a dictionary format for further analysis and should be called first.
-
-        Parameters
-        ----------
-        suffix : str, optional
-            Suffix to add to the file names, by default None. If None, it uses the class attribute self.suffix.
-        **kwargs : dict, optional such as:
-                extract_spike_counts: bool, whether to extract spike counts from csv files if they exist.
-
-        Returns
-        -------
-        None
         """
-        ### Load the NN prediction without using noise:
-        if suffixes is None:
-            self.suffixes = (
-                [self.suffix] if not hasattr(self, "suffixes") else self.suffixes
-            )
-        else:
-            self.suffixes = suffixes
-        if not isinstance(self.suffixes, list):
-            self.suffixes = [suffixes]
-
-        if "_training" in self.suffixes:
-            self.suffixes.remove("_training")
-            self.suffixes.insert(0, "_training")  # load training first if present
+        self.suffixes = self._prepare_suffixes(suffixes)
+        base_results_path = os.path.join(self.projectPath.experimentPath, "results")
 
         for suffix in self.suffixes:
-            lPredPos = []
-            fPredPos = []
-            truePos = []
-            lTruePos = []
-            time = []
-            lossPred = []
-            speedMask = []
-            posIndex = []
+            phase_results = {
+                "lPredPos": [],
+                "fPredPos": [],
+                "truePos": [],
+                "lTruePos": [],
+                "time": [],
+                "lossPred": [],
+                "speedMask": [],
+                "posIndex": [],
+                "spikes_count": [],
+            } or []
             resultsNN_phase_pkl = []
-            spikes_count = []
+
             for ws in self.timeWindows:
-                fPredPos.append(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"featurePred{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
-                    )
+                # Load standard position and time data
+                f_pred = self._load_csv_result(
+                    base_results_path, ws, "featurePred", suffix
                 )
-                truePos.append(
-                    np.array(
-                        pd.read_csv(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"featureTrue{suffix}.csv",
-                            )
-                        ).values[:, 1:],
-                        dtype=np.float32,
-                    )
+                f_true = self._load_csv_result(
+                    base_results_path, ws, "featureTrue", suffix
                 )
-                if os.path.exists(
-                    os.path.join(
-                        self.projectPath.experimentPath,
-                        "results",
-                        str(ws),
-                        f"linearTrue{suffix}.csv",
+                time_steps = self._load_csv_result(
+                    base_results_path, ws, "timeStepsPred", suffix
+                )
+                speed_mask = self._load_csv_result(
+                    base_results_path, ws, "speedMask", suffix
+                )
+                pos_index = self._load_csv_result(
+                    base_results_path, ws, "posIndex", suffix, dtype=np.int32
+                )
+
+                # Add to lists (with fallback for missing files if needed)
+                phase_results["fPredPos"].append(f_pred)
+                phase_results["truePos"].append(f_true)
+                phase_results["time"].append(
+                    np.squeeze(time_steps).flatten() if time_steps is not None else None
+                )
+                phase_results["speedMask"].append(
+                    np.squeeze(speed_mask).flatten() if speed_mask is not None else None
+                )
+                phase_results["posIndex"].append(
+                    np.squeeze(pos_index).flatten() if pos_index is not None else None
+                )
+
+                # Linearized positions
+                l_true = self._load_csv_result(
+                    base_results_path, ws, "linearTrue", suffix
+                )
+                l_pred = self._load_csv_result(
+                    base_results_path, ws, "linearPred", suffix
+                )
+
+                if l_true is not None and l_pred is not None:
+                    phase_results["lTruePos"].append(np.squeeze(l_true).flatten())
+                    phase_results["lPredPos"].append(np.squeeze(l_pred).flatten())
+                elif f_true is not None and f_pred is not None:
+                    phase_results["lTruePos"].append(
+                        self.l_function(f_true[:, :2])[1].flatten()
                     )
-                ):
-                    lPredPos.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
-                                        str(ws),
-                                        f"linearPred{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        )
-                    )
-                    lTruePos.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
-                                        str(ws),
-                                        f"linearTrue{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
+                    phase_results["lPredPos"].append(
+                        self.l_function(f_pred[:, :2])[1].flatten()
                     )
                 else:
-                    lPredPos.append(self.l_function(fPredPos[-1][:, :2])[1].flatten())
-                    lTruePos.append(self.l_function(truePos[-1][:, :2])[1].flatten())
-                time.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"timeStepsPred{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    ).flatten()
-                )
-                try:
-                    lossPred.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
-                                        str(ws),
-                                        f"lossPred{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                except FileNotFoundError:
-                    print("Adding entropy as lossPred")
-                    lossPred.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.projectPath.experimentPath,
-                                        "results",
-                                        str(ws),
-                                        f"Hn{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                speedMask.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"speedMask{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    ).flatten()
-                )
-                posIndex.append(
-                    np.squeeze(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"posIndex{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.int32,
-                        )
-                    ).flatten()
+                    phase_results["lTruePos"].append(None)
+                    phase_results["lPredPos"].append(None)
+
+                # Loss / Entropy
+                loss = self._load_csv_result(base_results_path, ws, "lossPred", suffix)
+                if loss is None:
+                    loss = self._load_csv_result(base_results_path, ws, "Hn", suffix)
+                phase_results["lossPred"].append(
+                    np.squeeze(loss).flatten() if loss is not None else None
                 )
 
+                # Optional Pickle and Spike Counts
                 if kwargs.get("load_pickle", False):
-                    try:  # load pkl files if they exist
-                        with open(
-                            os.path.join(
-                                self.projectPath.experimentPath,
-                                "results",
-                                str(ws),
-                                f"decoding_results{suffix}.pkl",
-                            ),
-                            "rb",
-                        ) as f:
-                            results = pickle.load(f)
-                            resultsNN_phase_pkl.append(results)
-                    except FileNotFoundError:
-                        print(
-                            f"No pkl file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it."
-                        )
+                    pkl_path = os.path.join(
+                        base_results_path, str(ws), f"decoding_results{suffix}.pkl"
+                    )
+                    if os.path.exists(pkl_path):
+                        with open(pkl_path, "rb") as f:
+                            resultsNN_phase_pkl.append(pickle.load(f))
+                    else:
                         resultsNN_phase_pkl.append(None)
-                if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                    "extract_spike_counts", False
-                ):
-                    try:
-                        spikes_count.append(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(ws),
-                                    f"spikes_count{suffix}.csv",
-                                )
+
+                if kwargs.get("extract_spike_counts", False):
+                    spikes = (
+                        pd.read_csv(
+                            os.path.join(
+                                base_results_path, str(ws), f"spikes_count{suffix}.csv"
                             )
                         )
-                    except FileNotFoundError:
-                        warnings.warn(
-                            f"No spikes_count file found for resultsNN_phase{suffix} and window {str(ws)}, skipping loading it.\n"
-                            f"You should export it when testing the model. See `extract_spike_counts` argument from `trainerNN.test`"
+                        if os.path.exists(
+                            os.path.join(
+                                base_results_path, str(ws), f"spikes_count{suffix}.csv"
+                            )
                         )
-                        spikes_count.append(None)
+                        else None
+                    )
+                    phase_results["spikes_count"].append(spikes)
 
-            speedMask = [ws.astype(bool) for ws in speedMask]
+            # Post-process speed mask
+            phase_results["speedMask"] = [
+                sm.astype(bool) if sm is not None else None
+                for sm in phase_results["speedMask"]
+            ]
 
-            # Output
+            # Store results
             if suffix == self.suffix or len(self.suffixes) == 1:
                 self.resultsNN = {
-                    "time": time,
-                    "speedMask": speedMask,
-                    "linPred": lPredPos,
-                    "fullPred": fPredPos,
-                    "truePos": truePos,
-                    "linTruePos": lTruePos,
-                    "predLoss": lossPred,
-                    "posIndex": posIndex,
+                    "time": phase_results["time"],
+                    "speedMask": phase_results["speedMask"],
+                    "linPred": phase_results["lPredPos"],
+                    "fullPred": phase_results["fPredPos"],
+                    "truePos": phase_results["truePos"],
+                    "linTruePos": phase_results["lTruePos"],
+                    "predLoss": phase_results["lossPred"],
+                    "posIndex": phase_results["posIndex"],
                 }
-                if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                    "extract_spike_counts", False
-                ):
-                    self.resultsNN["spikes_count"] = spikes_count
 
             self.resultsNN_phase[suffix] = {
-                "time": time,
-                "speedMask": speedMask,
-                "linPred": lPredPos,
-                "fullPred": fPredPos,
-                "truePos": truePos,
-                "linTruePos": lTruePos,
-                "predLoss": lossPred,
-                "posIndex": posIndex,
-                "spikes_count": spikes_count,
+                "time": phase_results["time"],
+                "speedMask": phase_results["speedMask"],
+                "linPred": phase_results["lPredPos"],
+                "fullPred": phase_results["fPredPos"],
+                "truePos": phase_results["truePos"],
+                "linTruePos": phase_results["lTruePos"],
+                "predLoss": phase_results["lossPred"],
+                "posIndex": phase_results["posIndex"],
+                "spikes_count": phase_results["spikes_count"],
             }
-            if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                "extract_spike_counts", False
-            ):
-                self.resultsNN_phase[suffix]["spikes_count"] = spikes_count
             if kwargs.get("load_pickle", False):
                 self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
     def load_bayes(self, suffixes=None, **kwargs):
         """
         Quickly load the bayesian decoding on the data, using the trainerBayes.
-        If the bayesMatrices are not provided, it will train them using the
-        trainerBayes.train_order_by_pos method.
-        If the testing results are already saved, it will load them - otherwise it will perform a decoding.
-
-        Parameters
-        -------
-        suffixes : str or list of str, optional
-            Suffixes to add to the file names, by default None. If None, it uses the class attribute self.suffix.
-        **kwargs : dict, optional such as:
-            onTheFlyCorrection, bayesMatrices, redo.
-
-        Returns
-        -------
-        self.resultsBayes : dict
-            A dictionary containing the results of the bayesian decoding.
-            It contains:
-                - linPred: list of linear predicted positions for each time window
-                - fullPred: list of full predicted positions for each time window
-                - probaBayes: list of probabilities for each time window
-                - time: list of time arrays for each time window
         """
-        if not hasattr(self.trainerBayes, "linearPreferredPos") and (
-            kwargs.get("load_bayesMatrices", False)
-            or self.trainerBayes.config.extra_kwargs.get("load_bayesMatrices", False)
-        ):
-            # load bayesMatrices if not already done
-            # first, we mix kwargs with trainerBayes config extra_kwargs, with kwargs having priority
+        if kwargs.get(
+            "load_bayesMatrices", False
+        ) or self.trainerBayes.config.extra_kwargs.get("load_bayesMatrices", False):
             combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
-
             self.bayesMatrices = self.trainerBayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 bayesMatrices=self.bayesMatrices
                 if (
-                    (isinstance(self.bayesMatrices, dict))
-                    and ("Occupation" in self.bayesMatrices.keys())
+                    isinstance(self.bayesMatrices, dict)
+                    and "Occupation" in self.bayesMatrices
+                )
+                else None,
+                **combined_kwargs,
+            )
+            if kwargs.get("load_decoded_bayes", False):
+                kwargs["redo"] = True
+                self._create_decoding_bayes_matrices(**kwargs)
+
+        self.suffixes = self._prepare_suffixes(suffixes)
+        base_results_path = self.trainerBayes.folderResult
+
+        for suffix in self.suffixes:
+            phase_results = {
+                "lPredPos": [],
+                "lTruePos": [],
+                "proba": [],
+                "fPred": [],
+                "fTrue": [],
+                "posLoss": [],
+                "time": [],
+                "total_spikes": [],
+                "matrix_spikes": [],
+            } or []
+            resultsBayes_phase_pkl = []
+
+            for i, ws in enumerate(self.timeWindows):
+                l_pred = self._load_csv_result(
+                    base_results_path, ws, "bayes_linearPred", suffix
+                )
+                if l_pred is not None:
+                    phase_results["lPredPos"].append(l_pred.flatten())
+                    phase_results["lTruePos"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_linearTrue", suffix
+                        ).flatten()
+                    )
+                    phase_results["proba"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_proba", suffix
+                        ).flatten()
+                    )
+                    phase_results["fPred"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_featurePred", suffix
+                        )
+                    )
+                    phase_results["fTrue"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_featureTrue", suffix
+                        )
+                    )
+                    phase_results["posLoss"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_posLoss", suffix
+                        ).flatten()
+                    )
+                    phase_results["time"].append(
+                        self._load_csv_result(
+                            base_results_path, ws, "bayes_timeStepsPred", suffix
+                        ).flatten()
+                    )
+
+                    if kwargs.get("extract_spike_counts", False):
+                        total_count, matrix_count = self._extract_bayes_spike_counts(
+                            phase_results["time"][-1], ws
+                        )
+                        phase_results["total_spikes"].append(total_count)
+                        phase_results["matrix_spikes"].append(matrix_count)
+
+                    if (
+                        phase_results["fPred"][-1].shape[0]
+                        != self.resultsNN_phase[suffix]["fullPred"][i].shape[0]
+                    ):
+                        self.logger.warning(
+                            f"Shape mismatch for window {ws}ms. Bayesian: {phase_results['fPred'][-1].shape}, NN: {self.resultsNN_phase[suffix]['fullPred'][i].shape}"
+                        )
+                else:
+                    self.logger.info(
+                        f"Bayesian results not found for {ws}ms, testing now..."
+                    )
+                    test_results = self._perform_bayes_test_fallback(
+                        suffix, ws, i, kwargs
+                    )
+                    phase_results["lPredPos"].append(test_results["lPredPos"])
+                    phase_results["lTruePos"].append(test_results["lTruePos"])
+                    phase_results["proba"].append(test_results["proba"])
+                    phase_results["fPred"].append(test_results["fPred"])
+                    phase_results["fTrue"].append(test_results["fTrue"])
+                    phase_results["posLoss"].append(test_results["posLoss"])
+                    phase_results["time"].append(test_results["time"])
+
+                if kwargs.get("load_pickle", False):
+                    pkl_path = os.path.join(
+                        base_results_path,
+                        str(ws),
+                        f"bayes_decoding_results{suffix}.pkl",
+                    )
+                    if os.path.exists(pkl_path):
+                        with open(pkl_path, "rb") as f:
+                            resultsBayes_phase_pkl.append(pickle.load(f))
+                    else:
+                        resultsBayes_phase_pkl.append(None)
+
+            # Store results
+            result_dict = {
+                "linPred": phase_results["lPredPos"],
+                "linTruePos": phase_results["lTruePos"],
+                "fullPred": phase_results["fPred"],
+                "truePos": phase_results["fTrue"],
+                "predLoss": phase_results[
+                    "proba"
+                ],  # ProbaBayes mapped to predLoss for NN compatibility
+                "posLossBayes": phase_results["posLoss"],
+                "timeNN": self.resultsNN_phase[suffix]["time"],
+                "time": phase_results["time"],
+                "speedMask": self.resultsNN_phase[suffix]["speedMask"],
+            }
+            if kwargs.get("extract_spike_counts", False):
+                result_dict.update(
+                    {
+                        "total_spikes_count": phase_results["total_spikes"],
+                        "matrix_spikes_count": phase_results["matrix_spikes"],
+                    }
+                )
+
+            self.resultsBayes_phase[suffix] = result_dict
+            if suffix == self.suffix or len(self.suffixes) == 1:
+                self.resultsBayes = result_dict
+            if kwargs.get("load_pickle", False):
+                self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
+
+    def _create_decoding_bayes_matrices(
+        self, winMS=None, suffix=None, phase=None, **kwargs
+    ):
+        """
+        Run the bayes trainer, not with the true positions but rather the predictions of the ANN, and create the bayes matrices from those predictions. This allows to have a fair comparison between the two methods, as they will be based on the same input data (the ANN predictions) rather than the true positions, which may be more accurate than what the ANN can achieve.
+        """
+        if not self.trainerBayes:
+            raise ValueError(
+                "Bayes trainer not loaded. Please load the bayes trainer first."
+            )
+        if not self.bayesMatrices or self.bayesMatrices is None:
+            combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
+            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+                self.behaviorData,
+                l_function=self.l_function,
+                bayesMatrices=self.bayesMatrices
+                if (
+                    isinstance(self.bayesMatrices, dict)
+                    and "Occupation" in self.bayesMatrices
                 )
                 else None,
                 **combined_kwargs,
             )
 
-        # quickly obtain bayesian decoding:
-        if suffixes is None:
-            self.suffixes = [self.suffix]
-        else:
-            self.suffixes = suffixes
-        if not isinstance(self.suffixes, list):
-            self.suffixes = [suffixes]
-        if "_training" in self.suffixes:
-            self.suffixes.remove("_training")
-            self.suffixes.insert(0, "_training")  # load training first if present
+        if phase is not None:
+            suffix = f"_{phase}"
+        if suffix is None:
+            suffix = self.suffix
+        if not suffix.startswith("_"):
+            suffix = f"_{suffix}"
+        if not isinstance(suffix, list):
+            suffix = [suffix]
 
-        for suffix in self.suffixes:
-            lPredPosBayes = []
-            lTruePosBayes = []
-            probaBayes = []
-            fPredBayes = []
-            fTruePosBayes = []
-            posLossBayes = []
-            timesBayes = []
-            resultsBayes_phase_pkl = []
-            total_spikes_count = []
-            matrix_spikes_count = []
-            for i, ws in enumerate(self.timeWindows):
-                try:
-                    lPredPosBayes.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.trainerBayes.folderResult,
-                                        str(ws),
-                                        f"bayes_linearPred{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                    lTruePosBayes.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.trainerBayes.folderResult,
-                                        str(ws),
-                                        f"bayes_linearTrue{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                    probaBayes.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.trainerBayes.folderResult,
-                                        str(ws),
-                                        f"bayes_proba{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                    fPredBayes.append(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.trainerBayes.folderResult,
-                                    str(ws),
-                                    f"bayes_featurePred{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    )
-                    fTruePosBayes.append(
-                        np.array(
-                            pd.read_csv(
-                                os.path.join(
-                                    self.trainerBayes.folderResult,
-                                    str(ws),
-                                    f"bayes_featureTrue{suffix}.csv",
-                                )
-                            ).values[:, 1:],
-                            dtype=np.float32,
-                        )
-                    )
-                    posLossBayes.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.trainerBayes.folderResult,
-                                        str(ws),
-                                        f"bayes_posLoss{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                    timesBayes.append(
-                        np.squeeze(
-                            np.array(
-                                pd.read_csv(
-                                    os.path.join(
-                                        self.trainerBayes.folderResult,
-                                        str(ws),
-                                        f"bayes_timeStepsPred{suffix}.csv",
-                                    )
-                                ).values[:, 1:],
-                                dtype=np.float32,
-                            )
-                        ).flatten()
-                    )
-                    if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                        "extract_spike_counts", False
-                    ):
-                        if not hasattr(
-                            self.trainerBayes, "spikeMatTimes"
-                        ) or not hasattr(self.trainerBayes, "spikeMat"):
-                            raise ValueError(
-                                """
-                                trainerBayes does not have spikeMatTimes or spikeMat attributes needed to extract spike counts.
-                                Make sure to run decoding with extract_spike_counts=True first. You can run trainerBayes.train_order_by_pos.
-                                """
-                            )
-                        total_count, _ = extract_spike_counts_keops(
-                            timesBayes[-1], self.trainerBayes.spikeMatTimes, ws / 1000
-                        )
-                        total_spikes_count.append(total_count)
-                        matrix_count, _ = extract_spike_counts_matrix_keops(
-                            timesBayes[-1],
-                            self.trainerBayes.spikeMatLabels,
-                            self.trainerBayes.spikeMatTimes,
-                            ws / 1000,
-                        )
-                        matrix_spikes_count.append(matrix_count)
+        if winMS is None:
+            winMS = self.timeWindows[-1]
+        idWindow = self.timeWindows.index(int(winMS))
 
-                    if (
-                        fPredBayes[i].shape[0]
-                        != self.resultsNN_phase[suffix]["fullPred"][i].shape[0]
-                    ):
-                        raise ValueError(
-                            f"""
-                            Bayesian and NN results do not have the same shape for
-                            {str(ws)} ms window.
-                            Found shapes {fPredBayes[i].shape} and {self.resultsNN_phase[suffix]["fullPred"][i].shape}.
-                            """
-                        )
-                except (FileNotFoundError, ValueError) as e:
-                    print(
-                        f"""
-                        Trouble finding bayesian results in folder, will test now because:
-                        {e}
-                        """
-                    )
+        # get the ANN predictions for the specified window size in the training phase
+        self.load_data(winMS=winMS, suffixes=suffix, which="ann", **kwargs)
+        true_pos_list = []
+        predicted_list = []
+        time_step_pred_list = []
+        speed_mask_list = []
+        for suff in suffix:
+            true_pos = self.resultsNN_phase[suff]["truePos"][idWindow]
+            predicted = self.resultsNN_phase[suff]["fullPred"][idWindow]
+            time_step_pred = self.resultsNN_phase[suff]["time"][idWindow].reshape(-1, 1)
+            speed_mask = self.resultsNN_phase[suff]["speedMask"][idWindow].flatten()
+            true_pos_list.append(true_pos)
+            predicted_list.append(predicted)
+            time_step_pred_list.append(time_step_pred)
+            speed_mask_list.append(speed_mask)
 
-                    timesToPredict = self.resultsNN_phase[suffix]["time"][i][
-                        :, np.newaxis
-                    ].astype(np.float64)
-                    useTrain_default = (
-                        suffix != f"_{self.phase}"
-                    )  # always false except for "test" phase
-                    useTest_default = (
-                        suffix != "_training"
-                    )  # always true except for training phase
-                    useTrain = kwargs.get("useTrain", useTrain_default)
-                    useTest = kwargs.get("useTest", useTest_default)
-                    if useTrain:
-                        print(f"Using training data for {suffix.strip('_')} phase!")
-                    if not useTest:
-                        print(f"Not using testing data for {suffix.strip('_')} phase!")
-                    outputsBayes = self.trainerBayes.test_as_NN(
-                        self.behaviorData,
-                        self.bayesMatrices,
-                        timesToPredict,
-                        windowSizeMS=ws,
-                        useTrain=useTrain,
-                        useTest=useTest,
-                        l_function=self.l_function,
-                        phase=suffix.strip("_"),
-                        folderResult=os.path.join(
-                            self.projectPath.experimentPath, "results"
-                        ),  # here we choose base folder instead of trainerBayes.folderResult to save all results in the same place - bayesMatrices is already loaded anyway
-                    )
-                    infPos = outputsBayes["featurePred"]
+        true_pos = np.array(true_pos_list).reshape(-1, true_pos.shape[1])
+        predicted = np.array(predicted_list).reshape(-1, predicted.shape[1])
+        time_step_pred = np.array(time_step_pred_list).reshape(-1, 1)
+        speed_mask = np.array(speed_mask_list).reshape(-1)
 
-                    if "linearPred" in outputsBayes:
-                        lPredPosBayes.append(outputsBayes["linearPred"].flatten())
-                    else:
-                        _, linearBayesPos = self.l_function(infPos)
-                        lPredPosBayes.append(linearBayesPos)
+        trainEpochs = [time_step_pred.min(), time_step_pred.max()]
 
-                    fPredBayes.append(infPos)
-                    fTruePosBayes.append(outputsBayes["featureTrue"])
-                    probaBayes.append(outputsBayes["proba"].flatten())
-                    posLossBayes.append(outputsBayes["posLoss"].flatten())
-                    lTruePosBayes.append(outputsBayes["linearTrue"].flatten())
-                    timesBayes.append(outputsBayes["times"].flatten())
-
-                if kwargs.get("load_pickle", False):
-                    try:  # load pkl files if they exist
-                        with open(
-                            os.path.join(
-                                self.trainerBayes.folderResult,
-                                str(ws),
-                                f"bayes_decoding_results{suffix}.pkl",
-                            ),
-                            "rb",
-                        ) as f:
-                            results = pickle.load(f)
-                            resultsBayes_phase_pkl.append(results)
-                    except FileNotFoundError:
-                        print(
-                            f"No pkl file found for resultsBayes_phase{suffix} and window {str(ws)}, skipping loading it."
-                        )
-                        resultsBayes_phase_pkl.append(None)
-
-            # Output
-            if suffix == self.suffix or len(self.suffixes) == 1:
-                self.resultsBayes = {
-                    "linPred": lPredPosBayes,
-                    "linTruePos": lTruePosBayes,
-                    "fullPred": fPredBayes,
-                    "truePos": fTruePosBayes,
-                    "predLoss": probaBayes,  # for compatibility with NN results but in reality corresponds to probaBayes
-                    "posLossBayes": posLossBayes,
-                    "timeNN": self.resultsNN_phase[suffix]["time"],
-                    "time": timesBayes,  # should be exactly the same as timeNN
-                    "speedMask": self.resultsNN_phase[suffix]["speedMask"],
-                }
-                if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                    "extract_spike_counts", False
-                ):
-                    self.resultsBayes.update(
-                        {
-                            "total_spikes_count": total_spikes_count,
-                            "matrix_spikes_count": matrix_spikes_count,
-                        }
-                    )
-            self.resultsBayes_phase[suffix] = {
-                "linPred": lPredPosBayes,
-                "linTruePos": lTruePosBayes,
-                "fullPred": fPredBayes,
-                "truePos": fTruePosBayes,
-                "predLoss": probaBayes,
-                "posLossBayes": posLossBayes,
-                "timeNN": self.resultsNN_phase[suffix]["time"],
-                "time": timesBayes,  # should be exactly the same as timeNN
-                "speedMask": self.resultsNN_phase[suffix]["speedMask"],
-            }
-            if kwargs.get("extract_spikes_count", False) or kwargs.get(
-                "extract_spike_counts", False
-            ):
-                self.resultsBayes_phase[suffix].update(
-                    {
-                        "total_spikes_count": total_spikes_count,
-                        "matrix_spikes_count": matrix_spikes_count,
-                    }
+        # Get learning time and if needed speedFilter
+        samplingWindowPosition = (time_step_pred[1:] - time_step_pred[0:-1])[:, 0]
+        samplingWindowPosition[np.isnan(np.sum(predicted[0:-1], axis=1))] = 0
+        lEpochIndex = [
+            [
+                np.argmin(np.abs(time_step_pred - trainEpochs[2 * i + 1])),
+                np.argmin(np.abs(time_step_pred - trainEpochs[2 * i])),
+            ]
+            for i in range(len(trainEpochs) // 2)
+        ]
+        learningTime = [
+            np.sum(
+                np.multiply(
+                    speed_mask[lEpochIndex[i][1] : lEpochIndex[i][0]],
+                    samplingWindowPosition[lEpochIndex[i][1] : lEpochIndex[i][0]],
                 )
-            if kwargs.get("load_pickle", False):
-                self.resultsBayes_phase_pkl[suffix] = resultsBayes_phase_pkl
+            )
+            for i in range(len(lEpochIndex))
+        ]
+        learningTime = np.sum(learningTime)
+
+        ## create a fake fullBehavior dict to feed to bayes.train_order_by_pos
+        self.decoded_fullBehavior = {
+            "positionTime": time_step_pred,
+            "Positions": predicted,
+            "groundTruth": true_pos,
+            "Times": {
+                "speedFilter": speed_mask,
+                "trainEpochs": trainEpochs,
+                "testEpochs": trainEpochs,
+                "learning": learningTime,
+            },
+        }
+
+        self.decoded_bayesMatrices = self.trainerBayes.train_order_by_pos(
+            self.decoded_fullBehavior,
+            l_function=self.l_function,
+            is_predicted=True,
+            winMS=winMS,
+            **kwargs,
+        )
+        return self.decoded_bayesMatrices
+
+    def plot_linear_tuning_curves(
+        self,
+        fullBehavior: Optional[Dict] = None,
+        l_function: Optional[Callable] = None,
+        use_speed_filter: bool = True,
+        ax: Optional[matplotlib.axes.Axes] = None,
+        sort_map: Optional[List[int]] = None,
+        **kwargs,
+    ):
+        if fullBehavior is None:
+            fullBehavior = self.behaviorData
+        if l_function is None:
+            l_function = self.l_function
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
+        else:
+            fig = ax.get_figure()
+
+        normalize = kwargs.get("normalize", True)
+        scaling_method = kwargs.get("scaling", "minmax")
+        mask = kwargs.get("mask", None)
+
+        lin_place_fields, bin_edges = self.trainerBayes.calculate_linear_tuning_curve(
+            l_function=l_function,
+            behaviorData=fullBehavior,
+            use_speed_filter=use_speed_filter,
+            **kwargs,
+        )
+        if sort_map is None:
+            preferred_linear_positions = []
+            for tuning_curve in lin_place_fields:
+                if np.any(tuning_curve > 0):
+                    peak_idx = np.argmax(tuning_curve)
+                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+                    preferred_linear_positions.append(preferred_pos)
+                else:
+                    preferred_linear_positions.append(bin_edges[0])
+
+            preferred_linear_positions = np.array(preferred_linear_positions)
+            linear_pos_argsort = np.argsort(preferred_linear_positions)
+        else:
+            linear_pos_argsort = sort_map
+
+        ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
+
+        if normalize:
+            if scaling_method == "z-score":
+                # Safe Z-score normalization per neuron (row-wise)
+                mean_vals = np.mean(ordered_lin_place_fields, axis=1, keepdims=True)
+                std_val = np.std(ordered_lin_place_fields, axis=1, keepdims=True)
+                fields = (ordered_lin_place_fields - mean_vals) / (std_val + 1e-8)
+
+                # Plotting Setup for Z-Score
+                cmap = "RdBu_r"
+                v_lim = min(np.percentile(np.abs(fields), 99), 4)
+                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+                cb_label = "Z-Scored FR"
+            elif scaling_method == "minmax":
+                # Min-Max normalization per neuron (row-wise)
+                min_vals = np.min(ordered_lin_place_fields, axis=1, keepdims=True)
+                max_vals = np.max(ordered_lin_place_fields, axis=1, keepdims=True)
+                fields = (ordered_lin_place_fields - min_vals) / (
+                    max_vals - min_vals + 1e-8
+                )
+
+                # Plotting Setup for Min-Max
+                cmap = "viridis"
+                norm = mcolors.Normalize(vmin=0, vmax=1)
+                cb_label = "Normalized Firing Rate (0-1)"
+            else:
+                raise ValueError(
+                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
+                )
+        else:
+            fields = ordered_lin_place_fields
+            cmap = "viridis"
+            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
+
+        fields = fields[mask] if mask is not None else fields
+        im = ax.imshow(fields, cmap, norm, origin="lower")
+        linear_bins = np.linspace(0, 1, fields.shape[1])
+        x_ticks = np.arange(0, fields.shape[1], 20)
+        x_labels = np.round(linear_bins[x_ticks], 2)
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels(x_labels)
+        ax.set_xlabel("Linear Position")
+        ax.set_ylabel("Neuron Index")
+        ax.set_title(kwargs.get("title", "Linear Tuning Curves"))
+        fig.colorbar(im, ax=ax, label=cb_label)
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=False):
         idWindow = self.timeWindows.index(timeWindow)
-        fig, ax = plt.subplots(
-            2,
-            2,
-            sharex=True,
-            sharey=True,
-        )
-        if phase is not None:
-            suffix = f"_{phase}"
-        if suffix is None:
-            suffix = self.suffix
-        for idim in range(2):
-            ax[idim, 0].plot(
-                self.resultsNN_phase[suffix]["time"][idWindow],
-                self.resultsNN_phase[suffix]["truePos"][idWindow][:, idim],
-                c="black",
-                alpha=0.3,
+        fig, ax = plt.subplots(2, 2, sharex=True, sharey=True)
+        suffix = f"_{phase}" if phase is not None else (suffix or self.suffix)
+
+        time = self.resultsNN_phase[suffix]["time"][idWindow]
+        true_pos = self.resultsNN_phase[suffix]["truePos"][idWindow]
+        nn_pred = self.resultsNN_phase[suffix]["fullPred"][idWindow]
+        bayes_pred = self.resultsBayes_phase[suffix]["fullPred"][idWindow]
+
+        for idim, label in enumerate(["X", "Y"]):
+            self._plot_prediction(
+                ax[idim, 0],
+                time,
+                true_pos[:, idim],
+                nn_pred[:, idim],
+                self.cm(12 + idWindow),
+                f"{timeWindow} ms",
             )
-            ax[idim, 0].scatter(
-                self.resultsNN_phase[suffix]["time"][idWindow],
-                self.resultsNN_phase[suffix]["fullPred"][idWindow][:, idim],
-                c=self.cm(12 + idWindow),
-                alpha=0.9,
-                label=(str(self.timeWindows[idWindow]) + " ms"),
-                s=1,
+            self._plot_prediction(
+                ax[idim, 1],
+                time,
+                true_pos[:, idim],
+                bayes_pred[:, idim],
+                self.cm(idWindow),
+                f"{timeWindow} ms",
             )
-            ax[idim, 1].plot(
-                self.resultsNN_phase[suffix]["time"][idWindow],
-                self.resultsNN_phase[suffix]["truePos"][idWindow][:, idim],
-                c="black",
-                alpha=0.3,
-            )
-            ax[idim, 1].scatter(
-                self.resultsNN_phase[suffix]["time"][idWindow],
-                self.resultsBayes_phase[suffix]["fullPred"][idWindow][:, idim],
-                c=self.cm(idWindow),
-                alpha=0.9,
-                label=(str(self.timeWindows[idWindow]) + " ms"),
-                s=1,
-            )
+            ax[idim, 0].set_ylabel(label, fontsize="xx-large")
+
         ax[0, 0].set_title(
-            "Neural network decoder \n " + str(self.timeWindows[idWindow]) + " window",
-            fontsize="xx-large",
+            f"Neural network decoder \n {timeWindow} window", fontsize="xx-large"
         )
         ax[0, 1].set_title(
-            "Bayesian decoder \n " + str(self.timeWindows[idWindow]) + " window",
-            fontsize="xx-large",
+            f"Bayesian decoder \n {timeWindow} window", fontsize="xx-large"
         )
-        ax[0, 0].set_ylabel("X", fontsize="xx-large")
-        ax[1, 0].set_ylabel("Y", fontsize="xx-large")
         ax[1, 0].set_xlabel("Time (s)", fontsize="xx-large")
         ax[1, 1].set_xlabel("Time (s)", fontsize="xx-large")
-        # set suffix
         fig.suptitle(f"2D decoding for phase {suffix.strip('_')}", fontsize="xx-large")
-        # Save figure
-        fig.tight_layout()
-        plt.show(block=block)
-        fig.savefig(
-            os.path.join(
-                self.folderFigures,
-                f"example2D_nn_bayes_{timeWindow}ms{suffix}.png",
-            )
-        )
-        fig.savefig(
-            os.path.join(
-                self.folderFigures,
-                f"example2D_nn_bayes_{timeWindow}ms{suffix}.svg",
-            )
-        )
+
+        self._save_fig(fig, f"example2D_nn_bayes_{timeWindow}ms{suffix}", block=block)
 
     def fig_example_linear(self, suffix=None, phase=None, block=False):
-        ## Figure 1: on habituation set, speed filtered, we plot an example of bayesian and neural network decoding
-        # ANN results
-        # TODO: why is it speed filtered?
-        if phase is not None:
-            suffix = f"_{phase}"
-        if suffix is None:
-            suffix = self.suffix
-        fig, ax = plt.subplots(len(self.timeWindows), 2, sharex=True, sharey=True)
-        if len(self.timeWindows) == 1:
-            ax[0].plot(
-                self.resultsNN_phase[suffix]["time"][0],
-                self.resultsNN_phase[suffix]["linTruePos"][0],
-                c="black",
-                alpha=0.3,
-            )
-            ax[0].scatter(
-                self.resultsNN_phase[suffix]["time"][0],
-                self.resultsNN_phase[suffix]["linPred"][0],
-                c=self.cm(12 + 0),
-                alpha=0.9,
-                label=(str(self.timeWindows[0]) + " ms"),
-                s=1,
-            )
-            ax[0].set_title(
-                "Neural network decoder \n " + str(self.timeWindows[0]) + " window",
-                fontsize="xx-large",
-            )
-            ax[0].set_ylabel("linear position", fontsize="xx-large")
-            ax[0].set_yticks([0, 0.4, 0.8])
-        else:
-            [
-                a.plot(
-                    self.resultsNN_phase[suffix]["time"][i],
-                    self.resultsNN_phase[suffix]["linTruePos"][i],
-                    c="black",
-                    alpha=0.3,
-                )
-                for i, a in enumerate(ax[:, 0])
-            ]
-            for i in range(len(self.timeWindows)):
-                ax[i, 0].scatter(
-                    self.resultsNN_phase[suffix]["time"][i],
-                    self.resultsNN_phase[suffix]["linPred"][i],
-                    c=self.cm(12 + i),
-                    alpha=0.9,
-                    label=(str(self.timeWindows[i]) + " ms"),
-                    s=1,
-                )
-                if i == 0:
-                    ax[i, 0].set_title(
-                        "Neural network decoder \n "
-                        + str(self.timeWindows[i])
-                        + " window",
-                        fontsize="xx-large",
-                    )
-                else:
-                    ax[i, 0].set_title(
-                        str(self.timeWindows[i]) + " window", fontsize="xx-large"
-                    )
+        suffix = f"_{phase}" if phase is not None else (suffix or self.suffix)
+        fig, ax = plt.subplots(
+            len(self.timeWindows), 2, sharex=True, sharey=True, squeeze=False
+        )
 
-        # Bayes
-        if len(self.timeWindows) == 1:
-            ax[1].plot(
-                self.resultsNN_phase[suffix]["time"][0],
-                self.resultsNN_phase[suffix]["linTruePos"][0],
-                c="black",
-                alpha=0.3,
+        for i, ws in enumerate(self.timeWindows):
+            time = self.resultsNN_phase[suffix]["time"][i]
+            true_pos = self.resultsNN_phase[suffix]["linTruePos"][i]
+            nn_pred = self.resultsNN_phase[suffix]["linPred"][i]
+            bayes_pred = self.resultsBayes_phase[suffix]["linPred"][i]
+
+            # Neural Network plot
+            self._plot_prediction(
+                ax[i, 0], time, true_pos, nn_pred, self.cm(12 + i), f"{ws} ms"
             )
-            ax[1].scatter(
-                self.resultsNN_phase[suffix]["time"][0],
-                self.resultsBayes_phase[suffix]["linPred"][0],
-                c=self.cm(0),
-                alpha=0.9,
-                label=(str(self.timeWindows[0]) + " ms"),
-                s=1,
+            title_nn = (
+                f"Neural network decoder \n {ws} window" if i == 0 else f"{ws} window"
             )
-            ax[1].set_title(
-                "Bayesian decoder \n" + str(self.timeWindows[0]) + " window",
-                fontsize="xx-large",
+            ax[i, 0].set_title(title_nn, fontsize="xx-large")
+            ax[i, 0].set_ylabel("linear position", fontsize="xx-large")
+            ax[i, 0].set_yticks([0, 0.4, 0.8])
+
+            # Bayesian plot
+            self._plot_prediction(
+                ax[i, 1], time, true_pos, bayes_pred, self.cm(i), f"{ws} ms"
             )
-            ax[1].set_xlabel("time (s)", fontsize="xx-large")
-        else:
-            [
-                a.plot(
-                    self.resultsNN_phase[suffix]["time"][i],
-                    self.resultsNN_phase[suffix]["linTruePos"][i],
-                    c="black",
-                    alpha=0.3,
-                )
-                for i, a in enumerate(ax[:, 1])
-            ]
-            for i in range(len(self.timeWindows)):
-                ax[i, 1].scatter(
-                    self.resultsNN_phase[suffix]["time"][i],
-                    self.resultsBayes_phase[suffix]["linPred"][i],
-                    c=self.cm(i),
-                    alpha=0.9,
-                    label=(str(self.timeWindows[i]) + " ms"),
-                    s=1,
-                )
-                if i == 0:
-                    ax[i, 1].set_title(
-                        "Bayesian decoder \n" + str(self.timeWindows[i]) + " window",
-                        fontsize="xx-large",
-                    )
-                else:
-                    ax[i, 1].set_title(
-                        str(self.timeWindows[i]) + " window", fontsize="xx-large"
-                    )
-            ax[len(self.timeWindows) - 1, 0].set_xlabel("time (s)", fontsize="xx-large")
-            ax[len(self.timeWindows) - 1, 1].set_xlabel("time (s)", fontsize="xx-large")
-            [a.set_ylabel("linear position", fontsize="xx-large") for a in ax[:, 0]]
-            [ax[i, 0].set_yticks([0, 0.4, 0.8]) for i in range(len(self.timeWindows))]
-        # give suffix in title
+            title_bayes = (
+                f"Bayesian decoder \n {ws} window" if i == 0 else f"{ws} window"
+            )
+            ax[i, 1].set_title(title_bayes, fontsize="xx-large")
+
+        ax[-1, 0].set_xlabel("time (s)", fontsize="xx-large")
+        ax[-1, 1].set_xlabel("time (s)", fontsize="xx-large")
         fig.suptitle(
             f"Linear position decoding for phase {suffix.strip('_')}",
             fontsize="xx-large",
         )
-        # Save figure
-        fig.tight_layout()
-        plt.show(block=block)
-        fig.savefig(os.path.join(self.folderFigures, f"example_nn_bayes{suffix}.png"))
-        fig.savefig(os.path.join(self.folderFigures, f"example_nn_bayes{suffix}.svg"))
+
+        self._save_fig(fig, f"example_nn_bayes{suffix}", block=block)
 
     def compare_nn_bayes(
         self, timeWindow, suffix=None, phase=None, isCM=False, isShow=False, block=False
@@ -1056,7 +948,12 @@ class PaperFigures:
             occupancy_map = gaussian_filter(H_true.T, sigma=2)
 
             map_ax.plot(
-                pos[:, 0], pos[:, 1], c="xkcd:dark grey", alpha=0.4, zorder=1
+                pos[:, 0],
+                pos[:, 1],
+                c="xkcd:dark grey",
+                alpha=0.6,
+                zorder=2,
+                linewidth=0.5,
             )  # Traces
             map_ax.imshow(
                 occupancy_map,
@@ -1065,6 +962,7 @@ class PaperFigures:
                 cmap=cmap_custom,
                 vmin=1,
                 zorder=0,
+                alpha=0.6,
             )
             map_ax.plot(
                 MAZE_COORDS[:, 0], MAZE_COORDS[:, 1], color="black", lw=2, zorder=2
@@ -2654,7 +2552,7 @@ class PaperFigures:
         self,
         suffix=None,
         phase=None,
-        speed="all",
+        speed="fast",
         mode="2d",
         block=False,
         typeDec="ann",
@@ -2720,6 +2618,8 @@ class PaperFigures:
         else:
             raise ValueError('speed argument could be only "full", "fast" or "slow"')
 
+        loss_name = "Predicted loss" if typeDec == "ann" else "Bayes Proba"
+
         # Figure
         fig, ax = plt.subplots(1, len(self.timeWindows))
         if len(self.timeWindows) == 1:
@@ -2736,11 +2636,11 @@ class PaperFigures:
                 errors[iw][masks[iw]],
                 (30, 30),
                 cmap=white_viridis,
-                aspect="auto",
+                # aspect="auto",
                 alpha=0.4,
                 density=True,
             )  # ,c="red",alpha=0.4
-            ax[iw].set_xlabel("Predicted loss" if typeDec == "NN" else "Bayes Proba")
+            ax[iw].set_xlabel(loss_name, fontsize="x-large")
             if mode == "2d":
                 ax[iw].set_ylabel("True error")
             elif mode == "1d":
@@ -2752,7 +2652,7 @@ class PaperFigures:
             ax[iw].ticklabel_format(axis="x", style="sci", scilimits=(-3, 3))
 
         fig.suptitle(
-            f"{'Predicted loss' if typeDec == 'ann' else 'Bayes Proba'} vs true error during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
+            f"{loss_name} vs true error during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
         )
         fig.tight_layout()
         plt.show(block=block)
@@ -2875,7 +2775,7 @@ class PaperFigures:
         self,
         suffix=None,
         phase=None,
-        speed="all",
+        speed="fast",
         num_steps=200,
         mask=None,
         use_mask=False,
@@ -3018,7 +2918,7 @@ class PaperFigures:
         self,
         suffix=None,
         phase=None,
-        speed="all",
+        speed="fast",
         typeDec="ann",
         num_steps=200,
         isCM=False,
@@ -3193,7 +3093,7 @@ class PaperFigures:
 
         return predLoss_ticks[0], errors_filtered
 
-    def plot_boxplot_error(
+    def plot_barplot_error(
         self,
         results_df=None,
         logscale=True,
@@ -3265,7 +3165,7 @@ class PaperFigures:
 
         plt.figure()
         results_exploded = results_df.explode(column).reset_index(drop=True)
-        sns.boxplot(
+        sns.barplot(
             data=results_exploded,
             x="phase",
             y=column,
@@ -3283,13 +3183,13 @@ class PaperFigures:
         plt.savefig(
             os.path.join(
                 self.folderFigures,
-                f"boxplot_{speed}_filtered_se_error.png",
+                f"barplot_{speed}_filtered_se_error.png",
             )
         )
         plt.show()
         return results_df
 
-    def lin_boxplot_error(
+    def lin_barplot_error(
         self,
         results_df=None,
         logscale=True,
@@ -3355,7 +3255,7 @@ class PaperFigures:
             column = f"confidence_{column}"
 
         plt.figure()
-        sns.boxplot(
+        sns.barplot(
             data=results_df.explode(column).reset_index(drop=True),
             x="phase",
             y=column,
@@ -3373,7 +3273,7 @@ class PaperFigures:
         plt.savefig(
             os.path.join(
                 self.folderFigures,
-                f"linboxplot_{speed}_filtered_se_error_{confidence=}_{threshold=}.png",
+                f"linbarplot_{speed}_filtered_se_error_{confidence=}_{threshold=}.png",
             )
         )
         plt.show()
@@ -3414,23 +3314,24 @@ class PaperFigures:
                 else:
                     raise ValueError("Speed must be 'all', 'slow' or 'fast'")
 
-                logits_hw = self.resultsNN_phase_pkl[phase][idWindow]["logits_hw"][
-                    speedMask
-                ]
+                try:
+                    logits_hw = self.resultsNN_phase_pkl[phase][idWindow]["logits_hw"][
+                        speedMask
+                    ]
+                except KeyError:
+                    raise ValueError(
+                        f"Logits not found for phase {phase} and window {winMS} ms. Make sure to load with load_pickle."
+                    )
                 truePos = self.resultsNN_phase[phase]["truePos"][idWindow][speedMask][
                     :, :2
                 ]
                 predPos = self.resultsNN_phase[phase]["fullPred"][idWindow][speedMask][
                     :, :2
                 ]
-                self.ann[str(winMS)].GaussianHeatmap.gaussian_heatmap_targets(truePos)
-                probs = (
-                    self.ann[str(winMS)]
-                    .GaussianHeatmap.decode_and_uncertainty(
-                        logits_hw, return_probs=True
-                    )[-1]
-                    .numpy()
-                )
+                self.ann.GaussianHeatmap.gaussian_heatmap_targets(truePos)
+                probs = self.ann.GaussianHeatmap.decode_and_uncertainty(
+                    logits_hw, return_probs=True
+                )[-1].numpy()
                 error = np.linalg.norm(truePos[:, :2] - predPos[:, :2], axis=1)
                 mean_probs = np.mean(probs, axis=0)
                 hist2d, xedges, yedges = np.histogram2d(
@@ -3595,18 +3496,12 @@ class PaperFigures:
                 truePos = self.resultsNN_phase[phase]["truePos"][idWindow][speedMask][
                     :, :2
                 ]
-                target_hw = (
-                    self.ann[str(winMS)]
-                    .GaussianHeatmap.gaussian_heatmap_targets(truePos)
-                    .numpy()
-                )
-                probs = (
-                    self.ann[str(winMS)]
-                    .GaussianHeatmap.decode_and_uncertainty(
-                        logits_hw, return_probs=True
-                    )[-1]
-                    .numpy()
-                )
+                target_hw = self.ann.GaussianHeatmap.gaussian_heatmap_targets(
+                    truePos
+                ).numpy()
+                probs = self.ann.GaussianHeatmap.decode_and_uncertainty(
+                    logits_hw, return_probs=True
+                )[-1].numpy()
                 mean_probs = np.mean(probs, axis=0)
                 target_mean = np.mean(target_hw, axis=0)
                 if per_trial:
@@ -4202,7 +4097,7 @@ class PaperFigures:
         iwindow = self.timeWindows.index(ws)
         # Calculate the tuning curve of all place cells
         linearTuningCurves, binEdges = self.trainerBayes.calculate_linear_tuning_curve(
-            self.l_function, self.behaviorData
+            l_function=self.l_function, behaviorData=self.behaviorData
         )
         try:
             placeFieldSort = self.trainerBayes.linearPosArgSort
@@ -4351,7 +4246,7 @@ class PaperFigures:
                 )
                 plt.close()
 
-    def boxplot_linError(
+    def barplot_linError(
         self, timeWindows, dirSave=None, suffix=None, phase=None, block=False
     ):
         """
@@ -4364,7 +4259,7 @@ class PaperFigures:
         :param lErrorNN_mean: mean linear error for NN
         :param lErrorBayes_mean: mean linear error for Bayes
         """
-        from resultAnalysis.hyper_paper_figures import boxplot_linError
+        from neuroencoders.resultAnalysis.hyper_paper_figures import barplot_linError
 
         if dirSave is None:
             dirSave = self.folderFigures
@@ -4372,34 +4267,40 @@ class PaperFigures:
             suffix = f"_{phase}"
         if suffix is None:
             suffix = self.suffix
-        suffix = f"_{phase}" if phase else ""
-        lErrorNN_mean = [
-            np.mean(
-                np.abs(
-                    self.resultsNN_phase[suffix]["linTruePos"][
-                        self.timeWindows.index(ws)
-                    ]
-                    - self.resultsNN_phase[suffix]["linPred"][
-                        self.timeWindows.index(ws)
-                    ]
+        if not isinstance(timeWindows, list):
+            timeWindows = [timeWindows]
+
+        lErrorNN_mean = np.array(
+            [
+                np.mean(
+                    np.abs(
+                        self.resultsNN_phase[suffix]["linTruePos"][
+                            self.timeWindows.index(ws)
+                        ]
+                        - self.resultsNN_phase[suffix]["linPred"][
+                            self.timeWindows.index(ws)
+                        ]
+                    )
                 )
-            )
-            for ws in timeWindows
-        ]
-        lErrorBayes_mean = [
-            np.mean(
-                np.abs(
-                    self.resultsNN_phase[suffix]["linTruePos"][
-                        self.timeWindows.index(ws)
-                    ]
-                    - self.resultsBayes_phase[suffix]["linPred"][
-                        self.timeWindows.index(ws)
-                    ]
+                for ws in timeWindows
+            ]
+        )
+        lErrorBayes_mean = np.array(
+            [
+                np.mean(
+                    np.abs(
+                        self.resultsNN_phase[suffix]["linTruePos"][
+                            self.timeWindows.index(ws)
+                        ]
+                        - self.resultsBayes_phase[suffix]["linPred"][
+                            self.timeWindows.index(ws)
+                        ]
+                    )
                 )
-            )
-            for ws in timeWindows
-        ]
-        return boxplot_linError(
+                for ws in timeWindows
+            ]
+        )
+        return barplot_linError(
             lErrorNN_mean,
             lErrorBayes_mean,
             timeWindows,
@@ -4407,7 +4308,7 @@ class PaperFigures:
             suffix=suffix,
         )
 
-    def boxplot_euclError(
+    def barplot_euclError(
         self, timeWindows, dirSave=None, suffix=None, phase=None, block=False
     ):
         """
@@ -4420,7 +4321,7 @@ class PaperFigures:
         :param lErrorNN_mean: mean linear error for NN
         :param lErrorBayes_mean: mean linear error for Bayes
         """
-        from resultAnalysis.hyper_paper_figures import boxplot_euclError
+        from neuroencoders.resultAnalysis.hyper_paper_figures import barplot_euclError
 
         if dirSave is None:
             dirSave = self.folderFigures
@@ -4428,34 +4329,40 @@ class PaperFigures:
             suffix = f"_{phase}"
         if suffix is None:
             suffix = self.suffix
-        euclErrorNN_mean = [
-            np.mean(
-                np.abs(
-                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)][
-                        :, :2
-                    ]
-                    - self.resultsNN_phase[suffix]["fullPred"][
-                        self.timeWindows.index(ws)
-                    ][:, :2]
+        if not isinstance(timeWindows, list):
+            timeWindows = [timeWindows]
+        euclErrorNN_mean = np.array(
+            [
+                np.mean(
+                    np.abs(
+                        self.resultsNN_phase[suffix]["truePos"][
+                            self.timeWindows.index(ws)
+                        ][:, :2]
+                        - self.resultsNN_phase[suffix]["fullPred"][
+                            self.timeWindows.index(ws)
+                        ][:, :2]
+                    )
                 )
-            )
-            for ws in timeWindows
-        ]
-        euclErrorBayes_mean = [
-            np.mean(
-                np.linalg.norm(
-                    self.resultsNN_phase[suffix]["truePos"][self.timeWindows.index(ws)][
-                        :, :2
-                    ]
-                    - self.resultsBayes_phase[suffix]["fullPred"][
-                        self.timeWindows.index(ws)
-                    ][:, :2],
-                    axis=1,
+                for ws in timeWindows
+            ]
+        )
+        euclErrorBayes_mean = np.array(
+            [
+                np.mean(
+                    np.linalg.norm(
+                        self.resultsNN_phase[suffix]["truePos"][
+                            self.timeWindows.index(ws)
+                        ][:, :2]
+                        - self.resultsBayes_phase[suffix]["fullPred"][
+                            self.timeWindows.index(ws)
+                        ][:, :2],
+                        axis=1,
+                    )
                 )
-            )
-            for ws in timeWindows
-        ]
-        return boxplot_euclError(
+                for ws in timeWindows
+            ]
+        )
+        return barplot_euclError(
             euclErrorNN_mean,
             euclErrorBayes_mean,
             timeWindows,
@@ -4736,6 +4643,293 @@ class PaperFigures:
             )
         )
 
+    def barplot_error_across_suffixes(
+        self,
+        timeWindow,
+        speed="fast",
+        type_error="lin",
+        suffixes=None,
+        dirSave=None,
+        block=False,
+        ax=None,
+    ):
+        if suffixes is None:
+            suffixes = self.suffixes
+        if dirSave is None:
+            dirSave = self.folderFigures
+        errors_dict = {}
+        for suffix in suffixes:
+            if type_error == "lin":
+                errors_dict[suffix] = np.mean(
+                    np.abs(
+                        self.resultsNN_phase[suffix]["linTruePos"][
+                            self.timeWindows.index(timeWindow)
+                        ]
+                        - self.resultsNN_phase[suffix]["linPred"][
+                            self.timeWindows.index(timeWindow)
+                        ]
+                    )
+                )
+            elif type_error == "eucl":
+                errors_dict[suffix] = np.mean(
+                    np.linalg.norm(
+                        self.resultsNN_phase[suffix]["truePos"][
+                            self.timeWindows.index(timeWindow)
+                        ][:, :2]
+                        - self.resultsNN_phase[suffix]["fullPred"][
+                            self.timeWindows.index(timeWindow)
+                        ][:, :2],
+                        axis=1,
+                    )
+                )
+            else:
+                raise ValueError("type_error should be 'lin' or 'eucl'")
+        fig, ax = plt.subplots() if ax is None else (None, ax)
+        if ax is None:
+            fig, ax = plt.subplots()
+
+        ax.bar(errors_dict.keys(), errors_dict.values(), color="skyblue")
+        ax.set_ylabel(f"Mean {type_error} error")
+        ax.set_title(
+            f"Mean {type_error} error across suffixes for {timeWindow} ms window, speed: {speed}"
+        )
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+    def plot_ann_pred_by_phase(
+        self,
+        winMS_list: Optional[Union[int, List[int]]] = None,
+        suffixes: Optional[List[str]] = None,
+        speeds: Union[str, List[str]] = "fast",
+        type_error: str = "lin",
+        reduce_fn: str = "median",
+        threshold_pct: Optional[float] = None,
+        by: str = "entropy",
+        add_bayes: bool = False,
+        ax: Optional[matplotlib.axes.Axes] = None,
+        show: bool = True,
+        save: bool = False,
+        **kwargs,
+    ):
+        """
+        Plot the evolution of median/mean lin/eucl error across phases.
+        Allows filtering by speed and predLoss (entropy) thresholding.
+        """
+        if winMS_list is None:
+            winMS_list = self.timeWindows
+        if isinstance(winMS_list, (int, float)):
+            winMS_list = [int(winMS_list)]
+
+        if suffixes is None:
+            suffixes = self.suffixes
+
+        if isinstance(speeds, str):
+            speeds = [speeds]
+
+        plot_data = []
+
+        # Threshold calculation from training phase if needed
+        thresholds = {}
+        if threshold_pct is not None:
+            training_suffix = (
+                "_training" if "_training" in self.resultsNN_phase else None
+            )
+            if training_suffix is None and suffixes:
+                training_suffix = suffixes[0]
+
+            if training_suffix:
+                for ws in winMS_list:
+                    if ws not in self.timeWindows:
+                        continue
+                    idx = self.timeWindows.index(ws)
+                    results = self.resultsNN_phase[training_suffix]
+                    sm = results["speedMask"][idx]
+
+                    for speed in speeds:
+                        if speed == "fast":
+                            s_mask = sm
+                        elif speed == "slow":
+                            s_mask = ~sm if sm is not None else None
+                        else:
+                            s_mask = np.ones_like(results["time"][idx], dtype=bool)
+
+                        if s_mask is None:
+                            continue
+
+                        if by == "entropy":
+                            val = results["predLoss"][idx]
+                            if val is not None:
+                                thresholds[(ws, speed)] = np.nanpercentile(
+                                    val[s_mask], threshold_pct
+                                )
+                        elif by == "maxp":
+                            if (
+                                hasattr(self, "resultsNN_phase_pkl")
+                                and training_suffix in self.resultsNN_phase_pkl
+                            ):
+                                pkl = self.resultsNN_phase_pkl[training_suffix][idx]
+                                if pkl is not None and "maxp" in pkl:
+                                    thresholds[(ws, speed)] = np.nanpercentile(
+                                        pkl["maxp"][s_mask], 100 - threshold_pct
+                                    )
+
+        for suffix in suffixes:
+            if suffix not in self.resultsNN_phase:
+                continue
+            results_nn = self.resultsNN_phase[suffix]
+            results_bayes = self.resultsBayes_phase.get(suffix) if add_bayes else None
+
+            for ws in winMS_list:
+                if ws not in self.timeWindows:
+                    continue
+                idx = self.timeWindows.index(ws)
+                sm = results_nn["speedMask"][idx]
+
+                for speed in speeds:
+                    if speed == "fast":
+                        s_mask = sm
+                    elif speed == "slow":
+                        s_mask = ~sm if sm is not None else None
+                    else:
+                        s_mask = np.ones_like(results_nn["time"][idx], dtype=bool)
+
+                    if s_mask is None:
+                        continue
+
+                    # Threshold Mask
+                    if threshold_pct is not None and (ws, speed) in thresholds:
+                        if by == "entropy":
+                            t_mask = (
+                                results_nn["predLoss"][idx] <= thresholds[(ws, speed)]
+                            )
+                            final_mask = s_mask & t_mask
+                        elif by == "maxp":
+                            if (
+                                hasattr(self, "resultsNN_phase_pkl")
+                                and suffix in self.resultsNN_phase_pkl
+                            ):
+                                pkl = self.resultsNN_phase_pkl[suffix][idx]
+                                if pkl is not None and "maxp" in pkl:
+                                    t_mask = pkl["maxp"] >= thresholds[(ws, speed)]
+                                    final_mask = s_mask & t_mask
+                                else:
+                                    final_mask = s_mask
+                        else:
+                            final_mask = s_mask
+                    else:
+                        final_mask = s_mask
+
+                    # ANN Error
+                    if results_nn["linPred"][idx] is not None:
+                        if type_error == "lin":
+                            err = np.abs(
+                                results_nn["linTruePos"][idx]
+                                - results_nn["linPred"][idx]
+                            )
+                        else:  # eucl
+                            err = np.linalg.norm(
+                                results_nn["truePos"][idx][:, :2]
+                                - results_nn["fullPred"][idx][:, :2],
+                                axis=1,
+                            )
+
+                        err = err[final_mask]
+                        if len(err) > 0:
+                            val = (
+                                np.nanmean(err)
+                                if reduce_fn == "mean"
+                                else np.nanmedian(err)
+                            )
+                            plot_data.append(
+                                {
+                                    "Phase": suffix.lstrip("_"),
+                                    "Error": val,
+                                    "Window (ms)": ws,
+                                    "Speed": speed,
+                                    "Method": "ANN",
+                                }
+                            )
+
+                    # Bayes Error
+                    if (
+                        add_bayes
+                        and results_bayes is not None
+                        and results_bayes["linPred"][idx] is not None
+                    ):
+                        if type_error == "lin":
+                            err_b = np.abs(
+                                results_bayes["linTruePos"][idx]
+                                - results_bayes["linPred"][idx]
+                            )
+                        else:
+                            err_b = np.linalg.norm(
+                                results_bayes["truePos"][idx][:, :2]
+                                - results_bayes["fullPred"][idx][:, :2],
+                                axis=1,
+                            )
+
+                        err_b = err_b[final_mask]
+                        if len(err_b) > 0:
+                            val_b = (
+                                np.nanmean(err_b)
+                                if reduce_fn == "mean"
+                                else np.nanmedian(err_b)
+                            )
+                            plot_data.append(
+                                {
+                                    "Phase": suffix.lstrip("_"),
+                                    "Error": val_b,
+                                    "Window (ms)": ws,
+                                    "Speed": speed,
+                                    "Method": "Bayes",
+                                }
+                            )
+
+        if not plot_data:
+            print("No data found for the specified criteria.")
+            return
+
+        df_plot = pd.DataFrame(plot_data)
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Determine sorting for Phases
+        phase_order = ["training", "pre", "cond", "post", "extinction"]
+        unique_phases = df_plot["Phase"].unique()
+        order = [p for p in phase_order if p in unique_phases]
+        # Append any remaining phases not in our predefined list
+        order += [p for p in unique_phases if p not in phase_order]
+
+        hue_val = "Window (ms)" if len(winMS_list) > 1 else "Speed"
+
+        if add_bayes:
+            # Combine Window/Speed and Method for hue
+            df_plot["Group"] = (
+                df_plot[hue_val].astype(str) + " (" + df_plot["Method"] + ")"
+            )
+            hue_to_use = "Group"
+        else:
+            hue_to_use = hue_val
+
+        sns.pointplot(
+            data=df_plot, x="Phase", y="Error", hue=hue_to_use, order=order, ax=ax
+        )
+
+        title = f"Evolution of {reduce_fn} {type_error} error across phases\n"
+        if threshold_pct:
+            title += f"Threshold: {threshold_pct}% {by}, "
+        title += f"Speeds: {', '.join(speeds)}"
+        ax.set_title(title)
+        ax.set_ylabel(f"{reduce_fn.capitalize()} {type_error} error")
+        plt.setp(ax.get_xticklabels(), rotation=45)
+
+        if save:
+            self._save_fig(ax.get_figure(), f"error_evolution_{type_error}_{reduce_fn}")
+        if show:
+            plt.show()
+        return df_plot
+
     def _plot_single_place_field(self, ax, neuron_idx, pos_x, pos_y, epoch, title):
         """Helper to plot a single place field on a specific axis."""
         spike_time = nap.Ts(
@@ -4817,44 +5011,48 @@ class PaperFigures:
         plot_high_quality = kwargs.get("plot_high_quality", False)
         save = kwargs.get("save", True if axs is None else False)
         show = kwargs.get("show", True if axs is None else False)
+        is_predicted = kwargs.get("is_predicted", False)
 
         # --- 1. Train/Load Data ---
-        if getattr(self, "bayesMatrices", None) is None:
-            existing_bayes = (
-                self.bayesMatrices
-                if (
-                    isinstance(self.bayesMatrices, dict)
-                    and "Occupation" in self.bayesMatrices
+        if kwargs.get("bayesMatrices", None) is not None:
+            bayes_mat = kwargs["bayesMatrices"]
+        else:
+            if getattr(self, "bayesMatrices", None) is None:
+                existing_bayes = (
+                    self.bayesMatrices
+                    if (
+                        isinstance(self.bayesMatrices, dict)
+                        and "Occupation" in self.bayesMatrices
+                    )
+                    else None
                 )
-                else None
-            )
 
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
-                self.behaviorData,
-                l_function=self.l_function,
-                bayesMatrices=existing_bayes,
-                **kwargs,
-            )
+                bayes_mat = self.trainerBayes.train_order_by_pos(
+                    self.behaviorData,
+                    l_function=self.l_function,
+                    bayesMatrices=existing_bayes,
+                    **kwargs,
+                )
+            else:
+                bayes_mat = self.bayesMatrices
 
         # Extract and sort Mutual Information
-        flat_mi = [
-            mi for tetrode_mi in self.bayesMatrices["mutualInfo"] for mi in tetrode_mi
-        ]
-        ordered_mi = np.array(flat_mi)[self.trainerBayes.linearPosArgSort]
+        flat_mi = [mi for tetrode_mi in bayes_mat["mutualInfo"] for mi in tetrode_mi]
+        ordered_mi = np.array(flat_mi)[bayes_mat["linearPosArgSort"]]
 
         # FIX: check that every neuron fires at least once in the spikeMatLabels (only in training data)
         # --- 2. Identify High-Quality Neurons ---
         thresh = 80
         percentile_val = np.percentile(ordered_mi, thresh)
         high_quality_mask = ordered_mi > percentile_val
-        high_quality_indices = self.trainerBayes.linearPosArgSort[high_quality_mask]
+        high_quality_indices = bayes_mat["linearPosArgSort"][high_quality_mask]
 
         print(
             f"High-quality place cells: {len(high_quality_indices)} neurons (top {100 - thresh}%)"
         )
-        print(f"Total neurons: {len(self.trainerBayes.linearPosArgSort)}")
+        print(f"Total neurons: {len(bayes_mat['linearPosArgSort'])}")
         print(
-            f"Position range: {self.trainerBayes.linearPreferredPos.min():.2f} - {self.trainerBayes.linearPreferredPos.max():.2f}"
+            f"Position range: {bayes_mat['linearPreferredPos'].min():.2f} - {bayes_mat['linearPreferredPos'].max():.2f}"
         )
 
         # --- 3. Visualization Setup ---
@@ -4889,9 +5087,9 @@ class PaperFigures:
         ).reshape(-1)
 
         # --- Panel 0: First Ordered Place Field ---
-        for i in range(len(self.trainerBayes.linearPosArgSort)):
+        for i in range(len(bayes_mat["linearPosArgSort"])):
             neuron_first = (
-                self.trainerBayes.linearPosArgSort[i]
+                bayes_mat["linearPosArgSort"][i]
                 if not plot_high_quality
                 else high_quality_indices[i]
             )
@@ -4915,59 +5113,16 @@ class PaperFigures:
 
         # --- Pre-calculate Linear Fields ---
         has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
-        scaling_method = kwargs.get("scaling", "minmax")
-        norm_fields = None
-        if has_linear:
-            raw_fields = self.trainerBayes.orderedLinearPlaceFields
-            if scaling_method == "z-score":
-                # Safe Z-score normalization per neuron (row-wise)
-                mean_vals = np.mean(raw_fields, axis=1, keepdims=True)
-                std_val = np.std(raw_fields, axis=1, keepdims=True)
-                norm_fields = (raw_fields - mean_vals) / (std_val + 1e-8)
-
-                # Plotting Setup for Z-Score
-                cmap = "RdBu_r"
-                v_lim = min(np.percentile(np.abs(norm_fields), 99), 4)
-                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
-                cb_label = "Z-Scored FR"
-            elif scaling_method == "minmax":
-                # Min-Max normalization per neuron (row-wise)
-                min_vals = np.min(raw_fields, axis=1, keepdims=True)
-                max_vals = np.max(raw_fields, axis=1, keepdims=True)
-                norm_fields = (raw_fields - min_vals) / (max_vals - min_vals + 1e-8)
-
-                # Plotting Setup for Min-Max
-                cmap = "viridis"
-                norm = mcolors.Normalize(vmin=0, vmax=1)
-                cb_label = "Normalized Firing Rate (0-1)"
-            else:
-                raise ValueError(
-                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
-                )
-
         # --- Panel 1: All Linear Tuning Curves ---
         ax = axs[1]
-        if has_linear and norm_fields is not None:
-            # smooth out the fields for better visualization
-            norm_fields = gaussian_filter1d(norm_fields, sigma=2, axis=1)
-            im = ax.imshow(
-                norm_fields, aspect="auto", origin="lower", cmap=cmap, norm=norm
-            )
-            linear_bins = np.linspace(0, 1, norm_fields.shape[1])
-            x_ticks = np.arange(0, norm_fields.shape[1], 20)
-            x_labels = np.round(linear_bins[x_ticks], 2)
-            ax.set_xticks(x_ticks)
-            ax.set_xticklabels(x_labels)
-            ax.set_xlabel("Linear Position")
-            ax.set_ylabel("Neuron Index")
-            ax.set_title("Linear Tuning Curves")
-            fig.colorbar(im, ax=ax, label=cb_label)
+        if has_linear:
+            self.plot_linear_tuning_curves(ax=ax, **kwargs)
         else:
             ax.axis("off")
 
         # --- Panel 2: Position Coverage ---
         ax = axs[2]
-        ax.hist(self.trainerBayes.linearPreferredPos, bins=20, alpha=0.7, color="teal")
+        ax.hist(bayes_mat["linearPreferredPos"], bins=20, alpha=0.7, color="teal")
         ax.set_xlabel("Linear Position")
         ax.set_title("Pos Coverage in Training Data")
 
@@ -4986,35 +5141,34 @@ class PaperFigures:
 
         # --- Panel 4: Best Linear Tuning Curves (High Quality Only) ---
         ax = axs[4]
-        if has_linear and norm_fields is not None and high_quality_mask.sum() > 0:
-            hq_fields = norm_fields[high_quality_mask]
-            im = ax.imshow(
-                hq_fields, aspect="auto", origin="lower", cmap=cmap, norm=norm
-            )
-            hq_indices = np.arange(norm_fields.shape[0])[high_quality_mask]
-            ax.set_xticks(x_ticks)
-            ax.set_xticklabels(x_labels)
+        if has_linear:
+            if not hasattr(self, "decoded_fullBehavior"):
+                if high_quality_mask.sum() > 0:
+                    print(
+                        "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
+                    )
+                    title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
+                    self.plot_linear_tuning_curves(
+                        ax=ax, mask=high_quality_mask, title=title, **kwargs
+                    )
+                else:
+                    ax.text(
+                        0.5, 0.5, "No High Quality Fields", ha="center", va="center"
+                    )
+                    ax.axis("off")
 
-            # Intelligent Y-tick labeling
-            if len(hq_indices) > 20:
-                y_display_idx = np.linspace(0, len(hq_indices) - 1, 10, dtype=int)
-                ax.set_yticks(y_display_idx)
-                ax.set_yticklabels(hq_indices[y_display_idx])
             else:
-                ax.set_yticks(np.arange(len(hq_indices)))
-                ax.set_yticklabels(hq_indices)
-
-            ax.set_xlabel("Linear Position")
-            ax.set_ylabel("Original Index")
-            ax.set_title(f"Best Linear Tuning Curves (Top {100 - thresh}%)")
-            fig.colorbar(im, ax=ax, label="Deviation")
-        else:
-            ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
-            ax.axis("off")
-
+                self.plot_linear_tuning_curves(
+                    ax=ax,
+                    fullBehavior=self.decoded_fullBehavior,
+                    title="Linear Tuning Curves (w/ANN predictions)",
+                    is_predicted=True,
+                    sort_map=self.trainerBayes.linearPosArgSort,
+                    **kwargs,
+                )
         # --- Panel 5: Last Ordered Place Field ---
         neuron_last = (
-            self.trainerBayes.linearPosArgSort[-1]
+            bayes_mat["linearPosArgSort"][-1]
             if not plot_high_quality
             else high_quality_indices[-1]
         )
@@ -5027,7 +5181,7 @@ class PaperFigures:
             plt.tight_layout()
 
         if save:
-            filename = f"bayesian_neurons_summary{self.suffix}"
+            filename = f"bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"
             fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
             fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
 
