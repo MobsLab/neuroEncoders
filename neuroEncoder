@@ -258,6 +258,7 @@ def main(args):
         if "1230" not in ProjectPath.xml
         else 128,
         save_json=True,
+        load_at_init=False,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=not args.no_dense,

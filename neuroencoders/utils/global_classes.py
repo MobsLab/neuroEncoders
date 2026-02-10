@@ -10,6 +10,8 @@ import json
 
 # Load custom code
 import os
+
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
 from typing import Dict, Tuple
@@ -196,6 +198,19 @@ class Project:
         except (IsADirectoryError, FileNotFoundError, EOFError):
             with open(os.path.join(path, "Project_108.pkl"), "rb") as f:
                 return pickle.load(f)
+
+    def get_config(self):
+        return {
+            "xmlPath": self.xml,
+            "datPath": self.dat,
+            "jsonPath": self.json,
+            "nameExp": os.path.basename(self.experimentPath),
+            "windowSize": self.windowSize,
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(config)
 
 
 class DataHelper(Project):
@@ -1526,6 +1541,29 @@ class DataHelper(Project):
 
         return np.sum(in_left_mask) / np.sum(in_right_mask)
 
+    def get_config(self):
+        """
+        Returns a dict containing the parameters of the DataHelper, useful for serialization and logging.
+        """
+        config = {
+            "mode": self.mode,
+            "target": self.target,
+            "force_ref": self.force_ref,
+            "isPredLoss": self.isPredLoss,
+            "phase": self.phase,
+            "windowSize": self.windowSize,
+            "nGroups": self.nGroups,
+            "folder": self.folder,
+        }
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Update the parameters of the DataHelper from a config dict, useful for deserialization and logging.
+        """
+        return cls(config)
+
 
 class Params:
     """
@@ -1640,7 +1678,7 @@ class Params:
         # Extract optional parameters
         nEpochs = kwargs.pop("nEpochs", 100)
         phase = kwargs.pop("phase", None)
-        batchSize = kwargs.pop("batchSize", 256)
+        batch_size = kwargs.pop("batch_size", 256)
         save_json = kwargs.pop("save_json", False)
 
         # Initialize attributes
@@ -1649,7 +1687,7 @@ class Params:
         # Store parameters
         self.nEpochs = nEpochs
         self.phase = phase
-        self.batchSize = batchSize
+        self.batch_size = batch_size
         if not hasattr(self, "windowSize"):
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
@@ -1703,7 +1741,7 @@ class Params:
         )  # path to save results
 
         # regarding data augmentation
-        self.dataAugmentation = kwargs.pop("dataAugmentation", False)
+        self.dataAugmentation = kwargs.pop("dataAugmentation", True)
 
         # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???
@@ -1849,7 +1887,7 @@ class Params:
 
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
-        self.usingMixedPrecision = False
+        self.usingMixedPrecision = True  # whether to use mixed precision training (float16) for faster computations on compatible hardware
 
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
@@ -1912,7 +1950,7 @@ class Params:
             f"Params(\n"
             f"  nEpochs={self.nEpochs},\n"
             f"  phase={self.phase},\n"
-            f"  batchSize={self.batchSize},\n"
+            f"  batchSize={self.batch_size},\n"
             f"  windowSize={self.windowSize},\n"
             f"  nGroups={self.nGroups},\n"
             f"  dimOutput={self.dimOutput},\n"

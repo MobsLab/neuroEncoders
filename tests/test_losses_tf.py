@@ -71,7 +71,7 @@ def test_contrastive_loss_layer():
     z = tf.random.normal((4, 128))
     pos = tf.constant([[0.1], [0.2], [0.3], [0.4]], dtype=tf.float32)
 
-    loss = layer([z, pos])
+    loss = layer([pos, z])  # respect the input format of [y_true, y_pred]
     assert loss.shape == ()
     assert loss >= 0
 
