@@ -27,6 +27,9 @@ def mock_params():
     params.nChannelsPerGroup = [32]
     params.stride = 36
     params.windowSizeMS = 100
+    params.dimOutput = 2
+    params.GaussianHeatmap = False
+    params.usingMixedPrecision = False
     return params
 
 

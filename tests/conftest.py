@@ -4,7 +4,7 @@ import pytest
 class MockParams:
     def __init__(self):
         self.nGroups = 2
-        self.nChannelsPerGroup = [2, 2]  # 2 groups, 2 channels each
+        self.nChannelsPerGroup = [2, 3]  # 2 groups, 2 channels vs 3 channels
         self.nFeatures = 64
         self.nHeads = 4
         self.ff_dim1 = 128
@@ -14,8 +14,8 @@ class MockParams:
         self.lstmSize = 64
         self.TransformerDenseSize1 = 64
         self.TransformerDenseSize2 = 32
-        self.dimOutput = 2
-        self.batchSize = 4
+        self.dimOutput = 3
+        self.batch_size = 8
         self.windowLength = 0.2
         self.dim_factor = 2
         self.project_transformer = True
@@ -23,12 +23,12 @@ class MockParams:
         self.weight_decay = 1e-4
         self.learningRates = [1e-3, 1e-4]
         self.target = "pos"
-        self.usingMixedPrecision = False
+        self.usingMixedPrecision = True
         self.windowSize = 0.036
         self.windowSizeMS = 36
         self.denseweight = False
-        self.GaussianHeatmap = False
-        self.OversamplingResampling = False
+        self.GaussianHeatmap = True
+        self.OversamplingResampling = True
 
         self.resultsPath = "test_results"
         self.use_conv2d = False
@@ -42,7 +42,7 @@ class MockParams:
         self.reduce_dense = False
         self.no_cnn = False
         self.loss = "mse"
-        self.contrastive_loss = False
+        self.contrastive_loss = True
         self.alpha = 1.3
         self.delta = 0.5
         self.transform_w_log = False

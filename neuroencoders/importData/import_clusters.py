@@ -211,6 +211,10 @@ def _load_linear_spike_sorting_from_clu(projectPath: Project, flatten=True) -> d
         all_labels = np.concatenate(labels)
         labels = all_labels[sort_idx]
         indexInDat = all_index[sort_idx]
+        if not os.path.isdir(
+            os.path.join(projectPath.folder, "dataset", "clusterData")
+        ):
+            os.makedirs(os.path.join(projectPath.folder, "dataset", "clusterData"))
 
     sys.stdout.write(
         "We have imported linear-time clusters.                                                           "

@@ -1,6 +1,7 @@
 # Load libs
 import os
 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd

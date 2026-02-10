@@ -16,22 +16,25 @@ win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
-    "M1239_MFB",
-    "M1230_Novel",
-    "M1230_Known",
-    "M1162_MFB",
-    "M1117_MFB",
-    "M1162_PAG",
-    "M1168_MFB",
-    "M1182_PAG",
-    "M1239_PAG",
-    "M1199_reversal",
-    "M905",
-    "M1199_MFB",
+    # "M1239_MFB",
+    # "M1230_Novel",
+    # "M1230_Known",
+    # "M1162_MFB",
+    # "M1117_MFB",
+    # "M1162_PAG",
+    # "M1168_MFB",
+    # "M1182_PAG",
+    # "M1239_PAG",
+    # "M1199_reversal",
+    # "M905",
+    # "M1199_MFB",
 ]
 ####
-nameExp = "consensus_v1_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07"
+nameExp = (
+    "new_consensus_v1_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07"
+)
 nbEpochs = str(30)
+nbEpochs = str(1)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
 target_bayes = "pos"

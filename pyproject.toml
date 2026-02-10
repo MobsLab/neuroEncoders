@@ -32,7 +32,6 @@ dependencies = [
     "matplotlib>=3.6.2",
     "numba>=0.60.0",
     "numpy<=2",
-    "nvidia-cudnn-cu12~=8.9",
     "nx-cugraph-cu12>=25.10",
     "opencv-python-headless>=4.11.0.86",
     "pandas>=2.1.0",
@@ -74,6 +73,7 @@ dev = [
     "bokeh>=3.8.1",
     "dash>=3.1.1",
     "ephyviewer>=1.7.0",
+    "gputil>=1.4.0",
     "imageio[ffmpeg,pyav]>=2.37.0",
     "keras-tuner>=1.4.8",
     "kilosort>=4.1.1",
@@ -91,6 +91,7 @@ dev = [
     "ruff>=0.11.8",
     "scipy>=1.15.3",
     "spikeinterface[full]>=0.103.0",
+    "torch>=2.3.1",
     "xlsxwriter>=3.2.5",
 ]
 

@@ -225,7 +225,7 @@ def inEpochsMask(t, epochs):
 
 def get_epochs_mask(
     times: Optional[np.ndarray] = None,
-    epochs: Optional[np.ndarray] = None,
+    epochs: Optional[Dict[str, np.ndarray]] = None,
     behaviorData: Optional[Dict] = None,
     useTrain: bool = False,
     useTest: bool = True,

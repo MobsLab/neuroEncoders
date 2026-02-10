@@ -3,7 +3,10 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
+import tables
 import tensorflow as tf
+
+from neuroencoders.transformData.linearizer import UMazeLinearizer
 
 # Assuming original TF class is importable
 try:
@@ -34,8 +37,6 @@ def get_mock_inputs(
         inputs["groups"] = np.random.randint(
             0, n_groups, size=(batch_size, seq_len)
         ).astype(np.int32)
-        # Ground truth pos for internal loss: (Batch, 2)
-        inputs["pos"] = np.random.normal(size=(batch_size, 2)).astype(np.float32)
 
     return inputs
 
@@ -52,6 +53,17 @@ def get_mock_behavior_data(n_samples=100):
 
 
 @pytest.fixture
+def mock_linearizer(tmp_path):
+    """Creates a mock linearizer for testing."""
+    mat_path = tmp_path / "nnBehavior.mat"
+    with tables.open_file(str(mat_path), mode="w") as f:
+        f.create_group("/", "behavior")
+
+    # UMazeLinearizer will generate canonical path automatically
+    return UMazeLinearizer(folder=str(tmp_path), nb_bins=45)
+
+
+@pytest.fixture
 def mock_project(temp_project_dir):
     project_dir, xml_path = temp_project_dir
     project = MagicMock()
@@ -62,23 +74,27 @@ def mock_project(temp_project_dir):
     return project
 
 
-def test_model_instantiation(mock_params, mock_project):
+def test_model_instantiation(mock_params, mock_project, mock_linearizer):
     behavior_data = get_mock_behavior_data()
     if TFNet is None:
         pytest.skip("TFNet not available")
     model = TFNet(
-        projectPath=mock_project, params=mock_params, behaviorData=behavior_data
+        projectPath=mock_project,
+        params=mock_params,
+        behaviorData=behavior_data,
+        linearizer=mock_linearizer,
+        jit_compile=False,
     )
     assert model.model is not None
     assert isinstance(model.model, tf.keras.Model)
 
 
-def test_model_forward(mock_params, mock_project):
+def test_model_forward(mock_params, mock_project, mock_linearizer):
     behavior_data = get_mock_behavior_data()
     backend = "tensorflow"
     inputs = get_mock_inputs(
         backend,
-        batch_size=mock_params.batchSize,
+        batch_size=mock_params.batch_size,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
     )
@@ -86,24 +102,41 @@ def test_model_forward(mock_params, mock_project):
     if TFNet is None:
         pytest.skip("TFNet not available")
     model_obj = TFNet(
-        projectPath=mock_project, params=mock_params, behaviorData=behavior_data
+        projectPath=mock_project,
+        params=mock_params,
+        behaviorData=behavior_data,
+        linearizer=mock_linearizer,
+        jit_compile=False,
     )
     output = model_obj.model(inputs)
 
-    if isinstance(output, (list, tuple)):
-        pos_out = output[0]
+    assert isinstance(output, dict)
+    assert "main_pred" in output
+    if mock_params.dimOutput > 2:
+        assert "others" in output
+    if getattr(mock_params, "contrastive_loss", False):
+        assert "latent" in output
+
+    # Check main_pred shape
+    if getattr(mock_params, "GaussianHeatmap", False):
+        H, W = mock_params.GaussianGridSize
+        # Heatmap is either (B, H, W) or (B, H*W) depending on architecture
+        # In current impl, it's (B, H*W) from the model output
+        assert output["main_pred"].shape == (mock_params.batch_size, H * W)
     else:
-        pos_out = output
+        assert output["main_pred"].shape[1] == 2
 
-    assert pos_out.shape == (mock_params.batchSize, mock_params.dimOutput)
+    # Check others shape
+    if "others" in output:
+        assert output["others"].shape[1] == mock_params.dimOutput - 2
 
 
-def test_train_step(mock_params, mock_project):
+def test_train_step(mock_params, mock_project, mock_linearizer):
     behavior_data = get_mock_behavior_data()
     backend = "tensorflow"
     inputs = get_mock_inputs(
         backend,
-        batch_size=mock_params.batchSize,
+        batch_size=mock_params.batch_size,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
     )
@@ -111,15 +144,75 @@ def test_train_step(mock_params, mock_project):
     if TFNet is None:
         pytest.skip("TFNet not available")
     model_obj = TFNet(
-        projectPath=mock_project, params=mock_params, behaviorData=behavior_data
+        projectPath=mock_project,
+        params=mock_params,
+        behaviorData=behavior_data,
+        linearizer=mock_linearizer,
+        jit_compile=False,
     )
 
     targets = {
-        "myoutputPos": np.random.randn(mock_params.batchSize, mock_params.dimOutput),
-        "posLoss": np.zeros((mock_params.batchSize,)),
+        "main_pred": np.random.randn(mock_params.batch_size, 2).astype(np.float32),
     }
-    for name in model_obj.outNames[2:]:
-        targets[name] = np.zeros((mock_params.batchSize,))
+    if mock_params.dimOutput > 2:
+        targets["others"] = np.random.randn(
+            mock_params.batch_size, mock_params.dimOutput - 2
+        ).astype(np.float32)
+    if getattr(mock_params, "contrastive_loss", False):
+        targets["latent"] = np.zeros(
+            (mock_params.batch_size, mock_params.nFeatures)
+        ).astype(np.float32)
 
     loss = model_obj.model.train_on_batch(inputs, targets)
     assert loss is not None
+
+
+def test_model_fit(mock_params, mock_project, mock_linearizer):
+    """Verifies that model.fit works correctly with the custom loss and multi-output."""
+    behavior_data = get_mock_behavior_data()
+    backend = "tensorflow"
+
+    if TFNet is None:
+        pytest.skip("TFNet not available")
+
+    model_obj = TFNet(
+        projectPath=mock_project,
+        params=mock_params,
+        behaviorData=behavior_data,
+        linearizer=mock_linearizer,
+        jit_compile=False,
+    )
+
+    def generate_data():
+        for _ in range(3):
+            batch_inputs = get_mock_inputs(
+                backend,
+                batch_size=mock_params.batch_size,
+                n_groups=mock_params.nGroups,
+                n_channels=mock_params.nChannelsPerGroup,
+            )
+            batch_targets = {
+                "main_pred": np.random.randn(mock_params.batch_size, 2).astype(
+                    np.float32
+                ),
+            }
+            if mock_params.dimOutput > 2:
+                batch_targets["others"] = np.random.randn(
+                    mock_params.batch_size, mock_params.dimOutput - 2
+                ).astype(np.float32)
+            if getattr(mock_params, "contrastive_loss", False):
+                batch_targets["latent"] = np.zeros(
+                    (mock_params.batch_size, mock_params.nFeatures)
+                ).astype(np.float32)
+            yield (batch_inputs, batch_targets)
+
+    history = model_obj.model.fit(
+        generate_data(), epochs=1, steps_per_epoch=3, verbose=0
+    )
+
+    assert "loss" in history.history
+    # Check that individual losses and metrics are reported
+    keys = history.history.keys()
+    assert any("main_pred_loss" in k for k in keys)
+    if mock_params.GaussianHeatmap:
+        assert any("dist_2d" in k for k in keys)

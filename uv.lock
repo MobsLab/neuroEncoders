@@ -1995,6 +1995,12 @@ wheels = [
 ]
 
 [[package]]
+name = "gputil"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/0e/5c61eedde9f6c87713e89d794f01e378cfd9565847d4576fa627d758c554/GPUtil-1.4.0.tar.gz", hash = "sha256:099e52c65e512cdfa8c8763fca67f5a5c2afb63469602d5dcb4d296b3661efb9", size = 5545 }
+
+[[package]]
 name = "graphviz"
 version = "0.21"
 source = { registry = "https://pypi.org/simple" }
@@ -4092,8 +4098,6 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy" },
-    { name = "nvidia-cudnn-cu12", version = "8.9.2.26", source = { registry = "https://pypi.nvidia.com/" }, marker = "python_full_version >= '3.13' or sys_platform == 'linux'" },
-    { name = "nvidia-cudnn-cu12", version = "8.9.7.29", source = { registry = "https://pypi.nvidia.com/" }, marker = "python_full_version < '3.13' and sys_platform != 'linux'" },
     { name = "nx-cugraph-cu12" },
     { name = "opencv-python-headless" },
     { name = "pandas" },
@@ -4137,6 +4141,7 @@ dev = [
     { name = "bokeh" },
     { name = "dash" },
     { name = "ephyviewer" },
+    { name = "gputil" },
     { name = "imageio", extra = ["ffmpeg", "pyav"] },
     { name = "keras-tuner" },
     { name = "kilosort" },
@@ -4155,6 +4160,8 @@ dev = [
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "spikeinterface", extra = ["full"] },
+    { name = "torch", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'linux'" },
+    { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "xlsxwriter" },
 ]
 
@@ -4183,7 +4190,6 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.6.2" },
     { name = "numba", specifier = ">=0.60.0" },
     { name = "numpy", specifier = "<=2" },
-    { name = "nvidia-cudnn-cu12", specifier = "~=8.9" },
     { name = "nx-cugraph-cu12", specifier = ">=25.10" },
     { name = "opencv-python-headless", specifier = ">=4.11.0.86" },
     { name = "pandas", specifier = ">=2.1.0" },
@@ -4225,6 +4231,7 @@ dev = [
     { name = "bokeh", specifier = ">=3.8.1" },
     { name = "dash", specifier = ">=3.1.1" },
     { name = "ephyviewer", specifier = ">=1.7.0" },
+    { name = "gputil", specifier = ">=1.4.0" },
     { name = "imageio", extras = ["ffmpeg", "pyav"], specifier = ">=2.37.0" },
     { name = "keras-tuner", specifier = ">=1.4.8" },
     { name = "kilosort", specifier = ">=4.1.1" },
@@ -4242,6 +4249,7 @@ dev = [
     { name = "ruff", specifier = ">=0.11.8" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "spikeinterface", extras = ["full"], specifier = ">=0.103.0" },
+    { name = "torch", specifier = ">=2.3.1" },
     { name = "xlsxwriter", specifier = ">=3.2.5" },
 ]
 
@@ -4717,58 +4725,11 @@ wheels = [
 name = "nvidia-cudnn-cu12"
 version = "8.9.2.26"
 source = { registry = "https://pypi.nvidia.com/" }
-resolution-markers = [
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.13.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
-    "python_full_version >= '3.14' and platform_machine == 'aarch64' and sys_platform != 'linux'",
-    "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform != 'linux'",
-    "python_full_version >= '3.14' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.13.*' and platform_machine == 'aarch64' and sys_platform != 'linux'",
-    "python_full_version == '3.13.*' and platform_machine == 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.13.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.11.*' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version == '3.11.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'linux'",
-    "python_full_version < '3.11' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform == 'linux'",
-]
 dependencies = [
     { name = "nvidia-cublas-cu12", version = "12.1.3.1", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cublas-cu12", version = "12.9.1.4", source = { registry = "https://pypi.nvidia.com/" }, marker = "(python_full_version >= '3.13' and sys_platform != 'linux') or (platform_machine != 'x86_64' and sys_platform == 'linux')" },
 ]
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cudnn-cu12/nvidia_cudnn_cu12-8.9.2.26-py3-none-manylinux1_x86_64.whl", hash = "sha256:5ccb288774fdfb07a7e7025ffec286971c06d8d7b4fb162525334616d7629ff9" },
-]
-
-[[package]]
-name = "nvidia-cudnn-cu12"
-version = "8.9.7.29"
-source = { registry = "https://pypi.nvidia.com/" }
-resolution-markers = [
-    "python_full_version == '3.12.*' and platform_machine == 'aarch64' and sys_platform != 'linux'",
-    "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.12.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.11.*' and platform_machine == 'aarch64' and sys_platform != 'linux'",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform != 'linux'",
-    "python_full_version == '3.11.*' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform != 'linux'",
-    "python_full_version < '3.11' and platform_machine == 'aarch64' and sys_platform != 'linux'",
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform != 'linux'",
-    "python_full_version < '3.11' and platform_machine != 'aarch64' and platform_machine != 'x86_64' and sys_platform != 'linux'",
-]
-dependencies = [
-    { name = "nvidia-cublas-cu12", version = "12.9.1.4", source = { registry = "https://pypi.nvidia.com/" }, marker = "python_full_version < '3.13' and sys_platform != 'linux'" },
-    { name = "nvidia-cuda-nvrtc-cu12", version = "12.9.86", source = { registry = "https://pypi.nvidia.com/" }, marker = "python_full_version < '3.13' and sys_platform != 'linux'" },
-]
-wheels = [
-    { url = "https://pypi.nvidia.com/nvidia-cudnn-cu12/nvidia_cudnn_cu12-8.9.7.29-py3-none-win_amd64.whl", hash = "sha256:4447321a2bdc8bd965084c1824575eb04f47a03ab62bbeb6cce7e9f74c3657f3" },
 ]
 
 [[package]]
@@ -7907,7 +7868,7 @@ dependencies = [
     { name = "nvidia-cuda-cupti-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cuda-nvrtc-cu12", version = "12.1.105", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cuda-runtime-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-    { name = "nvidia-cudnn-cu12", version = "8.9.2.26", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "nvidia-cudnn-cu12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cufft-cu12", version = "11.0.2.54", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-curand-cu12", version = "10.3.2.106", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cusolver-cu12", version = "11.4.5.107", source = { registry = "https://pypi.nvidia.com/" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
