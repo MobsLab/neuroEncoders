@@ -286,7 +286,7 @@ def realign_spikes(pos_tsd, spike_tsd, method="closest"):
         # Try restrict method
         try:
             return spike_tsd.restrict(pos_tsd, align=method)
-        except AttributeError:
+        except (AttributeError, TypeError):
             pass
 
     # Manual interpolation fallback
@@ -309,7 +309,7 @@ def realign_spikes(pos_tsd, spike_tsd, method="closest"):
     if HAS_NEUROSERIES:
         try:
             return nts.Tsd(spike_times, spike_pos)
-        except AttributeError:
+        except (AttributeError, TypeError):
             pass
 
     # Return as simple object with times and values
