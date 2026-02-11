@@ -210,7 +210,7 @@ class Project:
 
     @classmethod
     def from_config(cls, config):
-        return cls(config)
+        return cls(**config)
 
 
 class DataHelper(Project):
@@ -1562,7 +1562,7 @@ class DataHelper(Project):
         """
         Update the parameters of the DataHelper from a config dict, useful for deserialization and logging.
         """
-        return cls(config)
+        return cls(**config)
 
 
 class Params:
@@ -1648,7 +1648,7 @@ class Params:
             **kwargs: optional keyword arguments, can include:
                 - nEpochs (int, default 100)
                 - phase (str, optional)
-                - batchSize (int, default 256)
+                - batch_size (int, default 256)
                 - save_json (bool, default False)
                 - isTransformer (bool, optional, default True)
                 - transform_w_log (bool, optional, default False)
@@ -1950,7 +1950,7 @@ class Params:
             f"Params(\n"
             f"  nEpochs={self.nEpochs},\n"
             f"  phase={self.phase},\n"
-            f"  batchSize={self.batch_size},\n"
+            f"  batch_size={self.batch_size},\n"
             f"  windowSize={self.windowSize},\n"
             f"  nGroups={self.nGroups},\n"
             f"  dimOutput={self.dimOutput},\n"

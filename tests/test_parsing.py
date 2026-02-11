@@ -10,12 +10,12 @@ class MockParams:
         self.nGroups = 2
         self.nChannelsPerGroup = [2, 4]
         self.nFeatures = 64
-        self.batchSize = 4
+        self.batch_size = 4
 
 
 def create_dummy_parsed_tensors(params):
     tensors = {
-        "pos": tf.constant(np.random.rand(10, 2).astype(np.float32)),
+        "pos": tf.constant(np.random.rand(2).astype(np.float32)),
         "groups": tf.SparseTensor(
             indices=[[0], [1], [2]], values=[0, 1, 0], dense_shape=[3]
         ),
@@ -52,7 +52,7 @@ def test_parse_serialized_sequence():
 
     # Check pos
     assert isinstance(parsed["pos"], tf.Tensor)
-    assert parsed["pos"].shape == (10, 2)
+    assert parsed["pos"].shape == (2,)
 
     # Check groups
     assert parsed["groups"].shape == (3,)

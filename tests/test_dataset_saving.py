@@ -22,7 +22,7 @@ def mock_project(tmp_path):
 @pytest.fixture
 def mock_params():
     params = MagicMock()
-    params.batchSize = 2
+    params.batch_size = 2
     params.nGroups = 1
     params.nChannelsPerGroup = [32]
     params.stride = 36

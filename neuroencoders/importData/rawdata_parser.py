@@ -357,6 +357,8 @@ def speed_filter(
     window_range=-1,  # -1 means no window range
     get_rid_of_sleep: bool = True,
     threshold: Optional[float] = None,
+    force_min=None,
+    force_max=None,
 ) -> None:
     """
     A simple tool to set up a threshold on the speed value

@@ -2095,7 +2095,7 @@ class Results_Loader:
             deviceName (str): Device to use for training ('gpu' or 'cpu'). Default is 'gpu'.
             nEpochs (int): Number of epochs to consider for the ANN.
             isTransformer (bool): Whether to use a transformer model for the ANN. Default is False.
-            batchSize (int): Batch size for training the ANN. Default is 64.
+            batch_size (int): Batch size for training the ANN. Default is 64.
             transform_w_log (bool): Whether to apply a logarithmic transformation to the ann loss. Default is False.
 
 
