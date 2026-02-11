@@ -1149,16 +1149,7 @@ def parse_serialized_sequence(params, tensors, count_spikes=False, sorted_indice
         if isinstance(tensors[key], tf.SparseTensor):
             default = -1.0 if key == "pos" else -1
             tensors[key] = tf.sparse.to_dense(tensors[key], default_value=default)
-        if key == "pos":
-            # Position is expected to be 2D (seqLen, 2)
-            # If it was flattened during tf.io.parse_single_example, restore it
-            # But only if it's a multiple of 2 (for 2D coords)
-            num_elements = tf.size(tensors[key])
-            current_rank = tf.rank(tensors[key])
-            if current_rank == 1 and tf.equal(num_elements % 2, 0):
-                tensors[key] = tf.reshape(tensors[key], [-1, 2])
-        else:
-            tensors[key] = tf.reshape(tensors[key], [-1])
+        tensors[key] = tf.reshape(tensors[key], [-1])
 
     for g in range(params.nGroups):
         group_key = f"group{g}"
@@ -3603,7 +3594,12 @@ class PositionError2D(tf.keras.metrics.Metric):
     by decoding heatmap logits.
     """
 
-    def __init__(self, gaussian_heatmap_layer=None, name="pos_error_2d", **kwargs):
+    def __init__(
+        self,
+        gaussian_heatmap_layer: Optional[GaussianHeatmapLayer],
+        name="pos_error_2d",
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
         self.heatmap_layer = gaussian_heatmap_layer
         self.total_dist = self.add_weight(name="total_dist", initializer="zeros")
@@ -3655,8 +3651,19 @@ class PositionError2D(tf.keras.metrics.Metric):
 
     def get_config(self):
         config = super().get_config()
-        config.update({"gaussian_heatmap_layer": self.heatmap_layer})
+        config.update({"gaussian_heatmap_layer": self.heatmap_layer.get_config()})
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        gaussian_heatmap_layer_config = config.pop("gaussian_heatmap_layer", None)
+        if gaussian_heatmap_layer_config is not None:
+            gaussian_heatmap_layer = GaussianHeatmapLayer.from_config(
+                gaussian_heatmap_layer_config
+            )
+        else:
+            gaussian_heatmap_layer = None
+        return cls(gaussian_heatmap_layer=gaussian_heatmap_layer, **config)
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
@@ -3675,17 +3682,20 @@ class AngularErrorMetric(tf.keras.metrics.Metric):
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.cast(y_pred, tf.float32)
         y_true_shape = tf.shape(y_true)
-        if y_true_shape[1] == 1:
-            # Circular difference in radians
-            diff = (y_pred - y_true + np.pi) % (2 * np.pi) - np.pi
-            error = tf.abs(diff)
-        else:
-            # Dot product for unit vectors
-            cos_sim = tf.reduce_sum(y_pred * y_true, axis=-1) / (
-                tf.norm(y_pred, axis=-1) * tf.norm(y_true, axis=-1) + 1e-8
-            )
-            error = tf.acos(tf.clip(cos_sim, -1.0, 1.0))
-
+        error = tf.cond(
+            tf.equal(y_true_shape[1], 1),
+            # True branch: Radians
+            lambda: tf.abs((y_pred - y_true + np.pi) % (2 * np.pi) - np.pi),
+            # False branch: Unit Vectors
+            lambda: tf.acos(
+                tf.clip_by_value(
+                    tf.reduce_sum(y_pred * y_true, axis=-1)
+                    / (tf.norm(y_pred, axis=-1) * tf.norm(y_true, axis=-1) + 1e-8),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
         if sample_weight is not None:
             sample_weight = tf.cast(sample_weight, self.dtype)
             error = error * sample_weight

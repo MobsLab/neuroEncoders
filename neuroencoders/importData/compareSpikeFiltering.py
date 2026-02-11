@@ -330,20 +330,20 @@ class WaveFormComparator:
         )
 
 
-def reconstruct_spike_waveforms(vals, params):
+def reconstruct_spike_waveforms(vals, params: Params):
     """
     Reconstruct individual spike waveforms from the processed tensors.
 
     Args:
         vals: Dictionary containing groups, group+str(g), and indices tensors
-        params: Parameters object with batchSize, nGroups, nChannelsPerGroup
+        params: Parameters object with batch_size, nGroups, nChannelsPerGroup
 
     Returns:
         reconstructed_spikes: List of [batch, nspikes, nChannels, 32] arrays per group
         spike_positions: List of positions where spikes occurred per group
         batch_assignments: Which batch each spike belongs to
     """
-    batch_size = params.batchSize
+    batch_size = params.batch_size
     reconstructed_spikes = []
     spike_positions = []
     batch_assignments = []
@@ -538,7 +538,7 @@ def plot_spike_examples(
     plt.show()
 
 
-def analyze_spike_statistics(reconstructed_spikes, params):
+def analyze_spike_statistics(reconstructed_spikes, params: Params):
     """
     Analyze statistics of reconstructed spikes across batches and groups.
     """
@@ -546,7 +546,7 @@ def analyze_spike_statistics(reconstructed_spikes, params):
 
     total_spikes_per_batch = []
 
-    for batch_idx in range(params.batchSize):
+    for batch_idx in range(params.batch_size):
         batch_total = 0
         for group in range(params.nGroups):
             group_spikes = reconstructed_spikes[group][batch_idx].numpy()

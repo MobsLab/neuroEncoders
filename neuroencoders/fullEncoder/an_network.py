@@ -10,7 +10,6 @@ an_network module for training and managing LSTM and spiking neural networks.
 # Dima 21/01/22:
 # Cleanining and rewriting of the module
 
-import gc
 import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
@@ -1119,7 +1118,7 @@ class LSTMandSpikeNetwork:
                         project="ContrastiveLossNew",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
-                        # sync_tensorboard=True,
+                        sync_tensorboard=True,
                         config=ann_config,
                     )
                     # tf.profiler.experimental.start(
@@ -1181,16 +1180,6 @@ class LSTMandSpikeNetwork:
                     # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
-                print("doing a warmup pass of 2 epochs first")
-                it = iter(datasets["train"])
-                ex = next(it)
-                for warmup_epoch in range(2):
-                    self.model.train_on_batch(ex[0], ex[1])
-                    print(
-                        f"Warmup epoch {warmup_epoch + 1}/2 completed, learning rate is now {self.model.optimizer.learning_rate.numpy()}"
-                    )
-                del it, ex
-                gc.collect()
                 hist = self.model.fit(
                     datasets["train"],
                     epochs=self.params.nEpochs - nb_epochs_already_trained,
@@ -1237,7 +1226,7 @@ class LSTMandSpikeNetwork:
                 except Exception as e:
                     print("Could not save the full model:", e)
                 if self.debug:
-                    # wandb.tensorboard.unpatch()
+                    wandb.tensorboard.unpatch()
                     run.finish()
 
     def _dataset_loading_pipeline(
@@ -2095,8 +2084,9 @@ class LSTMandSpikeNetwork:
             batch_target_list = []
             if "main_pred" in targets:
                 batch_target_list.append(targets["main_pred"].numpy())
-            if "others" in targets:
-                batch_target_list.append(targets["others"].numpy())
+            # TODO: fix : for now main_pred also handles others (is pos + others) so we should not add others, but we should check that the order is correct (pos first then others)
+            # if "others" in targets:
+            #     batch_target_list.append(targets["others"].numpy())
 
             if batch_target_list:
                 list_pos.append(np.concatenate(batch_target_list, axis=-1))
@@ -2127,7 +2117,6 @@ class LSTMandSpikeNetwork:
         full_times = np.concatenate(list_times, axis=0).flatten()
         full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
         full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
-        full_groups = np.concatenate(list_groups, axis=0).flatten()
 
         # Handle Speed Mask
         # If speedFilter was in dataset, use it. Otherwise compute via lookup
@@ -2210,7 +2199,6 @@ class LSTMandSpikeNetwork:
                     "posIndex": full_pos_index,
                     # Convert list of arrays/lists to string or keep as object for indexInDat
                     "indexInDat": full_index_raw,
-                    "groups": full_groups,
                 }
 
                 # Add group counts
@@ -3182,7 +3170,7 @@ class LSTMandSpikeNetwork:
             # Create batch indices
             batch_indices = tf.repeat(tf.range(batch_size), max_spikes_per_batch)
         else:
-            # Assume batchSize is set in params
+            # Assume batch_size is set in params
             batch_size = self.params.batch_size
             total_spikes = original_shape[0]
             max_spikes_per_batch = total_spikes // batch_size
@@ -3833,7 +3821,8 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
         target_key="heatmap",
         **kwargs,
     ):
-        super().__init__(name=f"Loss_{target_key}", **kwargs)
+        name = kwargs.pop("name", f"Loss_{target_key}")
+        super().__init__(name=name, **kwargs)
         self.gaussian_params = gaussian_params
         self.lfunction_params = lfunction_params
         self.params = params
@@ -3901,7 +3890,7 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
             if self.target_key == "main_pred":
                 if getattr(self.params, "GaussianHeatmap", False):
                     # y_true: [batch, 2+], y_pred: [batch, grid_H, grid_W] or [batch, flattened]
-                    batchSize = tf.shape(y_true)[0]
+                    batch_size = tf.shape(y_true)[0]
                     targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(
                         y_true[:, :2]
                     )
@@ -3916,7 +3905,7 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
                         logits_hw = kops.reshape(
                             y_pred,
                             (
-                                batchSize,
+                                batch_size,
                                 self.params.GaussianGridSize[0],
                                 self.params.GaussianGridSize[1],
                             ),

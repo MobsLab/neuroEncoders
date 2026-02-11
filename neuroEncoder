@@ -28,6 +28,9 @@ debug = True
 overWrite_speed_filter_and_linearization = False
 redo_params = False
 redo_all_params = False
+# Modify the speed mask to be much more conservative
+min_speed = 10
+max_speed = 75
 
 
 def main(args):
@@ -226,6 +229,28 @@ def main(args):
             overwrite=args.redo and overWrite_speed_filter_and_linearization,
         )
 
+        # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
+        speed = helper.fullBehavior["Speed"][:, 0]
+        if len(speed) == len(helper.fullBehavior["positionTime"]) - 1:
+            speed = np.append(speed, speed[-1])
+
+        window_len = 14
+        s = np.r_[
+            speed[window_len - 1 : 0 : -1],
+            speed,
+            speed[-2 : -window_len - 1 : -1],
+        ]
+        w = np.hamming(window_len)
+        smoothed_speed = np.convolve(w / w.sum(), s, mode="valid")[
+            (window_len // 2 - 1) : -(window_len // 2)
+        ]
+
+        # Use logical_and to be conservative and ensure we filter within the [9, 75] range
+        helper.fullBehavior["Times"]["speedFilter"] = np.logical_and(
+            smoothed_speed > min_speed,
+            smoothed_speed < max_speed,
+        ).astype(bool)
+
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
         epochMask = inEpochsMask(
             helper.fullBehavior["positionTime"][:, 0],
@@ -254,7 +279,7 @@ def main(args):
         nEpochs=args.epochs,
         phase=args.phase,
         nFeatures=args.n_features,
-        batchSize=(256 if args.window < 0.252 else 128)
+        batch_size=(256 if args.window < 0.252 else 128)
         if "1230" not in ProjectPath.xml
         else 128,
         save_json=True,
@@ -721,6 +746,7 @@ def main(args):
                 fit_temperature=True,
                 useTrain=True,
                 useTest=False,
+                phase="fit_temperature",
                 windowSizeMS=windowSizeMS,
                 useSpeedFilter=True,
                 isPredLoss=isPL,
