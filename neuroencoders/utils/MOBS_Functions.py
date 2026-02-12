@@ -757,42 +757,21 @@ class Mouse_Results(Params, PaperFigures):
 
     def _initialize_window(self, winMS, i, **kwargs):
         """Loads or creates Project, Params and DataHelper for a given window."""
-        try:
-            self.projects[winMS] = Project.load(
-                os.path.join(self.path, self.nameExp, f"Project_{winMS}.pkl")
-            )
-            self.parameters[winMS] = Params.load(os.path.join(self.folderResult, winMS))
-            try:
-                self.data_helper = DataHelperClass.load(
-                    self.projects[winMS].experimentPath, phase=self.phase
-                )
-            except FileNotFoundError:
-                self.data_helper = DataHelperClass(
-                    self.projects[winMS].xml,
-                    mode="compare",
-                    windowSize=int(winMS) / 1000,
-                    **kwargs,
-                )
-        except (FileNotFoundError, AttributeError, ModuleNotFoundError) as e:
-            warn(
-                f"Failed to load project for window {winMS} with error: {e}. "
-                "Creating new Project and DataHelper."
-            )
-            self.projects[winMS] = Project(
+        self.projects[winMS] = Project(
+            self.xml,
+            windowSize=int(winMS) / 1000,
+            **kwargs,
+        )
+        if i == 0:
+            self.data_helper = DataHelperClass(
                 self.xml,
-                windowSize=int(winMS) / 1000,
+                mode="compare",
                 **kwargs,
             )
-            if i == 0:
-                self.data_helper = DataHelperClass(
-                    self.xml,
-                    mode="compare",
-                    **kwargs,
-                )
-                self.data_helper.get_true_target(
-                    windowSizeMS=int(winMS), in_place=True, **kwargs
-                )
-            self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
+            self.data_helper.get_true_target(
+                windowSizeMS=int(winMS), in_place=True, **kwargs
+            )
+        self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
 
     def _load_params_fallback(self, winMS, **kwargs):
         """Fallback to load Params from json or create new one."""

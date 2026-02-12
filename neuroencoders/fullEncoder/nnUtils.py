@@ -580,8 +580,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
 
             # 2. Add Group Embeddings
             # Broadcast embeddings across Batch and Time
-            embeddings = tf.cast(self.group_embeddings, x.dtype)
-            x = x + embeddings
+            x = x + self.group_embeddings
 
             shape = tf.shape(x)
             B, T = shape[0], shape[1]
@@ -654,8 +653,9 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         self.group_embeddings = self.add_weight(
             name="group_embeddings",
             shape=(1, 1, self.n_groups, self.embed_dim),
-            initializer="uniform",
+            initializer="glorot_uniform",
             trainable=True,
+            dtype="float32",
         )
         # build sublayers
         # attention operates on (batch*time, n_groups, embed_dim)
@@ -766,7 +766,7 @@ def create_attention_mask_from_padding_mask(padding_mask):
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class PositionalEncoding(tf.keras.layers.Layer):
     # increase max_len if you have longer sequences
-    def __init__(self, max_len=10000, d_model=128, **kwargs):
+    def __init__(self, max_len=500, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -808,7 +808,7 @@ class PositionalEncoding(tf.keras.layers.Layer):
         This is necessary for serialization/deserialization.
         """
         layer_config = {
-            "max_len": config.get("max_len", 1000),
+            "max_len": config.get("max_len", 500),
             "d_model": config.get("d_model", 128),
             "device": config.get("device", "/cpu:0"),
         }
@@ -1143,13 +1143,18 @@ def serialize_single_spike(clu, spike):
     return example_proto.SerializeToString()
 
 
-def parse_serialized_sequence(params, tensors, count_spikes=False, sorted_indices=None):
+def parse_serialized_sequence(
+    params, tensors, count_spikes=False, sorted_indices=None, dimOutput=2
+):
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
     for key in ["pos", "groups", "indexInDat"]:
         if isinstance(tensors[key], tf.SparseTensor):
             default = -1.0 if key == "pos" else -1
             tensors[key] = tf.sparse.to_dense(tensors[key], default_value=default)
-        tensors[key] = tf.reshape(tensors[key], [-1])
+        if key == "pos":
+            tensors[key] = tf.reshape(tensors[key], [dimOutput])
+        else:
+            tensors[key] = tf.reshape(tensors[key], [-1])
 
     for g in range(params.nGroups):
         group_key = f"group{g}"
@@ -1199,9 +1204,14 @@ def import_true_pos(feature):
     """
     Returns a function that adds true position (the feature array) to the parsed tensors.
     """
+    feature_tensor = tf.convert_to_tensor(feature)
 
     def change_feature(vals):
-        vals["pos"] = tf.gather(feature, vals["pos_index"])
+        idx = tf.cast(vals["pos_index"], tf.int32)
+        vals["pos"] = tf.gather(feature_tensor, idx)
+        vals["pos"] = tf.reshape(
+            vals["pos"], [feature_tensor.shape[1]]
+        )  # reshape to (2,) for consistency
         return vals
 
     return change_feature
@@ -1439,7 +1449,7 @@ class NeuralDataAugmentation:
 
 
 def parse_serialized_sequence_with_augmentation(
-    params, tensors, augmentation_config=None, count_spikes=False
+    params, tensors, augmentation_config=None, count_spikes=False, dimOutput=2
 ):
     # 1. Clean up Metadata Metadata efficiently
     for key in ["groups", "indexInDat", "pos"]:
@@ -1448,7 +1458,10 @@ def parse_serialized_sequence_with_augmentation(
                 tensors[key] = tf.sparse.to_dense(
                     tensors[key], default_value=-1.0 if key == "pos" else -1
                 )
-            tensors[key] = tf.reshape(tensors[key], [-1])
+            if key == "pos":
+                tensors[key] = tf.reshape(tensors[key], [dimOutput])
+            else:
+                tensors[key] = tf.reshape(tensors[key], [-1])
 
     original_groups = {}
     for g in range(params.nGroups):

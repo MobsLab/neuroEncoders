@@ -91,6 +91,7 @@ dev = [
     "ruff>=0.11.8",
     "scipy>=1.15.3",
     "spikeinterface[full]>=0.103.0",
+    "tensorboard-plugin-profile>=2.21.6",
     "torch>=2.3.1",
     "xlsxwriter>=3.2.5",
 ]

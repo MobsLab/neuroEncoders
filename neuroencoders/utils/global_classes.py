@@ -1717,8 +1717,6 @@ class Params:
         This is where you want to modify or add any additional parameters.
         """
         self.all_args = kwargs.get("all_args", None)
-        print(self.all_args)
-
         self.mixed_loss = kwargs.get("mixed_loss", False)
         self.git_info = get_git_info()
         self.nGroups = helper.nGroups()  # number of anatomical spiking groups
@@ -1820,16 +1818,16 @@ class Params:
 
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
-        self.learningRates = kwargs.pop(
-            "learningRates", [0.01]
-        )  #  [0.00003, 0.00003, 0.00001]
+        self.learningRates = kwargs.pop("learningRates", [0.0003, 0.0003, 0.0001])
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
 
         self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
 
         self.lossActivation = None  # activation function for the loss layer
-        self.featureActivation = kwargs.pop("featureActivation", None)
+        self.featureActivation = kwargs.pop(
+            "featureActivation", "relu"
+        )  # activation function for the features (last dense layer before output)
 
         # TODO: put it in a function
         self.loss = kwargs.pop(
@@ -1887,14 +1885,14 @@ class Params:
 
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
-        self.usingMixedPrecision = True  # whether to use mixed precision training (float16) for faster computations on compatible hardware
-
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
         self.contrastive_loss = kwargs.pop("contrastive_loss", False)
         self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.7)
         self.use_conv2d = kwargs.pop("use_conv2d", False)
         self.use_group_attention_fusion = kwargs.pop("use_group_attention_fusion", True)
+
+        self.usingMixedPrecision = False  # whether to use mixed precision training (float16) for faster computations on compatible hardware
         # enforcing float16 computations whenever possible
         # According to tf tutorials, we can allow that in most layer
         # except the output for unclear reasons linked to gradient computations

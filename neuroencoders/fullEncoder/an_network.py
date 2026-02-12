@@ -129,9 +129,9 @@ class LSTMandSpikeNetwork:
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
         ):
-            # assert not params.denseweight, (
-            #     "Cannot use both GaussianHeatmap and DenseWeight"
-            # )
+            assert not params.denseweight, (
+                "Cannot use both GaussianHeatmap and DenseWeight"
+            )
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
@@ -177,9 +177,6 @@ class LSTMandSpikeNetwork:
             # index of the position in the position array
             "pos_index": tf.io.FixedLenFeature([], tf.int64),
             # target position: current value of the environmental correlate
-            # WARNING: if the target is not position, this might change
-            # this is very dirty, but we need to hardcode the position dimension to 2 for the TFRecord parsing
-            # then it will be modified by the DataHelper.get_true_target method to actually match the target.
             "pos": tf.io.FixedLenFeature([2], tf.float32),
             # number of spike sequence gathered in the window
             "length": tf.io.FixedLenFeature([], tf.int64),
@@ -241,7 +238,7 @@ class LSTMandSpikeNetwork:
                         device=self.deviceName,
                         nFeatures=self.params.nFeatures,
                         number=str(group),
-                        batch_normalization=False,
+                        batch_normalization=True,
                         reduce_dense=getattr(self.params, "reduce_dense", False),
                         no_cnn=getattr(self.params, "no_cnn", False),
                         name=f"spikeNet_{group}",
@@ -337,11 +334,14 @@ class LSTMandSpikeNetwork:
                         ),
                     ]
                 )
-            self.projector_head = tf.keras.layers.Dense(
-                self.params.nFeatures,
-                activation="relu",
-                name="contrastive_projector",
-            )
+
+            if getattr(self.params, "contrastive_loss", False):
+                self.projector_head = tf.keras.layers.Dense(
+                    self.params.nFeatures,
+                    activation="relu",
+                    name="contrastive_projector",
+                    dtype="float32",  # ensure all output layers output float32, regardless of mixed precision policy, to avoid issues with loss scaling in mixed precision
+                )
 
             # Used as inputs to already compute the loss in the forward pass and feed it to the loss network.
             self.epsilon = tf.constant(10 ** (-8))
@@ -355,10 +355,11 @@ class LSTMandSpikeNetwork:
                 and self.params.dimOutput > 2
                 else self.params.dimOutput,
                 activation=getattr(
-                    self.params, "featureActivation", None
+                    self.params, "featureActivation", "relu"
                 ),  # ensures output is in [0,1]
                 name="feature_output",
                 kernel_regularizer="l2",
+                dtype="float32",
             )
             self.dim_factor = getattr(
                 self.params, "dim_factor", 1
@@ -369,11 +370,13 @@ class LSTMandSpikeNetwork:
                     self.params.nFeatures * self.dim_factor,
                     activation="relu",
                     name="feature_projection_transformer",
+                    dtype="float32",
                 )
             self.ProjectionInMazeLayer = UMazeProjectionLayer(
                 grid_size=kwargs.get(
                     "grid_size", getattr(self.params, "GaussianGridSize", (40, 40))
                 ),
+                dtype="float32",
             )
 
             # Gather the full model
@@ -448,7 +451,9 @@ class LSTMandSpikeNetwork:
             sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
 
-        print("Using Transformer architecture !")
+        output = None
+        outputSeq = None
+
         masked_features_layer = MaskingLayer(name="masking_layer_transformer")
         masked_features_layer.supports_masking = True
         masked_features = masked_features_layer([mymask, allFeatures_raw])
@@ -468,6 +473,7 @@ class LSTMandSpikeNetwork:
 
         # 2. Positional encoding
         allFeatures = self.lstmsNets[0](allFeatures)
+        output = allFeatures
 
         # 3. Transformer blocks with residual connections
         for ilstm, transformerLayer in enumerate(self.lstmsNets[1:-3]):
@@ -502,9 +508,12 @@ class LSTMandSpikeNetwork:
             output
         )  # dense layer after pooling (size [batch, TransformerDenseSize1])
 
-        final_output = self.projector_head(
-            h
-        )  # projection for contrastive loss (size [batch, nFeatures])
+        if getattr(self.params, "contrastive_loss", False):
+            final_output = self.projector_head(
+                h
+            )  # projection for contrastive loss (size [batch, nFeatures])
+        else:
+            final_output = None
 
         x = self.lstmsNets[-1](
             h
@@ -541,7 +550,12 @@ class LSTMandSpikeNetwork:
             tuple: (myoutputPos, outputPredLoss, output, sumFeatures)
         """
 
-        print("Using LSTM architecture !")
+        output = None
+        outputSeq = None
+
+        # Ensure output is assigned if lstmLayers is 0
+        output = allFeatures
+
         # LSTM blocks with masking and dropout
         for ilstm, lstmLayer in enumerate(self.lstmsNets):
             if ilstm == 0:
@@ -650,19 +664,32 @@ class LSTMandSpikeNetwork:
                 )
 
             # Name the outputs using Identity layers
-            main_pred = tf.keras.layers.Identity(name="main_pred")(main_pred)
-            if others is not None:
-                others = tf.keras.layers.Identity(name="others")(others)
-            latent = tf.keras.layers.Identity(name="latent")(latent)
+            main_pred = tf.keras.layers.Identity(name="main_pred", dtype="float32")(
+                main_pred
+            )
+            outputs = {"main_pred": main_pred}
 
-            outputs = {"main_pred": main_pred, "latent": latent}
             if others is not None:
+                others = tf.keras.layers.Identity(name="others", dtype="float32")(
+                    others
+                )
                 outputs["others"] = others
+
+            if latent is not None:
+                latent = tf.keras.layers.Identity(name="latent", dtype="float32")(
+                    latent
+                )
+                outputs["latent"] = latent
 
         return outputs
 
     def compile_model(
-        self, outputs, modelName="FullModel.pdf", predLossOnly=False, **kwargs
+        self,
+        outputs,
+        modelName="FullModel.pdf",
+        predLossOnly=False,
+        jit_compile=False,
+        **kwargs,
     ):
         """
         Compile the model with the desired losses and optimizer.
@@ -690,7 +717,7 @@ class LSTMandSpikeNetwork:
             learning_rate=kwargs.get("lr", self.params.learningRates[0]),
             beta_1=0.9,
             beta_2=0.999,
-            epsilon=1e-07,
+            epsilon=1e-04,
             weight_decay=getattr(self.params, "weight_decay", 1e-4),
             global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
         )
@@ -708,13 +735,6 @@ class LSTMandSpikeNetwork:
             loss_weights = {}
             metrics_dict = {}
 
-            # Prepare common layers needed for metrics
-            self.GaussianHeatmap = None
-            if getattr(self.params, "GaussianHeatmap", False):
-                self.GaussianHeatmap = GaussianHeatmapLayer(
-                    **self.gaussian_heatmap_params, name="GaussianHeatmap_Shared"
-                )
-
             # Main Prediction Loss
             if "main_pred" in self.outNames:
                 loss_dict["main_pred"] = LSTMandSpikeNetworkLoss(
@@ -726,7 +746,7 @@ class LSTMandSpikeNetwork:
                     target_key="main_pred",
                     **loss_kwargs,
                 )
-                loss_weights["main_pred"] = getattr(self.params, "heatmap_weight", 1.0)
+                loss_weights["main_pred"] = getattr(self.params, "heatmap_weight", 1.5)
 
                 # Add PositionError2D metric if heatmap is used
                 if self.GaussianHeatmap is not None:
@@ -747,7 +767,7 @@ class LSTMandSpikeNetwork:
                     target_key="others",
                     **loss_kwargs,
                 )
-                loss_weights["others"] = getattr(self.params, "others_weight", 1.0)
+                loss_weights["others"] = getattr(self.params, "others_weight", 0.5)
 
                 # Metrics for others
                 target_str = str(self.params.target).lower()
@@ -779,11 +799,14 @@ class LSTMandSpikeNetwork:
                 optimizer=self.optimizer,
                 loss=loss_dict,
                 loss_weights=loss_weights,
-                metrics=metrics_dict,
-                jit_compile=kwargs.get("jit_compile", False),
+                # metrics=metrics_dict,
+                jit_compile=jit_compile,
             )
             # Get internal names of losses
-        if not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName)):
+        if (
+            not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName))
+            or 1 < 2
+        ):
             try:
                 tf.keras.utils.plot_model(
                     model,
@@ -809,7 +832,7 @@ class LSTMandSpikeNetwork:
         Parameters
         ----------
         behaviorData : dict of arrays containing the times, the feature True...
-        onTheFlyCorrection : bool (default False) : normaliize the position data on the fly
+        onTheFlyCorrection : bool (default False) : normalize the position data on the fly
         windowSizeMS : int (default 36) : size of the window in milliseconds
         scheduler : str (default "decay") : scheduler type to use for the learning rate
         isPredLoss : bool (default True) : whether to train the loss predictor model
@@ -1112,6 +1135,14 @@ class LSTMandSpikeNetwork:
                         wandb.tensorboard.patch(
                             root_logdir=os.path.join(self.folderResult, "logs")
                         )
+                        tf.profiler.experimental.start(
+                            os.path.join(self.folderResult, "logs")
+                        )
+                        tb_callbacks = tf.keras.callbacks.TensorBoard(
+                            log_dir=os.path.join(self.folderResult, "logs"),
+                            histogram_freq=1,
+                            profile_batch=(2, 4) if is_tbcallback else 0,
+                        )
                         print(f"starting tensorboard at {self.folderResult}/logs ")
                     run = wandb.init(
                         entity="touseul",
@@ -1121,14 +1152,6 @@ class LSTMandSpikeNetwork:
                         sync_tensorboard=True,
                         config=ann_config,
                     )
-                    # tf.profiler.experimental.start(
-                    #     os.path.join(self.folderResult, "logs")
-                    # )
-                    # tb_callbacks = tf.keras.callbacks.TensorBoard(
-                    #     log_dir=os.path.join(self.folderResult, "logs"),
-                    #     histogram_freq=1,
-                    #     profile_batch=(2, 4) if is_tbcallback else 0,
-                    # )
 
                     wandb_callback = WandbMetricsLogger()
             if key != "predLoss":
@@ -1177,7 +1200,7 @@ class LSTMandSpikeNetwork:
                     callbacks.append(reduce_lr_callback)
 
                 if self.debug:
-                    # callbacks.append(tb_callbacks)
+                    callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
                 hist = self.model.fit(
@@ -1267,7 +1290,6 @@ class LSTMandSpikeNetwork:
         shuffle = kwargs.get("shuffle", True)
         random_spiking = kwargs.get("random_spiking", False)
         batch_size = kwargs.get("batch_size", self.params.batch_size)
-        print(f"batch_size is set to {batch_size}")
         speedMask = kwargs.get("speedMask", None)
         inference_mode = kwargs.get("inference_mode", False)
         if inference_mode and shuffle:
@@ -1630,6 +1652,7 @@ class LSTMandSpikeNetwork:
                     processed_batch,  # Pass the copy
                     augmentation_config=augmentation_config,
                     count_spikes=count_spikes,
+                    dimOutput=self.params.dimOutput,
                 )
 
             return optimized_parse_with_augmentation
@@ -1645,6 +1668,7 @@ class LSTMandSpikeNetwork:
                     self.params,
                     processed_batch,
                     count_spikes=count_spikes,
+                    dimOutput=self.params.dimOutput,
                 )
 
             return optimized_parse_standard
@@ -3529,6 +3553,7 @@ class LSTMandSpikeNetwork:
         self.GaussianHeatmap = GaussianHeatmapLayer(
             **self.gaussian_heatmap_params,
             name=name,
+            dtype="float32",
         )
 
     def extract_cnn_model(self):
@@ -3991,7 +4016,7 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
 
         # Helper to convert numpy arrays to lists for serialization
         def to_list_recursive(obj):
-            if isinstance(obj, np.ndarray):
+            if isinstance(obj, (np.ndarray, np.generic)):
                 return obj.tolist()
             if isinstance(obj, dict):
                 return {k: to_list_recursive(v) for k, v in obj.items()}
@@ -3999,11 +4024,23 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
                 return [to_list_recursive(i) for i in obj]
             return obj
 
-        params_dict = {
-            k: v
-            for k, v in vars(self.params).items()
-            if not isinstance(v, (str, np.ndarray)) or len(str(v)) < 1000
-        }
+        params_keys = [  # all the attributes of Params that we want to save and need for this Loss function
+            "GaussianHeatmap",
+            "mixed_loss",
+            "contrastive_loss",
+            "alpha",
+            "delta",
+            "loss",
+            "loss_type",
+            "sigma_contrastive",
+            "GaussianGridSize",
+            "column_losses",
+            "column_weights",
+            "dimOutput",
+        ]
+        params_dict = to_list_recursive(
+            {key: getattr(self.params, key, None) for key in params_keys}
+        )
 
         config.update(
             {
@@ -4044,7 +4081,8 @@ class LSTMandSpikeNetworkLoss(tf.keras.losses.Loss):
                 config["lfunction_params"]
             )
 
-            config["params"] = AttrDict(config["params"])
+        config["params"] = convert_to_numpy_recursive(config["params"])
+        config["params"] = AttrDict(config["params"])
 
         return cls(**config)
 
