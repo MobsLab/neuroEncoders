@@ -179,7 +179,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         )
     ) and (
         not force
-        and (
+        or (
             os.path.exists(
                 os.path.join(
                     dir,

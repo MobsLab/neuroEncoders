@@ -3830,12 +3830,16 @@ class PositionError2D(tf.keras.metrics.Metric):
 
     def __init__(
         self,
-        gaussian_heatmap_layer: Optional[GaussianHeatmapLayer],
+        gaussian_heatmap_config: Optional[Dict],
         name="pos_error_2d",
         **kwargs,
     ):
         super().__init__(name=name, **kwargs)
-        self.heatmap_layer = gaussian_heatmap_layer
+        self.heatmap_layer = (
+            GaussianHeatmapLayer.from_config(gaussian_heatmap_config)
+            if gaussian_heatmap_config
+            else None
+        )
         self.total_dist = self.add_weight(name="total_dist", initializer="zeros")
         self.count = self.add_weight(name="count", initializer="zeros")
 

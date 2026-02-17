@@ -751,7 +751,9 @@ class LSTMandSpikeNetwork:
                 # Add PositionError2D metric if heatmap is used
                 if self.GaussianHeatmap is not None:
                     metrics_dict["main_pred"] = [
-                        nnUtils.PositionError2D(self.GaussianHeatmap, name="dist_2d")
+                        nnUtils.PositionError2D(
+                            self.GaussianHeatmap.get_config(), name="dist_2d"
+                        )
                     ]
                 else:
                     metrics_dict["main_pred"] = ["mae"]
@@ -799,7 +801,7 @@ class LSTMandSpikeNetwork:
                 optimizer=self.optimizer,
                 loss=loss_dict,
                 loss_weights=loss_weights,
-                # metrics=metrics_dict,
+                metrics=metrics_dict,
                 jit_compile=jit_compile,
             )
             # Get internal names of losses
@@ -1650,7 +1652,6 @@ class LSTMandSpikeNetwork:
                     processed_batch,  # Pass the copy
                     augmentation_config=augmentation_config,
                     count_spikes=count_spikes,
-                    dimOutput=self.params.dimOutput,
                 )
 
             return optimized_parse_with_augmentation
@@ -1666,7 +1667,6 @@ class LSTMandSpikeNetwork:
                     self.params,
                     processed_batch,
                     count_spikes=count_spikes,
-                    dimOutput=self.params.dimOutput,
                 )
 
             return optimized_parse_standard
