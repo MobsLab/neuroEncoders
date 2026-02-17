@@ -5,17 +5,9 @@ import tensorflow as tf
 from neuroencoders.fullEncoder import nnUtils
 
 
-class MockParams:
-    def __init__(self):
-        self.nGroups = 2
-        self.nChannelsPerGroup = [2, 4]
-        self.nFeatures = 64
-        self.batch_size = 4
-
-
 def create_dummy_parsed_tensors(params):
     tensors = {
-        "pos": tf.constant(np.random.rand(2).astype(np.float32)),
+        "pos": tf.constant(np.random.rand(3).astype(np.float32)),
         "groups": tf.SparseTensor(
             indices=[[0], [1], [2]], values=[0, 1, 0], dense_shape=[3]
         ),
@@ -43,28 +35,27 @@ def create_dummy_parsed_tensors(params):
     return tensors
 
 
-def test_parse_serialized_sequence():
-    params = MockParams()
-    tensors = create_dummy_parsed_tensors(params)
+def test_parse_serialized_sequence(mock_params):
+    tensors = create_dummy_parsed_tensors(mock_params)
 
     # Call the refactored function
-    parsed = nnUtils.parse_serialized_sequence(params, tensors, count_spikes=True)
+    parsed = nnUtils.parse_serialized_sequence(mock_params, tensors, count_spikes=True)
 
     # Check pos
     assert isinstance(parsed["pos"], tf.Tensor)
-    assert parsed["pos"].shape == (2,)
+    assert parsed["pos"].shape == (3,)
 
     # Check groups
     assert parsed["groups"].shape == (3,)
 
     # Check group tensors
-    for g in range(params.nGroups):
+    for g in range(mock_params.nGroups):
         group_key = f"group{g}"
         assert group_key in parsed
         # parse_serialized_sequence reshapes to [-1, channels, 32] and filters non-zeros
         # Since we added non-zero data, there should be 2 spikes
         assert len(parsed[group_key].shape) == 3
-        assert parsed[group_key].shape[1] == params.nChannelsPerGroup[g]
+        assert parsed[group_key].shape[1] == mock_params.nChannelsPerGroup[g]
         assert parsed[group_key].shape[2] == 32
 
         # Check spike counts
@@ -73,13 +64,12 @@ def test_parse_serialized_sequence():
         assert parsed[count_key] == parsed[group_key].shape[0]
 
 
-def test_parse_serialized_sequence_with_augmentation():
-    params = MockParams()
-    tensors = create_dummy_parsed_tensors(params)
+def test_parse_serialized_sequence_with_augmentation(mock_params):
+    tensors = create_dummy_parsed_tensors(mock_params)
 
     # Without augmentation config, it should just parse
     parsed = nnUtils.parse_serialized_sequence_with_augmentation(
-        params, tensors, count_spikes=True
+        mock_params, tensors, count_spikes=True
     )
 
     assert "group0" in parsed

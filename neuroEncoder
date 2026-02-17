@@ -29,8 +29,8 @@ overWrite_speed_filter_and_linearization = False
 redo_params = False
 redo_all_params = False
 # Modify the speed mask to be much more conservative
-min_speed = 10
-max_speed = 75
+min_speed = 7.5
+max_speed = 50
 
 
 def main(args):
@@ -134,6 +134,7 @@ def main(args):
         windowSize=args.window,
         force_ref=False,
         isPredLoss=isPL,
+        load_at_init=False,  # we load a new params
     )
     helpers = [DataHelper]
     if args.phase != "cond":
@@ -173,6 +174,7 @@ def main(args):
             windowSize=args.window,
             force_ref=False,
             isPredLoss=isPL,
+            load_at_init=False,  # we load a new params
         )
         # adding post test helper
         rawdata_parser.speed_filter(
@@ -211,6 +213,7 @@ def main(args):
             windowSize=args.window,
             force_ref=False,
             isPredLoss=isPL,
+            load_at_init=False,  # we load a new params
         )
         helpers = [DataHelper_cond, DataHelper_post, DataHelper]
     for helper in helpers:
@@ -229,27 +232,31 @@ def main(args):
             overwrite=args.redo and overWrite_speed_filter_and_linearization,
         )
 
-        # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
-        speed = helper.fullBehavior["Speed"][:, 0]
-        if len(speed) == len(helper.fullBehavior["positionTime"]) - 1:
-            speed = np.append(speed, speed[-1])
+        if min_speed is not None and max_speed is not None:
+            # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
+            speed = helper.fullBehavior["Speed"][:, 0]
+            if len(speed) == len(helper.fullBehavior["positionTime"]) - 1:
+                speed = np.append(speed, speed[-1])
 
-        window_len = 14
-        s = np.r_[
-            speed[window_len - 1 : 0 : -1],
-            speed,
-            speed[-2 : -window_len - 1 : -1],
-        ]
-        w = np.hamming(window_len)
-        smoothed_speed = np.convolve(w / w.sum(), s, mode="valid")[
-            (window_len // 2 - 1) : -(window_len // 2)
-        ]
+            window_len = 14
+            s = np.r_[
+                speed[window_len - 1 : 0 : -1],
+                speed,
+                speed[-2 : -window_len - 1 : -1],
+            ]
+            w = np.hamming(window_len)
+            smoothed_speed = np.convolve(w / w.sum(), s, mode="valid")[
+                (window_len // 2 - 1) : -(window_len // 2)
+            ]
 
-        # Use logical_and to be conservative and ensure we filter within the [9, 75] range
-        helper.fullBehavior["Times"]["speedFilter"] = np.logical_and(
-            smoothed_speed > min_speed,
-            smoothed_speed < max_speed,
-        ).astype(bool)
+            # Use logical_and to be conservative and ensure we filter within the [9, 75] range
+            helper.fullBehavior["Times"]["speedFilter"] = np.logical_and(
+                smoothed_speed > min_speed,
+                smoothed_speed < max_speed,
+            ).astype(bool)
+            print(
+                f"forced speed filter with min_speed {min_speed} and max_speed {max_speed}"
+            )
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
         epochMask = inEpochsMask(
@@ -283,7 +290,7 @@ def main(args):
         if "1230" not in ProjectPath.xml
         else 128,
         save_json=True,
-        load_at_init=False,  # we load a new params
+        # load_at_init=False,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=not args.no_dense,

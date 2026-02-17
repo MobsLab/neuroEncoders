@@ -60,11 +60,10 @@ def test_save_datasets_isolated(mock_params, mock_project):
     # For one sample: pos (2,), groups (N,), group0 (N*32*32)
     data = {
         "pos": tf.constant(np.random.rand(2), dtype=tf.float32),
-        "speedMask": tf.constant([1], dtype=tf.int64),
-        "group0": tf.constant(np.random.rand(10 * 32 * 32), dtype=tf.float32),
+        "group0": tf.constant(np.random.rand(10 * 5 * 32), dtype=tf.float32),
+        "pos_index": tf.constant(1, dtype=tf.int64),
         "groups": tf.constant([0] * 10, dtype=tf.int64),
         "indexInDat": tf.constant([123] * 10, dtype=tf.int64),
-        "pos_index": tf.constant(1, dtype=tf.int64),
     }
 
     dataset = tf.data.Dataset.from_tensors(data)
@@ -101,7 +100,7 @@ def test_save_datasets_isolated(mock_params, mock_project):
     assert "pos" in df.columns
     assert len(df) == 1
     # Verify flattening (group0 should be a 1D array/list in the cell)
-    assert len(df["group0"].iloc[0]) == 10 * 32 * 32
+    assert len(df["group0"].iloc[0]) == 10 * 5 * 32
 
 
 def test_load_parsed_dataset(mock_params, mock_project):
@@ -113,7 +112,7 @@ def test_load_parsed_dataset(mock_params, mock_project):
     model_obj.load_parsed_dataset = TFNet.load_parsed_dataset.__get__(model_obj, TFNet)
     model_obj.params = mock_params
     model_obj.params.nGroups = 2  # Test with 2 groups
-    model_obj.params.nChannelsPerGroup = [32, 32]  # define for both groups
+    model_obj.params.nChannelsPerGroup = [18, 5]  # define for both groups
 
     # Mock data for 2 groups
     data = {
@@ -124,8 +123,8 @@ def test_load_parsed_dataset(mock_params, mock_project):
         "time": tf.constant(100.5, dtype=tf.float32),
         "time_behavior": tf.constant(100.6, dtype=tf.float32),
         "indexInDat": tf.constant([10, 20, 30, 40, 50], dtype=tf.int64),
-        "group0": tf.constant(np.random.rand(3 * 32 * 32), dtype=tf.float32),
-        "group1": tf.constant(np.random.rand(2 * 32 * 32), dtype=tf.float32),
+        "group0": tf.constant(np.random.rand(3 * 18 * 32), dtype=tf.float32),
+        "group1": tf.constant(np.random.rand(2 * 5 * 32), dtype=tf.float32),
     }
 
     dataset = tf.data.Dataset.from_tensors(data)
@@ -136,9 +135,23 @@ def test_load_parsed_dataset(mock_params, mock_project):
     # Save it first
     model_obj._save_datasets_to_tfrec(datasets, base_path)
 
+    featDesc = {
+        "pos_index": tf.io.FixedLenFeature([], tf.int64),
+        "pos": tf.io.FixedLenFeature([3], tf.float32),
+        "length": tf.io.FixedLenFeature([], tf.int64),
+        "groups": tf.io.VarLenFeature(tf.int64),
+        "time": tf.io.FixedLenFeature([], tf.float32),
+        "time_behavior": tf.io.FixedLenFeature([], tf.float32),
+        "indexInDat": tf.io.VarLenFeature(tf.int64),
+    }
+    for g in range(2):
+        featDesc[f"group{g}"] = tf.io.VarLenFeature(tf.float32)
+
     # Load it back using the new load_parsed_dataset
-    # It should use its internal default featDesc which handles VarLenFeature for pos
-    loaded_datasets = model_obj.load_parsed_dataset(base_path, keys=["train"])
+    # It should use its internal default featDesc if pos is really a FixedLenFeature of 2, otherwise we need to provide
+    loaded_datasets = model_obj.load_parsed_dataset(
+        base_path, keys=["train"], featDesc=featDesc, dimOutput=3
+    )
 
     assert "train" in loaded_datasets
     for batch in loaded_datasets["train"].take(1):
@@ -153,5 +166,5 @@ def test_load_parsed_dataset(mock_params, mock_project):
         assert "group0" in batch
         assert "group1" in batch
         # Reshaped group0: [num_spikes, channels, 32] -> [3, 32, 32]
-        assert batch["group0"].shape == (3, 32, 32)
-        assert batch["group1"].shape == (2, 32, 32)
+        assert batch["group0"].shape == (3, 18, 32)
+        assert batch["group1"].shape == (2, 5, 32)

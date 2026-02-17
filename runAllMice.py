@@ -34,6 +34,7 @@ nameExp = "consensus_v2_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLa
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
+target = "pos"
 target_bayes = "pos"
 phase = "pre"
 useStridingFactor = True
