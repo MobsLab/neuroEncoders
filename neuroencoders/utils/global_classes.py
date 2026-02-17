@@ -1818,7 +1818,7 @@ class Params:
 
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
-        self.learningRates = kwargs.pop("learningRates", [0.0003, 0.0003, 0.0001])
+        self.learningRates = kwargs.pop("learningRates", [0.01])
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
 
@@ -1826,7 +1826,8 @@ class Params:
 
         self.lossActivation = None  # activation function for the loss layer
         self.featureActivation = kwargs.pop(
-            "featureActivation", "relu"
+            "featureActivation",
+            None if getattr(self, "GaussianHeatmap", False) else "relu",
         )  # activation function for the features (last dense layer before output)
 
         # TODO: put it in a function
@@ -1852,19 +1853,6 @@ class Params:
         self.merge_losses = []
         self.merge_weights = []
 
-        if self.target.lower() == "posandheaddirectionandspeed":
-            self.column_losses = {
-                "0": "huber",
-                "1": "huber",
-                "2": "cyclic_mae",
-                "3": "mae",
-            }
-            self.column_weights = {
-                "0": 0.6,
-                "1": 0.6,
-                "2": 0.3,
-                "3": 0.3,
-            }
         self.denseweight = kwargs.pop(
             "denseweight", True
         )  # dense weight loss for dataset imbalance

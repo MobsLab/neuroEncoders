@@ -1,4 +1,5 @@
 # Load libs
+import logging
 import os
 import platform
 import subprocess
@@ -61,6 +62,7 @@ class PaperFigures:
         timeWindows=[36],
         phase=None,
         sleep=False,
+        verbose=True,
     ):
         self.phase = phase
         suffix = f"_{phase}" if phase is not None else ""
@@ -82,6 +84,14 @@ class PaperFigures:
         if not os.path.exists(self.folderFigures):
             os.mkdir(self.folderFigures)
         self.folderAligned = os.path.join(self.projectPath.dataPath, "aligned")
+
+        # Verbosity and logging
+        logging.basicConfig(
+            level=logging.INFO if verbose else logging.WARNING,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+        self.logger = logging.getLogger(__name__)
+
         self.resultsNN_phase = dict()
         self.resultsBayes_phase = dict()
         self.resultsNN_phase_pkl = dict()

@@ -708,6 +708,7 @@ class Mouse_Results(Params, PaperFigures):
             l_function=self.l_function,
             timeWindows=self.windows_values,
             phase=self.phase,
+            verbose=self.verbose,
         )
         print(self)
 
@@ -728,6 +729,7 @@ class Mouse_Results(Params, PaperFigures):
         phase = kwargs.get("phase", "pre")
         nameExp = kwargs.get("nameExp", "Network")
         target = kwargs.get("target", "pos")
+        self.verbose = kwargs.get("verbose", True)
 
         if kwargs.get("deviceName") is not None:
             self.deviceName = kwargs["deviceName"]

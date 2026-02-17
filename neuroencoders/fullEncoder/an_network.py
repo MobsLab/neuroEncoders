@@ -1200,7 +1200,8 @@ class LSTMandSpikeNetwork:
                     callbacks.append(reduce_lr_callback)
 
                 if self.debug:
-                    callbacks.append(tb_callbacks)
+                    if is_tbcallback:
+                        callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
                 hist = self.model.fit(
@@ -1397,8 +1398,6 @@ class LSTMandSpikeNetwork:
             filter_op = get_mask_filter(totMask[key])
             dataset = ndataset.filter(filter_op)
             dataset = dataset.map(nnUtils.import_true_pos(posFeature))
-            if speedMask is not None and key in speedMask:
-                dataset = dataset.map(nnUtils.import_speed_mask(speedMask[key]))
             dataset = dataset.filter(filter_nan_pos)
 
             # now that we have clean positions, we can resample if needed
@@ -1432,7 +1431,6 @@ class LSTMandSpikeNetwork:
 
             padded_shapes, padding_values = self._get_padding_shapes_values(
                 extract_spikes_counts=kwargs.get("extract_spikes_counts", False),
-                add_speed=(speedMask is not None and key in speedMask),
             )
 
             dataset = dataset.padded_batch(
@@ -1492,7 +1490,7 @@ class LSTMandSpikeNetwork:
 
         return datasets, counts if self.params.OversamplingResampling else None
 
-    def _get_padding_shapes_values(self, extract_spikes_counts=False, add_speed=False):
+    def _get_padding_shapes_values(self, extract_spikes_counts=False):
         # Pad and Batch logic
         padded_shapes = {
             "pos_index": [],
@@ -1529,10 +1527,6 @@ class LSTMandSpikeNetwork:
             padding_values[f"group{g}"] = tf.constant(-1.0, dtype=tf.float32)
             padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
 
-        if add_speed:
-            # add boolean speedMask
-            padded_shapes["speedMask"] = []
-            padding_values["speedMask"] = tf.constant(False, dtype=tf.bool)
         return padded_shapes, padding_values
 
     def _get_dataset_options(self):
@@ -1565,6 +1559,7 @@ class LSTMandSpikeNetwork:
         base_path: str,
         keys: List[str] = ["train", "test"],
         featDesc: Optional[Dict] = None,
+        dimOutput: Optional[int] = None,
     ) -> Dict[str, tf.data.Dataset]:
         """
         Load datasets that were previously saved using _save_datasets_to_tfrec.
@@ -1584,11 +1579,14 @@ class LSTMandSpikeNetwork:
         datasets : dict
             Dictionary of loaded tf.data.Dataset objects.
         """
+        if dimOutput is not None:
+            self.params.dimOutput = dimOutput
+
         if featDesc is None:
             # Default featDesc that handles variable length pos and groups
             featDesc = {
                 "pos_index": tf.io.FixedLenFeature([], tf.int64),
-                "pos": tf.io.VarLenFeature(tf.float32),
+                "pos": tf.io.FixedLenFeature([2], tf.float32),
                 "length": tf.io.FixedLenFeature([], tf.int64),
                 "groups": tf.io.VarLenFeature(tf.int64),
                 "time": tf.io.FixedLenFeature([], tf.float32),

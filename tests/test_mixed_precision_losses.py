@@ -64,7 +64,8 @@ def test_multi_column_loss_layer_mp(gaussian_params, mock_l_layer):
     )
 
     multi_loss = nnUtils.MultiColumnLossLayer(
-        column_losses={"0": "mse", "1": "kl_heatmap"}, gaussian_loss_layer=gh_losses
+        column_losses={"0": "mse", "1": "kl_heatmap"},
+        gaussian_params=gh_losses.get_config(),
     )
     print(f"managed to instantiate MultiColumnLossLayer with kl_heatmap: {multi_loss}")
 

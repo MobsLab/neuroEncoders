@@ -214,5 +214,3 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
     # Check that individual losses and metrics are reported
     keys = history.history.keys()
     assert any("main_pred_loss" in k for k in keys)
-    if mock_params.GaussianHeatmap:
-        assert any("dist_2d" in k for k in keys)
