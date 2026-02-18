@@ -770,9 +770,6 @@ class Mouse_Results(Params, PaperFigures):
                 mode="compare",
                 **kwargs,
             )
-            self.data_helper.get_true_target(
-                windowSizeMS=int(winMS), in_place=True, **kwargs
-            )
         self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
 
     def _load_params_fallback(self, winMS, **kwargs):
@@ -815,6 +812,7 @@ class Mouse_Results(Params, PaperFigures):
         )
 
         self.data_helper.get_true_target(
+            windowSizeMS=int(winMS),
             l_function=self.l_function,
             in_place=True,
             show=kwargs.get("show", False),

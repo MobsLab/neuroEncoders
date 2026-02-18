@@ -57,7 +57,7 @@ class PaperFigures:
         projectPath: Project,
         behaviorData: dict,
         trainerBayes: Optional[TrainerBayes],
-        l_function: Optional[Callable],
+        l_function: Callable,
         bayesMatrices: Optional[dict] = {},
         timeWindows=[36],
         phase=None,
