@@ -111,24 +111,25 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
     output = model_obj.model(inputs)
 
     assert isinstance(output, dict)
-    assert "main_pred" in output
-    if mock_params.dimOutput > 2:
-        assert "others" in output
+
+    # Verify all expected targets from target_structure are present
+    for target_name in model_obj.target_structure.keys():
+        assert target_name in output
+
     if getattr(mock_params, "contrastive_loss", False):
         assert "latent" in output
 
-    # Check main_pred shape
-    if getattr(mock_params, "GaussianHeatmap", False):
-        H, W = mock_params.GaussianGridSize
-        # Heatmap is either (B, H, W) or (B, H*W) depending on architecture
-        # In current impl, it's (B, H*W) from the model output
-        assert output["main_pred"].shape == (mock_params.batch_size, H * W)
-    else:
-        assert output["main_pred"].shape[1] == 2
+    # Check shapes
+    for target_name, spec in model_obj.target_structure.items():
+        if target_name == "pos_2d" and getattr(mock_params, "GaussianHeatmap", False):
+            H, W = mock_params.GaussianGridSize
+            # For heatmap, shape should be (B, H*W)
+            assert output[target_name].shape == (mock_params.batch_size, H * W)
+        else:
+            assert output[target_name].shape == (mock_params.batch_size, spec["dim"])
 
-    # Check others shape
-    if "others" in output:
-        assert output["others"].shape[1] == mock_params.dimOutput - 2
+    if "latent" in output:
+        assert output["latent"].shape == (mock_params.batch_size, mock_params.nFeatures)
 
 
 def test_train_step(mock_params, mock_project, mock_linearizer):
@@ -151,13 +152,12 @@ def test_train_step(mock_params, mock_project, mock_linearizer):
         jit_compile=False,
     )
 
-    targets = {
-        "main_pred": np.random.randn(mock_params.batch_size, 2).astype(np.float32),
-    }
-    if mock_params.dimOutput > 2:
-        targets["others"] = np.random.randn(
-            mock_params.batch_size, mock_params.dimOutput - 2
-        ).astype(np.float32)
+    targets = {}
+    for name, meta in model_obj.target_structure.items():
+        targets[name] = np.random.randn(mock_params.batch_size, meta["dim"]).astype(
+            np.float32
+        )
+
     if getattr(mock_params, "contrastive_loss", False):
         targets["latent"] = np.zeros(
             (mock_params.batch_size, mock_params.nFeatures)
@@ -191,15 +191,12 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
                 n_groups=mock_params.nGroups,
                 n_channels=mock_params.nChannelsPerGroup,
             )
-            batch_targets = {
-                "main_pred": np.random.randn(mock_params.batch_size, 2).astype(
-                    np.float32
-                ),
-            }
-            if mock_params.dimOutput > 2:
-                batch_targets["others"] = np.random.randn(
-                    mock_params.batch_size, mock_params.dimOutput - 2
+            batch_targets = {}
+            for name, meta in model_obj.target_structure.items():
+                batch_targets[name] = np.random.randn(
+                    mock_params.batch_size, meta["dim"]
                 ).astype(np.float32)
+
             if getattr(mock_params, "contrastive_loss", False):
                 batch_targets["latent"] = np.zeros(
                     (mock_params.batch_size, mock_params.nFeatures)
@@ -213,4 +210,5 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
     assert "loss" in history.history
     # Check that individual losses and metrics are reported
     keys = history.history.keys()
-    assert any("main_pred_loss" in k for k in keys)
+    for target_name in model_obj.target_structure.keys():
+        assert any(target_name in k for k in keys)

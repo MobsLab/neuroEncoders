@@ -2023,6 +2023,92 @@ class SpatialConstraintsMixin:
         self.maze_params_dict = self._extract_maze_boundaries(maze_params)
         self.forbid_mask_np, self.forbid_mask_tf = self._create_spatial_masks()
 
+        # Added for unified NN operations
+        self.common_eps = tf.constant(1e-8, dtype=tf.float32)
+        self.common_neg = tf.constant(-100.0, dtype=tf.float32)
+
+    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.03):
+        """
+        Generate Gaussian target heatmap for a batch of [x, y] positions.
+        """
+
+        pos_batch = tf.cast(pos_batch, tf.float32)
+        X = self.Xc_tf[None]  # [1, H, W]
+        Y = self.Yc_tf[None]
+
+        dx = pos_batch[:, 0][:, None, None] - X
+        dy = pos_batch[:, 1][:, None, None] - Y
+        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+
+        # Apply spatial mask
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        gauss *= allowed_mask
+
+        # Normalize across grid
+        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
+        gauss = tf.where(
+            gauss_sum > self.common_eps,
+            gauss / (gauss_sum + self.common_eps),
+            gauss / (tf.reduce_sum(allowed_mask) + self.common_eps + 1e-9),
+        )
+        return gauss
+
+    def decode_and_uncertainty_tf(self, logits_hw, mode="argmax", return_probs=False):
+        """
+        Unified decoding logic for Gaussian heatmaps.
+        """
+        B = tf.shape(logits_hw)[0]
+        H, W = self.GRID_H, self.GRID_W
+
+        # Mask forbidden
+        masked_logits = tf.where(
+            self.forbid_mask_tf[None] > 0, self.common_neg, logits_hw
+        )
+
+        # Softmax over grid
+        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Renormalize (safety)
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        probs_allowed = probs * allowed_mask
+        sum_p = tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True)
+        probs_allowed /= sum_p + self.common_eps
+
+        if mode == "expectation":
+            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
+        else:  # argmax
+            idx = tf.argmax(tf.reshape(probs_allowed, [B, H * W]), axis=-1)
+            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
+            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
+
+        # Variance
+        if mode == "expectation":
+            varx = tf.reduce_sum(
+                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
+            )
+            vary = tf.reduce_sum(
+                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
+            )
+            var = varx + vary
+        else:
+            var = tf.zeros([B], dtype=tf.float32)
+
+        maxp = tf.reduce_max(probs_flat, axis=1)
+
+        # Normalized Entropy
+        H_entropy = -tf.reduce_sum(
+            probs_flat * tf.math.log(probs_flat + self.common_eps), axis=1
+        )
+        n_allowed = tf.reduce_sum(allowed_mask)
+        Hn = H_entropy / tf.math.log(n_allowed + self.common_eps)
+
+        xy = tf.stack([ex, ey], axis=-1)
+        if return_probs:
+            return xy, maxp, Hn, var, probs_allowed
+        return xy, maxp, Hn, var
+
     def _setup_coordinate_grids(self):
         """Create coordinate grids for both numpy and tensorflow"""
         # Numpy version (for Bayesian decoder)

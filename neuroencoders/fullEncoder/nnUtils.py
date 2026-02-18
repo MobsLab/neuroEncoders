@@ -3,7 +3,7 @@ import contextlib
 import gc
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import keras
@@ -1145,6 +1145,7 @@ def serialize_single_spike(clu, spike):
 
 @tf.function
 def parse_serialized_sequence(params, tensors, count_spikes=False, sorted_indices=None):
+    # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
     tensors = dict(tensors)
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
     for key in ["pos", "groups", "indexInDat"]:
@@ -1654,8 +1655,8 @@ class LinearizationLayer(tf.keras.layers.Layer):
         Create a new instance of the layer from its config.
         This is necessary for serialization/deserialization.
         """
-        maze_points = config.get("maze_points")
-        ts_proj = config.get("ts_proj")
+        maze_points = config.get("maze_points", None)
+        ts_proj = config.get("ts_proj", None)
         device = config.get("device", "/cpu:0")
         return cls(
             maze_points=maze_points,
@@ -2057,13 +2058,16 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # final dense layer to map features to logits
         self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
-        self._validate_training_positions()
 
     def _initialize_computed_attributes(self):
-        self.EPS = self.eps
-        self.NEG = tf.constant(self.neg)
-        self.occ = self.occupancy_map(self.training_positions)
-        self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        self.EPS = self.common_eps
+        self.NEG = self.common_neg
+        if self.training_positions is not None:
+            self._validate_training_positions()
+            self.occ = self.occupancy_map(self.training_positions)
+            self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        elif not hasattr(self, "WMAP"):
+            self.WMAP = tf.ones((self.GRID_H, self.GRID_W), dtype=tf.float32)
         self.gaussian_kernel = self._create_gaussian_kernel(self.sigma)
 
     def _create_gaussian_kernel(self, sigma):
@@ -2112,30 +2116,16 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         return logits_flat
 
     def gaussian_heatmap_targets(self, pos_batch, sigma=None):
+        """Unified method for generating Gaussian targets using Mixin logic"""
         if sigma is None:
             sigma = self.sigma
-        # pos_batch: [B, 2] true [x,y] positions
-        # Ensure float32 for target generation
-        pos_batch = kops.cast(pos_batch, "float32")
-        X = kops.cast(self.Xc_tf[None], "float32")
-        Y = kops.cast(self.Yc_tf[None], "float32")
+        return self.gaussian_heatmap_targets_tf(pos_batch, sigma=sigma)
 
-        dx = pos_batch[:, 0][:, None, None] - X
-        dy = pos_batch[:, 1][:, None, None] - Y
-        gauss = kops.exp(-(dx**2 + dy**2) / (2 * kops.cast(sigma, "float32") ** 2))
-
-        # Apply forbidden mask here too
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        gauss *= allowed_mask
-
-        # Safer normalization
-        gauss_sum = kops.sum(gauss, axis=[1, 2], keepdims=True)
-        gauss = kops.where(
-            gauss_sum > self.EPS,
-            gauss / (gauss_sum + self.EPS),
-            gauss / kops.sum(allowed_mask),
+    def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
+        """Unified decoding logic using Mixin's method"""
+        return self.decode_and_uncertainty_tf(
+            logits_hw, mode=mode, return_probs=return_probs
         )
-        return gauss
 
     def positions_to_bins(self, pos):
         xs = np.clip((pos[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
@@ -2232,101 +2222,6 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Forbidden + zero-count bins remain 0
         return tf.constant(inv)
 
-    def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
-        """
-        Decode predicted heatmap into expected [x, y] position,
-        computing confidence/uncertainty metrics while excluding forbidden bins.
-
-        Args:
-            logits_hw: [B, H, W] unnormalized logits from the model
-            mode: 'expectation' or 'argmax' (default) for decoding method
-            #FIX: for now argmax is default since expectation can yield positions in forbidden region (eg predictions in both left and right arm, center of mass yields a point outside maze)
-
-        Returns:
-            mean_pos: [B, 2] expected position [ex, ey]
-            maxp: [B] max probability of any allowed bin
-            Hn: [B] normalized entropy over allowed bins (0-1)
-            var: [B] total variance (varx + vary)
-        """
-        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-
-        # Mask forbidden bins in logits
-        masked_logits = tf.where(
-            tf.cast(self.forbid_mask_tf[None], tf.bool),
-            tf.cast(self.NEG, logits_hw.dtype),
-            logits_hw,
-        )
-
-        # Flatten grid for softmax
-        logits_flat = tf.reshape(masked_logits, [B, H * W])
-        log_probs_flat = tf.nn.log_softmax(logits_flat, axis=-1)
-        probs_flat = tf.exp(log_probs_flat)
-        probs = tf.reshape(probs_flat, [B, H, W])
-
-        # Explicitly zero forbidden bins
-        allowed_mask = tf.cast(self.get_allowed_mask(use_tensorflow=True), probs.dtype)
-        probs_allowed = probs * allowed_mask
-
-        # Renormalize over allowed bins
-        probs_allowed /= tf.reduce_sum(
-            probs_allowed, axis=[1, 2], keepdims=True
-        ) + tf.cast(self.EPS, probs.dtype)
-
-        if mode == "expectation":
-            # Expected position using only allowed bins
-            ex = tf.reduce_sum(
-                probs_allowed * tf.cast(self.Xc_tf[None], probs.dtype), axis=[1, 2]
-            )
-            ey = tf.reduce_sum(
-                probs_allowed * tf.cast(self.Yc_tf[None], probs.dtype), axis=[1, 2]
-            )
-        elif mode == "argmax":
-            # Argmax bin (always inside allowed region)
-            idx = tf.argmax(
-                tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
-            )
-            W64 = tf.cast(W, tf.int64)
-            idx // W64  # for debugging
-            idx % W64
-            ex = tf.gather(tf.cast(tf.reshape(self.Xc_tf, [-1]), probs.dtype), idx)
-            ey = tf.gather(tf.cast(tf.reshape(self.Yc_tf, [-1]), probs.dtype), idx)
-        else:
-            raise ValueError("mode must be 'expectation' or 'argmax'")
-
-        if mode == "expectation":
-            # Variance
-            varx = tf.reduce_sum(
-                probs_allowed
-                * tf.square(tf.cast(self.Xc_tf[None], probs.dtype) - ex[:, None, None]),
-                [1, 2],
-            )
-            vary = tf.reduce_sum(
-                probs_allowed
-                * tf.square(tf.cast(self.Yc_tf[None], probs.dtype) - ey[:, None, None]),
-                [1, 2],
-            )
-            var = varx + vary
-        else:
-            var = tf.zeros([B])
-
-        # Max probability
-        maxp = tf.reduce_max(tf.reshape(probs_allowed, [B, H * W]), axis=1)
-
-        # Entropy (only allowed bins)
-        probs_flat_allowed = tf.reshape(probs_allowed, [B, H * W])
-        H_entropy = -tf.reduce_sum(
-            probs_flat_allowed * tf.math.log(probs_flat_allowed + self.EPS), axis=1
-        )
-        n_allowed = tf.reduce_sum(allowed_mask)
-        Hn = H_entropy / tf.math.log(n_allowed + self.EPS)  # normalized entropy (0-1)
-        xy = tf.stack([ex, ey], axis=-1)
-        # xy = self.project_out_of_forbid(xy)
-
-        if return_probs:
-            return xy, maxp, Hn, var, probs_allowed
-        else:
-            return xy, maxp, Hn, var
-
     def project_out_of_forbid(self, xy, forbid_box=None):
         """
         Project decoded positions back into allowed space if inside forbidden region.
@@ -2411,14 +2306,6 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def get_config(self):
         """Return the config dict for serialization"""
         config = tf.keras.layers.Layer.get_config(self)
-        # Convert numpy arrays to lists
-        training_pos = getattr(
-            self, "_training_positions_serializable", self.training_positions
-        )
-        if hasattr(training_pos, "tolist"):
-            training_pos = training_pos.tolist()
-        elif hasattr(training_pos, "numpy"):
-            training_pos = training_pos.numpy().tolist()
 
         # Convert TensorFlow tensors to Python scalars
         neg_value = self.neg
@@ -2427,12 +2314,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         config.update(
             {
-                "training_positions": training_pos,
+                "training_positions": None,  # Avoid storing large arrays
                 "grid_size": self.grid_size,
                 "eps": float(self.eps),
                 "sigma": float(self.sigma),
                 "neg": neg_value,
                 "maze_params": self.maze_params,
+                "WMAP": self.WMAP.numpy().tolist() if hasattr(self, "WMAP") else None,
             }
         )
         return config
@@ -2440,19 +2328,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     @classmethod
     def from_config(cls, config):
         """Create layer from config dict"""
-        # Convert training_positions back to numpy array if needed
-        if isinstance(config["training_positions"], list):
-            config["training_positions"] = np.array(config["training_positions"])
-        layer_config = {
-            "training_positions": config["training_positions"],
-            "grid_size": config.get("grid_size", (45, 45)),
-            "eps": config.get("eps", 1e-8),
-            "sigma": config.get("sigma", 0.03),
-            "neg": config.get("neg", -100),
-            "maze_params": config.get("maze_params", None),
-            "name": config.get("name", "gaussian_heatmap_layer"),
-        }
-        return cls(**layer_config)
+        wmap = config.pop("WMAP", None)
+        obj = cls(**config)
+        if wmap is not None:
+            obj.WMAP = tf.constant(wmap, dtype=tf.float32)
+            # Re-initialize computed attributes to ensure consistency
+            obj._initialize_computed_attributes()
+        return obj
 
     def build(self, input_shape):
         """Build the layer - called automatically by Keras"""
@@ -2473,7 +2355,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self,
         training_positions,
         grid_size,
-        l_function_layer,
+        l_function_layer_params,
         eps=1e-8,
         sigma=0.03,
         neg=-100,
@@ -2506,7 +2388,13 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.eps = float(eps)
         self.neg = float(neg)
         self.maze_params = maze_params
-        self.l_function_layer = l_function_layer
+        self.l_function_layer_params = l_function_layer_params
+        self.l_function_layer = LinearizationLayer(
+            maze_points=self.l_function_layer_params["maze_points"],
+            ts_proj=self.l_function_layer_params["ts_proj"],
+            device=self.l_function_layer_params.pop("device", None),
+            name=self.l_function_layer_params.get("name", "linearization_layer"),
+        )
         self.sinkhorn_eps = sinkhorn_eps
 
         self.allowed_mask_tf = tf.cast(
@@ -2579,6 +2467,16 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         if hasattr(neg_value, "numpy"):
             neg_value = float(neg_value.numpy())
 
+        # handle l function layer params serialization
+        l_function_layer_params_serializable = self.l_function_layer_params.copy()
+        for k, v in l_function_layer_params_serializable.items():
+            try:
+                v = v.numpy().tolist()
+            except AttributeError:
+                # Handle case where these aren't TensorFlow tensors
+                v = v.tolist() if hasattr(v, "tolist") else v
+            l_function_layer_params_serializable[k] = v
+
         config.update(
             {
                 "training_positions": self._training_positions_serializable,
@@ -2587,7 +2485,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
                 "sigma": float(self.sigma),
                 "neg": neg_value,
                 "maze_params": self.maze_params,
-                "l_function_layer": self.l_function_layer,
+                "l_function_layer_params": l_function_layer_params_serializable,
             }
         )
         return config
@@ -2601,7 +2499,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             "eps": config.get("eps", 1e-8),
             "sigma": config.get("sigma", 0.03),
             "neg": config.get("neg", -100),
-            "l_function_layer": config.get("l_function_layer", None),
+            "l_function_layer_params": config.get("l_function_layer_params", None),
             "maze_params": config.get("maze_params", None),
             "name": config.get("name", "gaussian_heatmap_losses"),
         }
@@ -3822,7 +3720,7 @@ def get_output_shape_for(self, input_shape):
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
-class PositionError2D(tf.keras.metrics.Metric):
+class PositionError2D(tf.keras.metrics.Metric, SpatialConstraintsMixin):
     """
     Keras Metric to calculate 2D position error (Euclidean distance)
     by decoding heatmap logits.
@@ -3830,46 +3728,53 @@ class PositionError2D(tf.keras.metrics.Metric):
 
     def __init__(
         self,
-        gaussian_heatmap_config: Optional[Dict],
+        grid_size: Tuple[int, int] = (45, 45),
+        maze_params: Optional[Dict] = None,
         name="pos_error_2d",
         **kwargs,
     ):
-        super().__init__(name=name, **kwargs)
-        self.heatmap_layer = (
-            GaussianHeatmapLayer.from_config(gaussian_heatmap_config)
-            if gaussian_heatmap_config
-            else None
+        # Handle the case where a config dictionary is passed directly (legacy support)
+        if isinstance(grid_size, dict) and "grid_size" in grid_size:
+            config = grid_size
+            grid_size = config.get("grid_size", (45, 45))
+            maze_params = config.get("maze_params", None)
+        elif isinstance(grid_size, dict) and "gaussian_heatmap_layer" in grid_size:
+            # Another variant of legacy support
+            config = grid_size.get("gaussian_heatmap_layer", {})
+            grid_size = config.get("grid_size", (45, 45))
+            maze_params = config.get("maze_params", None)
+
+        tf.keras.metrics.Metric.__init__(self, name=name, **kwargs)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
         )
+
+        # We store them for get_config reconstruction
+        self._grid_size = grid_size
+        self._maze_params = maze_params
+
         self.total_dist = self.add_weight(name="total_dist", initializer="zeros")
         self.count = self.add_weight(name="count", initializer="zeros")
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        # y_true: [B, 2+], y_pred: [B, H*W] or [B, H, W]
-        if self.heatmap_layer is None:
-            # Fallback to direct coords if no heatmap layer
-            dist = tf.sqrt(
-                tf.reduce_sum(tf.square(y_pred[:, :2] - y_true[:, :2]), axis=-1)
-            )
+        # Decode heatmap logits using unified mixin method
+        rank = y_pred.shape.rank
+        if rank is None:
+            rank = tf.rank(y_pred)
+
+        if rank == 2:
+            logits_hw = tf.reshape(y_pred, [-1, self.GRID_H, self.GRID_W])
         else:
-            # Decode heatmap
-            rank = y_pred.shape.rank
-            if rank is None:
-                rank = tf.rank(y_pred)
+            logits_hw = y_pred
 
-            if rank == 2:
-                H, W = self.heatmap_layer.grid_size
-                logits_hw = tf.reshape(y_pred, [-1, H, W])
-            else:
-                logits_hw = y_pred
+        # Decode using the mixin's unified method
+        # Using expectation for smoothness in training logs
+        xy, _, _, _ = self.decode_and_uncertainty_tf(logits_hw, mode="expectation")
 
-            # Using expectation for smoothness in training logs
-            xy, _, _, _ = self.heatmap_layer.decode_and_uncertainty(
-                logits_hw, mode="expectation"
-            )
-            # Ensure xy is float32 for metric calculation
-            xy = tf.cast(xy, tf.float32)
-            y_true_coords = tf.cast(y_true[:, :2], tf.float32)
-            dist = tf.sqrt(tf.reduce_sum(tf.square(xy - y_true_coords), axis=-1))
+        # Ensure xy is float32 for metric calculation
+        xy = tf.cast(xy, tf.float32)
+        y_true_coords = tf.cast(y_true[:, :2], tf.float32)
+        dist = tf.sqrt(tf.reduce_sum(tf.square(xy - y_true_coords), axis=-1))
 
         if sample_weight is not None:
             sample_weight = tf.cast(sample_weight, self.dtype)
@@ -3888,20 +3793,18 @@ class PositionError2D(tf.keras.metrics.Metric):
         self.count.assign(0.0)
 
     def get_config(self):
-        config = super().get_config()
-        config.update({"gaussian_heatmap_layer": self.heatmap_layer.get_config()})
+        config = tf.keras.metrics.Metric.get_config(self)
+        config.update(
+            {
+                "grid_size": list(self._grid_size),
+                "maze_params": self._maze_params,
+            }
+        )
         return config
 
     @classmethod
     def from_config(cls, config):
-        gaussian_heatmap_layer_config = config.pop("gaussian_heatmap_layer", None)
-        if gaussian_heatmap_layer_config is not None:
-            gaussian_heatmap_layer = GaussianHeatmapLayer.from_config(
-                gaussian_heatmap_layer_config
-            )
-        else:
-            gaussian_heatmap_layer = None
-        return cls(gaussian_heatmap_layer=gaussian_heatmap_layer, **config)
+        return cls(**config)
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
@@ -3951,6 +3854,277 @@ class AngularErrorMetric(tf.keras.metrics.Metric):
         self.count.assign(0.0)
 
 
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class CyclicMAE(tf.keras.losses.Loss):
+    def __init__(self, high=2 * np.pi, name="cyclic_mae", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.high = high
+
+    def call(self, y_true, y_pred):
+        # Calculate angular difference: (y_pred - y_true) mod high
+        delta = tf.abs(y_true - y_pred)
+        # handle circularity
+        delta = tf.where(delta > self.high / 2, self.high - delta, delta)
+        return tf.reduce_mean(delta, axis=-1)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"high": self.high})
+        return config
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class GaussianHeatmapLoss(tf.keras.losses.Loss, SpatialConstraintsMixin):
+    """
+    Gaussian Heatmap Loss that converts 2D coordinates to target heatmaps on-the-fly
+    and computes KL divergence directly.
+    """
+
+    def __init__(
+        self,
+        gaussian_params: Dict,
+        l_function_params: Optional[Dict] = None,
+        loss_type: str = "safe_kl",
+        name: str = "gaussian_heatmap_loss",
+        **kwargs,
+    ):
+        # Initialize Keras Loss
+        tf.keras.losses.Loss.__init__(self, name=name, **kwargs)
+
+        # Initialize Spatial Mixin
+        grid_size = gaussian_params.get("grid_size", (45, 45))
+        maze_params = gaussian_params.get("maze_params", None)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
+
+        # Core parameters
+        self.gaussian_params = gaussian_params
+        self.l_function_params = l_function_params
+        self.loss_type = loss_type
+        self.sigma = float(gaussian_params.get("sigma", 0.03))
+        self.eps = float(gaussian_params.get("eps", 1e-8))
+        self.neg = float(gaussian_params.get("neg", -100))
+
+        # Precompute occupancy-based weights if training_positions available
+        training_positions = gaussian_params.get("training_positions")
+        if training_positions is not None:
+            occ = self.occupancy_map(training_positions)
+            self.WMAP = tf.constant(
+                self.weight_map_from_occ(occ, alpha=0.5), dtype=tf.float32
+            )
+        else:
+            self.WMAP = tf.ones((self.GRID_H, self.GRID_W), dtype=tf.float32)
+
+    def call(self, y_true, y_pred):
+        # y_true: [B, 2+] coordinates, y_pred: [B, H, W] or [B, H*W] logits
+        # Ensure float32 for loss calculation (mixed precision safety)
+        y_true = kops.cast(y_true, "float32")
+        y_pred = kops.cast(y_pred, "float32")
+
+        # 1. Generate target heatmap from coordinates using Mixin method
+        targets_hw = self.gaussian_heatmap_targets_tf(y_true[:, :2], sigma=self.sigma)
+
+        # 2. Reshape predictions if flattened
+        rank = y_pred.shape.rank
+        if rank == 2:
+            y_pred = kops.reshape(y_pred, (-1, self.GRID_H, self.GRID_W))
+
+        # 3. Compute loss based on type
+        if self.loss_type == "safe_kl":
+            return self._compute_safe_kl(y_pred, targets_hw)
+        else:
+            # Fallback to direct MSE/MAE if specified
+            return tf.reduce_mean(tf.square(y_pred - targets_hw))
+
+    def _compute_safe_kl(self, logits_hw, target_hw):
+        batch_size = kops.shape(logits_hw)[0]
+
+        # Mask forbidden bins in logits to avoid mass leak
+        forbid_mask = kops.expand_dims(self.forbid_mask_tf, 0)
+        masked_logits = kops.where(forbid_mask > 0, self.common_neg, logits_hw)
+
+        # softmax probability over the grid
+        probs_flat = kops.softmax(
+            kops.reshape(masked_logits, (batch_size, self.GRID_H * self.GRID_W)),
+            axis=-1,
+        )
+        probs = kops.reshape(probs_flat, (batch_size, self.GRID_H, self.GRID_W))
+
+        # KL calculation with stability thresholding
+        threshold = self.common_eps * 10
+        safe_probs = kops.maximum(probs, self.common_eps)
+
+        # Weighted KL
+        weights = kops.expand_dims(self.WMAP, 0)
+        kl = kops.where(
+            target_hw > threshold,
+            target_hw * kops.log(target_hw / safe_probs),
+            0.0,
+        )
+
+        # Normalized weighted sum
+        weighted_kl = kl * weights
+        loss_per_sample = kops.sum(weighted_kl, axis=[1, 2]) / (
+            kops.sum(weights) + self.common_eps
+        )
+        return kops.mean(loss_per_sample)
+
+    def occupancy_map(self, positions):
+        occ = np.zeros((self.GRID_H, self.GRID_W), np.float32)
+        xs = np.clip((positions[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
+        ys = np.clip((positions[:, 1] * self.GRID_H).astype(int), 0, self.GRID_H - 1)
+        for k in range(len(positions)):
+            occ[ys[k], xs[k]] += 1
+        return occ
+
+    def weight_map_from_occ(self, occ, alpha=0.5):
+        # simplified version of the weight map logic
+        # weight = 1 / (occ + 1)^alpha
+        weights = 1.0 / (occ + 1.0) ** alpha
+        # apply spatial mask
+        allowed_mask = self.get_allowed_mask(use_tensorflow=False)
+        return weights * allowed_mask
+
+    def get_config(self):
+        config = tf.keras.losses.Loss.get_config(self)
+        # Handle numpy serialization for training_positions
+        g_params = self.gaussian_params.copy()
+        if hasattr(g_params.get("training_positions"), "tolist"):
+            g_params["training_positions"] = g_params["training_positions"].tolist()
+
+        # handle l function layer params serialization
+        l_function_layer_params_serializable = self.l_function_params.copy()
+        for k, v in l_function_layer_params_serializable.items():
+            try:
+                v = v.numpy().tolist()
+            except AttributeError:
+                # Handle case where these aren't TensorFlow tensors
+                v = v.tolist() if hasattr(v, "tolist") else v
+            l_function_layer_params_serializable[k] = v
+
+        config.update(
+            {
+                "gaussian_params": g_params,
+                "l_function_params": l_function_layer_params_serializable,
+                "loss_type": self.loss_type,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        g_params = config.get("gaussian_params", {})
+        # Handle deserialization of training_positions if it was a list
+        if "training_positions" in g_params and isinstance(
+            g_params["training_positions"], list
+        ):
+            g_params["training_positions"] = np.array(g_params["training_positions"])
+        return cls(
+            gaussian_params=g_params,
+            l_function_params=config.get("l_function_params"),
+            loss_type=config.get("loss_type", "safe_kl"),
+        )
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class ContrastiveRegressionLoss(tf.keras.losses.Loss):
+    """
+    Contrastive Loss based on NT-Xent with spatial weighting,
+    computing the NT-Xent loss directly without internal layers.
+    """
+
+    def __init__(
+        self,
+        temperature: float = 0.1,
+        sigma: float = 0.1,
+        l_function_params: Optional[Dict] = None,
+        name: str = "contrastive_loss",
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        self.temperature = float(temperature)
+        self.sigma = float(sigma)
+        self.l_function_params = l_function_params
+        self.eps = 1e-8
+
+        self.l_function = None
+        if l_function_params is not None:
+            self.l_function = LinearizationLayer(**l_function_params)
+
+    def call(self, y_true, y_pred):
+        # y_true: (batch, 2+) coords, y_pred: (batch, D) latent
+        # Ensure float32 for numerical stability (mixed precision)
+        z = kops.cast(y_pred, "float32")
+        y_true = kops.cast(y_true, "float32")
+
+        # 1. Get positions for weighting (linearized or 2D)
+        if self.l_function is not None:
+            _, linearized_pos = self.l_function(y_true[:, :2])
+            pos = linearized_pos
+        else:
+            pos = y_true[:, :2] if y_true.shape[-1] >= 2 else y_true
+
+        # 2. Normalize latents to unit length for cosine similarity
+        N = tf.shape(z)[0]
+        z = tf.math.l2_normalize(z, axis=1)
+
+        # 3. Compute pairwise Cosine Similarity Logits
+        logits = tf.matmul(z, z, transpose_b=True) / self.temperature
+
+        # 4. Compute Pairwise Spatial Distances
+        if len(pos.shape) == 1:
+            pos = tf.reshape(pos, [-1, 1])
+
+        if pos.shape[-1] > 1:
+            r = tf.reduce_sum(tf.square(pos), axis=1, keepdims=True)
+            d2 = r - 2 * tf.matmul(pos, pos, transpose_b=True) + tf.transpose(r)
+            d = tf.sqrt(tf.maximum(d2, self.eps))
+        else:
+            d = tf.abs(pos - tf.transpose(pos))
+
+        # 5. Distance weighting (soft positives)
+        w = kops.cast(tf.exp(-0.5 * tf.square(d) / (self.sigma**2)), "float32")
+        mask_diag = tf.eye(N, dtype="float32")
+        w = w * (1.0 - mask_diag)  # Mask self-similarity
+
+        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + self.eps
+        w_norm = w / w_sum
+
+        # 6. Compute Softmax Log-Probabilities masking diagonal
+        logits_masked = logits + (-1e9) * mask_diag
+        log_prob = tf.nn.log_softmax(logits_masked, axis=1)
+
+        # 7. Cross entropy with soft targets
+        loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
+        return tf.reduce_mean(loss_per_anchor)
+
+    def get_config(self):
+        config = super().get_config()
+
+        if self.l_function_params is not None:
+            # handle l function layer params serialization
+            l_function_layer_params_serializable = self.l_function_params.copy()
+            for k, v in l_function_layer_params_serializable.items():
+                try:
+                    v = v.numpy().tolist()
+                except AttributeError:
+                    # Handle case where these aren't TensorFlow tensors
+                    v = v.tolist() if hasattr(v, "tolist") else v
+                l_function_layer_params_serializable[k] = v
+        else:
+            l_function_layer_params_serializable = None
+
+        config.update(
+            {
+                "temperature": self.temperature,
+                "sigma": self.sigma,
+                "l_function_params": l_function_layer_params_serializable,
+            }
+        )
+        return config
+
+
 # Register custom layers and losses for Keras serialization
 keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
 keras_utils.get_custom_objects()["SpikeNet1D"] = SpikeNet1D
@@ -3968,3 +4142,9 @@ keras_utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer
 keras_utils.get_custom_objects()["ContrastiveLossLayer"] = ContrastiveLossLayer
 keras_utils.get_custom_objects()["GroupAttentionFusion"] = GroupAttentionFusion
 keras_utils.get_custom_objects()["ContrastiveMonitor"] = ContrastiveMonitor
+keras_utils.get_custom_objects()["CyclicMAE"] = CyclicMAE
+keras_utils.get_custom_objects()["PositionError2D"] = PositionError2D
+keras_utils.get_custom_objects()["GaussianHeatmapLoss"] = GaussianHeatmapLoss
+keras_utils.get_custom_objects()["ContrastiveRegressionLoss"] = (
+    ContrastiveRegressionLoss
+)

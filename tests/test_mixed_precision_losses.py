@@ -3,7 +3,6 @@ import pytest
 import tensorflow as tf
 
 from neuroencoders.fullEncoder import nnUtils
-from neuroencoders.fullEncoder.an_network import LinearizationLayer
 
 # Set mixed precision policy if possible
 policy = tf.keras.mixed_precision.Policy("mixed_bfloat16")
@@ -11,10 +10,10 @@ tf.keras.mixed_precision.set_global_policy(policy)
 
 
 @pytest.fixture
-def mock_l_layer():
+def mock_l_layer_params():
     maze_points = np.random.randn(45, 2).astype(np.float32)
     ts_proj = np.random.randn(45).astype(np.float32)
-    return LinearizationLayer(maze_points=maze_points, ts_proj=ts_proj)
+    return {"maze_points": maze_points, "ts_proj": ts_proj}
 
 
 @pytest.fixture
@@ -27,9 +26,9 @@ def gaussian_params():
     }
 
 
-def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer):
+def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
     losses_layer = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params, l_function_layer=mock_l_layer
+        **gaussian_params, l_function_layer_params=mock_l_layer_params
     )
 
     # Create bfloat16 inputs
@@ -58,9 +57,9 @@ def test_contrastive_loss_layer_mp():
     assert not tf.math.is_nan(loss)
 
 
-def test_multi_column_loss_layer_mp(gaussian_params, mock_l_layer):
+def test_multi_column_loss_layer_mp(gaussian_params, mock_l_layer_params):
     gh_losses = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params, l_function_layer=mock_l_layer
+        **gaussian_params, l_function_layer_params=mock_l_layer_params
     )
 
     multi_loss = nnUtils.MultiColumnLossLayer(
