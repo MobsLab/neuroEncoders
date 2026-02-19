@@ -707,7 +707,7 @@ def main(args):
             behaviorData=DataHelper.fullBehavior,
             alpha=Parameters.denseweightAlpha,
             linearizer=Linearizer,
-            jit_compile=False,
+            jit_compile=True,
         )
 
         if (
