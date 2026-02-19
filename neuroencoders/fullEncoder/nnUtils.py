@@ -1158,9 +1158,21 @@ def parse_serialized_sequence(
     tensors: Dict[str, tf.Tensor],
     count_spikes: bool = False,
     sorted_indices: bool = None,
+    max_spikes: int = None,
+    max_spikes_per_group: int = None,
 ):
     # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
     tensors = dict(tensors)
+
+    if max_spikes is not None:
+        actual_total = tf.shape(
+            tf.sparse.to_dense(tensors["groups"], default_value=-1)
+        )[0]
+        tf.debugging.assert_less_equal(
+            actual_total,
+            max_spikes,
+            message=f"A sample exceeded {max_spikes} total spikes. Actual: {actual_total}. Consider increasing max_spikes or filtering your dataset.",
+        )
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
     lengths = []
     for key in ["pos", "groups", "indexInDat"]:
@@ -1189,8 +1201,14 @@ def parse_serialized_sequence(
         isValid = tf.reduce_any(tf.not_equal(tensors[group_key], -1.0), axis=[1, 2])
 
         # 5. Use boolean_mask instead of gather(where)
-        # This removes the Cumsum internal dependency that was crashing your GPU rendezvous
         tensors[group_key] = tf.boolean_mask(tensors[group_key], isValid)
+        if max_spikes_per_group is not None:
+            tf.debugging.assert_less_equal(
+                tf.shape(tensors[group_key])[0],
+                max_spikes_per_group,
+                message=f"Group {g} exceeded {max_spikes_per_group} spikes. Actual: {tf.shape(tensors[group_key])[0]}. Consider increasing max_spikes_per_group or filtering your dataset.",
+            )
+
         lengths.append(tf.shape(tensors[group_key])[0])
 
         if count_spikes:

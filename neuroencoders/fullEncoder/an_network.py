@@ -112,6 +112,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self._setup_feature_description()
 
         self.zeroForGather = tf.zeros([1, self.params.nFeatures])
+        self.max_nb_spikes = kwargs.get(
+            "max_nb_spikes", 128
+        )  # maximum number of spikes per group to consider in the window, for batching purposes
+        self.max_spikes_per_group = kwargs.get(
+            "max_spikes_per_group", self.max_nb_spikes / self.params.nGroups
+        )
 
         if self.params.usingMixedPrecision:
             print("Using mixed precision with float16")
@@ -1499,7 +1505,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             return (inputs_dict, targets_dict)
 
         def create_indices(vals):
-            return self.create_indices(vals=vals, shuffle=random_spiking)
+            return self.create_indices(vals, shuffle=random_spiking)
 
         ndataset = tf.data.TFRecordDataset(
             os.path.join(self.projectPath.dataPath, filename),
@@ -1549,6 +1555,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.params,
                     vals,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
+                    max_spikes=300,
+                    max_spikes_per_group=100,
                     # sorted_indices = #TODO: at some point
                 )
 
@@ -1654,10 +1662,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "pos_index": [],
             "pos": [self.params.dimOutput],
             "length": [],
-            "groups": [None],
+            "groups": [self.max_nb_spikes],
             "time": [],
             "time_behavior": [],
-            "indexInDat": [None],
+            "indexInDat": [self.max_nb_spikes],
             "max_spikes": [],
         }
         padding_values = {
@@ -1679,11 +1687,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         for g in range(self.params.nGroups):
             padded_shapes[f"group{g}"] = [
-                None,  # spikes
+                self.max_spikes_per_group,  # spikes
                 self.params.nChannelsPerGroup[g],
                 32,
             ]
-            padded_shapes[f"indices{g}"] = [None]
+            padded_shapes[f"indices{g}"] = [self.max_spikes_per_group]
             padding_values[f"group{g}"] = tf.constant(-1.0, dtype=tf.float32)
             padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
 
