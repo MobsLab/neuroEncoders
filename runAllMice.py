@@ -30,7 +30,7 @@ mice_nb = [
     "M1199_MFB",
 ]
 ####
-nameExp = "consensus_v2_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_10_75"
+nameExp = "consensus_v3_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_10_75"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"

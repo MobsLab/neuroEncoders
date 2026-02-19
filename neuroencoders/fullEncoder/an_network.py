@@ -35,9 +35,9 @@ from neuroencoders.fullEncoder.nnUtils import (
     ContrastiveMonitor,
     ContrastiveRegressionLoss,
     CyclicMAE,
-    GatherSpikes,
     GaussianHeatmapLayer,
     GaussianHeatmapLoss,
+    GlobalSequenceGather,
     GroupAttentionFusion,
     MaskedGlobalAveragePooling1D,
     MaskingLayer,
@@ -46,10 +46,11 @@ from neuroencoders.fullEncoder.nnUtils import (
     PositionError2D,
     PositionalEncoding,
     SafeMaskCreation,
+    SpikeEncoder,
     SpikeNet1D,
     TransformerEncoderBlock,
     UMazeProjectionLayer,
-    spikeNet,
+    SpikeNet2D,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import (
@@ -113,10 +114,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         self.zeroForGather = tf.zeros([1, self.params.nFeatures])
         self.max_nb_spikes = kwargs.get(
-            "max_nb_spikes", 128
+            "max_nb_spikes", 512
         )  # maximum number of spikes per group to consider in the window, for batching purposes
         self.max_spikes_per_group = kwargs.get(
-            "max_spikes_per_group", self.max_nb_spikes / self.params.nGroups
+            "max_spikes_per_group", int(self.max_nb_spikes / self.params.nGroups)
         )
 
         if self.params.usingMixedPrecision:
@@ -408,7 +409,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
                     shape=(
-                        None,  # maxNbOfSpikes in group
+                        self.max_spikes_per_group,  # maxNbOfSpikes in group
                         self.params.nChannelsPerGroup[group],
                         32,
                     ),
@@ -418,37 +419,43 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             ]
 
             self.inputGroups = tf.keras.layers.Input(
-                shape=(None,), name="groups", dtype=tf.int32
+                shape=(self.max_nb_spikes,), name="groups", dtype=tf.int32
             )
             self.indices = [
                 tf.keras.layers.Input(
-                    shape=(None,), name="indices" + str(group), dtype=tf.int32
+                    shape=(self.max_nb_spikes,),
+                    name="indices" + str(group),
+                    dtype=tf.int32,
                 )
                 for group in range(self.params.nGroups)
             ]
 
             # Declare spike nets for the different groups:
-            spikeNetClass = (
-                SpikeNet1D
-                if not getattr(self.params, "use_conv2d", False)
-                else spikeNet
-            )
+            conv_dim = 2 if getattr(self.params, "use_conv2d", False) else 1
+            spikeNetClass = SpikeNet1D if conv_dim == 1 else SpikeNet2D
             self.spikeNets = [
-                tf.keras.layers.TimeDistributed(
-                    spikeNetClass(
-                        nChannels=self.params.nChannelsPerGroup[group],
-                        device=self.deviceName,
-                        nFeatures=self.params.nFeatures,
-                        number=str(group),
-                        batch_normalization=True,
-                        reduce_dense=getattr(self.params, "reduce_dense", False),
-                        no_cnn=getattr(self.params, "no_cnn", False),
-                        name=f"spikeNet_{group}",
-                    ),
-                    name=f"timedist_spikeNet_{group}",
+                # tf.keras.layers.TimeDistributed(
+                spikeNetClass(
+                    nChannels=self.params.nChannelsPerGroup[group],
+                    device=self.deviceName,
+                    nFeatures=self.params.nFeatures,
+                    number=str(group),
+                    batch_normalization=True,
+                    reduce_dense=getattr(self.params, "reduce_dense", False),
+                    no_cnn=getattr(self.params, "no_cnn", False),
+                    name=f"spikeNet_{group}",
+                    # ),
+                    # name=f"timedist_spikeNet_{group}",
                 )
                 for group in range(self.params.nGroups)
             ]
+            self.spike_encoder = SpikeEncoder(
+                self.spikeNets,
+                self.params,
+                self.max_nb_spikes,
+                self.max_spikes_per_group,
+                conv_dim,
+            )
 
             if getattr(self.params, "use_group_attention_fusion", True):
                 # 2. Initialize the Group Attention Fusion layer
@@ -495,6 +502,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.lstmsNets = (
                     [
                         PositionalEncoding(
+                            max_len=self.max_nb_spikes,
                             d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
                             else self.params.nFeatures * self.params.nGroups,
@@ -761,66 +769,58 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
     def generate_model(self, **kwargs):
         """
-        Generate the full model with the CNN, LSTM and Dense layers.
-
-        Returns
-        -------
-        myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
+        Updated generate_model using vectorized group encoding and
+        global sequence reconstruction.
         """
-        # CNN plus dense on every group independently
         with nnUtils.get_device_context(self.deviceName):
-            allFeatures = []  # store the result of the CNN computation for each group
-            for group in range(self.params.nGroups):
-                # Process all spikes in the group through the spike net
-                x = self.spikeNets[group](self.inputsToSpikeNets[group])
-                # x shape: (batch, n_spikes_in_group, nFeatures)
+            all_group_latents = []
+            group_latents_raw = self.spike_encoder(
+                self.inputsToSpikeNets
+            )  # List of (Batch, MaxSpikesPerGroup, nFeatures) for each group
+            for g, latent in enumerate(group_latents_raw):
+                full_emb = AddNullSpike(name=f"add_null_spike_group{g}")(
+                    latent
+                )  # Shape: (Batch, MaxSpikesPerGroup + 1, nFeatures)
+                all_group_latents.append(full_emb)
 
-                # The "Null Spike" Trick:
-                full_emb = AddNullSpike(
-                    name=f"null_spike_g{group}",
-                )(x)
+            # 2. RECONSTRUCT: Interleave groups back into the temporal sequence
+            # We concatenate all groups into one 'source pool'
+            # Shape: (Batch, Total_Max_Spikes_All_Groups + nGroups, nFeatures)
+            pool = kops.concatenate(all_group_latents, axis=1)
 
-                # Gather spikes into the global sequence: (batch, seqLen, nFeatures)
-                gather_layer = GatherSpikes(
-                    name=f"gather_g{group}",
-                )
-                gather_layer.supports_masking = True
-                gathered = gather_layer([full_emb, self.indices[group]])
+            # Compute global offsets for each group in the pool
+            # This is static and JIT-friendly
+            offsets = []
+            curr_offset = 0
+            for g in range(self.params.nGroups):
+                offsets.append(curr_offset)
+                # +1 because of the Null Spike added to each group
+                curr_offset += self.max_spikes_per_group + 1
 
-                allFeatures.append(gathered)
+            # 3. GATHER: Build the sequence using the group IDs and indices
+            # We iterate over the temporal sequence once to map indices to the pool
+            # This layer replaces your loop-based gather with a vectorized gather_nd or batch_gather
+            # It uses: pool, offsets, self.indices (list of tensors), and self.groups
+            sequence_reconstructor = GlobalSequenceGather(
+                n_groups=self.params.nGroups,
+                group_dim=self.params.nFeatures,
+                offsets=offsets,
+            )
+            allFeatures = sequence_reconstructor([pool, self.indices, self.inputGroups])
 
-            if not getattr(self.params, "use_group_attention_fusion", True):
-                # OLD: concatenation over features
-                allFeatures = kops.concatenate(allFeatures, axis=2)
-            else:
-                print("Using Group Attention Fusion for feature fusion")
-                # NEW: Group Attention Fusion over groups
-                # Create masks based on indices (0 means no spike)
-                group_masks = [
-                    kops.not_equal(self.indices[group], 0)
-                    for group in range(self.params.nGroups)
-                ]
-                fusion_mask = kops.stack(group_masks, axis=-1)
-                allFeatures = self.group_fusion(allFeatures, mask=fusion_mask)
-
-            # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
-            # We would like to mask timesteps that were added for batching purpose, before running the RNN
+            # Create mask for the RNN (NbBatch, NbTotSpike)
             mymask_layer = SafeMaskCreation(name="safe_mask_creation")
-            mymask = mymask_layer(self.inputGroups)
+            mymask = mymask_layer(self.inputGroups)  # Looks for groups != -1
 
             masking_layer = MaskingLayer(name="masking_layer_before_rnn")
-            masking_layer.supports_masking = True
             masked_features = masking_layer([mymask, allFeatures])
-            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
-            sumFeatures = kops.sum(
-                masked_features, axis=1
-            )  # This var will be used in the predLoss loss
 
+            sumFeatures = kops.sum(masked_features, axis=1)
+
+            # 5. RNN / TRANSFORMER
             allFeatures_raw = allFeatures
             allFeatures = self.dropoutLayer(allFeatures)
-            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
 
-            # LSTM / Transformer
             if not self.isTransformer:
                 x, latent, sumFeatures = self.apply_lstm_architecture(
                     allFeatures, sumFeatures, mymask, **kwargs
@@ -1555,8 +1555,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.params,
                     vals,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
-                    max_spikes=300,
-                    max_spikes_per_group=100,
+                    max_spikes=self.max_nb_spikes,
+                    max_spikes_per_group=self.max_spikes_per_group,
                     # sorted_indices = #TODO: at some point
                 )
 
@@ -1589,22 +1589,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     deterministic=False,
                 )
 
-            padded_shapes, padding_values = self._get_padding_shapes_values(
-                extract_spikes_counts=kwargs.get("extract_spikes_counts", False),
-            )
-
-            boundaries = [30, 100]  # TODO: adapt on winMS
-            batch_sizes = [batch_size] * (len(boundaries) + 1)
-
-            dataset = dataset.prefetch(buffer_size=2000)
-            dataset = dataset.bucket_by_sequence_length(
-                element_length_func=lambda x: x["max_spikes"],
-                bucket_boundaries=boundaries,
-                bucket_batch_sizes=batch_sizes,
-                padded_shapes=padded_shapes,
-                padding_values=padding_values,
-                drop_remainder=True,
-            )
+            dataset = dataset.batch(batch_size, drop_remainder=True)
+            dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
             dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
@@ -1691,7 +1677,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.params.nChannelsPerGroup[g],
                 32,
             ]
-            padded_shapes[f"indices{g}"] = [self.max_spikes_per_group]
+            padded_shapes[f"indices{g}"] = [self.max_nb_spikes]
             padding_values[f"group{g}"] = tf.constant(-1.0, dtype=tf.float32)
             padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
 
@@ -3278,12 +3264,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             if shuffle:
                 # We only want to shuffle the non-zero indices
                 # Extract values, shuffle them, and put them back
-                non_zero_indices = tf.boolean_mask(indices_tensor, is_in_group)
+                mask = indices_tensor > 0
+                non_zero_indices = tf.boolean_mask(indices_tensor, mask)
                 shuffled_values = tf.random.shuffle(non_zero_indices)
 
                 # Use scatter_nd to put shuffled values back into a zero-filled tensor
                 # We need the positions for scattering
-                positions = tf.where(is_in_group)
+                positions = tf.where(mask)
                 indices_tensor = tf.scatter_nd(
                     indices=positions,
                     updates=shuffled_values,

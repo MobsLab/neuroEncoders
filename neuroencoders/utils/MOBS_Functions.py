@@ -1082,7 +1082,7 @@ class Mouse_Results(Params, PaperFigures):
 
         for i, winMS in enumerate(self.windows):
             if i == 0 and which.lower() in ["ann", "both"]:
-                if not hasattr(self, "ann"):
+                if not hasattr(self, "ann") or kwargs.get("redo", False):
                     self.ann = NNTrainer(
                         self.projects[winMS],
                         self.parameters[winMS],

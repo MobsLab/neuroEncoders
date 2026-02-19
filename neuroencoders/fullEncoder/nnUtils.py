@@ -175,7 +175,7 @@ class MaskingLayer(tf.keras.layers.Layer):
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 @keras.saving.register_keras_serializable(package="neuroencoders")
-class spikeNet(tf.keras.layers.Layer):
+class SpikeNet2D(tf.keras.layers.Layer):
     """
     This class is a convolutional network that takes as input a spike sequence from nChannels and returns a feature vector of size nFeatures.
 
@@ -367,6 +367,9 @@ class spikeNet(tf.keras.layers.Layer):
                 f"Expected input shape with {self.nChannels} channels, got {input_shape[1]}"
             )
 
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.nFeatures)
+
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class SpikeNet1D(tf.keras.layers.Layer):
@@ -403,13 +406,11 @@ class SpikeNet1D(tf.keras.layers.Layer):
         with get_device_context(self.device):
             # Layer 1: Convolves over time bins
             self.conv1 = tf.keras.layers.Conv1D(16, 3, padding="same", activation=None)
-            self.bn1 = tf.keras.layers.BatchNormalization()
             self.act1 = tf.keras.layers.Activation("relu")
             self.pool1 = tf.keras.layers.MaxPool1D(2, padding="same")  # Pool time only
 
             # Layer 2
             self.conv2 = tf.keras.layers.Conv1D(32, 3, padding="same", activation=None)
-            self.bn2 = tf.keras.layers.BatchNormalization()
             self.act2 = tf.keras.layers.Activation("relu")
             self.pool2 = tf.keras.layers.MaxPool1D(2, padding="same")
 
@@ -420,22 +421,27 @@ class SpikeNet1D(tf.keras.layers.Layer):
             self.conv3 = tf.keras.layers.Conv1D(
                 self.nConvChannels, 3, padding="same", activation=None
             )
-            self.bn3 = tf.keras.layers.BatchNormalization()
             self.act3 = tf.keras.layers.Activation("relu")
             self.GlobalPool = tf.keras.layers.GlobalAveragePooling1D()
+            if self.batch_normalization:
+                self.bn1 = tf.keras.layers.BatchNormalization()
+                self.bn2 = tf.keras.layers.BatchNormalization()
+                self.bn3 = tf.keras.layers.BatchNormalization()
 
             self.temporal_extractor = tf.keras.Sequential(
                 [
                     self.conv1,
-                    self.bn1,
+                    self.bn1
+                    if self.batch_normalization
+                    else tf.keras.layers.Layer(),  # Identity if no BN
                     self.act1,
                     self.pool1,
                     self.conv2,
-                    self.bn2,
+                    self.bn2 if self.batch_normalization else tf.keras.layers.Layer(),
                     self.act2,
                     self.pool2,
                     self.conv3,
-                    self.bn3,
+                    self.bn3 if self.batch_normalization else tf.keras.layers.Layer(),
                     self.act3,
                     self.GlobalPool,  # result (Batch * nChannels, 64)
                 ]
@@ -551,6 +557,101 @@ class SpikeNet1D(tf.keras.layers.Layer):
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.nFeatures)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeEncoder(tf.keras.layers.Layer):
+    def __init__(
+        self, spikeNets, params, max_nb_spikes, max_spikes_per_group, conv_dim, **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.spikeNets = spikeNets
+        self.params = params
+        self.max_nb_spikes = max_nb_spikes
+        self.max_spikes_per_group = max_spikes_per_group
+        self.conv_dim = conv_dim
+        # Mark that this layer handles a list of inputs
+        self._supports_masking = True
+
+    def call(self, inputs):
+        # IMPORTANT: 'inputs' is a LIST of tensors: [group0, group1, ...]
+        # Not a dictionary!
+        encoded_groups = []
+
+        for g in range(len(inputs)):
+            group_input = inputs[g]
+
+            # Static shapes from params are safer for XLA/JIT
+            batch_size = tf.shape(group_input)[0]
+            max_spks = self.max_spikes_per_group
+            n_ch = self.params.nChannelsPerGroup[g]
+
+            # Reshape to 3D for Conv: (Batch*MaxSpks, Channels, Time)
+            x = tf.reshape(group_input, [-1, n_ch, 32])
+
+            # Forward pass through the specific tower
+            x = self.spikeNets[g](x)
+
+            # Reshape back to (Batch, MaxSpks, Features)
+            x = tf.reshape(x, [batch_size, max_spks, self.params.nFeatures])
+            encoded_groups.append(x)
+
+        return encoded_groups
+
+    def compute_output_shape(self, input_shape):
+        # Help Keras infer the shapes since there's a loop
+        # input_shape is a list of shapes [(None, 32, 6, 32), ...]
+        return [
+            (shape[0], self.max_spikes_per_group, self.params.nFeatures)
+            for shape in input_shape
+        ]
+
+    def build(self, input_shape):
+        # No trainable weights in this layer, but we need to call build on sub-layers
+        # for g in range(len(input_shape)):
+        #     self.spikeNets[g].build((None, self.params.nChannelsPerGroup[g], 32))
+        #
+        super().build(input_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        # turn params in serializable dict with only necessary info
+        params_dict = {
+            "nGroups": self.params.nGroups,
+            "nChannelsPerGroup": self.params.nChannelsPerGroup,
+            "nFeatures": self.params.nFeatures,
+        }
+        # turns spikeNets into a list of their configs (assuming they are serializable)
+        serialized_nets = [tf.keras.layers.serialize(net) for net in self.spikeNets]
+        config.update(
+            {
+                "params": params_dict,
+                "spikeNets": serialized_nets,
+                "conv_dim": self.conv_dim,
+                "max_nb_spikes": self.max_nb_spikes,
+                "max_spikes_per_group": self.max_spikes_per_group,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        # Reconstruct params object from dict
+        params_dict = config.pop("params")
+
+        class Params:
+            pass
+
+        params = Params()
+        for key, value in params_dict.items():
+            setattr(params, key, value)
+
+        # Reconstruct spikeNets from their configs
+        spikeNets_configs = config.pop("spikeNets", [])
+        spikeNets = [
+            tf.keras.layers.deserialize(net_config) for net_config in spikeNets_configs
+        ]
+        return cls(spikeNets=spikeNets, params=params, **config)
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
@@ -691,6 +792,75 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
+class GlobalSequenceGather(tf.keras.layers.Layer):
+    def __init__(self, n_groups, group_dim, offsets, **kwargs):
+        super().__init__(**kwargs)
+        self.n_groups = n_groups
+        self.group_dim = group_dim
+        self.offsets = offsets
+
+    def build(self, input_shape):
+        # learnable embedding for each group
+        self.group_embeddings = self.add_weight(
+            name="group_embeddings",
+            shape=(self.n_groups, self.group_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.null_identity = tf.zeros((1, self.group_dim), dtype=tf.float32)
+        super().build(input_shape)
+
+    def call(self, inputs):
+        pool, indices_list, group_sequence = inputs
+
+        # Start with a zero-filled sequence
+        # Shape: (Batch, SeqLen, Features)
+        batch_size = kops.shape(pool)[0]
+        seq_len = kops.shape(group_sequence)[1]
+        features = kops.shape(pool)[2]
+
+        # Map indices to global pool positions
+        global_indices = kops.zeros_like(group_sequence, dtype="int32")
+
+        for g, offset in enumerate(self.offsets):
+            idx_g = indices_list[g]
+            condition = kops.equal(group_sequence, g)
+            # If the sequence at time t belongs to group g,
+            # pick the spike at its relative index + offset
+            global_indices = kops.where(condition, idx_g + offset, global_indices)
+
+        # gather spike fatures
+        sequence_features = tf.gather(pool, global_indices, batch_dims=1)
+
+        # group id embedding
+        lookup_table = tf.concat([self.group_embeddings, self.null_identity], axis=0)
+        safe_group_ids = tf.where(
+            group_sequence == -1, self.n_groups, tf.cast(group_sequence, tf.int32)
+        )
+        identities = tf.gather(
+            lookup_table, safe_group_ids
+        )  # batch x seq_len x group_dim
+
+        # Batch gather
+        return sequence_features + identities
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_groups": self.n_groups,
+                "group_dim": self.group_dim,
+                "offsets": self.offsets,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     """Global Average Pooling that respects masking"""
 
@@ -775,7 +945,7 @@ def create_attention_mask_from_padding_mask(padding_mask):
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class PositionalEncoding(tf.keras.layers.Layer):
     # increase max_len if you have longer sequences
-    def __init__(self, max_len=200, d_model=128, **kwargs):
+    def __init__(self, max_len=512, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -1182,37 +1352,52 @@ def parse_serialized_sequence(
         if key == "pos":
             tensors[key] = tf.reshape(tensors[key], [params.dimOutput])
         else:
-            tensors[key] = tf.reshape(tensors[key], [-1])
+            too_long = tf.reshape(tensors[key], [-1])
+            too_long = too_long[:max_spikes]
+            if key == "groups":
+                groups = too_long  # keep track of groups for later processing
+            pad_len = max_spikes - tf.shape(too_long)[0]
+            tensors[key] = tf.pad(too_long, [[0, pad_len]], constant_values=-1)
 
+    # 3. Process each group to fixed-size dense blocks
     for g in range(params.nGroups):
         group_key = f"group{g}"
 
-        # 2. Convert to Dense once
-        tensors[group_key] = tf.sparse.to_dense(tensors[group_key], default_value=-1.0)
+        # Convert Sparse to Dense
+        raw_spikes = tf.sparse.to_dense(tensors[group_key], default_value=0.0)
 
-        # 3. Reshape [Total_Values] -> [Num_Spikes, Channels, 32]
-        tensors[group_key] = tf.reshape(
-            tensors[group_key], [-1, params.nChannelsPerGroup[g], 32]
+        # Reshape to [N_Spikes, Channels, Time]
+        # Note: We assume the TFRecord contains the raw data in a flat array
+        raw_spikes = tf.reshape(raw_spikes, [-1, params.nChannelsPerGroup[g], 32])
+
+        tf.debugging.assert_less_equal(
+            tf.shape(raw_spikes)[0],
+            max_spikes_per_group,
+            message=f"Group {g} exceeded {max_spikes_per_group} spikes. Actual: {tf.shape(raw_spikes)[0]}. Consider increasing max_spikes_per_group or filtering your dataset.",
         )
 
-        # 4. Optimized "Valid Spike" Detection
-        # Instead of heavy reduce_sum + cast, we check if the max value is > -1.0
-        # If a spike is all -1.0 (default), it's a padding spike.
-        isValid = tf.reduce_any(tf.not_equal(tensors[group_key], -1.0), axis=[1, 2])
-
-        # 5. Use boolean_mask instead of gather(where)
-        tensors[group_key] = tf.boolean_mask(tensors[group_key], isValid)
-        if max_spikes_per_group is not None:
-            tf.debugging.assert_less_equal(
-                tf.shape(tensors[group_key])[0],
-                max_spikes_per_group,
-                message=f"Group {g} exceeded {max_spikes_per_group} spikes. Actual: {tf.shape(tensors[group_key])[0]}. Consider increasing max_spikes_per_group or filtering your dataset.",
-            )
-
-        lengths.append(tf.shape(tensors[group_key])[0])
+        lengths.append(
+            tf.shape(raw_spikes)[0]
+        )  # Keep track of actual spike count per group
 
         if count_spikes:
-            tensors[f"group{g}_spikes_count"] = tf.shape(tensors[group_key])[0]
+            tensors[f"group{g}_spikes_count"] = lengths[-1]
+
+        # Truncate and Pad to max_spikes_per_group
+        # We take only the real spikes up to the limit
+        num_actual = tf.minimum(tf.shape(raw_spikes)[0], max_spikes_per_group)
+        actual_spikes = raw_spikes[:num_actual]
+
+        # Calculate padding needed for the spike data
+        spike_pad_len = max_spikes_per_group - num_actual
+        tensors[group_key] = tf.pad(
+            actual_spikes, [[0, spike_pad_len], [0, 0], [0, 0]], constant_values=0.0
+        )
+
+    # 5. Length and Masking
+    # Keep track of actual length for SafeMaskCreation
+    actual_len = tf.shape(groups)[0]
+    tensors["length_hand"] = actual_len
     tensors["max_spikes"] = tf.reduce_max(lengths)
 
     return tensors
@@ -1495,54 +1680,6 @@ class NeuralDataAugmentation:
 
 
 @tf.function
-def parse_serialized_sequence_with_augmentation(
-    params, tensors, augmentation_config=None, count_spikes=False
-):
-    tensors = dict(tensors)
-    lengths = []
-    # 1. Clean up Metadata Metadata efficiently
-    for key in ["groups", "indexInDat", "pos"]:
-        if key in tensors:
-            if isinstance(tensors[key], tf.SparseTensor):
-                tensors[key] = tf.sparse.to_dense(
-                    tensors[key], default_value=-1.0 if key == "pos" else -1
-                )
-            if key == "pos":
-                tensors[key] = tf.reshape(tensors[key], [params.dimOutput])
-            else:
-                tensors[key] = tf.reshape(tensors[key], [-1])
-
-    original_groups = {}
-    for g in range(params.nGroups):
-        g_key = f"group{g}"
-        # Convert to dense and reshape once
-        tensors[g_key] = tf.sparse.to_dense(tensors[g_key], default_value=-1.0)
-        tensors[g_key] = tf.reshape(
-            tensors[g_key], [-1, params.nChannelsPerGroup[g], 32]
-        )
-
-        # Optimized filtering: skip spikes that are all default (-1.0)
-        isValid = tf.reduce_any(tf.not_equal(tensors[g_key], -1.0), axis=[1, 2])
-        tensors[g_key] = tf.boolean_mask(tensors[g_key], isValid)
-        lengths.append(tf.shape(tensors[g_key])[0])
-
-        if count_spikes:
-            tensors[f"group{g}_spikes_count"] = tf.shape(tensors[g_key])[0]
-
-        original_groups[g_key] = tensors[g_key]
-
-    tensors["max_spikes"] = tf.reduce_max(lengths)
-
-    if augmentation_config is not None:
-        # Pass only the necessary data to the stacking function
-        return apply_group_augmentation(
-            tensors, original_groups, params, augmentation_config
-        )
-
-    return tensors
-
-
-@tf.function
 def apply_group_augmentation(
     tensors: Dict[str, tf.Tensor],
     original_groups: Dict[str, tf.Tensor],
@@ -1561,6 +1698,15 @@ def apply_group_augmentation(
     for g in range(params.nGroups):
         g_key = f"group{g}"
         group_data = original_groups[g_key]  # Shape: [Spikes, Chan, Time]
+
+        # now that ours groups are fixed size and already padded, we need a mask to avoid augmenting the padded part
+        is_real_spike = tf.reduce_any(
+            tf.not_equal(group_data, 0.0), axis=[1, 2]
+        )  # Shape: [Spikes]
+        # broadcast to match group_data shape
+        is_real_spike = is_real_spike[
+            tf.newaxis, :, tf.newaxis, tf.newaxis
+        ]  # Shape: [1, Spikes, 1, 1]
 
         # Generate ALL noise for ALL augmentations in 3 big API calls
         # Shape: [num_augs, Spikes, Chan, Time]
@@ -1583,6 +1729,9 @@ def apply_group_augmentation(
         # Broadcast the original data to match noise shape
         augmented_versions = group_data[tf.newaxis, ...] + white + offset + cum_noise
 
+        # zero out the padded spikes to ensure they remain unchanged after augmentations
+        augmented_versions = tf.where(is_real_spike, augmented_versions, 0.0)
+
         if keep_original:
             result_tensors[g_key] = tf.concat(
                 [group_data[tf.newaxis, ...], augmented_versions], axis=0
@@ -1597,6 +1746,7 @@ def apply_group_augmentation(
         "pos",
         "groups",
         "length",
+        "length_hand",
         "time",
         "time_behavior",
         "indexInDat",
@@ -2423,10 +2573,12 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     def build(self, input_shape):
         """Build the layer - called automatically by Keras"""
-        super().build(input_shape)
+        self.feature_to_logits_map.build(input_shape)
         # Ensure computed attributes are initialized after build
         if not hasattr(self, "EPS"):
             self._initialize_computed_attributes()
+
+        super().build(input_shape)
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
@@ -4213,7 +4365,8 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
 # Register custom layers and losses for Keras serialization
 keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
 keras_utils.get_custom_objects()["SpikeNet1D"] = SpikeNet1D
-keras_utils.get_custom_objects()["spikeNet"] = spikeNet
+keras_utils.get_custom_objects()["spikeNet"] = SpikeNet2D
+keras_utils.get_custom_objects()["SpikeEncoder"] = SpikeEncoder
 keras_utils.get_custom_objects()["DynamicDenseWeightLayer"] = DynamicDenseWeightLayer
 keras_utils.get_custom_objects()["GaussianHeatmapLayer"] = GaussianHeatmapLayer
 keras_utils.get_custom_objects()["GaussianHeatmapLosses"] = GaussianHeatmapLosses
@@ -4233,3 +4386,5 @@ keras_utils.get_custom_objects()["GaussianHeatmapLoss"] = GaussianHeatmapLoss
 keras_utils.get_custom_objects()["ContrastiveRegressionLoss"] = (
     ContrastiveRegressionLoss
 )
+keras_utils.get_custom_objects()["AngularErrorMetric"] = AngularErrorMetric
+keras_utils.get_custom_objects()["GlobalSequenceGather"] = GlobalSequenceGather
