@@ -15,7 +15,7 @@ from denseweight import DenseWeight
 from keras import ops as kops
 from scipy.ndimage import gaussian_filter
 
-from neuroencoders.utils.global_classes import SpatialConstraintsMixin
+from neuroencoders.utils.global_classes import Params, SpatialConstraintsMixin
 
 
 def get_device_context(device):
@@ -375,6 +375,8 @@ class SpikeNet1D(tf.keras.layers.Layer):
     Input shape: (Batch, Channels, Time) -> e.g., (128, 6, 32)
     This version transposes the input so Conv1D operates on the Time axis (32)
     while keeping the 6 channels separate.
+
+    Output shape: (Batch, nFeatures) -> e.g., (128, 128)
     """
 
     def __init__(
@@ -412,7 +414,12 @@ class SpikeNet1D(tf.keras.layers.Layer):
             self.pool2 = tf.keras.layers.MaxPool1D(2, padding="same")
 
             # Layer 3
-            self.conv3 = tf.keras.layers.Conv1D(64, 3, padding="same", activation=None)
+            self.nConvChannels = (
+                64  # number of output channels from conv layers (before global pool)
+            )
+            self.conv3 = tf.keras.layers.Conv1D(
+                self.nConvChannels, 3, padding="same", activation=None
+            )
             self.bn3 = tf.keras.layers.BatchNormalization()
             self.act3 = tf.keras.layers.Activation("relu")
             self.GlobalPool = tf.keras.layers.GlobalAveragePooling1D()
@@ -460,12 +467,12 @@ class SpikeNet1D(tf.keras.layers.Layer):
             )  # channels_last format for conv1d and global average pooling
 
             # Step 2: Extract temporal features (Shared Weights)
-            # Output shape: (Batch * 6, 64)
+            # Output shape: (Batch * 6, self.nConvChannels = 64)
             x = self.temporal_extractor(x)
 
             # Step 3: Concatenate channels back together
-            # New shape: (Batch, 6 * 64) -> (128, 384)
-            x = tf.reshape(x, [B, self.nChannels * 64])
+            # New shape: (Batch, 6 * nConvChannels) -> (128, 384)
+            x = tf.reshape(x, [B, self.nChannels * self.nConvChannels])
 
             # Step 4: Spatial Interaction (Learning relationships between fixed channels)
             x = self.dense_fusion(x)
@@ -531,7 +538,9 @@ class SpikeNet1D(tf.keras.layers.Layer):
         # 2. Dense Fusion
         # The extractor outputs 64 features per channel (from the 3rd conv/global pool)
         # Input shape becomes (Batch, Channels * 64)
-        fusion_input_dim = self.nChannels * 64
+        fusion_input_dim = (
+            self.nChannels * self.nConvChannels
+        )  # 6 channels * 64 convChannels = 384
         self.dense_fusion.build((None, fusion_input_dim))
 
         # 3. Dense Out
@@ -766,7 +775,7 @@ def create_attention_mask_from_padding_mask(padding_mask):
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class PositionalEncoding(tf.keras.layers.Layer):
     # increase max_len if you have longer sequences
-    def __init__(self, max_len=500, d_model=128, **kwargs):
+    def __init__(self, max_len=200, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -1144,10 +1153,16 @@ def serialize_single_spike(clu, spike):
 
 
 @tf.function
-def parse_serialized_sequence(params, tensors, count_spikes=False, sorted_indices=None):
+def parse_serialized_sequence(
+    params: Params,
+    tensors: Dict[str, tf.Tensor],
+    count_spikes: bool = False,
+    sorted_indices: bool = None,
+):
     # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
     tensors = dict(tensors)
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
+    lengths = []
     for key in ["pos", "groups", "indexInDat"]:
         if isinstance(tensors[key], tf.SparseTensor):
             default = -1.0 if key == "pos" else -1
@@ -1176,9 +1191,11 @@ def parse_serialized_sequence(params, tensors, count_spikes=False, sorted_indice
         # 5. Use boolean_mask instead of gather(where)
         # This removes the Cumsum internal dependency that was crashing your GPU rendezvous
         tensors[group_key] = tf.boolean_mask(tensors[group_key], isValid)
+        lengths.append(tf.shape(tensors[group_key])[0])
 
         if count_spikes:
             tensors[f"group{g}_spikes_count"] = tf.shape(tensors[group_key])[0]
+    tensors["max_spikes"] = tf.reduce_max(lengths)
 
     return tensors
 
@@ -1270,7 +1287,6 @@ class NeuralDataAugmentation:
         )
         self.device = kwargs.get("device", "/cpu:0")
 
-    @tf.function
     def add_white_noise(self, neural_data: tf.Tensor) -> tf.Tensor:
         """
         Add white noise to all time points of all channels independently.
@@ -1281,16 +1297,14 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with white noise
         """
-        with get_device_context(self.device):
-            noise = tf.random.normal(
-                shape=tf.shape(neural_data),
-                mean=0.0,
-                stddev=self.white_noise_std,
-                dtype=neural_data.dtype,
-            )
+        noise = tf.random.normal(
+            shape=tf.shape(neural_data),
+            mean=0.0,
+            stddev=self.white_noise_std,
+            dtype=neural_data.dtype,
+        )
         return neural_data + noise
 
-    @tf.function
     def add_constant_offset(self, neural_data: tf.Tensor, axis: int = -2) -> tf.Tensor:
         """
         Add constant offset to channels along specified axis.
@@ -1302,34 +1316,30 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with constant offset
         """
-        with get_device_context(self.device):
-            # Create offset shape - same as neural_data but with 1 along time dimension
-            shape = tf.shape(neural_data)
-            offset_shape = tf.concat(
-                [
-                    shape[
-                        : axis + 1
-                    ],  # Keep dimensions up to and including channel axis
-                    [1],  # Make time dimension 1 for broadcasting
-                    shape[axis + 2 :],  # Keep remaining dimensions
-                ],
-                axis=0,
-            )
+        # Create offset shape - same as neural_data but with 1 along time dimension
+        shape = tf.shape(neural_data)
+        offset_shape = tf.concat(
+            [
+                shape[: axis + 1],  # Keep dimensions up to and including channel axis
+                [1],  # Make time dimension 1 for broadcasting
+                shape[axis + 2 :],  # Keep remaining dimensions
+            ],
+            axis=0,
+        )
 
-            # Generate offset noise
-            offset = tf.random.normal(
-                shape=offset_shape,
-                mean=0.0,
-                stddev=self.offset_noise_std,
-                dtype=neural_data.dtype,
-            )
+        # Generate offset noise
+        offset = tf.random.normal(
+            shape=offset_shape,
+            mean=0.0,
+            stddev=self.offset_noise_std,
+            dtype=neural_data.dtype,
+        )
 
-            # Apply offset to neural data
-            augmented_data = neural_data + offset
+        # Apply offset to neural data
+        augmented_data = neural_data + offset
 
         return augmented_data
 
-    @tf.function
     def add_cumulative_noise(
         self, neural_data: tf.Tensor, time_axis: int = -1
     ) -> tf.Tensor:
@@ -1343,17 +1353,16 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with cumulative noise
         """
-        with get_device_context(self.device):
-            # Generate random noise for each time step
-            noise_increments = tf.random.normal(
-                shape=tf.shape(neural_data),
-                mean=0.0,
-                stddev=self.cumulative_noise_std,
-                dtype=neural_data.dtype,
-            )
+        # Generate random noise for each time step
+        noise_increments = tf.random.normal(
+            shape=tf.shape(neural_data),
+            mean=0.0,
+            stddev=self.cumulative_noise_std,
+            dtype=neural_data.dtype,
+        )
 
-            # Compute cumulative sum along time axis to create random walk
-            cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
+        # Compute cumulative sum along time axis to create random walk
+        cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
 
         return neural_data + cumulative_noise
 
@@ -1382,6 +1391,36 @@ class NeuralDataAugmentation:
         augmented_data = self.add_cumulative_noise(augmented_data, time_axis=time_axis)
 
         return augmented_data
+
+    @tf.function
+    def augment_spike_group_vectorized(self, group_data: tf.Tensor) -> tf.Tensor:
+        # 1. Prepare shapes for broadcasting
+        # result shape: [num_augs, spikes, channels, time]
+        num_spikes = tf.shape(group_data)[0]
+        channels = tf.shape(group_data)[1]
+        time_bins = tf.shape(group_data)[2]
+
+        output_shape = [self.num_augmentations, num_spikes, channels, time_bins]
+
+        # 2. Add White Noise (Independently for every augmentation)
+        # Total randomness in one go
+        white_noise = tf.random.normal(output_shape, stddev=self.white_noise_std)
+
+        # 3. Constant Offset (One per channel per augmentation)
+        # Shape: [num_augs, 1, channels, 1]
+        offset_noise = tf.random.normal(
+            [self.num_augmentations, 1, channels, 1], stddev=self.offset_noise_std
+        )
+
+        # 4. Cumulative Noise (Random walk per augmentation)
+        # Shape: [num_augs, num_spikes, channels, time]
+        cum_noise = tf.cumsum(
+            tf.random.normal(output_shape, stddev=self.cumulative_noise_std), axis=-1
+        )
+
+        # 5. Combine everything using broadcasting
+        # group_data [None, spikes, channels, time] + noises
+        return group_data[tf.newaxis, ...] + white_noise + offset_noise + cum_noise
 
     def augment_spike_group(self, group_data: tf.Tensor) -> tf.Tensor:
         """
@@ -1442,6 +1481,7 @@ def parse_serialized_sequence_with_augmentation(
     params, tensors, augmentation_config=None, count_spikes=False
 ):
     tensors = dict(tensors)
+    lengths = []
     # 1. Clean up Metadata Metadata efficiently
     for key in ["groups", "indexInDat", "pos"]:
         if key in tensors:
@@ -1466,11 +1506,14 @@ def parse_serialized_sequence_with_augmentation(
         # Optimized filtering: skip spikes that are all default (-1.0)
         isValid = tf.reduce_any(tf.not_equal(tensors[g_key], -1.0), axis=[1, 2])
         tensors[g_key] = tf.boolean_mask(tensors[g_key], isValid)
+        lengths.append(tf.shape(tensors[g_key])[0])
 
         if count_spikes:
             tensors[f"group{g}_spikes_count"] = tf.shape(tensors[g_key])[0]
 
         original_groups[g_key] = tensors[g_key]
+
+    tensors["max_spikes"] = tf.reduce_max(lengths)
 
     if augmentation_config is not None:
         # Pass only the necessary data to the stacking function
@@ -1481,49 +1524,73 @@ def parse_serialized_sequence_with_augmentation(
     return tensors
 
 
-def apply_group_augmentation(tensors, original_groups, params, augmentation_config):
+@tf.function
+def apply_group_augmentation(
+    tensors: Dict[str, tf.Tensor],
+    original_groups: Dict[str, tf.Tensor],
+    params: Params,
+    augmentation_config: NeuralDataAugmentation,
+    count_spikes: bool = False,
+):
+    """
+    Apply augmentation to each group and replicate metadata efficiently.
+    """
     num_augs = augmentation_config.num_augmentations
     keep_original = getattr(augmentation_config, "keep_original", False)
 
     result_tensors = {}
-
-    # 1. Process Group Data (Neural Spikes)
+    # --- 1. Vectorized Spike Augmentation ---
     for g in range(params.nGroups):
         g_key = f"group{g}"
-        if g_key not in original_groups:
-            continue
+        group_data = original_groups[g_key]  # Shape: [Spikes, Chan, Time]
 
-        group_data = original_groups[g_key]
-        augmented_list = []
+        # Generate ALL noise for ALL augmentations in 3 big API calls
+        # Shape: [num_augs, Spikes, Chan, Time]
+        noise_shape = tf.concat([[num_augs], tf.shape(group_data)], axis=0)
+
+        white = tf.random.normal(
+            noise_shape, stddev=augmentation_config.white_noise_std
+        )
+        offset = tf.random.normal(
+            [num_augs, 1, tf.shape(group_data)[1], 1],
+            stddev=augmentation_config.offset_noise_std,
+        )
+        cum_noise = tf.cumsum(
+            tf.random.normal(
+                noise_shape, stddev=augmentation_config.cumulative_noise_std
+            ),
+            axis=-1,
+        )
+
+        # Broadcast the original data to match noise shape
+        augmented_versions = group_data[tf.newaxis, ...] + white + offset + cum_noise
 
         if keep_original:
-            augmented_list.append(group_data)
+            result_tensors[g_key] = tf.concat(
+                [group_data[tf.newaxis, ...], augmented_versions], axis=0
+            )
+        else:
+            result_tensors[g_key] = augmented_versions
 
-        # We still need the loop for the actual augmentation math,
-        # but we only stack the final results.
-        for _ in range(num_augs):
-            augmented_list.append(augmentation_config.augment_spike_group(group_data))
-
-        # This creates the [batch_aug, spikes, channels, time] dimension
-        result_tensors[g_key] = tf.stack(augmented_list, axis=0)
-
-    # 2. Vectorized Metadata Replication
-    # Don't loop over dictionaries; calculate the total count and repeat once.
-    n_total = (num_augs + 1) if keep_original else num_augs
-
+    # --- 2. Lightning Fast Metadata Replication ---
+    # We don't re-calculate indices! We just repeat what Step 1 produced.
     metadata_keys = [
         "pos_index",
         "pos",
-        "length",
         "groups",
+        "length",
         "time",
         "time_behavior",
         "indexInDat",
-    ]
+        "max_spikes",
+    ] + [f"indices{g}" for g in range(params.nGroups)]
+    if count_spikes:
+        metadata_keys += [f"group{g}_spikes_count" for g in range(params.nGroups)]
+    n_total = num_augs + (1 if keep_original else 0)
+
     for key in metadata_keys:
         if key in tensors:
-            # Expand dims and repeat: [N] -> [1, N] -> [n_total, N]
-            # This is significantly faster than Python-level list comprehension
+            # Repeat the pre-calculated tensor N times
             result_tensors[key] = tf.repeat(
                 tensors[key][tf.newaxis, ...], n_total, axis=0
             )

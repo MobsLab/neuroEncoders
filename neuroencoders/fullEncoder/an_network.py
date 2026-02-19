@@ -1243,12 +1243,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
 
             # NOTE: In case you need debugging, toggle this profiling line to True
-            is_tbcallback = kwargs.get("tensorboard_callback", False)
+            is_tbcallback = kwargs.get("tensorboard_callback", True)
             if self.debug:
-                print(
-                    "Debugging mode is ON, enabling TensorBoard callback and device placement loggin"
-                )
-                tf.debugging.set_log_device_placement(True)
+                print("Debugging mode is ON")
+                if is_tbcallback:
+                    print("enabling TensorBoard callback and device placement logging")
+                    tf.debugging.set_log_device_placement(True)
                 if key != "predLoss":
                     ann_config = {
                         k: v
@@ -1266,24 +1266,34 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                     prefix = "LOADED_" if loaded else ""
                     if is_tbcallback:
-                        wandb.tensorboard.patch(
-                            root_logdir=os.path.join(self.folderResult, "logs")
-                        )
-                        tf.profiler.experimental.start(
-                            os.path.join(self.folderResult, "logs")
+                        # wandb.tensorboard.patch(
+                        #     root_logdir=os.path.join(self.folderResult, "logs")
+                        # )
+                        # tf.profiler.experimental.start(
+                        #     os.path.join(self.folderResult, "logs")
+                        # )
+
+                        from datetime import datetime
+
+                        log_dir = os.path.join(
+                            self.folderResult,
+                            "logs",
+                            str(windowSizeMS),
+                            key,
+                            datetime.now().strftime("%Y%m%d-%H%M%S"),
                         )
                         tb_callbacks = tf.keras.callbacks.TensorBoard(
-                            log_dir=os.path.join(self.folderResult, "logs"),
+                            log_dir=log_dir,
                             histogram_freq=1,
-                            profile_batch=(2, 4) if is_tbcallback else 0,
+                            profile_batch=(10, 100),
                         )
-                        print(f"starting tensorboard at {self.folderResult}/logs ")
+                        print(f"starting tensorboard at {log_dir}")
                     run = wandb.init(
                         entity="touseul",
                         project="ContrastiveLossNew",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
-                        sync_tensorboard=True,
+                        # sync_tensorboard=True,
                         config=ann_config,
                     )
 
@@ -1384,7 +1394,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 except Exception as e:
                     print("Could not save the full model:", e)
                 if self.debug:
-                    wandb.tensorboard.unpatch()
+                    # wandb.tensorboard.unpatch()
                     run.finish()
 
     def _dataset_loading_pipeline(
@@ -1526,13 +1536,29 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             filter_op = get_mask_filter(totMask[key])
             dataset = ndataset.filter(filter_op)
             dataset = dataset.map(nnUtils.import_true_pos(posFeature))
-            dataset = dataset.filter(filter_nan_pos)
+            dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
 
             # now that we have clean positions, we can resample if needed
             if self.params.OversamplingResampling and key == "train":
                 dataset, count_tmp = self._apply_oversampling_resampling(
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
+
+            def parse_serialized_sequence(vals):
+                return nnUtils.parse_serialized_sequence(
+                    self.params,
+                    vals,
+                    count_spikes=kwargs.get("extract_spikes_counts", False),
+                    # sorted_indices = #TODO: at some point
+                )
+
+            # Map create_indices BEFORE batching and data augmentation (per-example)
+            dataset = dataset.map(
+                parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
             # 7. Optimized Detailed Parsing / Augmentation
             is_aug_active = (
                 self.params.dataAugmentation
@@ -1540,29 +1566,33 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 and not kwargs.get("inference_mode", False)
             )
 
-            optimized_fn = self.create_optimized_parse_function(
-                augmentation=is_aug_active,
-                augmentation_config=augmentation_config if is_aug_active else None,
-                count_spikes=kwargs.get("extract_spikes_counts", False),
-            )
-
             if is_aug_active:
-                print(f"Applying data augmentation to {key} dataset")
-                dataset = dataset.flat_map(
-                    lambda x: tf.data.Dataset.from_tensor_slices(optimized_fn(x))
+                optimized_fn = self.create_optimized_parse_function(
+                    augmentation=is_aug_active,
+                    augmentation_config=augmentation_config if is_aug_active else None,
+                    count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
-            else:
-                dataset = dataset.map(optimized_fn, num_parallel_calls=tf.data.AUTOTUNE)
-
-            # Map create_indices BEFORE batching (per-example)
-            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+                print(f"Applying data augmentation to {key} dataset")
+                dataset = dataset.interleave(
+                    lambda x: tf.data.Dataset.from_tensor_slices(optimized_fn(x)),
+                    num_parallel_calls=tf.data.AUTOTUNE,
+                    cycle_length=64,
+                    block_length=11,
+                    deterministic=False,
+                )
 
             padded_shapes, padding_values = self._get_padding_shapes_values(
                 extract_spikes_counts=kwargs.get("extract_spikes_counts", False),
             )
 
-            dataset = dataset.padded_batch(
-                batch_size,
+            boundaries = [30, 100]  # TODO: adapt on winMS
+            batch_sizes = [batch_size] * (len(boundaries) + 1)
+
+            dataset = dataset.prefetch(buffer_size=2000)
+            dataset = dataset.bucket_by_sequence_length(
+                element_length_func=lambda x: x["max_spikes"],
+                bucket_boundaries=boundaries,
+                bucket_batch_sizes=batch_sizes,
                 padded_shapes=padded_shapes,
                 padding_values=padding_values,
                 drop_remainder=True,
@@ -1628,6 +1658,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "time": [],
             "time_behavior": [],
             "indexInDat": [None],
+            "max_spikes": [],
         }
         padding_values = {
             "pos_index": tf.constant(-1, dtype=tf.int64),
@@ -1637,6 +1668,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "time": tf.constant(-1.0, dtype=tf.float32),
             "time_behavior": tf.constant(-1.0, dtype=tf.float32),
             "indexInDat": tf.constant(-1, dtype=tf.int64),
+            "max_spikes": tf.constant(-1, dtype=tf.int32),
         }
         if extract_spikes_counts:
             for g in range(self.params.nGroups):
@@ -1759,46 +1791,36 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self,
         augmentation: bool = False,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
-        count_spikes=False,
+        count_spikes: bool = False,
     ):
-        """
-        Create optimized parsing function that respects spike data structure
-        """
+        if augmentation and augmentation_config:
 
-        if augmentation:
+            @tf.function
+            def optimized_parse_with_augmentation(tensors):
+                # 1. Identify Spike Groups
+                original_groups = {}
+                for g in range(self.params.nGroups):
+                    g_key = f"group{g}"
+                    if g_key in tensors:
+                        original_groups[g_key] = tensors[g_key]
 
-            def optimized_parse_with_augmentation(batch_data):
-                # Create a COPY to avoid the mutation error
-                processed_batch = {}
-
-                # Copy all keys to new dict (avoid mutation)
-                for key in batch_data.keys():
-                    processed_batch[key] = batch_data[key]
-
-                # Call your existing function but on the copy
-                return nnUtils.parse_serialized_sequence_with_augmentation(
+                # 2. Call the Vectorized Augmentation logic
+                # This returns a dict where every tensor has a new leading 'augmentation' dimension
+                return nnUtils.apply_group_augmentation(
+                    tensors,
+                    original_groups,
                     self.params,
-                    processed_batch,  # Pass the copy
-                    augmentation_config=augmentation_config,
-                    count_spikes=count_spikes,
+                    augmentation_config,
+                    count_spikes,
                 )
 
             return optimized_parse_with_augmentation
         else:
-
-            def optimized_parse_standard(batch_data):
-                # Same pattern for standard parsing
-                processed_batch = {}
-                for key in batch_data.keys():
-                    processed_batch[key] = batch_data[key]
-
-                return nnUtils.parse_serialized_sequence(
-                    self.params,
-                    processed_batch,
-                    count_spikes=count_spikes,
-                )
-
-            return optimized_parse_standard
+            # If no augmentation, it's just a pass-through because
+            # parse_serialized_sequence already ran.
+            raise ValueError(
+                "Augmentation must be enabled and config provided to create optimized parse function."
+            )
 
     def _save_datasets_to_tfrec(self, datasets, base_path):
         """
@@ -3211,7 +3233,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self.tsProjTensor = tf.convert_to_tensor(tsProj[None, :])
 
     # used in the data pipepline
-    def create_indices(self, vals, addLinearizationTensor=False, shuffle=False):
+    def create_indices(self, vals, shuffle=False):
         """
         Create relative indices for gathering spikes from each group.
         The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
@@ -3260,10 +3282,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     shape=tf.cast(tf.shape(groups), tf.int64),
                 )
             vals[f"indices{group_id}"] = indices_tensor
-
-        if addLinearizationTensor:
-            vals.update({"mazePoints": self.mazePoints_tensor})
-            vals.update({"tsProj": self.tsProjTensor})
 
         return vals
 
@@ -3728,7 +3746,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         with nnUtils.get_device_context(self.deviceName):
             # Create new inputs for transformer model
             cnn_feature_inputs = [
-                tf.keras.Input(shape=(self.params.nFeatures,), name=f"cnn_features_{i}")
+                tf.keras.layers.Input(
+                    shape=(self.params.nFeatures,), name=f"cnn_features_{i}"
+                )
                 for i in range(self.params.nGroups)
             ]
 
