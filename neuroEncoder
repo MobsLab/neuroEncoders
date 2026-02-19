@@ -707,6 +707,7 @@ def main(args):
             behaviorData=DataHelper.fullBehavior,
             alpha=Parameters.denseweightAlpha,
             linearizer=Linearizer,
+            jit_compile=False,
         )
 
         if (
@@ -729,7 +730,7 @@ def main(args):
                 windowSizeMS=windowSizeMS,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=True,
+                load_model=False,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=num_augmentations,
