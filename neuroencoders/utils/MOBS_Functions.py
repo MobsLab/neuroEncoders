@@ -1843,7 +1843,9 @@ class Mouse_Results(Params, PaperFigures):
         This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
         """
         try:
-            self.pre = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
+            self.pre = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
+            ).reshape(-1, 2)
             self.preMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.pre
             )
@@ -1852,32 +1854,48 @@ class Mouse_Results(Params, PaperFigures):
                 "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
             )
         try:
-            self.hab = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
+            self.hab = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
+            ).reshape(-1, 2)
             self.habMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.hab
             )
         except KeyError:
             pass
         try:
-            self.cond = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
+            self.cond = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
+            ).reshape(-1, 2)
             self.condMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.cond
             )
         except KeyError:
             pass
         try:
-            self.post = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
+            self.post = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
+            ).reshape(-1, 2)
             self.postMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.post
             )
         except KeyError:
             pass
         try:
-            self.extinct = self.DataHelper.fullBehavior["Times"]["SessionEpochs"][
-                "extinct"
-            ]
+            self.extinct = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["extinct"]
+            ).reshape(-1, 2)
             self.extinctMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.extinct
+            )
+        except KeyError:
+            pass
+
+        try:
+            self.sleep = np.array(
+                self.DataHelper.fullBehavior["Times"]["sleepEpochs"]
+            ).reshape(-1, 2)
+            self.sleepMask = inEpochsMask(
+                self.DataHelper.fullBehavior["positionTime"][:, 0], self.sleep
             )
         except KeyError:
             pass

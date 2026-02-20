@@ -235,10 +235,13 @@ def main(args):
         if min_speed is not None and max_speed is not None:
             # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
             speed = helper.fullBehavior["Speed"][:, 0]
-            if len(speed) == len(helper.fullBehavior["positionTime"]) - 1:
-                speed = np.append(speed, speed[-1])
+            pos_time = helper.fullBehavior["positionTime"][:, 0]
+            freeze_epochs = helper.get_freeze_epochs()
 
-            window_len = 14
+            if speed.shape[0] == pos_time.shape[0] - 1:
+                speed = np.concatenate([[speed[0]], speed])
+
+            window_len = 6
             s = np.r_[
                 speed[window_len - 1 : 0 : -1],
                 speed,
@@ -253,6 +256,7 @@ def main(args):
             helper.fullBehavior["Times"]["speedFilter"] = np.logical_and(
                 smoothed_speed > min_speed,
                 smoothed_speed < max_speed,
+                ~inEpochsMask(pos_time, freeze_epochs),
             ).astype(bool)
             print(
                 f"forced speed filter with min_speed {min_speed} and max_speed {max_speed}"
@@ -260,7 +264,7 @@ def main(args):
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
         epochMask = inEpochsMask(
-            helper.fullBehavior["positionTime"][:, 0],
+            pos_time,
             helper.fullBehavior["Times"]["trainEpochs"],
         )
         totMask = speedMask * epochMask
