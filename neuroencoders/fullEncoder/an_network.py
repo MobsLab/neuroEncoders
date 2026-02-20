@@ -14,7 +14,7 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
@@ -36,7 +36,6 @@ from neuroencoders.fullEncoder.nnUtils import (
     ContrastiveRegressionLoss,
     CyclicMAE,
     GaussianHeatmapLayer,
-    GaussianHeatmapLoss,
     GlobalSequenceGather,
     GroupAttentionFusion,
     MaskedGlobalAveragePooling1D,
@@ -48,9 +47,9 @@ from neuroencoders.fullEncoder.nnUtils import (
     SafeMaskCreation,
     SpikeEncoder,
     SpikeNet1D,
+    SpikeNet2D,
     TransformerEncoderBlock,
     UMazeProjectionLayer,
-    SpikeNet2D,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import (
@@ -349,10 +348,25 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     assert self.gaussian_heatmap_params is not None, (
                         "Gaussian heatmap parameters not set up"
                     )
-                    loss_dict[name] = GaussianHeatmapLoss(
-                        gaussian_params=self.gaussian_heatmap_params,
-                        l_function_params=self.lfunction_layer_params,
-                        loss_type=getattr(self.params, "loss_type", "safe_kl"),
+                    gaussian_loss_layer_config = self.GaussianHeatmap.get_config()
+                    # Setup config for GaussianHeatmapLosses
+                    gaussian_loss_layer_config.update(
+                        {
+                            "l_function_layer_params": self.lfunction_layer_params,
+                            "loss_type": getattr(self.params, "loss_type", "safe_kl"),
+                            "maze_params": getattr(
+                                self.params, "GaussianHeatmapMaze", None
+                            ),
+                        }
+                    )
+                    gaussian_loss_layer_config.pop(
+                        "name", None
+                    )  # avoid 'name' conflict
+                    gaussian_loss_layer_config.pop("trainable", None)
+                    gaussian_loss_layer_config.pop("dtype", None)
+
+                    loss_dict[name] = nnUtils.GaussianHeatmapLosses(
+                        **gaussian_loss_layer_config,
                         **loss_kwargs,
                     )
                     loss_weights[name] = getattr(self.params, "heatmap_weight", 1.5)
@@ -505,8 +519,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             max_len=self.max_nb_spikes,
                             d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
-                            else self.params.nFeatures * self.params.nGroups,
-                            # if we dont shrink the feature dimension before feeding to the transformer, we need to account for the nGroups factor
+                            else self.params.nFeatures,
                             device=self.deviceName,
                         )
                     ]
@@ -514,7 +527,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         TransformerEncoderBlock(
                             d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
-                            else self.params.nFeatures * self.params.nGroups,
+                            else self.params.nFeatures,
                             num_heads=self.params.nHeads,
                             ff_dim1=self.params.ff_dim1,
                             ff_dim2=self.params.ff_dim2,
@@ -666,10 +679,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         masked_features_layer.supports_masking = True
         masked_features = masked_features_layer([mymask, allFeatures_raw])
 
+        d_model = (
+            self.params.nFeatures * self.dim_factor
+            if getattr(self.params, "project_transformer", True)
+            else self.params.nFeatures
+        )
         if (
             getattr(self.params, "project_transformer", True)
-            and self.params.nFeatures * self.dim_factor
-            != self.params.nFeatures * self.params.nGroups
+            and self.params.nFeatures != d_model
         ):
             # 1. Projection layer
             allFeatures = self.transformer_projection_layer(allFeatures)
@@ -897,7 +914,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             beta_2=0.999,
             epsilon=1e-04,
             weight_decay=getattr(self.params, "weight_decay", 1e-4),
-            global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
+            # global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
+            clipnorm=getattr(self.params, "clipnorm", 1.0),
         )
         # TODO: something with mixed precision and keras policy ?
 
@@ -1950,13 +1968,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
     def decode_predictions(
         self,
-        preds,
+        preds: Dict,
         y_true=None,
-        fit_temperature=False,
-        T_scaling=None,
-        l_function=None,
+        fit_temperature: bool = False,
+        T_scaling: Optional[float] = None,
+        l_function: Optional[Callable] = None,
         **kwargs,
-    ):
+    ) -> Dict:
         """
         Consolidated decoding and post-processing of model predictions.
 
@@ -2045,7 +2063,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Classification handling
         if results.get("featurePred") is not None:
             target_str = str(self.target).lower()
-            if "classification" in target_str or "int" in target_str:
+            if (
+                "classification" in target_str
+                or "int" in target_str
+                or target_str == "direction"
+            ):
                 results["featurePred"] = np.round(results["featurePred"]).astype(int)
 
         # Linear projections / ID score
@@ -2318,15 +2340,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # -------------------------------------------------------------------------
 
         testOutput = {
-            "featurePred": decoded_results["featurePred"],
             "featureTrue": featureTrue,
             "times": full_times,
             "times_behavior": full_times_behavior,
             "posLoss": full_pos_loss,
             "posIndex": full_pos_index,
             "speedMask": windowmaskSpeed,
-            "latent": decoded_results["latent"],
         }
+        for name, spec in decoded_results.items():
+            if name not in testOutput:
+                testOutput[name] = spec
 
         # Merge other metrics from decoding
         for k in [
@@ -2340,7 +2363,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "maxp",
             "T_scaling",
         ]:
-            if k in decoded_results:
+            if k in decoded_results.keys():
                 testOutput[k] = decoded_results[k]
 
         # -------------------------------------------------------------------------

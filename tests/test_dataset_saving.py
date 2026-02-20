@@ -30,6 +30,8 @@ def mock_params():
     params.dimOutput = 2
     params.GaussianHeatmap = False
     params.usingMixedPrecision = False
+    params.max_nb_spikes = 512
+    params.max_nb_spikes_per_group = 512
     return params
 
 
@@ -162,9 +164,9 @@ def test_load_parsed_dataset(mock_params, mock_project):
 
         # Verify other fields
         assert batch["length"] == 5
-        assert len(batch["groups"]) == 5
+        assert len(batch["groups"]) == 512
         assert "group0" in batch
         assert "group1" in batch
         # Reshaped group0: [num_spikes, channels, 32] -> [3, 32, 32]
-        assert batch["group0"].shape == (3, 18, 32)
-        assert batch["group1"].shape == (2, 5, 32)
+        assert batch["group0"].shape == (512, 18, 32)
+        assert batch["group1"].shape == (512, 5, 32)

@@ -28,7 +28,7 @@ def gaussian_params():
 
 def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
     losses_layer = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params, l_function_layer_params=mock_l_layer_params
+        **gaussian_params, l_function_layer_params=mock_l_layer_params, loss_type="safe_kl"
     )
 
     # Create bfloat16 inputs
@@ -37,7 +37,7 @@ def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
     targets = tf.random.uniform((batch_size, 45, 45), dtype=tf.bfloat16)
 
     # Call the layer
-    loss = losses_layer({"logits": logits, "targets": targets}, loss_type="safe_kl")
+    loss = losses_layer(targets, logits)
 
     # Assertions
     assert loss.dtype == tf.float32

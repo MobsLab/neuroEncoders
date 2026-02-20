@@ -608,9 +608,6 @@ class SpikeEncoder(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         # No trainable weights in this layer, but we need to call build on sub-layers
-        # for g in range(len(input_shape)):
-        #     self.spikeNets[g].build((None, self.params.nChannelsPerGroup[g], 32))
-        #
         super().build(input_shape)
 
     def get_config(self):
@@ -833,7 +830,13 @@ class GlobalSequenceGather(tf.keras.layers.Layer):
         sequence_features = tf.gather(pool, global_indices, batch_dims=1)
 
         # group id embedding
-        lookup_table = tf.concat([self.group_embeddings, self.null_identity], axis=0)
+        lookup_table = tf.concat(
+            [
+                self.group_embeddings,
+                tf.cast(self.null_identity, self.group_embeddings.dtype),
+            ],
+            axis=0,
+        )
         safe_group_ids = tf.where(
             group_sequence == -1, self.n_groups, tf.cast(group_sequence, tf.int32)
         )
@@ -1333,6 +1336,10 @@ def parse_serialized_sequence(
 ):
     # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
     tensors = dict(tensors)
+    if max_spikes is None:
+        max_spikes = getattr(params, "max_nb_spikes", 512)
+    if max_spikes_per_group is None:
+        max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 512)
 
     if max_spikes is not None:
         actual_total = tf.shape(
@@ -2133,6 +2140,7 @@ class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         config = super().get_config()
         config.update(
             {
+                "grid_size": self.grid_size,
                 "maze_params": self.maze_params_dict,
                 "smoothing_factor": self.smoothing_factor,
             }
@@ -2141,13 +2149,14 @@ class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     @classmethod
     def from_config(cls, config):
-        maze_params = config.get("maze_params", None)
-        smoothing_factor = config.get("smoothing_factor", 0.01)
-        grid_size = config.get("grid_size", 50)
+        maze_params = config.pop("maze_params", None)
+        smoothing_factor = config.pop("smoothing_factor", 0.01)
+        grid_size = config.pop("grid_size", 50)
         return cls(
+            grid_size=grid_size,
             maze_params=maze_params,
             smoothing_factor=smoothing_factor,
-            grid_size=grid_size,
+            **config,
         )
 
 
@@ -2582,7 +2591,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
-class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
+class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
     """
     A simple wrapup class to hold various loss functions and handle keras symbols. Inherits from
     GaussianHeatmapLayer to access masks and constants.
@@ -2590,24 +2599,31 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     def __init__(
         self,
-        training_positions,
-        grid_size,
-        l_function_layer_params,
+        training_positions=None,
+        grid_size=(45, 45),
+        l_function_layer_params=None,
         eps=1e-8,
         sigma=0.03,
         neg=-100,
         maze_params=None,
         sinkhorn_eps=0.4,
+        loss_type="safe_kl",
+        WMAP=None,
+        scale=False,
+        name="gaussian_heatmap_losses",
         **kwargs,
     ):
         """
         Args:
             heatmap_layer: An instance of GaussianHeatmapLayer to provide masks and constants.
         """
-        tf.keras.layers.Layer.__init__(self, **kwargs)
+        tf.keras.losses.Loss.__init__(self, name=name, **kwargs)
         SpatialConstraintsMixin.__init__(
             self, grid_size=grid_size, maze_params=maze_params
         )
+        self.loss_type = loss_type
+        self.WMAP = WMAP
+        self.scale = scale
         # Convert numpy array to Python list immediately for serialization
         if hasattr(training_positions, "tolist"):
             self.training_positions = (
@@ -2626,12 +2642,15 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.neg = float(neg)
         self.maze_params = maze_params
         self.l_function_layer_params = l_function_layer_params
-        self.l_function_layer = LinearizationLayer(
-            maze_points=self.l_function_layer_params["maze_points"],
-            ts_proj=self.l_function_layer_params["ts_proj"],
-            device=self.l_function_layer_params.pop("device", None),
-            name=self.l_function_layer_params.get("name", "linearization_layer"),
-        )
+        if self.l_function_layer_params is not None:
+            self.l_function_layer = LinearizationLayer(
+                maze_points=self.l_function_layer_params["maze_points"],
+                ts_proj=self.l_function_layer_params["ts_proj"],
+                device=self.l_function_layer_params.pop("device", None),
+                name=self.l_function_layer_params.get("name", "linearization_layer"),
+            )
+        else:
+            self.l_function_layer = None
         self.sinkhorn_eps = sinkhorn_eps
 
         self.allowed_mask_tf = tf.cast(
@@ -2647,10 +2666,9 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         mask_indices = kops.where(self.allowed_mask_flat > 0)[0]  # [N_allowed]
         mask_indices = kops.reshape(mask_indices, (-1,))  # ensure 1D
         # store to map [H,W] to allowed indices
-        self.allowed_indices = self.add_variable(
-            shape=mask_indices.shape,
-            initializer=lambda shape, dtype: mask_indices,
-            dtype="int32",
+        self.allowed_indices = tf.Variable(
+            initial_value=mask_indices,
+            dtype=tf.int32,
             trainable=False,
             name="allowed_indices",
         )
@@ -2658,71 +2676,70 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.N_valid = kops.shape(mask_indices)[0]
         self._precompute_cost_matrix()
 
-    def call(self, inputs, loss_type="safe_kl", **kwargs):
+    def call(self, y_true, y_pred):
         """
         Compute loss in a Keras symbolic-safe way.
-
-        Args:
-            inputs: Dictionary with keys 'logits' and 'targets', or tuple/list of (y_true, y_pred)
-            loss_type: 'weighted' or 'kl' or 'safe_kl'
-
-        Returns:
-            loss: Scalar loss tensor
         """
-        if not isinstance(inputs, dict):
-            # assume (targets, logits) or [targets, logits] ie y_true, y_pred
-            if isinstance(inputs, (list, tuple)) and len(inputs) >= 2:
-                target_hw, logits_hw = (
-                    kops.cast(inputs[0], "float32"),
-                    kops.cast(inputs[1], "float32"),
-                )
-            else:
-                raise ValueError("Expected dict or (logits, targets) pair")
-        else:
-            logits_hw = kops.cast(inputs["logits"], "float32")
-            target_hw = kops.cast(inputs["targets"], "float32")
-
-        if loss_type == "weighted":
-            return self._weighted_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "kl":
-            return self._kl_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "safe_kl":
-            return self._safe_kl_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "wasserstein":
-            return self._safe_kl_wasserstein_heatmap_loss(
-                logits_hw, target_hw, **kwargs
+        pred_shape = kops.shape(y_pred)
+        if len(pred_shape) == 2:
+            y_pred = kops.reshape(
+                y_pred,
+                (-1, self.GRID_H, self.GRID_W),
             )
+
+        logits_hw = kops.cast(y_pred, "float32")
+        target_hw = kops.cast(y_true, "float32")
+
+        if self.loss_type == "weighted":
+            return self._weighted_heatmap_loss(logits_hw, target_hw, wmap=self.WMAP)
+        elif self.loss_type == "kl":
+            return self._kl_heatmap_loss(
+                logits_hw, target_hw, wmap=self.WMAP, scale=self.scale
+            )
+        elif self.loss_type == "safe_kl":
+            return self._safe_kl_heatmap_loss(
+                logits_hw, target_hw, wmap=self.WMAP, scale=self.scale
+            )
+        elif self.loss_type == "wasserstein":
+            return self._safe_kl_wasserstein_heatmap_loss(logits_hw, target_hw)
         else:
-            raise ValueError("Unknown loss_type:" + str(loss_type))
+            raise ValueError("Unknown loss_type:" + str(self.loss_type))
 
     def get_config(self):
         """Return the config dict for serialization"""
-        config = tf.keras.layers.Layer.get_config(self)
+        config = tf.keras.losses.Loss.get_config(self)
 
         # Convert TensorFlow tensors to Python scalars
         neg_value = self.neg
         if hasattr(neg_value, "numpy"):
             neg_value = float(neg_value.numpy())
 
-        # handle l function layer params serialization
-        l_function_layer_params_serializable = self.l_function_layer_params.copy()
-        for k, v in l_function_layer_params_serializable.items():
-            try:
-                v = v.numpy().tolist()
-            except AttributeError:
-                # Handle case where these aren't TensorFlow tensors
-                v = v.tolist() if hasattr(v, "tolist") else v
-            l_function_layer_params_serializable[k] = v
+        if self.l_function_layer_params is not None:
+            # handle l function layer params serialization
+            l_function_layer_params_serializable = self.l_function_layer_params.copy()
+            for k, v in l_function_layer_params_serializable.items():
+                try:
+                    v = v.numpy().tolist()
+                except AttributeError:
+                    # Handle case where these aren't TensorFlow tensors
+                    v = v.tolist() if hasattr(v, "tolist") else v
+                l_function_layer_params_serializable[k] = v
+        else:
+            l_function_layer_params_serializable = None
 
         config.update(
             {
                 "training_positions": self._training_positions_serializable,
                 "grid_size": self.grid_size,
-                "eps": float(self.eps),
-                "sigma": float(self.sigma),
+                "l_function_layer_params": l_function_layer_params_serializable,
+                "eps": self.eps,
+                "sigma": self.sigma,
                 "neg": neg_value,
                 "maze_params": self.maze_params,
-                "l_function_layer_params": l_function_layer_params_serializable,
+                "sinkhorn_eps": self.sinkhorn_eps,
+                "loss_type": self.loss_type,
+                "scale": self.scale,
+                "WMAP": self.WMAP,
             }
         )
         return config
@@ -3007,13 +3024,14 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         sinkhorn_iters=20,
         return_batch=False,
         reduction=None,
+        **kwargs,
     ):
         """
         KL divergence + optional Wasserstein distance (Sinkhorn)
         using precomputed linearized maze cost matrix.
         """
         if alpha is None:
-            alpha = 1  # default weight for Wasserstein penalty
+            alpha = 15  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
         allowed_mask = kops.cast(self.allowed_mask_tf, "float32")
@@ -3057,7 +3075,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
             q_allowed = q_allowed / (kops.sum(q_allowed, axis=1, keepdims=True) + 1e-9)
             temp = kops.matmul(P_allowed, self.cost_matrix)  # [batch, N]
             W = kops.sum(temp * q_allowed, axis=1)  # [batch]
-            loss = kl + alpha * W
+            loss = kl + alpha * kops.log(W + self.EPS)
         else:
             loss = kl
 
@@ -3297,6 +3315,12 @@ class KLHeatmapLoss(tf.keras.losses.Loss):
     def call(self, y_true, y_pred):
         # y_pred should be logits in shape [B, H, W]
         # y_true should be target heatmap in shape [B, H, W]
+        pred_shape = kops.shape(y_pred)
+        if len(pred_shape) == 2:
+            y_pred = kops.reshape(
+                y_pred,
+                (-1, self.gaussian_loss_layer.GRID_H, self.gaussian_loss_layer.GRID_W),
+            )
         loss_inputs = {"logits": y_pred, "targets": y_true}
         return self.gaussian_loss_layer(
             loss_inputs,
@@ -3310,7 +3334,7 @@ class KLHeatmapLoss(tf.keras.losses.Loss):
         config = super().get_config()
         config.update(
             {
-                "gaussian_loss_config": self.gaussian_loss_config,
+                "gaussian_loss_layer_config": self.gaussian_loss_layer_config,
                 "wmap": self.wmap,
                 "scale": self.scale,
                 "loss_type": self.loss_type,
@@ -3321,14 +3345,13 @@ class KLHeatmapLoss(tf.keras.losses.Loss):
     @classmethod
     def from_config(cls, config):
         # Reconstruct the layer from saved config
-        gaussian_loss_layer = GaussianHeatmapLosses.from_config(
-            config["gaussian_loss_config"]
-        )
+        gaussian_loss_layer_config = config["gaussian_loss_layer_config"]
         return cls(
-            gaussian_loss_layer=gaussian_loss_layer,
-            wmap=config.get("wmap"),
-            scale=config.get("scale", False),
-            loss_type=config.get("loss_type", "safe_kl"),
+            gaussian_loss_layer_config=gaussian_loss_layer_confg,
+            wmap=config.pop("wmap"),
+            scale=config.pop("scale", False),
+            loss_type=config.pop("loss_type", "safe_kl"),
+            **config,
         )
 
 
@@ -3550,7 +3573,11 @@ def _get_loss_function(
             raise ValueError(
                 "gaussian_layer config must be provided for kl_heatmap loss"
             )
-        return KLHeatmapLoss(gaussian_loss_layer_config, scale=False)
+        config = gaussian_loss_layer_config.copy()
+        config["loss_type"] = "kl"
+        config["scale"] = False
+        config.pop("name", None)
+        return GaussianHeatmapLosses(**config)
         # reduction is already none
 
     else:
@@ -4158,6 +4185,8 @@ class GaussianHeatmapLoss(tf.keras.losses.Loss, SpatialConstraintsMixin):
         # Ensure float32 for loss calculation (mixed precision safety)
         y_true = kops.cast(y_true, "float32")
         y_pred = kops.cast(y_pred, "float32")
+        tf.print("y_true shape:", tf.shape(y_true))
+        tf.print("y_pred shape:", tf.shape(y_pred))
 
         # 1. Generate target heatmap from coordinates using Mixin method
         targets_hw = self.gaussian_heatmap_targets_tf(y_true[:, :2], sigma=self.sigma)
