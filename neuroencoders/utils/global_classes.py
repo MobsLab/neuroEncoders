@@ -1541,6 +1541,52 @@ class DataHelper(Project):
 
         return np.sum(in_left_mask) / np.sum(in_right_mask)
 
+    def get_freeze_epochs(
+        self, th_immob_acc=1.7e7, smooth_fact_acc=30, min_drop_dur=2.0, merge_gap=0.3
+    ):
+        """
+        Get freeze epochs based on smoothed accelero.
+
+        Args:
+            th_immob_acc (float): Threshold for immobility based on acceleration (default: 1.7e7).
+            smooth_fact_acc (int): Smoothing factor for acceleration (default: 30).
+            min_drop_dur (float): Minimum duration to drop short immobility epochs in seconds (default: 2.0).
+            merge_gap (float): Maximum gap to merge close immobility epochs in seconds (default: 0.3).
+
+        """
+        import pandas as pd
+        import pynapple as nap
+
+        MovAccTsd = nap.Tsd(
+            t=self.fullBehavior["MovTimes"].flatten(),
+            d=self.fullBehavior["MovAcc"].flatten(),
+        )
+
+        # 2. Smoothing (Equivalent to runmean)
+        # We use pandas rolling mean on the tsd data
+        smoothed_data = (
+            pd.Series(MovAccTsd.values)
+            .rolling(window=smooth_fact_acc, center=True)
+            .mean()
+            .values
+        )
+        NewMovAccTsd = nap.Tsd(t=MovAccTsd.index, d=smoothed_data)
+
+        self.mov_acc = NewMovAccTsd
+
+        # 3. Thresholding (Direction 'Below')
+        # threshold(val, "below") returns a Tsd; .time_support returns the Intervals
+        FreezeAccEpoch = NewMovAccTsd.threshold(th_immob_acc, "below").time_support
+
+        # 4. Cleaning the Intervals
+        # merge_close_intervals -> merge_neighbors
+        # drop_short_intervals -> drop_short_intervals
+        FreezeAccEpoch = FreezeAccEpoch.merge_close_intervals(merge_gap)
+        FreezeAccEpoch = FreezeAccEpoch.drop_short_intervals(min_drop_dur)
+        self.freeze_epochs = FreezeAccEpoch
+
+        return self.freeze_epochs
+
     def get_config(self):
         """
         Returns a dict containing the parameters of the DataHelper, useful for serialization and logging.
@@ -2125,19 +2171,21 @@ class SpatialConstraintsMixin:
         """Return spatial config for serialization"""
         return {
             "grid_size": self.grid_size,
-            "maze_params": self.maze_params,
+            "maze_params": self.maze_params_dict,
         }
 
     def get_config(self):
         """Return config for serialization"""
-        return self.get_spatial_config()
+        base_config = super().get_config() if hasattr(super(), "get_config") else {}
+        spatial_config = self.get_spatial_config()
+        return {**base_config, **spatial_config}
 
     @classmethod
-    def from_config(self, config):
+    def from_config(cls, config):
         """Create instance from config"""
         grid_size = config.get("grid_size", (45, 45))
         maze_params = config.get("maze_params", None)
-        return self.__class__(grid_size=grid_size, maze_params=maze_params)
+        return cls(grid_size=grid_size, maze_params=maze_params)
 
     def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
         """
@@ -2165,6 +2213,18 @@ class SpatialConstraintsMixin:
                 "gap_x_max": maze_coords[-4, 0],
                 "gap_y_min": maze_coords[-3, 1],
             }
+        elif isinstance(maze_params, dict):
+            required_keys = [
+                "x_min",
+                "x_max",
+                "y_min",
+                "y_max",
+                "gap_x_min",
+                "gap_x_max",
+                "gap_y_min",
+            ]
+            if not all(key in maze_params for key in required_keys):
+                raise ValueError(f"maze_params dict must contain keys: {required_keys}")
         return maze_params
 
     def _create_spatial_masks(self) -> Tuple[np.ndarray, tf.Tensor]:

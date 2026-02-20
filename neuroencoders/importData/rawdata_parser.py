@@ -161,6 +161,16 @@ def get_behavior(
         else:
             tRipples = None
 
+        if "MovAcc" in f.root.optional:
+            MovAcc = f.root.optional.MovAcc[:].flatten().reshape(-1)
+            MovTimes = f.root.optional.MovTimes[:].flatten().reshape(-1)
+        else:
+            raise ValueError(
+                "this file does not contain MovAccTsd :"
+                + folder
+                + "optional_nnBehavior.mat"
+            )
+
     if phase is not None:
         filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
         if not os.path.exists(filename):
@@ -229,6 +239,12 @@ def get_behavior(
                         pattern = "(post|extinction|extinct|ext)"
                     elif phase == "extinction":
                         pattern = "(extinction|extinct|ext)"
+                    else:
+                        raise ValueError(
+                            "phase should be one of pre, hab, cond, post, extinction"
+                        )
+
+                    pattern = f"^(?!.*sleep).*{pattern}.*$"  # exclude sleep sessions
 
                     list_sessions = [
                         re.search(pattern, name, re.IGNORECASE) for name in sessionNames
@@ -297,6 +313,8 @@ def get_behavior(
             "positionTime": positionTime,
             "Speed": speed,
             "Bandwidth": bandwidth,
+            "MovAcc": MovAcc,
+            "MovTimes": MovTimes,
             "Times": {
                 "learning": learningTime,
                 "start_freeze": start_freeze,
