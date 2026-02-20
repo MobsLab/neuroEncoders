@@ -84,6 +84,7 @@ def test_model_instantiation(mock_params, mock_project, mock_linearizer):
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
         jit_compile=False,
+        max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
     assert model.model is not None
     assert isinstance(model.model, tf.keras.Model)
@@ -97,6 +98,8 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
         batch_size=mock_params.batch_size,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
+        seq_len=mock_params.max_nb_spikes,
+        max_spikes=mock_params.max_nb_spikes_per_group,
     )
 
     if TFNet is None:
@@ -107,6 +110,7 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
         jit_compile=False,
+        max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
     output = model_obj.model(inputs)
 
@@ -140,6 +144,8 @@ def test_train_step(mock_params, mock_project, mock_linearizer):
         batch_size=mock_params.batch_size,
         n_groups=mock_params.nGroups,
         n_channels=mock_params.nChannelsPerGroup,
+        seq_len=mock_params.max_nb_spikes,
+        max_spikes=mock_params.max_nb_spikes_per_group,
     )
 
     if TFNet is None:
@@ -150,6 +156,7 @@ def test_train_step(mock_params, mock_project, mock_linearizer):
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
         jit_compile=False,
+        max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
 
     targets = {}
@@ -181,6 +188,7 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
         jit_compile=False,
+        max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
 
     def generate_data():
@@ -190,6 +198,8 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
                 batch_size=mock_params.batch_size,
                 n_groups=mock_params.nGroups,
                 n_channels=mock_params.nChannelsPerGroup,
+                seq_len=mock_params.max_nb_spikes,
+                max_spikes=mock_params.max_nb_spikes_per_group,
             )
             batch_targets = {}
             for name, meta in model_obj.target_structure.items():

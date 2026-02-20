@@ -15,6 +15,8 @@ class MockParams:
         self.TransformerDenseSize1 = 64
         self.TransformerDenseSize2 = 32
         self.dimOutput = 3
+        self.max_nb_spikes = 512
+        self.max_nb_spikes_per_group = 512
         self.batch_size = 8
         self.windowLength = 0.2
         self.dim_factor = 2

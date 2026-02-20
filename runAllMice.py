@@ -221,12 +221,12 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
-            "--contrastive_loss",
+            # "--contrastive_loss",
             "--plot_id",
             # "--predicted_loss",
             # "--transform_w_log",
             # "--mixed_loss",
-            # "--no_gaussian",
+            "--no_gaussian",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]

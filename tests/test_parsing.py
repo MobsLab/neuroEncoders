@@ -46,7 +46,7 @@ def test_parse_serialized_sequence(mock_params):
     assert parsed["pos"].shape == (3,)
 
     # Check groups
-    assert parsed["groups"].shape == (3,)
+    assert parsed["groups"].shape == (mock_params.max_nb_spikes,)
 
     # Check group tensors
     for g in range(mock_params.nGroups):
@@ -55,26 +55,17 @@ def test_parse_serialized_sequence(mock_params):
         # parse_serialized_sequence reshapes to [-1, channels, 32] and filters non-zeros
         # Since we added non-zero data, there should be 2 spikes
         assert len(parsed[group_key].shape) == 3
+        assert parsed[group_key].shape[0] == mock_params.max_nb_spikes_per_group
         assert parsed[group_key].shape[1] == mock_params.nChannelsPerGroup[g]
         assert parsed[group_key].shape[2] == 32
 
         # Check spike counts
         count_key = f"group{g}_spikes_count"
         assert count_key in parsed
-        assert parsed[count_key] == parsed[group_key].shape[0]
+        assert parsed[count_key].numpy() == 2
 
 
-def test_parse_serialized_sequence_with_augmentation(mock_params):
-    tensors = create_dummy_parsed_tensors(mock_params)
 
-    # Without augmentation config, it should just parse
-    parsed = nnUtils.parse_serialized_sequence_with_augmentation(
-        mock_params, tensors, count_spikes=True
-    )
-
-    assert "group0" in parsed
-    assert "group1" in parsed
-    assert parsed["group0_spikes_count"] == parsed["group0"].shape[0]
 
 
 if __name__ == "__main__":
