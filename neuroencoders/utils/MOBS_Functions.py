@@ -690,9 +690,6 @@ class Mouse_Results(Params, PaperFigures):
         for i, winMS in enumerate(self.windows):
             self._initialize_window(winMS, i, **kwargs)
 
-            if i == 0:
-                self._setup_main_window(winMS, **kwargs)
-
         # Initialize PaperFigures and load trainers if requested
         if kwargs.get("load_trainers_at_init", True):
             self.load_trainers(**kwargs)
@@ -770,7 +767,9 @@ class Mouse_Results(Params, PaperFigures):
                 mode="compare",
                 **kwargs,
             )
-        self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
+            self._setup_main_window(winMS, **kwargs)
+        else:
+            self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
 
     def _load_params_fallback(self, winMS, **kwargs):
         """Fallback to load Params from json or create new one."""
@@ -787,7 +786,7 @@ class Mouse_Results(Params, PaperFigures):
                     kwargs[k] = v
 
         return Params(
-            self.data_helper,
+            helper=self.data_helper,
             windowSize=int(winMS) / 1000,
             save_json=True,
             **kwargs,
@@ -817,6 +816,9 @@ class Mouse_Results(Params, PaperFigures):
             in_place=True,
             show=kwargs.get("show", False),
         )
+
+        if winMS not in self.parameters:
+            self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
 
         # Set main references to the first processed window
         self.DataHelper = self.data_helper

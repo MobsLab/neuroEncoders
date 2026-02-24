@@ -28,7 +28,9 @@ def gaussian_params():
 
 def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
     losses_layer = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params, l_function_layer_params=mock_l_layer_params, loss_type="safe_kl"
+        **gaussian_params,
+        l_function_layer_params=mock_l_layer_params,
+        loss_type="safe_kl",
     )
 
     # Create bfloat16 inputs

@@ -65,8 +65,5 @@ def test_parse_serialized_sequence(mock_params):
         assert parsed[count_key].numpy() == 2
 
 
-
-
-
 if __name__ == "__main__":
     pytest.main([__file__])
