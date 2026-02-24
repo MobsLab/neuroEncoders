@@ -261,7 +261,7 @@ class DataHelper(Project):
             if xmlPath is not None and kwargs.get("nameExp", None) is not None:
                 load_path = os.path.join(
                     os.path.dirname(xmlPath),
-                    kwargs.get("nameExp", None),
+                    kwargs["nameExp"],
                     f"DataHelper{suffix}.pkl",
                 )
             else:
@@ -1641,7 +1641,6 @@ class Params:
 
         if helper is None:
             return super().__new__(cls)
-            raise ValueError("helper (DataHelper instance) is required")
 
         # By default, we try to load Params from pickle if available
         if kwargs.pop("load_at_init", True):
@@ -1734,6 +1733,7 @@ class Params:
         self.nEpochs = nEpochs
         self.phase = phase
         self.batch_size = batch_size
+        self.batchSize = batch_size
         if not hasattr(self, "windowSize"):
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
@@ -1873,7 +1873,7 @@ class Params:
         self.lossActivation = None  # activation function for the loss layer
         self.featureActivation = kwargs.pop(
             "featureActivation",
-            None if getattr(self, "GaussianHeatmap", False) else "relu",
+            None if getattr(self, "GaussianHeatmap", False) else None,
         )  # activation function for the features (last dense layer before output)
 
         # TODO: put it in a function
@@ -1899,6 +1899,19 @@ class Params:
         self.merge_losses = []
         self.merge_weights = []
 
+        if self.target.lower() == "posandheaddirectionandspeed":
+            self.column_losses = {
+                "0": "huber",
+                "1": "huber",
+                "2": "cyclic_mae",
+                "3": "mae",
+            }
+            self.column_weights = {
+                "0": 0.6,
+                "1": 0.6,
+                "2": 0.3,
+                "3": 0.3,
+            }
         self.denseweight = kwargs.pop(
             "denseweight", True
         )  # dense weight loss for dataset imbalance

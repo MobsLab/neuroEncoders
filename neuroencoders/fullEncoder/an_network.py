@@ -11,19 +11,19 @@ an_network module for training and managing LSTM and spiking neural networks.
 # Cleanining and rewriting of the module
 
 import os
+import warnings
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
-import warnings
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
-import keras
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
+from keras.layers import Lambda
 from tqdm import tqdm
 
 import wandb
@@ -31,39 +31,26 @@ import wandb
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.nnUtils import (
-    AddNullSpike,
     ContrastiveMonitor,
-    ContrastiveRegressionLoss,
-    CyclicMAE,
     GaussianHeatmapLayer,
-    GlobalSequenceGather,
-    GroupAttentionFusion,
-    MaskedGlobalAveragePooling1D,
-    MaskingLayer,
+    GaussianHeatmapLosses,
+    LinearPosWeighting,
+    LinearizationLayer,
     MemoryUsageCallbackExtended,
+    MultiColumnLossLayer,
     NeuralDataAugmentation,
-    PositionError2D,
-    PositionalEncoding,
-    SafeMaskCreation,
-    SpikeEncoder,
-    SpikeNet1D,
-    SpikeNet2D,
-    TransformerEncoderBlock,
     UMazeProjectionLayer,
+    _get_loss_function,
+    create_flatten_augmented_groups_fn,
 )
-from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
-from neuroencoders.utils.global_classes import (
-    DataHelper,
-    Params,
-    Project,
-    SpatialConstraintsMixin,
-)
+from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.utils.global_classes import DataHelper, Params, Project
 from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
 ########### START OF FULL NETWORK CLASS #####################
-class LSTMandSpikeNetwork(SpatialConstraintsMixin):
+class LSTMandSpikeNetwork:
     """
     LSTMandSpikeNetwork class, the main ann Class.
 
@@ -92,13 +79,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         phase: Optional[str] = None,
         **kwargs,
     ):
-        # Initialize SpatialConstraintsMixin
-        grid_size = getattr(params, "GaussianGridSize", (45, 45))
-        maze_params = getattr(params, "GaussianHeatmapMaze", None)
-        super(LSTMandSpikeNetwork, self).__init__(
-            grid_size=grid_size, maze_params=maze_params, **kwargs
-        )
-
+        super(LSTMandSpikeNetwork, self).__init__()
         self.clear_session()
         ### Main parameters here
         self.projectPath = projectPath  # Project object containing the path to the project, the xml file, the dat file, the positions...
@@ -111,35 +92,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self._setup_folders()
         self._setup_feature_description()
 
-        self.zeroForGather = tf.zeros([1, self.params.nFeatures])
-        self.max_nb_spikes = kwargs.get(
-            "max_nb_spikes", 512
-        )  # maximum number of spikes per group to consider in the window, for batching purposes
-        self.max_spikes_per_group = kwargs.get(
-            "max_spikes_per_group", int(self.max_nb_spikes / self.params.nGroups)
-        )
-
-        if self.params.usingMixedPrecision:
-            print("Using mixed precision with float16")
-            policy = tf.keras.mixed_precision.Policy("mixed_bfloat16")
-            tf.keras.mixed_precision.set_global_policy(policy)
-            print("Compute dtype:", policy.compute_dtype)
-            print("Variable dtype:", policy.variable_dtype)
-        else:
-            print("Not using mixed precision, using float32")
-
         # Moved the initialization of the DataHelper here
         if kwargs.get("linearizer", None) is not None:
             Linearizer = kwargs["linearizer"]
             self.fix_linearizer(Linearizer.mazePoints, Linearizer.tsProj)
-        else:
-            self.maze_points = None
-            self.ts_proj = None
-            self.mazePoints_tensor = None
-            self.tsProjTensor = None
-
-        self.target_structure = self._parse_target_structure()
-
         if params.denseweight:
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
@@ -154,9 +110,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if getattr(params, "GaussianHeatmap", False) or getattr(
             params, "OversamplingResampling", False
         ):
-            assert not params.denseweight, (
-                "Cannot use both GaussianHeatmap and DenseWeight"
-            )
+            # assert not params.denseweight, (
+            #     "Cannot use both GaussianHeatmap and DenseWeight"
+            # )
             if kwargs.get("behaviorData", None) is None:
                 warnings.warn(
                     '"behaviorData" not provided, using default setup WITHOUT Gaussian Heatmap layering. Is your code version deprecated?'
@@ -167,19 +123,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     "ts_proj": self.ts_proj,
                     "device": self.deviceName,
                 }
+                self.l_function_layer = LinearizationLayer(
+                    maze_points=self.maze_points,
+                    ts_proj=self.ts_proj,
+                    device=self.deviceName,
+                    name="l_function",
+                )
                 self.setup_gaussian_heatmap(**kwargs)
-        else:
-            self.gaussian_heatmap_params = None
-            self.lfunction_layer_params = None
 
         self._build_model(**kwargs)
-        # if kwargs.get("extractTransformer", False):
-        #     self.create_separable_models(
-        #         self.model,
-        #         spikeNetsoutputsName="dropoutCNN",
-        #         transformer_start_layer_name="feature_projection_transformer",
-        #         save=True,
-        #     )
 
     def _setup_folders(self):
         self.folderResult = self.projectPath.folderResult
@@ -202,6 +154,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # index of the position in the position array
             "pos_index": tf.io.FixedLenFeature([], tf.int64),
             # target position: current value of the environmental correlate
+            # WARNING: if the target is not position, this might change
+            # this is very dirty, but we need to hardcode the position dimension to 2 for the TFRecord parsing
+            # then it will be modified by the DataHelper.get_true_target method to actually match the target.
             "pos": tf.io.FixedLenFeature([2], tf.float32),
             # number of spike sequence gathered in the window
             "length": tf.io.FixedLenFeature([], tf.int64),
@@ -225,258 +180,66 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Loss obtained during training
         self.trainLosses = {}
 
-    def _parse_target_structure(self):
-        """
-        Parses the target string from self.params.target and returns a dictionary
-        mapping output names to their dimensions, slices, and ideal activation.
-        This is based on the logic in DataHelper.get_true_target().
-        """
-        target = self.params.target.lower()
-        use_heatmap = getattr(self.params, "GaussianHeatmap", False)
-
-        # Pos 2D dimensions: 2 for raw regression or grid size for heatmap
-        pos_dim_out = 2
-        if use_heatmap:
-            pos_dim_out = (
-                self.params.GaussianGridSize[0] * self.params.GaussianGridSize[1]
-            )
-
-        # Define structure based on the concatenation order in DataHelper.get_true_target
-        structure = {}
-
-        if target == "pos":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-        elif target in ["lin", "linear"]:
-            structure["pos_lin"] = {"dim": 1, "slice": (0, 1), "activation": "linear"}
-        elif target == "linandthigmo":
-            structure["pos_lin"] = {"dim": 1, "slice": (0, 1), "activation": "linear"}
-            structure["thigmo"] = {"dim": 1, "slice": (1, 2), "activation": "linear"}
-        elif target == "linanddirection":
-            structure["pos_lin"] = {"dim": 1, "slice": (0, 1), "activation": "linear"}
-            structure["direction"] = {
-                "dim": 1,
-                "slice": (1, 2),
-                "activation": "sigmoid",
-            }
-        elif target == "direction":
-            structure["direction"] = {
-                "dim": 1,
-                "slice": (0, 1),
-                "activation": "sigmoid",
-            }
-        elif target == "linandheaddirection":
-            structure["pos_lin"] = {"dim": 1, "slice": (0, 1), "activation": "linear"}
-            structure["hd"] = {"dim": 1, "slice": (1, 2), "activation": "linear"}
-        elif target == "linandspeed":
-            structure["pos_lin"] = {"dim": 1, "slice": (0, 1), "activation": "linear"}
-            structure["speed"] = {"dim": 1, "slice": (1, 2), "activation": "linear"}
-        elif target == "posanddirection":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["direction"] = {
-                "dim": 1,
-                "slice": (2, 3),
-                "activation": "sigmoid",
-            }
-        elif target == "posandheaddirection":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["hd"] = {"dim": 1, "slice": (2, 3), "activation": "linear"}
-        elif target == "posandspeed":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["speed"] = {"dim": 1, "slice": (2, 3), "activation": "linear"}
-        elif target == "posanddirectionandthigmo":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["direction"] = {
-                "dim": 1,
-                "slice": (2, 3),
-                "activation": "sigmoid",
-            }
-            structure["thigmo"] = {"dim": 1, "slice": (3, 4), "activation": "linear"}
-        elif target == "posandheaddirectionandspeed":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["hd"] = {"dim": 1, "slice": (2, 3), "activation": "linear"}
-            structure["speed"] = {"dim": 1, "slice": (3, 4), "activation": "linear"}
-        elif target == "posandheaddirectionandthigmo":
-            structure["pos_2d"] = {
-                "dim": pos_dim_out,
-                "slice": (0, 2),
-                "activation": "linear",
-            }
-            structure["hd"] = {"dim": 1, "slice": (2, 3), "activation": "linear"}
-            structure["thigmo"] = {"dim": 1, "slice": (3, 4), "activation": "linear"}
-        else:
-            # Fallback for complex unknown target
-            structure["main_pred"] = {
-                "dim": self.params.dimOutput,
-                "slice": (0, self.params.dimOutput),
-                "activation": "linear",
-            }
-
-        return structure
-
-    def _parse_loss_and_metrics_dict(self, **loss_kwargs):
-        loss_dict = {}
-        loss_weights = {}
-        metrics_dict = {}
-
-        for name in self.outNames:
-            if name == "pos_2d":
-                if getattr(self.params, "GaussianHeatmap", False):
-                    assert self.gaussian_heatmap_params is not None, (
-                        "Gaussian heatmap parameters not set up"
-                    )
-                    gaussian_loss_layer_config = self.GaussianHeatmap.get_config()
-                    # Setup config for GaussianHeatmapLosses
-                    gaussian_loss_layer_config.update(
-                        {
-                            "l_function_layer_params": self.lfunction_layer_params,
-                            "loss_type": getattr(self.params, "loss_type", "safe_kl"),
-                            "maze_params": getattr(
-                                self.params, "GaussianHeatmapMaze", None
-                            ),
-                        }
-                    )
-                    gaussian_loss_layer_config.pop(
-                        "name", None
-                    )  # avoid 'name' conflict
-                    gaussian_loss_layer_config.pop("trainable", None)
-                    gaussian_loss_layer_config.pop("dtype", None)
-
-                    loss_dict[name] = nnUtils.GaussianHeatmapLosses(
-                        **gaussian_loss_layer_config,
-                        **loss_kwargs,
-                    )
-                    loss_weights[name] = getattr(self.params, "heatmap_weight", 1.5)
-                    metrics_dict[name] = [
-                        PositionError2D(
-                            self.GaussianHeatmap.get_config(), name="dist_2d"
-                        )
-                    ]
-                else:
-                    loss_dict[name] = "mae"
-                    loss_weights[name] = 1.2
-                    metrics_dict[name] = ["mae"]
-
-            elif name == "pos_lin":
-                loss_dict[name] = "mae"
-                loss_weights[name] = 1.0
-                metrics_dict[name] = ["mae"]
-
-            elif name == "thigmo":
-                loss_dict[name] = "mae"
-                loss_weights[name] = getattr(self.params, "thigmo_weight", 0.8)
-                metrics_dict[name] = ["mae"]
-
-            elif name == "direction":
-                loss_dict[name] = "binary_crossentropy"
-                loss_weights[name] = getattr(self.params, "direction_weight", 0.5)
-                metrics_dict[name] = ["accuracy"]
-
-            elif name == "hd":
-                # cyclic mae for head direction (radians)
-                loss_dict[name] = CyclicMAE(high=2 * np.pi)
-                loss_weights[name] = getattr(self.params, "hd_weight", 1.0)
-                metrics_dict[name] = [CyclicMAE(high=2 * np.pi, name="hd_mae")]
-
-            elif name == "speed":
-                loss_dict[name] = "mae"
-                loss_weights[name] = getattr(self.params, "speed_weight", 0.5)
-                metrics_dict[name] = ["mae"]
-
-            elif name == "latent":
-                loss_dict[name] = ContrastiveRegressionLoss(
-                    temperature=getattr(self.params, "temperature", 0.1),
-                    sigma=getattr(self.params, "sigma_contrastive", 0.1),
-                    l_function_params=self.lfunction_layer_params,
-                    **loss_kwargs,
-                )
-                loss_weights[name] = getattr(self.params, "contrastive_weight", 0.7)
-
-        return loss_dict, loss_weights, metrics_dict
-
     def _build_model(self, **kwargs):
         ### Description of layers here
-        with nnUtils.get_device_context(self.deviceName):
+        with tf.device(self.deviceName):
             self.inputsToSpikeNets = [
                 tf.keras.layers.Input(
                     shape=(
-                        self.max_spikes_per_group,  # maxNbOfSpikes in group
                         self.params.nChannelsPerGroup[group],
                         32,
-                    ),
+                    ),  # + batch size, which will be batchSize * maxNbOfSpikes
+                    # the shape is N, 32 bc the voltage values are discretized over 32 time bins for each channel (4 most of the time)
+                    # of each spike of a given group in the window
+                    # we measure the voltage in 32 time steps windows. See the julia code.
                     name="group" + str(group),
+                    dtype=tf.float16 if self.params.usingMixedPrecision else tf.float32,
+                    # If we use mixed precision, we need to specify the type of the inputs
+                    # We use float16 for the inputs to the spike nets
                 )
                 for group in range(self.params.nGroups)
             ]
 
-            self.inputGroups = tf.keras.layers.Input(
-                shape=(self.max_nb_spikes,), name="groups", dtype=tf.int32
-            )
+            self.inputGroups = tf.keras.layers.Input(shape=(), name="groups")
             self.indices = [
                 tf.keras.layers.Input(
-                    shape=(self.max_nb_spikes,),
-                    name="indices" + str(group),
-                    dtype=tf.int32,
+                    shape=(), name="indices" + str(group), dtype=tf.int32
                 )
                 for group in range(self.params.nGroups)
             ]
 
+            # The spike nets acts on each group separately; to reorganize all these computations we use
+            # an identity matrix which shape is the total number of spike measured (over all groups)
+            self.zeroForGather = tf.keras.layers.Input(
+                shape=(self.params.nFeatures,),
+                name="zeroForGather",
+                dtype=tf.float16 if self.params.usingMixedPrecision else tf.float32,
+            )  # the actual zero tensor is created in self.create_indices in train/test calls.
+
             # Declare spike nets for the different groups:
-            conv_dim = 2 if getattr(self.params, "use_conv2d", False) else 1
-            spikeNetClass = SpikeNet1D if conv_dim == 1 else SpikeNet2D
+            spikeNet = (
+                nnUtils.SpikeNet1D
+                if not getattr(self.params, "use_conv2d", False)
+                else nnUtils.spikeNet
+            )
             self.spikeNets = [
-                # tf.keras.layers.TimeDistributed(
-                spikeNetClass(
+                spikeNet(
                     nChannels=self.params.nChannelsPerGroup[group],
                     device=self.deviceName,
                     nFeatures=self.params.nFeatures,
                     number=str(group),
-                    batch_normalization=True,
+                    batch_normalization=False,
                     reduce_dense=getattr(self.params, "reduce_dense", False),
                     no_cnn=getattr(self.params, "no_cnn", False),
-                    name=f"spikeNet_{group}",
-                    # ),
-                    # name=f"timedist_spikeNet_{group}",
                 )
                 for group in range(self.params.nGroups)
             ]
-            self.spike_encoder = SpikeEncoder(
-                self.spikeNets,
-                self.params,
-                self.max_nb_spikes,
-                self.max_spikes_per_group,
-                conv_dim,
-            )
-
             if getattr(self.params, "use_group_attention_fusion", True):
                 # 2. Initialize the Group Attention Fusion layer
-                self.group_fusion = GroupAttentionFusion(
+                self.group_fusion = nnUtils.GroupAttentionFusion(
                     n_groups=self.params.nGroups,
                     embed_dim=self.params.nFeatures,
-                    num_heads=4,
+                    num_heads=4,  # You can tune this
                     device=self.deviceName,
                     name="group_fusion",
                 )
@@ -488,10 +251,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
             # LSTMs
-            self.isTransformer = kwargs.get(
-                "isTransformer", getattr(self.params, "isTransformer", False)
-            )
-            if not self.isTransformer:
+            if not kwargs.get("isTransformer", False):
+                self.isTransformer = False
                 self.lstmsNets = [
                     tf.keras.layers.LSTM(
                         self.params.lstmSize,
@@ -503,6 +264,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 ]
             else:
                 self.isTransformer = True
+                from neuroencoders.fullEncoder.nnUtils import (
+                    MaskedGlobalAveragePooling1D,
+                    PositionalEncoding,
+                    TransformerEncoderBlock,
+                )
 
                 self.dim_factor = getattr(
                     self.params, "dim_factor", 1
@@ -516,10 +282,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.lstmsNets = (
                     [
                         PositionalEncoding(
-                            max_len=self.max_nb_spikes,
                             d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
-                            else self.params.nFeatures,
+                            else self.params.nFeatures * self.params.nGroups,
+                            # if we dont shrink the feature dimension before feeding to the transformer, we need to account for the nGroups factor
                             device=self.deviceName,
                         )
                     ]
@@ -527,7 +293,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         TransformerEncoderBlock(
                             d_model=self.params.nFeatures * self.dim_factor
                             if getattr(self.params, "project_transformer", True)
-                            else self.params.nFeatures,
+                            else self.params.nFeatures * self.params.nGroups,
                             num_heads=self.params.nHeads,
                             ff_dim1=self.params.ff_dim1,
                             ff_dim2=self.params.ff_dim2,
@@ -553,35 +319,28 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     ]
                 )
 
-            if getattr(self.params, "contrastive_loss", False):
-                self.projector_head = tf.keras.layers.Dense(
-                    self.params.nFeatures,
-                    activation="relu",
-                    name="contrastive_projector",
-                    dtype="float32",  # ensure all output layers output float32, regardless of mixed precision policy, to avoid issues with loss scaling in mixed precision
-                )
-
             # Used as inputs to already compute the loss in the forward pass and feed it to the loss network.
+            # Pierre
+            self.truePos = tf.keras.layers.Input(
+                shape=(self.params.dimOutput,), name="pos"
+            )
             self.epsilon = tf.constant(10 ** (-8))
-
-            # Define named outputs heads based on target structure
-            self.heads = {}
-            for name, spec in self.target_structure.items():
-                if name == "pos_2d" and getattr(self.params, "GaussianHeatmap", False):
-                    # GaussianHeatmap is already defined in setup_gaussian_heatmap
-                    continue
-                else:
-                    self.heads[name] = tf.keras.layers.Dense(
-                        spec["dim"],
-                        activation=spec["activation"],
-                        name=name + "_dense",
-                        kernel_regularizer="l2",
-                        dtype="float32",
-                    )
-
             # Outputs
             print("Output dimension:", self.params.dimOutput)
-
+            self.denseFeatureOutput = tf.keras.layers.Dense(
+                self.params.dimOutput - 2
+                if getattr(
+                    self.params, "GaussianHeatmap", False
+                )  # if we have a heatmap and other vars, only the others are predicted here
+                and self.params.dimOutput > 2
+                else self.params.dimOutput,
+                activation=getattr(
+                    self.params, "featureActivation", None
+                ),  # ensures output is in [0,1]
+                dtype=tf.float32,
+                name="feature_output",
+                kernel_regularizer="l2",
+            )
             self.dim_factor = getattr(
                 self.params, "dim_factor", 1
             )  # factor to increase the dimension of the transformer if needed
@@ -590,18 +349,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.transformer_projection_layer = tf.keras.layers.Dense(
                     self.params.nFeatures * self.dim_factor,
                     activation="relu",
+                    dtype=tf.float32,
                     name="feature_projection_transformer",
-                    dtype="float32",
                 )
             self.ProjectionInMazeLayer = UMazeProjectionLayer(
                 grid_size=kwargs.get(
                     "grid_size", getattr(self.params, "GaussianGridSize", (40, 40))
                 ),
-                dtype="float32",
             )
 
             # Gather the full model
-            self.generate_kwargs = kwargs
             outputs = self.generate_model(**kwargs)
             # Build two models
             # One just described, with two objective functions corresponding
@@ -609,48 +366,24 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.model = self.compile_model(
                 outputs, modelName="FullModel.pdf", **kwargs
             )
+            try:
+                # quickly check if you can save and load back
+                self.model.save(os.path.join(self.folderModels, "temp_model.keras"))
+                model_tmp = tf.keras.models.load_model(
+                    os.path.join(self.folderModels, "temp_model.keras")
+                )
+                os.remove(os.path.join(self.folderModels, "temp_model.keras"))
+                model_tmp.summary()  # just to check if the custom layers are properly loaded
+            except Exception as e:
+                print("Error while saving/loading the model:", e)
             # TODO: add option to add independent losses to the model ?
 
-            # In theory, the predicted loss could be not learning enough in the first network (optional)
-            # Second only with loss corresponding to predicted loss
             if kwargs.get("isPredLoss", False):
+                # In theory, the predicted loss could be not learning enough in the first network (optional)
+                # Second only with loss corresponding to predicted loss
                 self.predLossModel = self.compile_model(
                     outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
                 )
-
-    def rebuild_model(self, **kwargs):
-        """
-        Regenerate the model with the current parameters.
-
-        Returns
-        -------
-        None
-        """
-        self.clear_session()
-        outputs = self.generate_model(**kwargs)
-        self.model = self.compile_model(outputs, modelName="FullModel.pdf", **kwargs)
-        if kwargs.get("isPredLoss", False):
-            self.predLossModel = self.compile_model(
-                outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
-            )
-
-    def change_batch_size(self, new_batch_size, **kwargs):
-        """
-        Change the batch size of the model.
-
-        Parameters
-        ----------
-        new_batch_size : int
-            The new batch size to set.
-
-        Returns
-        -------
-        None
-        """
-        default_kwargs = self.generate_kwargs.copy()
-        default_kwargs["batch_size"] = new_batch_size
-        default_kwargs.update(kwargs)
-        self.rebuild_model(**default_kwargs)
 
     def apply_transformer_architecture(
         self, allFeatures, allFeatures_raw, mymask, **kwargs
@@ -672,21 +405,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
 
-        output = None
-        outputSeq = None
+        print("Using Transformer architecture !")
+        masked_features = Lambda(
+            lambda t: kops.where(
+                kops.expand_dims(t[0], axis=-1), t[1], kops.zeros_like(t[1])
+            )
+        )([mymask, allFeatures_raw])
 
-        masked_features_layer = MaskingLayer(name="masking_layer_transformer")
-        masked_features_layer.supports_masking = True
-        masked_features = masked_features_layer([mymask, allFeatures_raw])
-
-        d_model = (
-            self.params.nFeatures * self.dim_factor
-            if getattr(self.params, "project_transformer", True)
-            else self.params.nFeatures
-        )
         if (
             getattr(self.params, "project_transformer", True)
-            and self.params.nFeatures != d_model
+            and self.params.nFeatures * self.dim_factor
+            != self.params.nFeatures * self.params.nGroups
         ):
             # 1. Projection layer
             allFeatures = self.transformer_projection_layer(allFeatures)
@@ -698,7 +427,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # 2. Positional encoding
         allFeatures = self.lstmsNets[0](allFeatures)
-        output = allFeatures
 
         # 3. Transformer blocks with residual connections
         for ilstm, transformerLayer in enumerate(self.lstmsNets[1:-3]):
@@ -725,26 +453,46 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # 4. Pooling and final dense layers
         # size [batch, max_nspikes, nFeatures]
+        mymask = kops.cast(mymask, dtype="float32")
         output = self.lstmsNets[-3](
             output, mask=mymask
         )  # pooling (size [batch, nFeatures*nGroups])
 
-        h = self.lstmsNets[-2](
+        x = self.lstmsNets[-2](
             output
         )  # dense layer after pooling (size [batch, TransformerDenseSize1])
-
-        if getattr(self.params, "contrastive_loss", False):
-            final_output = self.projector_head(
-                h
-            )  # projection for contrastive loss (size [batch, nFeatures])
-        else:
-            final_output = None
-
         x = self.lstmsNets[-1](
-            h
+            x
         )  # another dense layer after pooling (size [batch, TransformerDenseSize2])
 
-        return x, final_output, sumFeatures
+        if not getattr(self.params, "GaussianHeatmap", False):
+            x = kops.cast(x, dtype="float32")
+            myoutputPos = self.denseFeatureOutput(x)
+            if "pos" in self.params.target.lower():
+                myoutputPos = self.ProjectionInMazeLayer(
+                    myoutputPos
+                )  # size [batch, dimOutput]
+        else:
+            if self.params.dimOutput > 2:
+                myoutputPos = self.GaussianHeatmap(
+                    x
+                )  # outputs a flattened heatmap for better concatenation afterwards
+                x = kops.cast(x, dtype="float32")  # size [batch, GRID_H * GRID_W]
+                others = self.denseFeatureOutput(x)  # size [batch, dimOutput - 2]
+                # this way we have 2 different outputs in the model: a heatmap and some scalars
+                myoutputPos = tf.keras.layers.Concatenate(name="heatmap_cat_others")(
+                    [myoutputPos, others]
+                )
+                myoutputPos = kops.cast(myoutputPos, dtype="float32")
+            else:
+                myoutputPos = self.GaussianHeatmap(
+                    x, flatten=False
+                )  # we dont need to worry about flattening, it's the only output
+                myoutputPos = kops.cast(
+                    myoutputPos, dtype="float32"
+                )  # size [batch, GRID_H, GRID_W]
+
+        return myoutputPos, output, sumFeatures
 
     def apply_lstm_architecture(self, allFeatures, sumFeatures, mymask, **kwargs):
         """
@@ -760,12 +508,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             tuple: (myoutputPos, outputPredLoss, output, sumFeatures)
         """
 
-        output = None
-        outputSeq = None
-
-        # Ensure output is assigned if lstmLayers is 0
-        output = allFeatures
-
+        print("Using LSTM architecture !")
         # LSTM blocks with masking and dropout
         for ilstm, lstmLayer in enumerate(self.lstmsNets):
             if ilstm == 0:
@@ -780,111 +523,260 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 outputSeq = lstmLayer(outputSeq, mask=mymask)
                 outputSeq = self.lstmdropOutLayer(outputSeq)
 
-        final_output = None
+        ### Outputs
+        myoutputPos = self.denseFeatureOutput(self.dropoutLayer(output))  # positions
+        # Projection in UMaze space
+        myoutputPos = self.ProjectionInMazeLayer(myoutputPos)
 
-        return output, final_output, sumFeatures
+        return myoutputPos, output, sumFeatures
 
     def generate_model(self, **kwargs):
         """
-        Updated generate_model using vectorized group encoding and
-        global sequence reconstruction.
+        Generate the full model with the CNN, LSTM and Dense layers.
+
+        Returns
+        -------
+        myoutputPos, outputPredLoss, posLoss, uncertaintyLoss
         """
-        with nnUtils.get_device_context(self.deviceName):
-            all_group_latents = []
-            group_latents_raw = self.spike_encoder(
-                self.inputsToSpikeNets
-            )  # List of (Batch, MaxSpikesPerGroup, nFeatures) for each group
-            for g, latent in enumerate(group_latents_raw):
-                full_emb = AddNullSpike(name=f"add_null_spike_group{g}")(
-                    latent
-                )  # Shape: (Batch, MaxSpikesPerGroup + 1, nFeatures)
-                all_group_latents.append(full_emb)
+        # CNN plus dense on every group independently
+        with tf.device(self.deviceName):
+            allFeatures = []  # store the result of the CNN computation for each group
+            batchSize = kwargs.get("batchSize", self.params.batchSize)
+            for group in range(self.params.nGroups):
+                # FIX: otherwise just use TimeDistributed layer
+                # keep self.inputsToSpikeNets[group] in [batch, nSpikes, nChannels, 32] and then
+                # x = TimeDistributed(self.spikeNets[group])(x)  # [batch, max_nSpikes, cnn_dim] --> get rid of the gather, reshape...
+                x = self.inputsToSpikeNets[group]
+                # --> [NbKeptSpike = batchSize * maxNbOfSpikes,nbChannels,31] tensors, created my nnUtils.parse_serialized_sequence(batched = True) in train/test calls.
+                x = self.spikeNets[group](x)
+                # outputs a [NbSpikeOfTheGroup = batchSize * maxNbOfSpikes,nFeatures=self.params.nFeatures(default 64)] tensor.
+                # The gather strategy:
+                #   extract the final position of the spikes
+                # Note: inputGroups is already filled with -1 at position that correspond to filling
+                # for batch issues
+                # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
+                # We therefore need to    indices[spikePosition[i]] to i  so that it is effectively gather
+                # We then gather either a value of
+                filledFeatureTrain = kops.take(
+                    kops.concatenate([self.zeroForGather, x], axis=0),
+                    self.indices[
+                        group
+                    ],  # self.indices[group] contains the indices where to put the spikes of the group in the final tensor - created by self.create_indices in train/test calls.
+                    axis=0,
+                )  # give time sense
+                # At this point; filledFeatureTrain is a tensor of size (NbBatch*max(nbSpikeInBatch),self.params.nFeatures)
+                # where we have filled lines corresponding to spike time of the group
+                # with the feature computed by the spike net; and let other time with a value of 0:
+                # The index of spike detected then become similar to a time value...
+                filledFeatureTrain = kops.reshape(
+                    filledFeatureTrain,
+                    (int(batchSize), -1, self.params.nFeatures),
+                )
+                # Reshaping the result of the spike net as batchSize:MaxNbTotSpikeDetected:nFeatures
+                # this allow to separate spikes from the same window or from the same batch.
+                # if use_time: will be reshaped as batchSize:num_idx(max_spikes):nFeatures
+                allFeatures.append(filledFeatureTrain)
 
-            # 2. RECONSTRUCT: Interleave groups back into the temporal sequence
-            # We concatenate all groups into one 'source pool'
-            # Shape: (Batch, Total_Max_Spikes_All_Groups + nGroups, nFeatures)
-            pool = kops.concatenate(all_group_latents, axis=1)
+            if not getattr(self.params, "use_group_attention_fusion", True):
+                # OLD: concatenation over features
+                allFeatures = tf.tuple(tensors=allFeatures)
+                # synchronizes the computation of all features (like a join)
+                # The concatenation is made over axis 2, which is the Feature axis
+                # So we reserve columns to each output of the spiking networks...
+                allFeatures = kops.concatenate(allFeatures, axis=2)  # , name="concat1"
+            else:
+                print("Using Group Attention Fusion for feature fusion")
+                # NEW: Group Attention Fusion over groups (see nnUtils.GroupAttentionFusion)
+                # Create a mask for Group Attention Fusion
+                # indices[group] == 0 implies it gathered 'zeroForGather' (no spike)
+                # indices[group] > 0 implies it gathered a real spike feature
 
-            # Compute global offsets for each group in the pool
-            # This is static and JIT-friendly
-            offsets = []
-            curr_offset = 0
-            for g in range(self.params.nGroups):
-                offsets.append(curr_offset)
-                # +1 because of the Null Spike added to each group
-                curr_offset += self.max_spikes_per_group + 1
+                # 1. Cast indices to the appropriate shape (Batch, Time) match filledFeatureTrain
+                # indices are usually flat, so we reshape them using the same logic as filledFeatureTrain
+                group_masks = []
+                for group in range(self.params.nGroups):
+                    # Get the indices for this group
+                    inds = self.indices[group]
 
-            # 3. GATHER: Build the sequence using the group IDs and indices
-            # We iterate over the temporal sequence once to map indices to the pool
-            # This layer replaces your loop-based gather with a vectorized gather_nd or batch_gather
-            # It uses: pool, offsets, self.indices (list of tensors), and self.groups
-            sequence_reconstructor = GlobalSequenceGather(
-                n_groups=self.params.nGroups,
-                group_dim=self.params.nFeatures,
-                offsets=offsets,
+                    # Create boolean: True if spike exists, False if zero-padding
+                    is_active = kops.not_equal(inds, 0)
+
+                    # Reshape to (Batch, Time) to match the feature tensors
+                    # We use -1 to infer the time dimension dynamically
+                    is_active = kops.reshape(is_active, (int(batchSize), -1))
+
+                    group_masks.append(is_active)
+
+                # 2. Stack to shape (Batch, Time, nGroups)
+                # The Attention layer usually expects the mask in this format (or Broadcastable)
+                fusion_mask = kops.stack(group_masks, axis=-1)
+                # --- END OF FIX ---
+                # we pass a list of tensors of shape (NbBatch, NbTotSpikeDetected, nFeatures) for each spike group
+                # the class then applies a multi-head attention mechanism to fuse the information from different groups
+                allFeatures = self.group_fusion(allFeatures, mask=fusion_mask)
+
+            # now the shape of allfeatures is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
+            # We would like to mask timesteps that were added for batching purpose, before running the RNN
+            batchedInputGroups = kops.reshape(
+                self.inputGroups,
+                (
+                    batchSize,
+                    -1,
+                ),  # self.inputGroups has shape (BatchSize * NbTotalSpikes) and is filled with group indices or -1
             )
-            allFeatures = sequence_reconstructor([pool, self.indices, self.inputGroups])
+            mymask = nnUtils.safe_mask_creation(
+                batchedInputGroups
+            )  # [batch, max_n_spikes] (True for real spikes, False for padded values)
 
-            # Create mask for the RNN (NbBatch, NbTotSpike)
-            mymask_layer = SafeMaskCreation(name="safe_mask_creation")
-            mymask = mymask_layer(self.inputGroups)  # Looks for groups != -1
+            masked_features = Lambda(
+                lambda t: kops.where(
+                    kops.expand_dims(t[0], axis=-1),
+                    t[1],
+                    kops.zeros_like(t[1], dtype=t[1].dtype),
+                )
+            )([mymask, allFeatures])
+            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
+            sumFeatures = kops.sum(
+                masked_features, axis=1
+            )  # This var will be used in the predLoss loss
 
-            masking_layer = MaskingLayer(name="masking_layer_before_rnn")
-            masked_features = masking_layer([mymask, allFeatures])
-
-            sumFeatures = kops.sum(masked_features, axis=1)
-
-            # 5. RNN / TRANSFORMER
             allFeatures_raw = allFeatures
             allFeatures = self.dropoutLayer(allFeatures)
+            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
 
-            if not self.isTransformer:
-                x, latent, sumFeatures = self.apply_lstm_architecture(
+            # LSTM
+            # TODO: at some point, analyse the output of lstm/transformer ?
+            if not kwargs.get("isTransformer", False):
+                myoutputPos, output, sumFeatures = self.apply_lstm_architecture(
                     allFeatures, sumFeatures, mymask, **kwargs
                 )
             else:
-                x, latent, sumFeatures = self.apply_transformer_architecture(
+                # Use shared transformer logic
+                myoutputPos, output, sumFeatures = self.apply_transformer_architecture(
                     allFeatures, allFeatures_raw, mymask, **kwargs
-                )
+                )  # shape (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
 
-            # 5. Create final heads branching from x
-            outputs = {}
+            # finally, normalize the output on the unit-hypersphere (see FaceNet paper)
+            # myoutputPos = tf.keras.layers.UnitNormalization(axis=-1)(myoutputPos)
+            # Regression loss
+            loss_function = self._parse_loss_function_from_params(myoutputPos)
 
-            for name, layer in self.heads.items():
-                out = layer(x)
-                if name == "pos_2d" and "pos" in self.params.target.lower():
-                    # Check if heatmap or raw regression
-                    if not getattr(self.params, "GaussianHeatmap", False):
-                        out = self.ProjectionInMazeLayer(out)
+            #### note
+            # bayesian loss function  = sum ((y_true - y_pred)^2 / sigma^2 + log(sigma^2))
+            # we assume myoutputPos is in cm x cm,
+            # as self.truePos (modulo [0,1] normalization)
+            # in ~cm2 as no loss is sqrt or log
+            if getattr(self.params, "GaussianHeatmap", False):
+                if self.params.dimOutput > 2:
+                    # we separate the heatmap from the other variables
+                    targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(
+                        self.truePos[:, :2]  # already batched
+                    )
+                    logits_hw = myoutputPos[
+                        :,  # all batch
+                        : self.params.GaussianGridSize[0]
+                        * self.params.GaussianGridSize[1],  # only the heatmap part
+                    ]
+                    logits_hw = kops.reshape(
+                        logits_hw,
+                        (
+                            batchSize,
+                            self.params.GaussianGridSize[0],
+                            self.params.GaussianGridSize[1],
+                        ),
+                    )
+                    loss_inputs = {
+                        "logits": logits_hw,
+                        "targets": targets_hw,
+                    }
+                    tempPosLoss_logits = self.GaussianLoss_layer(
+                        loss_inputs,
+                        loss_type=getattr(self.params, "loss_type", "safe_kl"),
+                        return_batch=True,
+                    )
+                    others = myoutputPos[
+                        :,
+                        self.params.GaussianGridSize[0]
+                        * self.params.GaussianGridSize[1] :,
+                    ]
+                    tempPosLoss_others = loss_function(others, self.truePos[:, 2:])
+                    tempPosLoss = (
+                        self.params.heatmap_weight * tempPosLoss_logits
+                        + self.params.others_weight * tempPosLoss_others
+                    )
+                else:
+                    targets_hw = self.GaussianHeatmap.gaussian_heatmap_targets(
+                        self.truePos
+                    )
+                    loss_inputs = {
+                        "logits": myoutputPos,
+                        "targets": targets_hw,
+                    }
+                    tempPosLoss = self.GaussianLoss_layer(
+                        loss_inputs,
+                        loss_type=getattr(self.params, "loss_type", "safe_kl"),
+                        return_batch=True,
+                    )
+                tempPosLoss = kops.cast(tempPosLoss, "float32")
 
-                outputs[name] = keras.layers.Identity(name=name, dtype="float32")(out)
+            else:
+                if getattr(self.params, "mixed_loss", False):
+                    proj, lin_truePos = self.l_function_layer(self.truePos[:, :2])
+                    # weight the first 2 dimensions (x,y positions)  by linPos before computing the loss
 
-            # Special case for GaussianHeatmap if enabled for pos_2d
-            if (
-                getattr(self.params, "GaussianHeatmap", False)
-                and "pos_2d" in self.target_structure
-            ):
-                # Use the special GaussianHeatmap layer
-                # simply a kernel convolution with a fixed gaussian kernel, applied to the output of the dense layer for pos_2d
-                # before it also had a dense layer
-                out_heatmap = self.GaussianHeatmap(x)
-                outputs["pos_2d"] = keras.layers.Identity(
-                    name="pos_2d", dtype="float32"
-                )(out_heatmap)
+                    myoutputPos_weighted = LinearPosWeighting()(
+                        [myoutputPos, lin_truePos]
+                    )
+                    truePos_weighted = LinearPosWeighting()([self.truePos, lin_truePos])
+                else:
+                    myoutputPos_weighted = myoutputPos
+                    truePos_weighted = self.truePos
 
-            if latent is not None:
-                latent = keras.layers.Identity(name="latent", dtype="float32")(latent)
-                outputs["latent"] = latent
+                tempPosLoss = loss_function(myoutputPos_weighted, truePos_weighted)[
+                    :, tf.newaxis
+                ]
+                tempPosLoss = kops.cast(tempPosLoss, "float32")
+            # for main loss functions:
+            # if loss function is mse
+            # tempPosLoss is in cm2
+            # if loss function is logcosh
+            # tempPosLoss is in cm2
 
-        return outputs
+            rawPosLoss = tf.keras.layers.Identity(name="rawPosLoss")(tempPosLoss)
+
+            if self.params.denseweight:
+                tempPosLoss = self.apply_dynamic_dense_loss(tempPosLoss, self.truePos)
+            if getattr(self.params, "contrastive_loss", False):
+                print("Using contrastive loss")
+                print("output shape:", output.shape)
+                print("truePos shape:", self.truePos.shape)
+                regression_loss_layer = nnUtils.ContrastiveLossLayer()
+                # TODO: make sure the layer exists
+                _, linearized_pos = self.l_function_layer(self.truePos[:, :2])
+                regression_loss = regression_loss_layer([myoutputPos, linearized_pos])
+                lambda_c = getattr(self.params, "lambda_contrastive", 0.3)
+                tempPosLoss += lambda_c * regression_loss
+
+            if self.params.transform_w_log:
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
+            elif not getattr(self.params, "GaussianHeatmap", False):
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
+            else:
+                posLoss = tf.keras.layers.Identity(name="posLoss")(tempPosLoss)
+
+            myoutputPos_named = tf.keras.layers.Identity(name="myoutputPos")(
+                myoutputPos
+            )
+        if getattr(self.params, "contrastive_loss", False):
+            regression_loss = tf.keras.layers.Identity(name="regressionLoss")(
+                regression_loss
+            )
+            return myoutputPos_named, posLoss, rawPosLoss, regression_loss
+
+        return myoutputPos_named, posLoss, rawPosLoss
 
     def compile_model(
-        self,
-        outputs,
-        modelName="FullModel.pdf",
-        predLossOnly=False,
-        jit_compile=False,
-        **kwargs,
+        self, outputs, modelName="FullModel.pdf", predLossOnly=False, **kwargs
     ):
         """
         Compile the model with the desired losses and optimizer.
@@ -892,7 +784,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         Parameters
         ----------
-        outputs : dict of tensors
+        outputs : list of tensors ( myoutputPos, outputPredLoss, posLoss, uncertaintyLoss )
         modelName : str (default "FullModel.png")
         predLossOnly : bool (default False)
 
@@ -902,9 +794,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         """
         # Initialize and plot the model
         model = tf.keras.Model(
-            inputs=self.inputsToSpikeNets + self.indices + [self.inputGroups],
+            inputs=self.inputsToSpikeNets
+            + self.indices
+            + [self.truePos, self.inputGroups, self.zeroForGather],
             outputs=outputs,
         )
+
+        @tf.keras.utils.register_keras_serializable()
+        def pos_loss(x, y):
+            return y
 
         # Compile the model
         # TODO: use params.optimizer instead of hardcoding RMSprop
@@ -912,53 +810,48 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             learning_rate=kwargs.get("lr", self.params.learningRates[0]),
             beta_1=0.9,
             beta_2=0.999,
-            epsilon=1e-04,
+            epsilon=1e-07,
             weight_decay=getattr(self.params, "weight_decay", 1e-4),
-            # global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
-            clipnorm=getattr(self.params, "clipnorm", 1.0),
+            global_clipnorm=getattr(self.params, "global_clipnorm", 1.0),
         )
         # TODO: something with mixed precision and keras policy ?
+        if not predLossOnly:
+            # Full model
+            self.outNames = ["myoutputPos", "posLoss", "rawPosLoss"]
+            if getattr(self.params, "contrastive_loss", False):
+                self.outNames.append("regressionLoss")
 
-        # Full model
-        self.outNames = list(outputs.keys())
+            # TODO: Adam or AdaGrad?
+            # optimizer=tf.keras.optimizers.RMSprop(self.params.learningRates[0]), # Initially compile with first lr.
+            loss_dict = {
+                # tf_op_layer_ position loss (eucledian distance between predicted and real coordinates)
+                self.outNames[0]: None,
+                self.outNames[1]: pos_loss,
+            }
+            metrics_dict = {
+                self.outNames[1]: [
+                    tf.keras.metrics.MeanMetricWrapper(fn=pos_loss, name="mean")
+                ],
+            }
+            for outName in self.outNames[2:]:
+                loss_dict[outName] = None
+                metrics_dict[outName] = [
+                    tf.keras.metrics.MeanMetricWrapper(fn=pos_loss, name="mean")
+                ]
 
-        # Filter kwargs for loss initialization - remove everything except name and reduction
-        known_loss_args = ["name", "reduction"]
-        loss_kwargs = {k: v for k, v in kwargs.items() if k in known_loss_args}
-
-        loss_dict, loss_weights, metrics_dict = self._parse_loss_and_metrics_dict(
-            **loss_kwargs
-        )
-
-        if predLossOnly:
-            # compile for predLoss only if requested
-            # For now, we reuse the same logic but filters could be applied if needed
             model.compile(
                 optimizer=self.optimizer,
                 loss=loss_dict,
-                loss_weights=loss_weights,
                 metrics=metrics_dict,
-                jit_compile=jit_compile,
-            )
-        else:
-            model.compile(
-                optimizer=self.optimizer,
-                loss=loss_dict,
-                loss_weights=loss_weights,
-                metrics=metrics_dict,
-                jit_compile=jit_compile,
+                jit_compile=False,
             )
             # Get internal names of losses
-        if (
-            not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName))
-            or 1 < 2
-        ):
+        if not os.path.exists(os.path.join(self.projectPath.experimentPath, modelName)):
             try:
                 tf.keras.utils.plot_model(
                     model,
                     to_file=(os.path.join(self.projectPath.experimentPath, modelName)),
                     show_shapes=True,
-                    show_layer_names=True,
                 )
             except Exception as e:
                 print("Could not plot the model:", e)
@@ -978,7 +871,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         Parameters
         ----------
         behaviorData : dict of arrays containing the times, the feature True...
-        onTheFlyCorrection : bool (default False) : normalize the position data on the fly
+        onTheFlyCorrection : bool (default False) : normaliize the position data on the fly
         windowSizeMS : int (default 36) : size of the window in milliseconds
         scheduler : str (default "decay") : scheduler type to use for the learning rate
         isPredLoss : bool (default True) : whether to train the loss predictor model
@@ -993,10 +886,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         None
         """
 
+        def pos_loss(x, y):
+            return y
+
         ### Create neccessary arrays
         windowSizeMS = kwargs.pop("windowSizeMS", 36)
         scheduler = kwargs.get("scheduler", "cosine")
-        isPredLoss = kwargs.get("isPredLoss", False)
+        isPredLoss = kwargs.get("isPredLoss", True)
         earlyStop = kwargs.get("earlyStop", False)
         strideFactor = kwargs.get("strideFactor", 1)
 
@@ -1083,55 +979,33 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if kwargs.get("return_datasets", False):
             return datasets, counts
 
-        if counts is not None:
-            # means we are augmenting the data on the fly, so we can visualize the distribution of the data and compute the balanced size after augmentation
-            import termplotlib as tpl
+        import termplotlib as tpl
 
-            count_x, bin_edges = np.histogram(counts["train"], bins=40)
-            fig = tpl.figure()
-            fig.hist(
-                count_x,
-                bin_edges,
-                grid=[15, 25],
-                force_ascii=False,
-            )
-            fig.show()
-            max_count = counts["train"].max()
-            # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
-            print("Max count per bin in training set:", max_count)
-            num_allowed_bins = np.sum(counts["train"] > 0)
-            print("total num of allowed bins in training set:", num_allowed_bins)
-            balanced_size = max_count * num_allowed_bins
-            print("Balanced dataset size would be:", balanced_size)
-            print(
-                "Original training dataset size:",
-                self.GaussianHeatmap.training_positions.shape[0],
-            )
-            n_aug = (
-                kwargs.get("num_augmentations", 1)
-                if kwargs.get("use_augmentation", False) or self.params.dataAugmentation
-                else 1
-            )
+        count_x, bin_edges = np.histogram(counts["train"], bins=40)
+        fig = tpl.figure()
+        fig.hist(
+            count_x,
+            bin_edges,
+            grid=[15, 25],
+            force_ascii=False,
+        )
+        fig.show()
 
-            # If keeping original, we have n_aug + 1 samples total
-            n_total_aug = n_aug + 1 if kwargs.get("keep_original", True) else n_aug
-            # In your main pipeline where you calculate steps_per_epoch:
-            actual_rep_factors = np.minimum(
-                max_count / np.maximum(counts["train"], 1e-8), 20.0
-            )
-            actual_balanced_size = np.sum(counts["train"] * actual_rep_factors)
-
-            steps_per_epoch = np.floor(
-                (actual_balanced_size * n_total_aug) / (self.params.batch_size)
-            )
-        else:
-            print(
-                "no data augmentation or class balancing, using original dataset size for steps per epoch calculation"
-            )
-            num_train_samples = np.sum(epochMask["train"])
-            steps_per_epoch = np.floor(num_train_samples / self.params.batch_size)
-
-        print("Steps per epoch:", steps_per_epoch)
+        max_count = counts["train"].max()
+        # we compute the balanced size, ie the size of the dataset after resampling if it was perfectly uniform
+        print("Max count per bin in training set:", max_count)
+        print("total len of counts['train']:", len(counts["train"]))
+        print("num_bins:", self.coarse_H * self.coarse_W)
+        balanced_size = max_count * len(counts["train"])
+        print("Balanced dataset size would be:", balanced_size)
+        print(
+            "Original training dataset size:",
+            self.GaussianHeatmap.training_positions.shape[0],
+        )
+        steps_per_epoch = np.ceil(
+            (balanced_size * kwargs.get("num_augmentations", 1))
+            / (self.params.batchSize * min(kwargs.get("num_augmentations", 1), 2))
+        )
 
         ### Train the model(s)
         # Train
@@ -1267,12 +1141,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
 
             # NOTE: In case you need debugging, toggle this profiling line to True
-            is_tbcallback = kwargs.get("tensorboard_callback", True)
+            is_tbcallback = False
             if self.debug:
-                print("Debugging mode is ON")
-                if is_tbcallback:
-                    print("enabling TensorBoard callback and device placement logging")
-                    tf.debugging.set_log_device_placement(True)
+                print(
+                    "Debugging mode is ON, enabling TensorBoard callback and device placement loggin"
+                )
+                tf.debugging.set_log_device_placement(True)
                 if key != "predLoss":
                     ann_config = {
                         k: v
@@ -1283,43 +1157,30 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         and not isinstance(v, np.ndarray)
                         and not isinstance(v, tf.Tensor)
                         and not isinstance(v, DataHelper)
-                        and len(str(v)) < 1000
                     }
-
                     ann_config["loaded"] = loaded
 
                     prefix = "LOADED_" if loaded else ""
-                    if is_tbcallback:
-                        # wandb.tensorboard.patch(
-                        #     root_logdir=os.path.join(self.folderResult, "logs")
-                        # )
-                        # tf.profiler.experimental.start(
-                        #     os.path.join(self.folderResult, "logs")
-                        # )
-
-                        from datetime import datetime
-
-                        log_dir = os.path.join(
-                            self.folderResult,
-                            "logs",
-                            str(windowSizeMS),
-                            key,
-                            datetime.now().strftime("%Y%m%d-%H%M%S"),
-                        )
-                        tb_callbacks = tf.keras.callbacks.TensorBoard(
-                            log_dir=log_dir,
-                            histogram_freq=1,
-                            profile_batch=(10, 100),
-                        )
-                        print(f"starting tensorboard at {log_dir}")
+                    # wandb.tensorboard.patch(
+                    #     root_logdir=os.path.join(self.folderResult, "logs")
+                    # )
+                    # print(f"starting tensorboard at {self.folderResult}/logs ")
                     run = wandb.init(
                         entity="touseul",
-                        project="ContrastiveLossNew",
+                        project="ContrastiveLoss",
                         name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
                         config=ann_config,
                     )
+                    # tf.profiler.experimental.start(
+                    #     os.path.join(self.folderResult, "logs")
+                    # )
+                    # tb_callbacks = tf.keras.callbacks.TensorBoard(
+                    #     log_dir=os.path.join(self.folderResult, "logs"),
+                    #     histogram_freq=1,
+                    #     profile_batch=(2, 4) if is_tbcallback else 0,
+                    # )
 
                     wandb_callback = WandbMetricsLogger()
             if key != "predLoss":
@@ -1368,8 +1229,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     callbacks.append(reduce_lr_callback)
 
                 if self.debug:
-                    if is_tbcallback:
-                        callbacks.append(tb_callbacks)
+                    # callbacks.append(tb_callbacks)
                     callbacks.append(wandb_callback)
 
                 hist = self.model.fit(
@@ -1379,6 +1239,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     validation_data=datasets["test"],
                     steps_per_epoch=int(steps_per_epoch),
                 )
+
                 self.trainLosses[key] = np.transpose(
                     np.stack(
                         [
@@ -1457,14 +1318,50 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         """
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         shuffle = kwargs.get("shuffle", True)
-        random_spiking = kwargs.get("random_spiking", False)
-        batch_size = kwargs.get("batch_size", self.params.batch_size)
-        speedMask = kwargs.get("speedMask", None)
-        inference_mode = kwargs.get("inference_mode", False)
-        if inference_mode and shuffle:
-            raise ValueError(
-                "Shuffle should be set to False in inference mode to ensure deterministic outputs."
+        batchSize = kwargs.get("batch_size", self.params.batchSize)
+
+        @tf.autograph.experimental.do_not_convert
+        def filter_by_pos_index(x):
+            return tf.equal(table.lookup(x["pos_index"]), 1.0)
+
+        def filter_nan_pos(x):
+            pos_data = x["pos"]
+            # convert to float if it's a binary pred
+            if pos_data.dtype in [tf.int32, tf.int64]:
+                pos_data = tf.cast(pos_data, tf.float64)
+
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
+
+        @tf.autograph.experimental.do_not_convert
+        def _parse_function(*vals):
+            with tf.device(self.deviceName):
+                return nnUtils.parse_serialized_spike(self.featDesc, *vals)
+
+        dim_output = (
+            self.params.dimOutput
+            if not getattr(self.params, "GaussianHeatmap", False)
+            else (
+                self.params.dimOutput
+                - 2
+                + self.params.GaussianGridSize[0] * self.params.GaussianGridSize[1]
             )
+        )
+
+        @tf.function
+        def map_outputs(vals):
+            basic_dict = {
+                self.outNames[0]: tf.zeros((batchSize, dim_output), dtype=tf.float32),
+            }
+            for outname in self.outNames[1:]:
+                basic_dict[outname] = tf.zeros(batchSize, dtype=tf.float32)
+            return (vals, basic_dict)
+
+        ndataset = tf.data.TFRecordDataset(
+            os.path.join(self.projectPath.dataPath, filename)
+        )
+        # Parse the record into tensors - simply attribute a name to every tensor from featDesc
+        ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
+        ndataset = ndataset.prefetch(tf.data.AUTOTUNE)
 
         # Create datasets
         if not isinstance(totMask, dict):
@@ -1472,77 +1369,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             totMask_backup = totMask.copy()
             totMask = (
                 {"test": totMask_backup}
-                if inference_mode
+                if kwargs.get("inference_mode", False)
                 else {"train": totMask_backup}
             )
-        if speedMask is not None and not isinstance(speedMask, dict):
-            # it means we have just one set of keys
-            speedMask_backup = speedMask.copy()
-            speedMask = (
-                {"test": speedMask_backup}
-                if inference_mode
-                else {"train": speedMask_backup}
-            )
-
-        def get_mask_filter(totMask_for_key):
-            mask_tensor = tf.constant(totMask_for_key, dtype=tf.float32)
-
-            @tf.function
-            def filter_by_pos_index(x):
-                # return tf.equal(table.lookup(x["pos_index"]), 1.0)
-                pos_index = x["pos_index"]
-                return tf.equal(tf.gather(mask_tensor, pos_index), 1.0)
-
-            return filter_by_pos_index
-
-        def filter_nan_pos(x):
-            pos_data = x["pos"]
-
-            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
-
-        @tf.function
-        def _parse_function(*vals):
-            with nnUtils.get_device_context(self.deviceName):
-                return nnUtils.parse_serialized_spike(self.featDesc, *vals)
-
-        @tf.function
-        def map_outputs(vals):
-            # Move 'pos' to targets, rest stay in inputs
-            inputs_dict = {k: v for k, v in vals.items() if k != "pos"}
-            # Structured targets matching model outputs
-            targets_dict = {}
-            for name, spec in self.target_structure.items():
-                start_idx, end_idx = spec["slice"]
-                targets_dict[name] = vals["pos"][:, start_idx:end_idx]
-
-            # latent targets are the 2D position for contrastive regression
-            # TODO: ensure that contrastive regression is always wrt the 2D position
-            if "latent" in self.outNames:
-                targets_dict["latent"] = vals["pos"][:, :2]
-
-            return (inputs_dict, targets_dict)
-
-        def create_indices(vals):
-            return self.create_indices(vals, shuffle=random_spiking)
-
-        ndataset = tf.data.TFRecordDataset(
-            os.path.join(self.projectPath.dataPath, filename),
-            buffer_size=100 * 1024 * 1024,  # 100MB read buffer
-        )
-
-        if shuffle:
-            print("Shuffling the dataset")
-            ndataset = ndataset.shuffle(
-                10000
-            )  # move shuffle before parsing for better randomness, we can afford a bigger buffer because we are not yet in the batched stage
-
-        # Parse the record into tensors - simply attribute a name to every tensor from featDesc
-        ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-        ndataset = ndataset.prefetch(tf.data.AUTOTUNE)
-
         datasets = {}
         counts = {}
         for key in totMask.keys():
+            # creates a lookup table to filter by pos index, and by totMask (speed + epoch)
+            table = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(
+                    tf.constant(np.arange(len(totMask[key])), dtype=tf.int64),
+                    tf.constant(totMask[key], dtype=tf.float32),
+                ),
+                default_value=0,
+            )
             # This is just max normalization to use if the behavioral data have not been normalized yet
             if onTheFlyCorrection:
                 maxPos = np.nanmax(
@@ -1557,10 +1397,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 posFeature = behaviorData["Positions"]
 
             # posFeature is already of shape (N,dimOutput) because we ran data_helper.get_true_target before.
-            filter_op = get_mask_filter(totMask[key])
-            dataset = ndataset.filter(filter_op)
+            dataset = ndataset.filter(filter_by_pos_index)
             dataset = dataset.map(nnUtils.import_true_pos(posFeature))
-            dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
+            dataset = dataset.filter(filter_nan_pos)
 
             # now that we have clean positions, we can resample if needed
             if self.params.OversamplingResampling and key == "train":
@@ -1568,56 +1407,87 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                 )
 
-            def parse_serialized_sequence(vals):
-                return nnUtils.parse_serialized_sequence(
-                    self.params,
-                    vals,
-                    count_spikes=kwargs.get("extract_spikes_counts", False),
-                    max_spikes=self.max_nb_spikes,
-                    max_spikes_per_group=self.max_spikes_per_group,
-                    # sorted_indices = #TODO: at some point
-                )
+            if key != "test" and shuffle:
+                print("Shuffling the", key, "dataset")
+                dataset = dataset.shuffle(100000, reshuffle_each_iteration=True)
 
-            # Map create_indices BEFORE batching and data augmentation (per-example)
-            dataset = dataset.map(
-                parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
-            )
-            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+            dataset = dataset.batch(batchSize, drop_remainder=True)
 
-            # 7. Optimized Detailed Parsing / Augmentation
-            is_aug_active = (
-                self.params.dataAugmentation
-                and key != "test"
-                and not kwargs.get("inference_mode", False)
-            )
-
-            if is_aug_active:
-                optimized_fn = self.create_optimized_parse_function(
-                    augmentation=is_aug_active,
-                    augmentation_config=augmentation_config if is_aug_active else None,
+            if (
+                not self.params.dataAugmentation
+                or key == "test"
+                or kwargs.get("inference_mode", False)
+            ):
+                print("No data augmentation for", key, "dataset")
+                optimized_parse_fn = self.create_optimized_parse_function(
+                    augmentation=False,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
-                print(f"Applying data augmentation to {key} dataset")
-                dataset = dataset.interleave(
-                    lambda x: tf.data.Dataset.from_tensor_slices(optimized_fn(x)),
+                dataset = dataset.map(
+                    optimized_parse_fn,
                     num_parallel_calls=tf.data.AUTOTUNE,
-                    cycle_length=64,
-                    block_length=11,
-                    deterministic=False,
+                )  # self.featDesc, *
+            else:
+                # this way the data augmentation is applied after resampling and batching.
+                print("Applying data augmentation to", key, "dataset with config:")
+                print(augmentation_config)
+                optimized_aug_fn = self.create_optimized_parse_function(
+                    augmentation=True,
+                    augmentation_config=augmentation_config,
+                    count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
 
-            dataset = dataset.batch(batch_size, drop_remainder=True)
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+                dataset = dataset.map(
+                    optimized_aug_fn,
+                    num_parallel_calls=tf.data.AUTOTUNE,
+                )  # self.featDesc, *
+                flatten_fn = create_flatten_augmented_groups_fn(
+                    self.params, augmentation_config.num_augmentations
+                )
+                dataset = dataset.flat_map(flatten_fn)  # Flatten the augmented groups
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
+            # for now we provide all inputs as potential outputs targets... but this can be changed in the future...
+            dataset = dataset.map(
+                self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
+            )
             dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
+            # cache only once, after all the preprocessing
+            print(
+                f"finalizing the {key} dataset pipeline... Will move data to {self.deviceName}"
+            )
+            dataset = dataset.apply(
+                tf.data.experimental.copy_to_device(self.deviceName)
+            )
+            # WARN: this seems to be cached on CPU RAM, not GPU RAM...
+
+            # now dataset is a tuple (inputsDict, outputsDict)
+            # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
+            # and each mini-batch contains a representative sample of the training set.
+            # nSteps represent the buffer size of the shuffle operation - 10 seconds worth of buffer starting
+            # from the 0-timepoint of the dataset.
+            # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
+            # At each epoch, the shuffle order is different.
+            # smaller buffer for batched data
+            # were talking in number of batches here, not time (so it does not make sense to use params.nSteps)
+            # prefetch entire batches
+            options = tf.data.Options()
+            options.experimental_optimization.apply_default_optimizations = True
+            options.experimental_optimization.map_and_batch_fusion = True
+            options.experimental_optimization.map_parallelization = True
+            options.experimental_optimization.parallel_batch = True
+            options.experimental_optimization.filter_fusion = True
+            options.experimental_optimization.noop_elimination = True
+            options.experimental_distribute.auto_shard_policy = (
+                tf.data.experimental.AutoShardPolicy.DATA
+            )
+            # get max num of cpu cores minus 1 for data loading
+            options.threading.private_threadpool_size = max(1, os.cpu_count() - 1)
+            options.threading.max_intra_op_parallelism = 1
 
             if key != "test":
                 # handle dataset ran out of data by repeating it
                 dataset = dataset.repeat()
-
-            options = self._get_dataset_options()
             dataset = dataset.with_options(options).prefetch(tf.data.AUTOTUNE)
 
             datasets[key] = dataset
@@ -1627,460 +1497,59 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 else None
             )
 
-        # Save parsed datasets to new TFRecord files if requested
-        save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
-        save_parsed_parquet = kwargs.get("save_parsed_parquet", None)
-
-        # The user mentioned useSpeedMask, but the code often uses useSpeedFilter.
-        # We handle both, defaulting to the condition that saving only happens when speed masking is NOT applied during loading (i.e. we want the "raw" but cropped data).
-        useSpeedMask = kwargs.get("useSpeedMask", kwargs.get("useSpeedFilter", False))
-        should_save = not useSpeedMask
-
-        if save_parsed_tfrec is not None:
-            if should_save:
-                print(
-                    f"Saving parsed datasets to TFRecord files with base path: {save_parsed_tfrec}"
-                )
-                self._save_datasets_to_tfrec(datasets, save_parsed_tfrec)
-            else:
-                print(
-                    f"Skipping TFRecord saving because speed masking is active (useSpeedMask/Filter={useSpeedMask})"
-                )
-
-        if save_parsed_parquet is not None:
-            if should_save:
-                print(
-                    f"Saving parsed datasets to Parquet files with base path: {save_parsed_parquet}"
-                )
-                self._save_datasets_to_parquet(datasets, save_parsed_parquet)
-            else:
-                print(
-                    f"Skipping Parquet saving because speed masking is active (useSpeedMask/Filter={useSpeedMask})"
-                )
-
-        return datasets, counts if self.params.OversamplingResampling else None
-
-    def _get_padding_shapes_values(self, extract_spikes_counts=False):
-        # Pad and Batch logic
-        padded_shapes = {
-            "pos_index": [],
-            "pos": [self.params.dimOutput],
-            "length": [],
-            "groups": [self.max_nb_spikes],
-            "time": [],
-            "time_behavior": [],
-            "indexInDat": [self.max_nb_spikes],
-            "max_spikes": [],
-        }
-        padding_values = {
-            "pos_index": tf.constant(-1, dtype=tf.int64),
-            "pos": tf.constant(-1.0, dtype=tf.float64),
-            "length": tf.constant(-1, dtype=tf.int64),
-            "groups": tf.constant(-1, dtype=tf.int64),
-            "time": tf.constant(-1.0, dtype=tf.float32),
-            "time_behavior": tf.constant(-1.0, dtype=tf.float32),
-            "indexInDat": tf.constant(-1, dtype=tf.int64),
-            "max_spikes": tf.constant(-1, dtype=tf.int32),
-        }
-        if extract_spikes_counts:
-            for g in range(self.params.nGroups):
-                padded_shapes[f"group{g}_spikes_count"] = []
-                padding_values[f"group{g}_spikes_count"] = tf.constant(
-                    0, dtype=tf.int32
-                )
-
-        for g in range(self.params.nGroups):
-            padded_shapes[f"group{g}"] = [
-                self.max_spikes_per_group,  # spikes
-                self.params.nChannelsPerGroup[g],
-                32,
-            ]
-            padded_shapes[f"indices{g}"] = [self.max_nb_spikes]
-            padding_values[f"group{g}"] = tf.constant(-1.0, dtype=tf.float32)
-            padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
-
-        return padded_shapes, padding_values
-
-    def _get_dataset_options(self):
-        # We shuffle the datasets and cache it - this way the training samples are randomized for each epoch
-        # and each mini-batch contains a representative sample of the training set.
-        # nSteps represent the buffer size of the shuffle operation - 10 seconds worth of buffer starting
-        # from the 0-timepoint of the dataset.
-        # once an element is selected, its space in the buffer is replaced by the next element (right after the 10s window...)
-        # At each epoch, the shuffle order is different.
-        # smaller buffer for batched data
-        # were talking in number of batches here, not time (so it does not make sense to use params.nSteps)
-        # prefetch entire batches
-        options = tf.data.Options()
-        options.experimental_optimization.apply_default_optimizations = True
-        options.experimental_optimization.map_and_batch_fusion = True
-        options.experimental_optimization.map_parallelization = True
-        options.experimental_optimization.parallel_batch = True
-        options.experimental_optimization.filter_fusion = True
-        options.experimental_optimization.noop_elimination = True
-        options.experimental_distribute.auto_shard_policy = (
-            tf.data.experimental.AutoShardPolicy.DATA
-        )
-        # get max num of cpu cores minus 1 for data loading
-        options.threading.private_threadpool_size = max(1, os.cpu_count() - 1)
-        options.threading.max_intra_op_parallelism = 1
-        return options
-
-    def load_parsed_dataset(
-        self,
-        base_path: str,
-        keys: List[str] = ["train", "test"],
-        featDesc: Optional[Dict] = None,
-        dimOutput: Optional[int] = None,
-    ) -> Dict[str, tf.data.Dataset]:
-        """
-        Load datasets that were previously saved using _save_datasets_to_tfrec.
-
-        Parameters
-        ----------
-        base_path : str
-            Base path for the TFRecord files.
-        keys : list of str
-            The dataset keys to load (e.g., ['train', 'test']).
-        featDesc : dict, optional
-            The feature description to use for parsing. If None, uses a default that
-            handles variable position dimensions.
-
-        Returns
-        -------
-        datasets : dict
-            Dictionary of loaded tf.data.Dataset objects.
-        """
-        if dimOutput is not None:
-            self.params.dimOutput = dimOutput
-
-        if featDesc is None:
-            # Default featDesc that handles variable length pos and groups
-            featDesc = {
-                "pos_index": tf.io.FixedLenFeature([], tf.int64),
-                "pos": tf.io.FixedLenFeature([2], tf.float32),
-                "length": tf.io.FixedLenFeature([], tf.int64),
-                "groups": tf.io.VarLenFeature(tf.int64),
-                "time": tf.io.FixedLenFeature([], tf.float32),
-                "time_behavior": tf.io.FixedLenFeature([], tf.float32),
-                "indexInDat": tf.io.VarLenFeature(tf.int64),
-            }
-            for g in range(self.params.nGroups):
-                featDesc[f"group{g}"] = tf.io.VarLenFeature(tf.float32)
-
-        datasets = {}
-        for key in keys:
-            file_path = f"{base_path}_{key}.tfrec"
-            if not os.path.exists(file_path):
-                print(f"Warning: File {file_path} does not exist. Skipping.")
-                continue
-
-            print(f"Loading {key} dataset from {file_path}...")
-
-            raw_dataset = tf.data.TFRecordDataset(file_path)
-
-            def _parse_function(example_proto):
-                return tf.io.parse_single_example(example_proto, featDesc)
-
-            dataset = raw_dataset.map(
-                _parse_function, num_parallel_calls=tf.data.AUTOTUNE
-            )
-
-            def map_parse_serialized_sequence(*vals):
-                return nnUtils.parse_serialized_sequence(self.params, *vals)
-
-            # Re-apply the parsing logic to get the correct shapes (e.g., reshaping groups)
-            dataset = dataset.map(
-                map_parse_serialized_sequence,
-                num_parallel_calls=tf.data.AUTOTUNE,
-            )
-
-            datasets[key] = dataset
-
-        return datasets
+        if self.params.OversamplingResampling:
+            return datasets, counts
+        else:
+            return datasets, None
 
     def create_optimized_parse_function(
         self,
         augmentation: bool = False,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
-        count_spikes: bool = False,
+        count_spikes=False,
     ):
-        if augmentation and augmentation_config:
+        """
+        Create optimized parsing function that respects spike data structure
+        """
 
-            @tf.function
-            def optimized_parse_with_augmentation(tensors):
-                # 1. Identify Spike Groups
-                original_groups = {}
-                for g in range(self.params.nGroups):
-                    g_key = f"group{g}"
-                    if g_key in tensors:
-                        original_groups[g_key] = tensors[g_key]
+        if augmentation:
 
-                # 2. Call the Vectorized Augmentation logic
-                # This returns a dict where every tensor has a new leading 'augmentation' dimension
-                return nnUtils.apply_group_augmentation(
-                    tensors,
-                    original_groups,
+            @tf.function(experimental_relax_shapes=True)
+            def optimized_parse_with_augmentation(batch_data):
+                # Create a COPY to avoid the mutation error
+                processed_batch = {}
+
+                # Copy all keys to new dict (avoid mutation)
+                for key in batch_data.keys():
+                    processed_batch[key] = batch_data[key]
+
+                # Call your existing function but on the copy
+                return nnUtils.parse_serialized_sequence_with_augmentation(
                     self.params,
-                    augmentation_config,
-                    count_spikes,
+                    processed_batch,  # Pass the copy
+                    augmentation_config=augmentation_config,
+                    batched=True,
+                    count_spikes=count_spikes,
                 )
 
             return optimized_parse_with_augmentation
         else:
-            # If no augmentation, it's just a pass-through because
-            # parse_serialized_sequence already ran.
-            raise ValueError(
-                "Augmentation must be enabled and config provided to create optimized parse function."
-            )
 
-    def _save_datasets_to_tfrec(self, datasets, base_path):
-        """
-        Save parsed datasets to new TFRecord files.
+            @tf.function(experimental_relax_shapes=True)
+            def optimized_parse_standard(batch_data):
+                # Same pattern for standard parsing
+                processed_batch = {}
+                for key in batch_data.keys():
+                    processed_batch[key] = batch_data[key]
 
-        Parameters
-        ----------
-        datasets : dict
-            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
-        base_path : str
-            Base path for saved TFRecord files. Files will be saved as:
-            {base_path}_train.tfrec, {base_path}_test.tfrec, etc.
-        """
-
-        def serialize_example(example_dict):
-            """Serialize a single example to TFRecord format"""
-            # Create feature dict for serialization
-            feature_dict = {}
-
-            for key, value in example_dict.items():
-                if isinstance(value, tf.Tensor):
-                    value = value.numpy()
-
-                # Handle different data types
-                if isinstance(value, np.ndarray):
-                    if value.dtype in [np.float32, np.float64]:
-                        feature_dict[key] = tf.train.Feature(
-                            float_list=tf.train.FloatList(value=value.flatten())
-                        )
-                    elif value.dtype in [np.int32, np.int64]:
-                        feature_dict[key] = tf.train.Feature(
-                            int64_list=tf.train.Int64List(value=value.flatten())
-                        )
-                    else:
-                        # For other types, convert to bytes
-                        feature_dict[key] = tf.train.Feature(
-                            bytes_list=tf.train.BytesList(value=[value.tobytes()])
-                        )
-                elif isinstance(value, (int, np.integer)):
-                    feature_dict[key] = tf.train.Feature(
-                        int64_list=tf.train.Int64List(value=[int(value)])
-                    )
-                elif isinstance(value, (float, np.floating)):
-                    feature_dict[key] = tf.train.Feature(
-                        float_list=tf.train.FloatList(value=[float(value)])
-                    )
-                elif isinstance(value, (str, bytes)):
-                    if isinstance(value, str):
-                        value = value.encode()
-                    feature_dict[key] = tf.train.Feature(
-                        bytes_list=tf.train.BytesList(value=[value])
-                    )
-
-            # Create an Example proto
-            example_proto = tf.train.Example(
-                features=tf.train.Features(feature=feature_dict)
-            )
-            return example_proto.SerializeToString()
-
-        # Save each dataset
-        for key, dataset in datasets.items():
-            output_path = f"{base_path}_{key}.tfrec"
-            print(f"Saving {key} dataset to {output_path}...")
-
-            writer = tf.io.TFRecordWriter(os.path.abspath(output_path))
-
-            try:
-                for batch in tqdm(dataset, desc=f"Writing {key} to TFRecord"):
-                    if isinstance(batch, tuple):
-                        inputs, _ = batch  # Usually (inputs, targets)
-                    else:
-                        inputs = batch
-
-                    serialized = serialize_example(inputs)
-                    writer.write(serialized)
-            finally:
-                writer.close()
-
-            print(f"Successfully saved {key} dataset to {output_path}")
-
-    def _save_datasets_to_parquet(self, datasets, base_path):
-        """
-        Save parsed datasets to Parquet files using pandas logic.
-
-        Parameters
-        ----------
-        datasets : dict
-            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
-        base_path : str
-            Base path for saved Parquet files. Files will be saved as:
-            {base_path}_{key}.parquet
-        """
-
-        for key, dataset in datasets.items():
-            output_path = f"{base_path}_{key}.parquet"
-            print(f"Saving {key} dataset to {output_path}...")
-
-            df = self.convert_tfrec_to_pandas(
-                dataset, desc=f"Converting {key} to Pandas"
-            )
-
-            if df.shape[0] > 0:
-                # Some columns might still be lists, which Parquet handles fine as nesting or objects.
-                df.to_parquet(output_path)
-                print(f"Successfully saved {key} dataset to {output_path}")
-            else:
-                print(f"No data to save for {key}")
-
-    def convert_tfrec_to_pandas(
-        self, dataset, flatten=True, desc="Converting to Pandas"
-    ):
-        all_data = []
-        for example in tqdm(dataset, desc=desc):
-            if isinstance(example, tuple):
-                inputs, _ = example
-            else:
-                inputs = example
-
-            row_data = {}
-            for k, v in inputs.items():
-                val = v.numpy()
-                # Parquet (via Arrow) doesn't like multidimensional arrays in object columns.
-                # We flatten arrays with ndim > 1 to ensure compatibility.
-                if val.ndim > 1 and flatten:
-                    # Store as a flattened 1D array inside the cell
-                    row_data[k] = [val.reshape(-1)]
-                else:
-                    # For 1D or scalars, wrap in list for 1-row DataFrame construction
-                    row_data[k] = [val] if val.ndim == 1 else val
-
-            all_data.append(pd.DataFrame(row_data))
-        return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
-
-    def decode_predictions(
-        self,
-        preds: Dict,
-        y_true=None,
-        fit_temperature: bool = False,
-        T_scaling: Optional[float] = None,
-        l_function: Optional[Callable] = None,
-        **kwargs,
-    ) -> Dict:
-        """
-        Consolidated decoding and post-processing of model predictions.
-
-        Args:
-            preds (dict): Dictionary of predictions from model (indexed by target_structure keys).
-            y_true (np.ndarray, optional): Concatenated ground truth (matches behavioral data).
-            fit_temperature (bool): Whether to fit temperature scaling.
-            T_scaling (float, optional): Temperature scaling factor.
-            l_function (callable, optional): Linearization function.
-            **kwargs: Additional parameters.
-
-        Returns:
-            dict: Decoded predictions and metadata.
-        """
-        results = {}
-        use_heatmap = getattr(self.params, "GaussianHeatmap", False)
-
-        # 1. Handle main position head if it's a heatmap
-        if use_heatmap and "pos_2d" in preds:
-            output_logits = preds["pos_2d"]
-            # Ensure 3D (Batch, H, W)
-            if len(output_logits.shape) == 2:
-                H, W = self.params.GaussianGridSize
-                output_logits = tf.reshape(output_logits, [-1, H, W])
-
-            # Calibration if requested
-            if fit_temperature and y_true is not None:
-                # Get index slice for pos_2d (usually 0:2)
-                start, end = self.target_structure["pos_2d"]["slice"]
-                y_pos_2d = y_true[:, start:end]
-                # Heatmap targets from Mixin
-                val_targets = self.gaussian_heatmap_targets_tf(y_pos_2d)
-                # Calibrate via Layer
-                T_cal = self.GaussianHeatmap.fit_temperature(
-                    output_logits, val_targets, iters=400
+                return nnUtils.parse_serialized_sequence(
+                    self.params,
+                    processed_batch,
+                    batched=True,
+                    count_spikes=count_spikes,
                 )
-                return T_cal
 
-            if T_scaling is not None:
-                output_logits = output_logits / T_scaling
-
-            # Decode via Mixin
-            xy, maxp, Hn, var_total = self.decode_and_uncertainty_tf(output_logits)
-
-            results.update(
-                {
-                    "pos_2d": xy.numpy(),
-                    "logits_hw": output_logits.numpy()
-                    if hasattr(output_logits, "numpy")
-                    else output_logits,
-                    "var_total": var_total.numpy()
-                    if hasattr(var_total, "numpy")
-                    else var_total,
-                    "Hn": Hn.numpy() if hasattr(Hn, "numpy") else Hn,
-                    "maxp": maxp.numpy() if hasattr(maxp, "numpy") else maxp,
-                    "T_scaling": T_scaling,
-                }
-            )
-
-        # 2. Reconstruct featurePred by looping through target_structure
-        # This ensures the output matrix matches expectations of legacy code
-        reconstructed_parts = []
-        for name, spec in self.target_structure.items():
-            if name == "pos_2d" and use_heatmap:
-                reconstructed_parts.append(results["pos_2d"])
-            elif name in preds:
-                pred_val = (
-                    preds[name].numpy()
-                    if hasattr(preds[name], "numpy")
-                    else preds[name]
-                )
-                reconstructed_parts.append(pred_val)
-
-        if reconstructed_parts:
-            # Concatenate all parts (2d pos + HD + etc)
-            results["featurePred"] = np.concatenate(reconstructed_parts, axis=-1)
-
-        # 3. Handle latent explicitly (not in reconstructed list because it's auxiliary)
-        if "latent" in preds:
-            results["latent"] = (
-                preds["latent"].numpy()
-                if hasattr(preds["latent"], "numpy")
-                else preds["latent"]
-            )
-
-        # Classification handling
-        if results.get("featurePred") is not None:
-            target_str = str(self.target).lower()
-            if (
-                "classification" in target_str
-                or "int" in target_str
-                or target_str == "direction"
-            ):
-                results["featurePred"] = np.round(results["featurePred"]).astype(int)
-
-        # Linear projections / ID score
-        if l_function and results.get("featurePred") is not None:
-            projPredPos, linearPred = l_function(results["featurePred"][:, :2])
-            results["projPred"] = projPredPos
-            results["linearPred"] = linearPred
-            if y_true is not None:
-                projTruePos, linearTrue = l_function(y_true[:, :2])
-                results["projTruePos"] = projTruePos
-                results["linearTrue"] = linearTrue
-
-        return results
+            return optimized_parse_standard
 
     def test(self, behaviorData, **kwargs):
         """
@@ -2098,8 +1567,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             Whether to use the speed filter, by default False.
         useTrain : bool, optional
             Whether to use the training epochs, by default False.
-        useTest : bool, optional
-            Whether to use the testing epochs, by default True.
         onTheFlyCorrection : bool, optional
             Whether to apply on-the-fly correction to the positions, by default False.
         isPredLoss : bool, optional
@@ -2118,7 +1585,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         windowSizeMS = kwargs.pop("windowSizeMS", 36)
         useSpeedFilter = kwargs.get("useSpeedFilter", False)
         useTrain = kwargs.get("useTrain", False)
-        useTest = kwargs.get("useTest", True)
         onTheFlyCorrection = kwargs.get("onTheFlyCorrection", False)
         isPredLoss = kwargs.get("isPredLoss", False)
         speedValue = kwargs.get("speedValue", None)
@@ -2126,6 +1592,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         template = kwargs.get("template", None)
         fit_temperature = kwargs.get("fit_temperature", False)
         T_scaling = kwargs.get("T_scaling", None)
+        epochKey = kwargs.get("epochKey", "testEpochs")
         strideFactor = kwargs.get("strideFactor", 1)
         extract_spikes_counts = kwargs.get("extract_spikes_counts", False)
 
@@ -2149,9 +1616,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
-                    skip_mismatch=True,
                 )
-            except FileNotFoundError:
+            except:
                 print("loading from savedModels failed, trying full checkpoint ")
                 try:
                     self.model.load_weights(
@@ -2159,8 +1625,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
                         ),
                     )
-                except (FileNotFoundError, ValueError):
-                    print("loading from full checkpoint failed, trying weights.h5")
+                except:
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2178,10 +1643,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             speedMask = speedValue > speed
         if speedMask.shape[0] != behaviorData["Times"]["speedFilter"].shape[0]:
             warnings.warn("The speed mask must be the same length as the speed filter")
-        # Manage epoch mask
-        epochMask = get_epochs_mask(
-            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
-        )
+        if useTrain:
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+            ) + inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
+            )
+        else:
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"][epochKey]
+            )
         if useSpeedFilter:
             totMask = speedMask * epochMask
         else:
@@ -2221,77 +1692,75 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             inference_mode=True,
             onTheFlyCorrection=onTheFlyCorrection,
             shuffle=False,
-            speedMask=speedMask,
             **kwargs,
         )
         dataset = datasets["test"]
+        # -------------------------------------------------------------------------
+        # CUSTOM SYNCHRONIZED INFERENCE LOOP
+        # -------------------------------------------------------------------------
+        print("Starting synchronized inference loop...")
 
-        save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
-        if save_parsed_tfrec is not None:
-            assert not useSpeedFilter, (
-                "Cannot use speed filter when saving parsed TFRecord"
-            )
-            # save final speedMask
-            pos_index = np.arange(len(behaviorData["Positions"]))
-            # final speedMask is an 2D array with shape (N,2) where N is the number of timepoints
-            final_speedMask = np.zeros((len(pos_index), 2), dtype=np.float32)
-            final_speedMask[:, 0] = pos_index
-            final_speedMask[:, 1] = speedMask
-            np.save(f"{save_parsed_tfrec}_speedMask_{phase}.npy", final_speedMask)
+        # 1. Initialize accumulators
+        # Predictions
+        list_pred_features = []
+        list_pred_loss = []
 
-            return
-
-        # 1. Run model prediction
-        print(f"Inferring values for {phase} dataset...")
-        # dataset yields (inputs, targets)
-        preds_dict = self.model.predict(dataset, verbose=1)
-        # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent": ...}
-
-        full_pos_loss = (
-            None  # Position loss is not explicitly returned by the model anymore
-        )
-
-        # 2. Extract metadata in a single pass
-        print("Extracting metadata...")
+        # Metadata / Ground Truth
         list_pos = []
         list_times = []
         list_times_behavior = []
         list_pos_index = []
-        list_groups = []
         list_speed_filter = []
         list_index_in_dat = []
+        list_index_in_dat_raw = []
 
         # Spike Counts (Dynamic dict to handle variable groups)
         dict_spike_counts = {
             f"group{g}_spikes_count": [] for g in range(self.params.nGroups)
         }
 
-        for inputs, targets in tqdm(dataset, desc="Gathering metadata"):
-            # Reconstruct full Y ground truth from individual target heads
-            max_idx = 0
-            for spec in self.target_structure.values():
-                max_idx = max(max_idx, spec["slice"][1])
+        # 2. Iterate ONCE over the dataset
+        # This locks inputs and metadata together for every batch
+        for batch in tqdm(dataset, desc="Inferring"):
+            # Determine structure: Dataset usually yields (inputs, targets)
+            # Based on your map functions, 'inputs' is a dictionary containing 'pos', 'time', etc.
+            if isinstance(batch, tuple):
+                inputs = batch[0]
+                # targets = batch[1] # Unused here, but available
+            else:
+                inputs = batch
 
-            batch_size = next(iter(targets.values())).shape[0]
-            batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
+            # A. Run Model Prediction
+            # training=False ensures Dropout/BatchNorm behave correctly for inference
+            preds = self.model(inputs, training=False)
 
-            for name, spec in self.target_structure.items():
-                if name in targets:
-                    start, end = spec["slice"]
-                    batch_y_true[:, start:end] = targets[name].numpy()
+            # Handle model returning tuple (Features, Loss) vs single output
+            if isinstance(preds, (list, tuple)):
+                pred_feat_batch = preds[0]
+                pred_loss_batch = preds[1]
+            else:
+                pred_feat_batch = preds
+                pred_loss_batch = None
 
-            list_pos.append(batch_y_true)
+            # B. Store Predictions (move to CPU/numpy immediately to save GPU mem)
+            list_pred_features.append(pred_feat_batch.numpy())
+            if pred_loss_batch is not None:
+                list_pred_loss.append(pred_loss_batch.numpy())
+
+            # C. Store Metadata from the 'inputs' dict
+            # We look for keys directly in the input batch that generated the prediction
+            list_pos.append(inputs["pos"].numpy())
             list_times.append(inputs["time"].numpy())
             list_times_behavior.append(inputs["time_behavior"].numpy())
             list_pos_index.append(inputs["pos_index"].numpy())
             list_index_in_dat.append(inputs["indexInDat"].numpy())
-            list_groups.append(inputs["groups"].numpy())
 
             # Optional keys (use .get or check)
             if "speedFilter" in inputs:
                 list_speed_filter.append(inputs["speedFilter"].numpy())
 
             if extract_spikes_counts:
+                list_index_in_dat_raw.append(inputs["indexInDat_raw"].numpy())
                 for g in range(self.params.nGroups):
                     key = f"group{g}_spikes_count"
                     if key in inputs:
@@ -2299,12 +1768,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # 3. Concatenate all batches into single arrays
         print("Concatenating results...")
-        # full_pred_features and full_pos_loss are already arrays/None from predict
+        full_pred_features = np.concatenate(list_pred_features, axis=0)
+
+        # Handle Pos Loss
+        if len(list_pred_loss) > 0:
+            full_pos_loss = np.concatenate(list_pred_loss, axis=0)
+        else:
+            full_pos_loss = None  # Or empty array depending on downstream needs
 
         full_feature_true = np.concatenate(list_pos, axis=0)
         full_times = np.concatenate(list_times, axis=0).flatten()
         full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
         full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
+        full_index_in_dat = np.concatenate(list_index_in_dat, axis=0)
 
         # Handle Speed Mask
         # If speedFilter was in dataset, use it. Otherwise compute via lookup
@@ -2316,30 +1792,74 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             windowmaskSpeed = speedMask[full_pos_index]
 
         # -------------------------------------------------------------------------
-        # 3. CONSOLIDATED POST-PROCESSING
+        # POST-PROCESSING (Heatmaps, etc.)
         # -------------------------------------------------------------------------
-        decoded_results = self.decode_predictions(
-            preds=preds_dict,
-            y_true=full_feature_true,
-            fit_temperature=fit_temperature,
-            T_scaling=T_scaling,
-            l_function=l_function,
-        )
 
-        # If we were just fitting temperature, return the scaling factor
-        if fit_temperature:
-            return decoded_results
+        outputTest = (full_pred_features, full_pos_loss)
+
+        # Handle Direction classification target
+        if self.target.lower() == "direction":
+            outputTest = (tf.cast(outputTest[0] > 0.5, tf.int32),)
+
+        # Handle Gaussian Heatmap Decoding
+        if getattr(self.params, "GaussianHeatmap", False):
+            print("Decoding Gaussian Heatmaps...")
+            if self.params.dimOutput > 2:
+                # Split logits vs other outputs
+                grid_size = self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H
+                output_logits = outputTest[0][:, :grid_size]
+                output_logits = tf.reshape(
+                    output_logits,
+                    (-1, self.GaussianHeatmap.GRID_H, self.GaussianHeatmap.GRID_W),
+                )
+                others = outputTest[0][:, grid_size:]
+            else:
+                output_logits = outputTest[0]
+                others = None
+
+            # Initial Decode
+            xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                output_logits
+            )
+
+            # Temperature Scaling Logic
+            if fit_temperature:
+                featureTrue = np.reshape(
+                    full_feature_true, [xy.shape[0], self.params.dimOutput]
+                )
+                featureTruePos = featureTrue[:, :2]
+                val_targets = self.GaussianHeatmap.gaussian_heatmap_targets(
+                    featureTruePos
+                )
+                T_scaling = self.GaussianHeatmap.fit_temperature(
+                    output_logits, val_targets, iters=400
+                )
+                return T_scaling
+
+            if T_scaling is not None:
+                output_logits = output_logits / T_scaling
+                xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                    output_logits
+                )
+
+            # Reassemble output
+            if self.params.dimOutput > 2:
+                total_output = tf.concat([xy, others], axis=-1)
+            else:
+                total_output = xy
+
+            # Update outputTest with decoded XY
+            outputTest = (total_output.numpy(), outputTest[1])
 
         # Ensure Feature True shape is correct
-        featureTrue = np.reshape(
-            full_feature_true, [decoded_results["featurePred"].shape[0], -1]
-        )
+        featureTrue = np.reshape(full_feature_true, [outputTest[0].shape[0], -1])
 
         # -------------------------------------------------------------------------
         # PACKAGING OUTPUTS
         # -------------------------------------------------------------------------
 
         testOutput = {
+            "featurePred": outputTest[0],
             "featureTrue": featureTrue,
             "times": full_times,
             "times_behavior": full_times_behavior,
@@ -2347,24 +1867,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "posIndex": full_pos_index,
             "speedMask": windowmaskSpeed,
         }
-        for name, spec in decoded_results.items():
-            if name not in testOutput:
-                testOutput[name] = spec
-
-        # Merge other metrics from decoding
-        for k in [
-            "projPred",
-            "projTruePos",
-            "linearPred",
-            "linearTrue",
-            "logits_hw",
-            "var_total",
-            "Hn",
-            "maxp",
-            "T_scaling",
-        ]:
-            if k in decoded_results.keys():
-                testOutput[k] = decoded_results[k]
 
         # -------------------------------------------------------------------------
         # CSV GENERATION (Spike Counts)
@@ -2380,7 +1882,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 # Concatenate the raw indices
                 full_index_raw = [
-                    row.tolist() for batch in list_index_in_dat for row in batch
+                    row.tolist() for batch in list_index_in_dat_raw for row in batch
                 ]
 
                 # Construct DataFrame directly from the arrays (Much faster than row-loop)
@@ -2407,110 +1909,35 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # LINEAR FUNCTION METRICS
         # -------------------------------------------------------------------------
         if l_function:
-            projPredPos, linearPred = l_function(decoded_results["featurePred"][:, :2])
+            projPredPos, linearPred = l_function(outputTest[0][:, :2])
             projTruePos, linearTrue = l_function(featureTrue[:, :2])
             testOutput["projPred"] = projPredPos
             testOutput["projTruePos"] = projTruePos
             testOutput["linearPred"] = linearPred
             testOutput["linearTrue"] = linearTrue
 
-        # -------------------------------------------------------------------------
-        # ADDITIONAL METRICS & VISUALIZATIONS
-        # -------------------------------------------------------------------------
-        self._compute_metrics_and_plots(
-            featurePred=decoded_results["featurePred"],
-            featureTrue=featureTrue,
-            phase=phase,
-            windowSizeMS=windowSizeMS,
-            testOutput=testOutput,
-            sleep=False,
-        )
+        if getattr(self.params, "GaussianHeatmap", False):
+            # add uncertainty and confidence metrics to output dict
+            testOutput["logits_hw"] = (
+                output_logits.numpy()
+                if hasattr(output_logits, "numpy")
+                else output_logits
+            )
+            testOutput["var_total"] = (
+                var_total.numpy() if hasattr(var_total, "numpy") else var_total
+            )
+            testOutput["Hn"] = Hn.numpy() if hasattr(Hn, "numpy") else Hn
+            testOutput["maxp"] = maxp.numpy() if hasattr(maxp, "numpy") else maxp
+            testOutput["T_scaling"] = (
+                (T_scaling.numpy() if hasattr(T_scaling, "numpy") else T_scaling)
+                if T_scaling is not None
+                else None
+            )
 
-        # -------------------------------------------------------------------------
-        # SAVE RESULTS
-        # -------------------------------------------------------------------------
+        # Save the results
         self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
 
         return testOutput
-
-    def _compute_metrics_and_plots(
-        self, featurePred, featureTrue, phase, windowSizeMS, testOutput, sleep=False
-    ):
-        """Helper to compute additional metrics and generate visualizations"""
-        print(f"Calculating additional metrics for {phase}...")
-        target = str(self.params.target).lower()
-
-        metrics = {}
-        # 2D Position Metrics
-        if "pos" in target or "lin" in target:
-            # MSE on 2D positions
-            dist_sq = np.sum((featurePred[:, :2] - featureTrue[:, :2]) ** 2, axis=1)
-            metrics["mse_2d"] = np.mean(dist_sq)
-            metrics["rmse_2d"] = np.sqrt(metrics["mse_2d"])
-            metrics["max_error"] = np.max(np.sqrt(dist_sq))
-            testOutput["residuals"] = featurePred - featureTrue
-
-        # Classification Metrics
-        if "classification" in target or "int" in target:
-            metrics["accuracy"] = np.mean(featurePred == featureTrue)
-
-        # Polar/Direction Metrics
-        if "direction" in target or "head" in target:
-            # Assume angles are in radians if single column, or unit vectors if 2 columns
-            if featurePred.shape[1] == 1:
-                # Circular MAE
-                diff = (featurePred - featureTrue + np.pi) % (2 * np.pi) - np.pi
-                metrics["circular_mae"] = np.mean(np.abs(diff))
-                metrics["bias"] = np.mean(diff)
-            elif featurePred.shape[1] == 2:
-                # Dot product for unit vectors
-                cos_sim = np.sum(featurePred * featureTrue, axis=1) / (
-                    np.linalg.norm(featurePred, axis=1)
-                    * np.linalg.norm(featureTrue, axis=1)
-                    + 1e-8
-                )
-                metrics["angular_error"] = np.mean(np.arccos(np.clip(cos_sim, -1, 1)))
-
-        testOutput["metrics"] = metrics
-        print(f"Metrics: {metrics}")
-
-        # VISUALIZATIONS
-        if ("pos" in target or "lin" in target) and featurePred.shape[1] >= 2:
-            print("Generating quiver plot...")
-            plt.figure(figsize=(10, 10))
-            # Sample for clarity if too many points
-            n = len(featurePred)
-            step = max(1, n // 500)
-            p_true = featureTrue[::step, :2]
-            res = (featurePred - featureTrue)[::step, :2]
-            plt.quiver(
-                p_true[:, 0],
-                p_true[:, 1],
-                res[:, 0],
-                res[:, 1],
-                scale_units="xy",
-                angles="xy",
-                scale=1,
-                alpha=0.6,
-                color="red",
-            )
-            plt.title(f"Position Residuals - {phase} ({windowSizeMS}ms)")
-            plt.xlabel("X")
-            plt.ylabel("Y")
-
-            # Save plot path
-            if sleep:
-                plot_folder = os.path.join(
-                    self.folderResultSleep, str(windowSizeMS), phase
-                )
-            else:
-                plot_folder = os.path.join(self.folderResult, str(windowSizeMS))
-
-            os.makedirs(plot_folder, exist_ok=True)
-            plot_path = os.path.join(plot_folder, f"quiver_residuals_{phase}.png")
-            plt.savefig(plot_path)
-            plt.close()
-            testOutput["quiver_plot_path"] = plot_path
 
     def testSleep(self, behaviorData, **kwargs):
         """
@@ -2565,9 +1992,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
-                    skip_mismatch=True,
                 )
-            except FileNotFoundError:
+            except:
                 print("loading from savedModels failed, trying full checkpoint ")
                 try:
                     self.model.load_weights(
@@ -2575,7 +2001,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
                         ),
                     )
-                except (FileNotFoundError, ValueError):
+                except:
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2611,29 +2037,37 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     tf.squeeze(tf.math.greater_equal(x["time"], timeSleepStart)),
                 )
 
+            @tf.autograph.experimental.do_not_convert
             def map_parse_serialized_sequence(*vals):
                 return nnUtils.parse_serialized_sequence(
                     self.params, *vals, batched=True
                 )
 
+            dim_output = (
+                self.params.dimOutput
+                if not getattr(self.params, "GaussianHeatmap", False)
+                else (
+                    self.params.dimOutput
+                    - 2
+                    + self.params.GaussianGridSize[0] * self.params.GaussianGridSize[1]
+                )
+            )
+
             @tf.function
             def map_outputs(vals):
-                # Move 'pos' to targets, rest stay in inputs
-                inputs_dict = {k: v for k, v in vals.items() if k != "pos"}
-                # Structured targets matching model outputs
-                targets_dict = {}
-                for name, spec in self.target_structure.items():
-                    start_idx, end_idx = spec["slice"]
-                    targets_dict[name] = vals["pos"][:, start_idx:end_idx]
-
-                # latent targets are the 2D position for contrastive regression
-                if "latent" in self.outNames:
-                    targets_dict["latent"] = vals["pos"][:, :2]
-
-                return (inputs_dict, targets_dict)
+                basic_dict = {
+                    self.outNames[0]: tf.zeros(
+                        (self.params.batchSize, dim_output), dtype=tf.float32
+                    ),
+                }
+                for outname in self.outNames[1:]:
+                    basic_dict[outname] = tf.zeros(
+                        self.params.batchSize, dtype=tf.float32
+                    )
+                return (vals, basic_dict)
 
             dataset = dataset.filter(filter_by_time)
-            dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
+            dataset = dataset.batch(self.params.batchSize, drop_remainder=True)
 
             dataset = dataset.map(
                 map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
@@ -2646,79 +2080,84 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             dataset.prefetch(tf.data.AUTOTUNE)
             # Infer
             print(f"Inferring {sleepName} values")
-            preds_dict = self.model.predict(dataset, verbose=1)
+            output = self.model.predict(dataset, verbose=1)
 
-            # -------------------------------------------------------------------------
-            # CONSOLIDATED POST-PROCESSING
-            # -------------------------------------------------------------------------
-            decoded_results = self.decode_predictions(
-                preds=preds_dict,
-                T_scaling=T_scaling,
-                l_function=l_function,
+            if self.target.lower() == "direction":
+                output = (tf.cast(output[0] > 0.5, tf.int32),)
+
+            if getattr(self.params, "GaussianHeatmap", False):
+                if self.params.dimOutput > 2:
+                    output_logits = output[0][
+                        :, : self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H
+                    ]
+                    output_logits = tf.reshape(
+                        output_logits,
+                        (
+                            output_logits.shape[0],
+                            self.GaussianHeatmap.GRID_H,
+                            self.GaussianHeatmap.GRID_W,
+                        ),
+                    )  # logits with shape (batch, H, W)
+                    others = output[0][
+                        :, self.GaussianHeatmap.GRID_H * self.GaussianHeatmap.GRID_H :
+                    ]  # other outputs (speed, ...) with shape (batch, dimOutput-2)
+                else:
+                    # output_logits is already (batch, H, W) because flatten = False
+                    output_logits = output[0]
+
+                xy, maxp, Hn, var_total = self.GaussianHeatmap.decode_and_uncertainty(
+                    output_logits
+                )
+                if T_scaling is not None:
+                    output_logits = output_logits / T_scaling
+
+                if self.params.dimOutput > 2:
+                    # concatenate xy with the other outputs (speed, ...)
+                    total_output = tf.concat([xy, others], axis=-1)
+                else:
+                    total_output = xy
+                # reconstruct output tuple with xy pred instead of heatmap
+                output = (total_output.numpy(), output[1])
+
+            # Post-infer management
+            print(f"gathering times of the centre in the time window for {sleepName}")
+
+            @tf.autograph.experimental.do_not_convert
+            def map_time(x, y):
+                return x["time"]
+
+            datasetTimes = dataset.map(map_time, num_parallel_calls=tf.data.AUTOTUNE)
+            times = list(datasetTimes.as_numpy_iterator())
+            times = np.ravel(times)
+            print(
+                f"gathering indices of spikes relative to coordinates for {sleepName}"
             )
 
-            output_preds = decoded_results["featurePred"]
+            @tf.autograph.experimental.do_not_convert
+            def map_pos_index(x, y):
+                return x["pos_index"]
 
-            # output is used for predictions[sleepName] packaging
-            output = (output_preds, None)
+            @tf.autograph.experimental.do_not_convert
+            def map_index_in_dat(x, y):
+                return x["indexInDat"]
 
-            # Post-infer management: Gather metadata efficiently in a single pass
-            print(f"gathering metadata for {sleepName}")
-            list_times = []
-            list_posIndex = []
-            list_IDdat = []
-            list_pos = []
-
-            for inputs, targets in tqdm(
-                dataset, desc=f"Gathering metadata {sleepName}"
-            ):
-                list_times.append(inputs["time"].numpy())
-                list_posIndex.append(inputs["pos_index"].numpy())
-                list_IDdat.append(inputs["indexInDat"].numpy())
-
-                # Reconstruct full Y ground truth from individual target heads
-                max_idx = 0
-                for spec in self.target_structure.values():
-                    max_idx = max(max_idx, spec["slice"][1])
-
-                batch_size = next(iter(targets.values())).shape[0]
-                batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
-
-                for name, spec in self.target_structure.items():
-                    if name in targets:
-                        start, end = spec["slice"]
-                        batch_y_true[:, start:end] = targets[name].numpy()
-
-                list_pos.append(batch_y_true)
-
-            times = np.concatenate(list_times, axis=0).flatten()
-            posIndex = np.concatenate(list_posIndex, axis=0).flatten()
-            IDdat = [batch for batch in list_IDdat]
-
-            # featureTrue if targets were present (some sleep recordings might have it)
-            featureTrue = None
-            if list_pos:
-                featureTrue = np.concatenate(list_pos, axis=0)
-                featureTrue = np.reshape(featureTrue, [output[0].shape[0], -1])
+            datasetPosIndex = dataset.map(
+                map_pos_index, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            posIndex = list(datasetPosIndex.as_numpy_iterator())
+            posIndex = np.ravel(np.array(posIndex))
+            #
+            datasetIndexInDat = dataset.map(
+                map_index_in_dat, num_parallel_calls=tf.data.AUTOTUNE
+            )
+            IDdat = list(datasetIndexInDat.as_numpy_iterator())
 
             predictions[sleepName] = {
                 "featurePred": output[0],
-                "featureTrue": featureTrue,  # Still add even if None for consistency
                 "times": times,
                 "posIndex": posIndex,
                 "indexInDat": IDdat,
             }
-
-            # If we have targets, compute metrics for this sleep epoch
-            if featureTrue is not None:
-                self._compute_metrics_and_plots(
-                    featurePred=output[0],
-                    featureTrue=featureTrue,
-                    phase=sleepName,
-                    windowSizeMS=windowSizeMS,
-                    testOutput=predictions[sleepName],
-                    sleep=True,
-                )
             if l_function:
                 projPredPos, linearPred = l_function(output[0][:, :2])
                 predictions[sleepName]["projPred"] = projPredPos
@@ -2726,7 +2165,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             if getattr(self.params, "GaussianHeatmap", False):
                 # add uncertainty and confidence metrics to output dict
-                print("Not implemented yet")
+                predictions[sleepName]["logits_hw"] = output_logits
+                predictions[sleepName]["var_total"] = var_total
+                predictions[sleepName]["Hn"] = Hn
+                predictions[sleepName]["maxp"] = maxp
+                predictions[sleepName]["T_scaling"] = T_scaling
 
         # Save the results
         for key in predictions.keys():
@@ -2773,6 +2216,44 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # return reshaped_w
         return wdata
 
+    def _parse_loss_function_from_params(self, myoutputPos):
+        # TODO: change
+        ### Multi-column loss configuration
+        column_losses = getattr(
+            self.params,
+            "column_losses",
+            {str(i): self.params.loss for i in range(myoutputPos.shape[-1])},
+        )
+        column_weights = getattr(self.params, "column_weights", {})
+        merge_columns = getattr(self.params, "merge_columns", [])
+        merge_losses = getattr(self.params, "merge_losses", [])
+        merge_weights = getattr(self.params, "merge_weights", [])
+
+        # Create the loss instance
+        if len(column_weights) > 1 or any("," in spec for spec in column_losses.keys()):
+            print("Using multi-column loss")
+            self.loss_function = MultiColumnLossLayer(
+                column_losses=column_losses,
+                column_weights=column_weights,
+                merge_columns=merge_columns,
+                merge_losses=merge_losses,
+                merge_weights=merge_weights,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_layer=getattr(self, "GaussianLoss_layer", None),
+            )  # actually it's more of a layer than a function
+
+        else:
+            # Single loss case
+            self.loss_function = _get_loss_function(
+                self.params.loss,
+                alpha=self.params.alpha,
+                delta=self.params.delta,
+                gaussian_loss_layer=getattr(self, "GaussianLoss_layer", None),
+            )
+
+        return self.loss_function
+
     def _apply_oversampling_resampling(self, dataset, windowSizeMS, shuffle=True):
         """
         Apply oversampling resampling to the training dataset to balance the samples.
@@ -2804,6 +2285,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         stride = 5
         self.coarse_H, self.coarse_W = GRID_H // stride, GRID_W // stride
 
+        @tf.autograph.experimental.do_not_convert
         def map_bin_class(ex):
             return nnUtils.bin_class(
                 ex,
@@ -2813,11 +2295,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.GaussianHeatmap.forbid_mask_tf,
             )
 
-        def filter_for_oversampling(ex):
-            return tf.greater_equal(map_bin_class(ex), 0)
-
         # should not be useful as true positions are already allowed!
-        dataset = dataset.filter(filter_for_oversampling)
+        dataset = dataset.filter(lambda ex: tf.greater_equal(map_bin_class(ex), 0))
 
         positions = self.GaussianHeatmap.training_positions
         # filter position by map_bin_class
@@ -2858,9 +2337,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         allowed_bins = (counts > 0) & (~FORBID_flat)
 
-        # compute oversampling ratios relative to max count among allowed bins
-        max_count = counts.max()
-        rep_factors = max_count / np.maximum(counts[allowed_bins], 1e-8)
+        # Normalize - empirical proba for each allowed bin
+        initial_dist = counts / np.maximum(1.0, counts.sum())
+        initial_dist = initial_dist[allowed_bins]
+        target_dist = np.ones(
+            self.coarse_H * self.coarse_W,
+            np.float32,
+        )
+        target_dist[FORBID_flat] = 0  # forbid forbidden bins
+        target_dist /= target_dist.sum()  # normalize to sum=1
+        target_dist = target_dist[allowed_bins]
+
+        # compute oversampling ratios
+        rep_factors = target_dist / np.maximum(initial_dist, 1e-8)
         rep_factors = np.minimum(rep_factors, 20.0)  # clip to avoid extreme repeats
         rep_factors_tf = tf.constant(rep_factors, tf.float32)
 
@@ -2872,6 +2361,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
 
         # Map each example to repeated dataset
+        @tf.autograph.experimental.do_not_convert
         def map_repeat(ex):
             mapped_cls = map_bin_class(ex)
             allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
@@ -2881,17 +2371,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             repeats = tf.cast(
                 tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
             )
-            repeats = tf.where(
-                allowed_idx_val >= 0, repeats, tf.constant(0, dtype=tf.int64)
+            repeats = tf.where(allowed_idx_val >= 0, repeats, 0)
+            return tf.cond(
+                repeats > 0,
+                lambda: tf.data.Dataset.from_tensors(ex).repeat(repeats),
+                lambda: tf.data.Dataset.from_tensors(ex).take(0),
             )
-
-            def repeat_fn():
-                return tf.data.Dataset.from_tensors(ex).repeat(repeats)
-
-            def empty_fn():
-                return tf.data.Dataset.from_tensors(ex).take(0)
-
-            return tf.cond(repeats > 0, repeat_fn, empty_fn)
 
         dataset_before_oversampling = dataset
         # Save this before the oversampling block
@@ -2912,7 +2397,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 dataset_before_oversampling,
                 dataset_after_oversampling,
                 stride=stride,  # Match your stride
-                max_samples=30000,
+                max_samples=20000,
                 path=os.path.join(
                     self.folderResult,
                     str(windowSizeMS),
@@ -2927,7 +2412,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         windowSizeMS: int = 36,
         useSpeedFilter: bool = False,
         useTrain: bool = False,
-        useTest: bool = True,
         isPredLoss: bool = False,
         strideFactor: int = 1,
         phase: str = "test",
@@ -2975,18 +2459,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
-                    skip_mismatch=True,
                 )
-            except FileNotFoundError:
+            except:
                 print("fallback loading full/cp.ckpt")
                 try:
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels, str(windowSizeMS), "full", "cp.ckpt"
                         ),
-                        skip_mismatch=True,
                     )
-                except (FileNotFoundError, ValueError):
+                except:
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2994,13 +2476,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "full",
                             "cp.weights.h5",
                         ),
-                        skip_mismatch=True,
                     )
 
         # --- Build the same total mask used in test() ---
-        epochMask = get_epochs_mask(
-            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
-        )
+        if useTrain:
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
+            ) + inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
+            )
+        else:
+            epochMask = inEpochsMask(
+                behaviorData["positionTime"][:, 0], behaviorData["Times"]["testEpochs"]
+            )
 
         if useSpeedFilter:
             speedMask = behaviorData["Times"]["speedFilter"]
@@ -3246,61 +2734,62 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         ## For the linearization we define two fixed inputs:
         self.maze_points = mazePoints
         self.ts_proj = tsProj
-        self.mazePoints_tensor = tf.convert_to_tensor(mazePoints[None, :])
-        self.tsProjTensor = tf.convert_to_tensor(tsProj[None, :])
+        self.mazePoints_tensor = tf.convert_to_tensor(
+            mazePoints[None, :], dtype=tf.float32
+        )
+        self.tsProjTensor = tf.convert_to_tensor(tsProj[None, :], dtype=tf.float32)
 
     # used in the data pipepline
-    def create_indices(self, vals, shuffle=False):
+    def create_indices(self, vals, addLinearizationTensor=False):
         """
-        Create relative indices for gathering spikes from each group.
+        Create indices for gathering spikes from each group.
         The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
 
         Args:
             vals (dict): A dictionary containing the input tensors, including "groups" and "group{n}" for each group.
             addLinearizationTensor (bool): Whether to add linearization tensors to the output.
-            shuffle (bool): Whether to shuffle the indices within each group for null hypothesis/control.
         Returns:
-            dict: Updated dictionary with indices for each group. The indices are stored under the keys "indices{n}" for each group.
+            dict: Updated dictionary with indices for each group and optional linearization tensors. The indices are stored under the keys "indices{n}" for each group and represent the positions to gather spikes from each group.
+
+        See self.indices in the model definition for more details on usage.
         """
-        if shuffle:
-            print(
-                "Shuffling spike indices within each group for null hypothesis/control."
+        for group in range(self.params.nGroups):
+            spikePosition = tf.where(tf.equal(vals["groups"], group))
+            # Note: inputGroups is already filled with -1 at position that correspond to filling
+            # for batch issues
+            # The i-th spike of the group should be positioned at spikePosition[i] in the final tensor
+            # We therefore need to set indices[spikePosition[i]] to i so that it is effectively gathered
+            # We need to wrap the use of sparse tensor (tensorflow error otherwise)
+            # The sparse tensor allows us to get the list of indices for the gather quite easily
+            rangeIndices = tf.range(tf.shape(vals["group" + str(group)])[0]) + 1
+            indices = tf.sparse.SparseTensor(
+                spikePosition, rangeIndices, [tf.shape(vals["groups"])[0]]
             )
+            indices = tf.cast(tf.sparse.to_dense(indices), dtype=tf.int32)
+            vals.update({"indices" + str(group): indices})
 
-        groups = vals["groups"]
-        for group_id in range(self.params.nGroups):
-            # Find positions of spikes belonging to this group
-            is_in_group = tf.equal(groups, group_id)
+            if self.params.usingMixedPrecision:
+                zeroForGather = tf.zeros([1, self.params.nFeatures], dtype=tf.float16)
+            else:
+                zeroForGather = tf.zeros([1, self.params.nFeatures])
+            vals.update({"zeroForGather": zeroForGather})
 
-            # 2. Use cumsum to generate sequential IDs (1, 2, 3...) for these spikes
-            # This replaces the SparseTensor logic entirely.
-            # Example: [0, 1, 0, 1] -> [0, 1, 1, 2]
-            relative_indices = tf.cast(
-                tf.cumsum(tf.cast(is_in_group, tf.int32)), tf.int32
-            )
-
-            # 3. Apply the mask so only spikes in this group have a non-zero index
-            # Example: [0, 1, 1, 2] -> [0, 1, 0, 2]
-            indices_tensor = tf.where(is_in_group, relative_indices, 0)
-
-            # 4. Handle Shuffling (Null Hypothesis Control)
-            if shuffle:
-                # We only want to shuffle the non-zero indices
-                # Extract values, shuffle them, and put them back
-                mask = indices_tensor > 0
-                non_zero_indices = tf.boolean_mask(indices_tensor, mask)
-                shuffled_values = tf.random.shuffle(non_zero_indices)
-
-                # Use scatter_nd to put shuffled values back into a zero-filled tensor
-                # We need the positions for scattering
-                positions = tf.where(mask)
-                indices_tensor = tf.scatter_nd(
-                    indices=positions,
-                    updates=shuffled_values,
-                    shape=tf.cast(tf.shape(groups), tf.int64),
+            # changing the dtype to allow faster computations
+            if self.params.usingMixedPrecision:
+                vals.update(
+                    {
+                        "group" + str(group): tf.cast(
+                            vals["group" + str(group)], dtype=tf.float16
+                        )
+                    }
                 )
-            vals[f"indices{group_id}"] = indices_tensor
 
+            if addLinearizationTensor:
+                vals.update({"mazePoints": self.mazePoints_tensor})
+                vals.update({"tsProj": self.tsProjTensor})
+
+        if self.params.usingMixedPrecision:
+            vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
         return vals
 
     # used in the data pipepline some day?
@@ -3355,17 +2844,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             max_spikes_per_batch = original_shape[1]
             # Flatten for processing
             original_groups_flat = tf.reshape(original_groups, [-1])
+            spike_times_flat = tf.reshape(spike_times, [-1])
             temporal_bin_indices_flat = tf.reshape(temporal_bin_indices, [-1])
 
             # Create batch indices
             batch_indices = tf.repeat(tf.range(batch_size), max_spikes_per_batch)
         else:
-            # Assume batch_size is set in params
-            batch_size = self.params.batch_size
+            # Assume batchSize is set in params
+            batch_size = self.params.batchSize
             total_spikes = original_shape[0]
             max_spikes_per_batch = total_spikes // batch_size
 
             original_groups_flat = original_groups
+            spike_times_flat = spike_times
             temporal_bin_indices_flat = temporal_bin_indices
             batch_indices = tf.repeat(tf.range(batch_size), max_spikes_per_batch)
 
@@ -3425,7 +2916,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             # Create linear indices for the temporal structure
             # Total size is now batch_size * n_temporal_bins
-            (spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1])
+            linear_temporal_positions = (
+                spikePosition[:, 0] * n_temporal_bins + spikePosition[:, 1]
+            )
 
             # Map: for each position in spikePosition, which original spike index to use
             # Build lookup: (batch, temporal_bin) -> original_spike_index
@@ -3451,8 +2944,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 }
             )
 
+            if self.params.usingMixedPrecision:
+                vals.update(
+                    {
+                        "group" + str(group): tf.cast(
+                            vals["group" + str(group)], dtype=tf.float16
+                        )
+                    }
+                )
+
         # Create zero tensor for gathering
-        zeroForGather = tf.zeros([1, self.params.nFeatures])
+        if self.params.usingMixedPrecision:
+            zeroForGather = tf.zeros([1, self.params.nFeatures], dtype=tf.float16)
+        else:
+            zeroForGather = tf.zeros([1, self.params.nFeatures])
 
         vals.update(
             {
@@ -3462,6 +2967,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 "n_temporal_bins": n_temporal_bins,
             }
         )
+
+        if self.params.usingMixedPrecision:
+            vals.update({"pos": tf.cast(vals["pos"], dtype=tf.float16)})
 
         if addLinearizationTensor:
             vals.update(
@@ -3546,25 +3054,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         df = pd.DataFrame(test_output["times"])
         df.to_csv(os.path.join(folderToSave, f"timeStepsPred{suffix}.csv"))
         # Index of spikes relative to positions
-        df = pd.DataFrame(test_output["posIndex"])
-        df.to_csv(os.path.join(folderToSave, f"posIndex{suffix}.csv"))
-
-        # Save additional metrics
-        if "metrics" in test_output:
-            import json
-
-            # Convert numpy types to native python types for JSON serialization
-            metrics_serializable = {
-                k: float(v) if hasattr(v, "__float__") else v
-                for k, v in test_output["metrics"].items()
-            }
-            with open(os.path.join(folderToSave, f"metrics{suffix}.json"), "w") as f:
-                json.dump(metrics_serializable, f, indent=4)
-
-        # Save residuals if present
-        if "residuals" in test_output:
-            df = pd.DataFrame(test_output["residuals"])
-            df.to_csv(os.path.join(folderToSave, f"residuals{suffix}.csv"))
         df = pd.DataFrame(test_output["posIndex"])
         df.to_csv(os.path.join(folderToSave, f"posIndex{suffix}.csv"))
         # Speed mask
@@ -3722,6 +3211,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             dtype="float32",
         )
 
+        gaussian_loss_layer_config = self.GaussianHeatmap.get_config()
+        # Setup config for GaussianHeatmapLosses
+        gaussian_loss_layer_config.update(
+            {
+                "l_function_layer_params": self.lfunction_layer_params,
+            }
+        )
+        gaussian_loss_layer_config.pop("name", None)  # avoid 'name' conflict
+        gaussian_loss_layer_config.pop("trainable", None)
+        gaussian_loss_layer_config.pop("dtype", None)
+        self.GaussianLoss_layer = GaussianHeatmapLosses(
+            **gaussian_loss_layer_config,
+            name="gaussian_loss_layer",
+        )
+
     def extract_cnn_model(self):
         """
         Extract CNN feature extractor from the complete model.
@@ -3761,12 +3265,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             transformer_model: Model that processes CNN features through transformer
         """
 
-        with nnUtils.get_device_context(self.deviceName):
+        with tf.device(self.deviceName):
             # Create new inputs for transformer model
             cnn_feature_inputs = [
-                tf.keras.layers.Input(
-                    shape=(self.params.nFeatures,), name=f"cnn_features_{i}"
-                )
+                tf.keras.Input(shape=(self.params.nFeatures,), name=f"cnn_features_{i}")
                 for i in range(self.params.nGroups)
             ]
 
@@ -3791,7 +3293,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 filledFeatureTrain = tf.reshape(
                     filledFeatureTrain,
-                    [self.params.batch_size, -1, self.params.nFeatures],
+                    [self.params.batchSize, -1, self.params.nFeatures],
                 )
                 allFeatures.append(filledFeatureTrain)
 
@@ -3799,7 +3301,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             allFeatures = tf.concat(allFeatures, axis=2, name="concat_CNNs")
 
             # Create mask
-            batchedInputGroups = tf.reshape(groups_input, [self.params.batch_size, -1])
+            batchedInputGroups = tf.reshape(groups_input, [self.params.batchSize, -1])
             mymask = tf.not_equal(batchedInputGroups, -1)
 
             # Store raw features and apply dropout
@@ -3807,7 +3309,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             allFeatures = self.dropoutLayer(allFeatures)
 
             # Use the shared transformer logic
-            myoutputPos, outputPredLoss, sumFeatures = (
+            myoutputPos, outputPredLoss, output, sumFeatures = (
                 self.apply_transformer_architecture(
                     allFeatures, allFeatures_raw, mymask
                 )
@@ -3888,7 +3390,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             validation_data=val_data,
             epochs=epochs,
             verbose=1,
-            batch_size=self.params.batch_size,
+            batch_size=self.params.batchSize,
         )
 
         return history
@@ -3923,7 +3425,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             validation_data=val_data,
             epochs=epochs,
             verbose=1,
-            batch_size=self.params.batch_size,
+            batch_size=self.params.batchSize,
         )
 
         return history
@@ -3989,7 +3491,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # Get final predictions
         predictions = transformer_model.predict(transformer_inputs)
-        return predictions
 
     @classmethod
     def clear_session(cls):

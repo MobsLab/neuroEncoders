@@ -11,8 +11,18 @@ import psutil
 
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
+win_values = [2.16]
+win_values = [0.036, 0.108, 0.18, 0.252, 0.504, 1.08, 2.16]
+win_values = [0.18, 2.16]
+win_values = [0.036, 0.108]
+win_values = [0.108, 0.18, 0.252, 0.504]
+win_values = [0.504]  # only kept for new dataset
+win_values = [0.108, 0.252]
+win_values = [0.108, 0.252]  # only kept for new dataset
+win_values = [0.108]
 win_values = [0.108, 0.252, 0.036]  # only kept for new dataset
 # Mice name
+mice_nb = []
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
@@ -34,7 +44,6 @@ nameExp = "consensus_v3_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLa
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
-target = "pos"
 target_bayes = "pos"
 phase = "pre"
 useStridingFactor = True
@@ -221,12 +230,12 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "--loss_type",
             "wasserstein",
             "--reduce_dense",
-            # "--contrastive_loss",
+            "--contrastive_loss",
             "--plot_id",
             # "--predicted_loss",
             # "--transform_w_log",
             # "--mixed_loss",
-            "--no_gaussian",
+            # "--no_gaussian",
         ]
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
@@ -249,6 +258,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             nbEpochs,
             "--target",
             target_bayes,
+            "--flat_prior",
             "--striding",
             str(win),
         ]
@@ -261,12 +271,12 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         if useStridingFactor:
             cmd_bayes += ["--striding_factor", str(stridingFactor)]
 
+        if "_test" not in xml_file:
+            cmd_bayes += ["--phase", phase]
         if redo:
             cmd_ann += ["--redo"]
-            cmd_bayes += ["--redo"]
         if "_test" not in xml_file:
             cmd_ann += ["--phase", phase]
-            cmd_bayes += ["--phase", phase]
         if run_bayes and run_ann and not lstmAndTransfo:
             return cmd_ann, cmd_bayes
         elif run_bayes and run_ann and lstmAndTransfo:
@@ -364,61 +374,45 @@ if __name__ == "__main__":
 
     # print(f"Found directories: {dirs}")
     mouse_commands = {}
-    for directory in dirs:
-        if (
-            any((mouse in directory or mouse[:-1] in directory) for mouse in mice_nb)
-            or not mice_nb
-        ):
-            if "M1199_MFB" not in directory:
-                mouse_commands[directory] = []
+    for dir in dirs:
+        if any(mouse in dir for mouse in mice_nb) or not mice_nb:
+            if "M1199_MFB" not in dir:
+                mouse_commands[dir] = []
                 for win in win_values:
                     if lstm:
                         for lstmAndTransfo in [False, True]:
                             # print(
-                            #     f"Processing {directory} with window {win} and lstmAndTransfo {lstmAndTransfo}"
+                            #     f"Processing {dir} with window {win} and lstmAndTransfo {lstmAndTransfo}"
                             # )
                             cmd_ann, cmd_bayes = process_directory(
-                                dir=directory,
+                                dir=dir,
                                 win=win,
                                 force=force,
                                 redo=redo,
                                 lstmAndTransfo=lstmAndTransfo,
                             )
                             if cmd_ann:
-                                mouse_commands[directory].append(cmd_ann)
+                                mouse_commands[dir].append(cmd_ann)
                             if cmd_bayes:
-                                mouse_commands[directory].append(cmd_bayes)
+                                mouse_commands[dir].append(cmd_bayes)
                     else:
-                        cmd_ann, cmd_bayes = process_directory(
-                            directory, win, force, redo
-                        )
+                        cmd_ann, cmd_bayes = process_directory(dir, win, force, redo)
                         if cmd_ann:
-                            mouse_commands[directory].append(cmd_ann)
+                            mouse_commands[dir].append(cmd_ann)
                         if cmd_bayes:
-                            mouse_commands[directory].append(cmd_bayes)
+                            mouse_commands[dir].append(cmd_bayes)
             else:
-                print(f"Processing M1199MFB mouse in directory: {directory}")
-                list_exps = []
-                if any("MFB1" in mouse for mouse in mice_nb):
-                    list_exps.append("exp1")
-                if any("MFB2" in mouse for mouse in mice_nb):
-                    list_exps.append("exp2")
-                if not list_exps:
-                    list_exps = ["exp1", "exp2"]
-                for dirmfb in list_exps:
-                    mouse_commands[os.path.join(directory, dirmfb)] = []
+                print(f"Processing M1199MFB mouse in directory: {dir}")
+                for dirmfb in ["exp1", "exp2"]:
+                    mouse_commands[os.path.join(dir, dirmfb)] = []
                     for win in win_values:
                         cmd_ann, cmd_bayes = process_directory(
-                            os.path.join(directory, dirmfb), win, force, redo
+                            os.path.join(dir, dirmfb), win, force, redo
                         )
                         if cmd_ann:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(
-                                cmd_ann
-                            )
+                            mouse_commands[os.path.join(dir, dirmfb)].append(cmd_ann)
                         if cmd_bayes:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(
-                                cmd_bayes
-                            )
+                            mouse_commands[os.path.join(dir, dirmfb)].append(cmd_bayes)
 
             if rsync:
                 PathForExperiments["realPath"] = PathForExperiments["path"].apply(
@@ -426,10 +420,10 @@ if __name__ == "__main__":
                 )
                 try:
                     Mouse = PathForExperiments[
-                        PathForExperiments["realPath"] == os.path.realpath(directory)
+                        PathForExperiments["realPath"] == os.path.realpath(dir)
                     ].iloc[0]["name"]
                     print(f"Mouse: {Mouse} from PathForExperiments")
-                    SOURCE = os.path.realpath(directory)
+                    SOURCE = os.path.realpath(dir)
                     DESTINATION = PathForExperiments[
                         PathForExperiments["name"] == Mouse
                     ].iloc[0]["network_path"]
@@ -442,17 +436,13 @@ if __name__ == "__main__":
                         DESTINATION,
                         "--force",
                     ]
-                    if "M1199_MFB" not in directory:
-                        mouse_commands[directory].append(runNasCMD)
+                    if "M1199_MFB" not in dir:
+                        mouse_commands[dir].append(runNasCMD)
                     else:
                         for dirmfb in ["exp1", "exp2"]:
-                            mouse_commands[os.path.join(directory, dirmfb)].append(
-                                runNasCMD
-                            )
-                except (IndexError, KeyError) as e:
-                    # Exception is expected when mouse directory structure is non-standard
-                    # or when mouse is not found in PathForExperiments
-                    print(f"Error finding mouse in PathForExperiments: {e}")
+                            mouse_commands[os.path.join(dir, dirmfb)].append(runNasCMD)
+                except:
+                    pass
 
     if mode == "sequential":
         run_commands_sequentially(mouse_commands)
