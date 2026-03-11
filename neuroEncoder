@@ -134,7 +134,7 @@ def main(args):
         windowSize=args.window,
         force_ref=False,
         isPredLoss=isPL,
-        load_at_init=False,  # we load a new params
+        load_at_init=True,  # we load a new params
     )
     helpers = [DataHelper]
     if args.phase != "cond":
@@ -174,7 +174,7 @@ def main(args):
             windowSize=args.window,
             force_ref=False,
             isPredLoss=isPL,
-            load_at_init=False,  # we load a new params
+            load_at_init=True,  # we load a new params
         )
         # adding post test helper
         rawdata_parser.speed_filter(
@@ -213,7 +213,7 @@ def main(args):
             windowSize=args.window,
             force_ref=False,
             isPredLoss=isPL,
-            load_at_init=False,  # we load a new params
+            load_at_init=True,  # we load a new params
         )
         helpers = [DataHelper_cond, DataHelper_post, DataHelper]
     for helper in helpers:
@@ -234,35 +234,10 @@ def main(args):
 
         if min_speed is not None and max_speed is not None:
             # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
-            speed = helper.fullBehavior["Speed"][:, 0]
-            pos_time = helper.fullBehavior["positionTime"][:, 0]
-            freeze_epochs = helper.get_freeze_epochs()
-
-            if speed.shape[0] == pos_time.shape[0] - 1:
-                speed = np.concatenate([[speed[0]], speed])
-
-            window_len = 6
-            s = np.r_[
-                speed[window_len - 1 : 0 : -1],
-                speed,
-                speed[-2 : -window_len - 1 : -1],
-            ]
-            w = np.hamming(window_len)
-            smoothed_speed = np.convolve(w / w.sum(), s, mode="valid")[
-                (window_len // 2 - 1) : -(window_len // 2)
-            ]
-
-            # Use logical_and to be conservative and ensure we filter within the [9, 75] range
-            helper.fullBehavior["Times"]["speedFilter"] = np.logical_and(
-                smoothed_speed > min_speed,
-                smoothed_speed < max_speed,
-                ~inEpochsMask(pos_time, freeze_epochs),
-            ).astype(bool)
-            print(
-                f"forced speed filter with min_speed {min_speed} and max_speed {max_speed}"
-            )
+            helper.force_speed_mask(min_speed, max_speed)
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
+        pos_time = helper.fullBehavior["positionTime"][:, 0]
         epochMask = inEpochsMask(
             pos_time,
             helper.fullBehavior["Times"]["trainEpochs"],
@@ -284,15 +259,22 @@ def main(args):
             windowSizeMS, l_function, in_place=True, show=show_figures, speedMask=True
         )
 
+    if windowSizeMS >= 504:
+        batch_size = 32
+    elif windowSizeMS >= 252:
+        batch_size = 64
+    elif windowSizeMS >= 108:
+        batch_size = 128
+    else:
+        batch_size = 256
+
     Parameters = Params(
         helper=DataHelper,
         windowSize=args.window,
         nEpochs=args.epochs,
         phase=args.phase,
         nFeatures=args.n_features,
-        batch_size=(256 if args.window < 0.252 else 128)
-        if "1230" not in ProjectPath.xml
-        else 128,
+        batch_size=batch_size,
         save_json=True,
         load_at_init=False,  # we load a new params
         isTransformer=not args.lstm,
@@ -700,6 +682,17 @@ def main(args):
         )
 
         # Network
+        if windowSizeMS >= 504:
+            max_nb_spikes = 1000
+        elif windowSizeMS >= 252:
+            max_nb_spikes = 600
+        elif windowSizeMS >= 108:
+            max_nb_spikes = 400
+        elif windowSizeMS >= 36:
+            max_nb_spikes = 100
+        else:
+            max_nb_spikes = None
+
         NNTrainer = Training.LSTMandSpikeNetwork(
             ProjectPath,
             Parameters,
@@ -712,6 +705,7 @@ def main(args):
             alpha=Parameters.denseweightAlpha,
             linearizer=Linearizer,
             jit_compile=False,
+            max_nb_spikes=max_nb_spikes,
         )
 
         if (
@@ -728,7 +722,7 @@ def main(args):
             if Parameters.dataAugmentation:
                 print("num_augmentations", num_augmentations)
                 if num_augmentations is None:
-                    num_augmentations = 4 if args.window < 0.504 else 2
+                    num_augmentations = 3
             NNTrainer.train(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -942,7 +936,7 @@ def main(args):
                 # TODO: add window Size Decoder --> decode small windows with big window trained model
             )
 
-        if args.plot_id and (
+        if args.plot_id or (
             not os.path.exists(
                 os.path.join(
                     ProjectPath.experimentPath,
@@ -1010,7 +1004,7 @@ def main(args):
             curr.fig_summary_id_card(
                 timeWindow=windowSizeMS,
                 DataHelper=DataHelper,
-                save=True,
+                open=True,
                 block=False,
                 mouse_name=curr.mouse_name + curr.manipe,
             )

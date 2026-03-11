@@ -1,24 +1,200 @@
 # Load libs
+import contextlib
 import gc
+import logging
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, TypeAlias
 
+import matplotlib.pyplot as plt
 import numpy as np
-import psutil
-from denseweight import DenseWeight
-from scipy.ndimage import gaussian_filter
-
-from neuroencoders.utils.global_classes import SpatialConstraintsMixin
+from sklearn.decomposition import PCA
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
+import keras
 import keras.utils as keras_utils
+import psutil
 import tensorflow as tf
+from denseweight import DenseWeight
 from keras import ops as kops
+from scipy.ndimage import gaussian_filter
+
+from neuroencoders.utils.global_classes import Params, SpatialConstraintsMixin
+
+
+def get_device_context(device):
+    """
+    Return a context manager that controls TensorFlow device or strategy scope.
+
+    Parameters
+    ----------
+    device : None, str, or tf.distribute.Strategy
+        - ``None``:
+            No explicit device placement is requested. A no-op context manager
+            (``contextlib.nullcontext``) is returned, so the caller's existing
+            device/strategy configuration is left unchanged.
+        - ``tf.distribute.Strategy``:
+            A distribution strategy instance. The strategy's scope
+            (``strategy.scope()``) is returned so that any model or variable
+            creation inside the ``with`` block is placed under the strategy.
+        - ``str``:
+            A TensorFlow device specification string, e.g. ``"/CPU:0"``,
+            ``"/GPU:0"``, or ``"/device:GPU:0"``. If no distribution strategy
+            is active, this is passed to :func:`tf.device`. If a distribution
+            strategy is already active, a no-op context is returned instead so
+            that the strategy can manage placement automatically.
+
+    Returns
+    -------
+    context manager
+        A context manager suitable for use in a ``with`` statement:
+
+        - ``contextlib.nullcontext()`` when:
+            * ``device is None``,
+            * a distribution strategy is active and ``device`` is a ``str``,
+            * or ``device`` is an invalid device specification (caught
+              ``ValueError`` or ``TypeError`` from :func:`tf.device`).
+        - ``strategy.scope()`` when ``device`` is an instance of
+          :class:`tf.distribute.Strategy`.
+        - ``tf.device(device)`` when ``device`` is a valid device string and
+          no distribution strategy is active.
+
+    Notes
+    -----
+    This helper centralizes the logic for safely handling device strings and
+    distribution strategies. It intentionally falls back to a no-op context
+    manager for unsupported or invalid configurations instead of raising,
+    making it easier to write higher-level utilities that accept an optional
+    ``device`` argument.
+
+    When a distribution strategy is active and a device string is provided,
+    the device string is ignored with a warning, allowing the strategy to
+    manage device placement automatically.
+
+    Examples
+    --------
+    Use default (no explicit device):
+
+    >>> with get_device_context(None):
+    ...     x = tf.constant(1.0)
+
+    Use a specific device:
+
+    >>> with get_device_context("/GPU:0"):
+    ...     x = tf.constant(1.0)
+
+    Use with a distribution strategy:
+
+    >>> strategy = tf.distribute.MirroredStrategy()
+    >>> with get_device_context(strategy):
+    ...     model = tf.keras.Sequential(...)
+
+    Active strategy with a device string (string is ignored, strategy wins):
+
+    >>> strategy = tf.distribute.MirroredStrategy()
+    >>> with strategy.scope():
+    ...     # Strategy is active here
+    ...     with get_device_context("/GPU:0"):
+    ...         # This inner scope is effectively a no-op; placement is still
+    ...         # controlled by the active strategy.
+    ...         x = tf.constant(1.0)
+
+    Invalid device string (falls back to no-op context):
+
+    >>> with get_device_context("INVALID_DEVICE"):
+    ...     # Falls back to a no-op context; no exception is raised here.
+    ...     x = tf.constant(1.0)
+    """
+    logger = logging.getLogger(__name__)
+
+    if device is None:
+        return contextlib.nullcontext()
+    if isinstance(device, tf.distribute.Strategy):
+        return device.scope()
+    if tf.distribute.has_strategy() and isinstance(device, str):
+        # If a distribution strategy is active, it's generally better to let it
+        # handle device placement automatically.
+        logger.warning(
+            f"Distribution strategy is active, ignoring explicit device placement request: {device}"
+        )
+        return contextlib.nullcontext()
+    try:
+        return tf.device(device)
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            f"Invalid device specification '{device}': {e}. Falling back to default device placement."
+        )
+        return contextlib.nullcontext()
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class AddNullSpike(tf.keras.layers.Layer):
+    """
+    The "Null Spike" Trick:
+    Add a row of zeros at index 0 for each example in the batch.
+    When index_inputs[g] is 0 (padding), tf.gather will pick up these zeros.
+    """
+
+    def __init__(self, n_features, **kwargs):
+        super().__init__(**kwargs)
+        self.n_features = n_features
+
+    def call(self, e):
+        # e shape : (batch, max_spikes_per_group, nFeatures)
+        dtype = self.compute_dtype
+        batch_size = tf.shape(e)[0]
+        n_features = self.n_features
+        null_spike = kops.zeros((batch_size, 1, n_features), dtype=dtype)
+        e = kops.cast(e, dtype)  # Ensure e is the same dtype as null_spike
+        return kops.concatenate([null_spike, e], axis=1)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], input_shape[1] + 1, input_shape[2])
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class GatherSpikes(tf.keras.layers.Layer):
+    """
+    Gather spikes into the global sequence: (batch, seqLen, nFeatures)
+    batch_dims=1 enables parallel gathering across the batch
+    """
+
+    def call(self, inputs):
+        full_emb, indices = inputs
+        return tf.gather(full_emb, indices, batch_dims=1)
+
+    def compute_output_shape(self, input_shapes):
+        # input_shapes = [(batch, time_in, feat), (batch, seqLen)]
+        return (input_shapes[0][0], input_shapes[1][1], input_shapes[0][2])
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class MaskingLayer(tf.keras.layers.Layer):
+    """
+    Apply mask to features, setting masked values to zero.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.supports_masking = True
+
+    def call(self, inputs):
+        # make sure inputs is a tuple of (mask, features)
+        mask, features = inputs
+        mask_expanded = kops.expand_dims(mask, axis=-1)
+        return kops.where(mask_expanded, features, kops.zeros_like(features))
+
+    def compute_mask(self, inputs, mask=None):
+        # this layer already has a mask in the inputs, so we can just pass it through
+        return inputs[0]  # the mask is the first element of the inputs
+
+    def compute_output_shape(self, input_shapes):
+        # input_shapes = [(batch, seqLen), (batch, seqLen, feat)]
+        return input_shapes[1]
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
-@tf.keras.utils.register_keras_serializable(package="neuroencoders", name="spikeNet")
-class spikeNet(tf.keras.layers.Layer):
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeNet2D(tf.keras.layers.Layer):
     """
     This class is a convolutional network that takes as input a spike sequence from nChannels and returns a feature vector of size nFeatures.
 
@@ -59,20 +235,13 @@ class spikeNet(tf.keras.layers.Layer):
         self.nChannels = nChannels
         self.device = device
         self.number = number
-        with tf.device(self.device):
+        with get_device_context(self.device):
             self.convLayer1 = tf.keras.layers.Conv2D(8, [2, 3], padding="same")
             self.convLayer2 = tf.keras.layers.Conv2D(16, [2, 3], padding="same")
             self.convLayer3 = tf.keras.layers.Conv2D(32, [2, 3], padding="same")
 
-            self.maxPoolLayer1 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="same"
-            )
-            self.maxPoolLayer2 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="same"
-            )
-            self.maxPoolLayer3 = tf.keras.layers.MaxPool2D(
-                [1, 2], [1, 2], padding="same"
-            )
+            self.pool = tf.keras.layers.MaxPool2D([1, 2], padding="same")
+
             if self.batch_normalization:
                 self.bn1 = tf.keras.layers.BatchNormalization()
                 self.bn2 = tf.keras.layers.BatchNormalization()
@@ -84,6 +253,7 @@ class spikeNet(tf.keras.layers.Layer):
             self.denseLayer3 = tf.keras.layers.Dense(
                 self.nFeatures, activation="relu", name="outputCNN{}".format(number)
             )
+            self.flatten = tf.keras.layers.Flatten()
 
     def get_config(self):
         base_config = super().get_config()
@@ -121,45 +291,51 @@ class spikeNet(tf.keras.layers.Layer):
             no_cnn=no_cnn,
         )
 
-    def __call__(self, input):
-        return self.apply(input)
+    def __call__(self, input, training=False):
+        return self.apply(input, training=training)
 
-    def apply(self, input):
-        with tf.device(self.device):
+    def apply(self, input, training=False):
+        dtype = self.compute_dtype
+        with get_device_context(self.device):
+            x = kops.expand_dims(x, axis=-1)
+            x = kops.cast(input, dtype)  # Ensure correct dtype for the conv layers
+
             if self.no_cnn:
                 # reshape input directly to dense layer
                 # must be of shape (batch_size, -1)
-                x = tf.keras.layers.Flatten()(input)
+                x = self.flatten(input)
                 x = self.denseLayer3(x)
-                x = self.dropoutLayer(x)
+                x = self.dropoutLayer(x, training=training)
                 print("Skipping CNN layers")
                 return x
-            x = kops.expand_dims(input, axis=3)
+
             x = self.convLayer1(x)
             if self.batch_normalization:
-                x = self.bn1(x)
-            x = self.maxPoolLayer1(x)
+                x = self.bn1(x, training=training)
+            x = self.pool(x)
+
             x = self.convLayer2(x)
             if self.batch_normalization:
-                x = self.bn2(x)
-            x = self.maxPoolLayer2(x)
+                x = self.bn2(x, training=training)
+            x = self.pool(x)
+
             x = self.convLayer3(x)
             if self.batch_normalization:
-                x = self.bn3(x)
-            x = self.maxPoolLayer3(x)
+                x = self.bn3(x, training=training)
+            x = self.pool(x)
 
             # or we could simply tf.keras.layers.Flatten() the output of the conv layers - leaves batch size unchanged
-            x = tf.keras.layers.Flatten()(x)
+            x = self.flatten(x)
             if not self.reduce_dense:
                 x = self.denseLayer1(x)
-                x = self.dropoutLayer(x)
+                x = self.dropoutLayer(x, training=training)
                 x = self.denseLayer2(x)
                 x = self.denseLayer3(x)
             else:
                 x = self.denseLayer3(x)
-                x = self.dropoutLayer(x)
+                x = self.dropoutLayer(x, training=training)
 
-        return x
+            return x
 
     @property
     def variables(self):
@@ -167,9 +343,9 @@ class spikeNet(tf.keras.layers.Layer):
             self.convLayer1.variables
             + self.convLayer2.variables
             + self.convLayer3.variables
-            + self.maxPoolLayer1.variables
-            + self.maxPoolLayer2.variables
-            + self.maxPoolLayer3.variables
+            + self.pool.variables
+            + self.pool.variables
+            + self.pool.variables
             + self.denseLayer3.variables
         )
         if not self.reduce_dense:
@@ -185,9 +361,9 @@ class spikeNet(tf.keras.layers.Layer):
             self.convLayer1,
             self.convLayer2,
             self.convLayer3,
-            self.maxPoolLayer1,
-            self.maxPoolLayer2,
-            self.maxPoolLayer3,
+            self.pool,
+            self.pool,
+            self.pool,
             self.denseLayer3,
         )
         if not self.reduce_dense:
@@ -199,7 +375,6 @@ class spikeNet(tf.keras.layers.Layer):
         return layers_list
 
     def build(self, input_shape):
-        super().build(input_shape)
         # validate input shape
         if len(input_shape) != 3:
             raise ValueError(
@@ -209,12 +384,17 @@ class spikeNet(tf.keras.layers.Layer):
             raise ValueError(
                 f"Expected input shape with {self.nChannels} channels, got {input_shape[1]}"
             )
+        for layer in self.layers():
+            if not layer.built:
+                layer.build(input_shape)
+
+        super().build(input_shape)
 
     def compute_output_shape(self, input_shape):
         return (input_shape[0], self.nFeatures)
 
 
-@tf.keras.utils.register_keras_serializable(package="neuroencoders", name="spikeNet1D")
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class SpikeNet1D(tf.keras.layers.Layer):
     """
     Refined Spike Encoder.
@@ -232,12 +412,15 @@ class SpikeNet1D(tf.keras.layers.Layer):
         nFeatures=128,
         number="",
         dropout_rate=0.2,
-        batch_normalization=True,
+        batch_normalization=False,
         **kwargs,
     ):
         name = kwargs.pop("name", "spikeNet1D{}".format(number))
         # TODO: implement reduce_dense and no_cnn options if needed
         self.reduce_dense = kwargs.pop("reduce_dense", False)
+        self.nConvChannels = kwargs.pop(
+            "nConvChannels", 64
+        )  # Number of filters in the last conv layer (before global pooling)
         self.no_cnn = kwargs.pop("no_cnn", False)
         super().__init__(name=name, **kwargs)
         self.nChannels = nChannels
@@ -246,51 +429,32 @@ class SpikeNet1D(tf.keras.layers.Layer):
         self.device = device
         self.number = number
 
-        with tf.device(self.device):
-            # Layer 1: Convolves over time bins
-            self.conv1 = tf.keras.layers.Conv1D(16, 3, padding="same", activation=None)
-            self.bn1 = tf.keras.layers.BatchNormalization()
-            self.act1 = tf.keras.layers.Activation("relu")
-            self.pool1 = tf.keras.layers.MaxPool1D(2, padding="same")  # Pool time only
+        with get_device_context(self.device):
+            layers = [tf.keras.layers.InputLayer(shape=(32, 1))]
+
+            # Layer 1
+            layers.append(tf.keras.layers.Conv1D(16, 3, padding="same"))
+            if self.batch_normalization:
+                layers.append(tf.keras.layers.BatchNormalization())
+            layers.append(tf.keras.layers.Activation("relu"))
+            layers.append(tf.keras.layers.MaxPool1D(2, padding="same"))
 
             # Layer 2
-            self.conv2 = tf.keras.layers.Conv1D(32, 3, padding="same", activation=None)
-            self.bn2 = tf.keras.layers.BatchNormalization()
-            self.act2 = tf.keras.layers.Activation("relu")
-            self.pool2 = tf.keras.layers.MaxPool1D(2, padding="same")
+            layers.append(tf.keras.layers.Conv1D(32, 3, padding="same"))
+            if self.batch_normalization:
+                layers.append(tf.keras.layers.BatchNormalization())
+            layers.append(tf.keras.layers.Activation("relu"))
+            layers.append(tf.keras.layers.MaxPool1D(2, padding="same"))
 
             # Layer 3
-            self.nConvChannels = (
-                64  # number of output channels from conv layers (before global pool)
-            )
-            self.conv3 = tf.keras.layers.Conv1D(
-                self.nConvChannels, 3, padding="same", activation=None
-            )
-            self.act3 = tf.keras.layers.Activation("relu")
-            self.GlobalPool = tf.keras.layers.GlobalAveragePooling1D()
+            layers.append(tf.keras.layers.Conv1D(self.nConvChannels, 3, padding="same"))
             if self.batch_normalization:
-                self.bn1 = tf.keras.layers.BatchNormalization()
-                self.bn2 = tf.keras.layers.BatchNormalization()
-                self.bn3 = tf.keras.layers.BatchNormalization()
+                layers.append(tf.keras.layers.BatchNormalization())
+            layers.append(tf.keras.layers.Activation("relu"))
+            layers.append(tf.keras.layers.GlobalAveragePooling1D())
 
-            self.temporal_extractor = tf.keras.Sequential(
-                [
-                    self.conv1,
-                    self.bn1
-                    if self.batch_normalization
-                    else tf.keras.layers.Layer(),  # Identity if no BN
-                    self.act1,
-                    self.pool1,
-                    self.conv2,
-                    self.bn2 if self.batch_normalization else tf.keras.layers.Layer(),
-                    self.act2,
-                    self.pool2,
-                    self.conv3,
-                    self.bn3 if self.batch_normalization else tf.keras.layers.Layer(),
-                    self.act3,
-                    self.GlobalPool,  # result (Batch * nChannels, 64)
-                ]
-            )
+            # Define the backbone
+            self.temporal_extractor = tf.keras.Sequential(layers)
 
             # Aggregation
             self.dropout = tf.keras.layers.Dropout(dropout_rate)
@@ -305,25 +469,27 @@ class SpikeNet1D(tf.keras.layers.Layer):
         return self.call(x, training=training)
 
     def call(self, x, training=False):
-        with tf.device(self.device):
-            # 1. Input is (Batch, Channels, Time) -> (128, 6, 32)
-            shape = tf.shape(x)
-            B, C, T = shape[0], shape[1], shape[2]
+        dtype = self.compute_dtype
+        with get_device_context(self.device):
+            # 1. Input is (Batch = totalNbSpikes, Channels, Time) -> (128, 6, 32)
+            T = 32
+            C = self.nChannels
 
             # Step 1: Reshape to process all channels through the SAME backbone
             # New shape: (Batch * 6, 32, 1)
             # T is hardcoded to be 32 for now (see tfrec creation via julia)
             x = tf.reshape(
-                x, [B * self.nChannels, T, 1]
+                x, [-1, T, 1]
             )  # channels_last format for conv1d and global average pooling
+            x = kops.cast(x, dtype)  # Ensure correct dtype for the conv layers
 
             # Step 2: Extract temporal features (Shared Weights)
-            # Output shape: (Batch * 6, 64)
-            x = self.temporal_extractor(x)
+            # Output shape: (Batch * 6, self.nConvChannels = 64)
+            x = self.temporal_extractor(x, training=training)
 
             # Step 3: Concatenate channels back together
-            # New shape: (Batch, 6 * 64) -> (128, 384)
-            x = tf.reshape(x, [B, self.nChannels * 64])
+            # New shape: (Batch, 6 * nConvChannels) -> (128, 384)
+            x = tf.reshape(x, [-1, C * self.nConvChannels])
 
             # Step 4: Spatial Interaction (Learning relationships between fixed channels)
             x = self.dense_fusion(x)
@@ -341,6 +507,7 @@ class SpikeNet1D(tf.keras.layers.Layer):
                 "batch_normalization": self.batch_normalization,
                 "reduce_dense": self.reduce_dense,
                 "no_cnn": self.no_cnn,
+                "nConvChannels": self.nConvChannels,
             }
         )
         return config
@@ -366,10 +533,10 @@ class SpikeNet1D(tf.keras.layers.Layer):
             batch_normalization=batch_normalization,
             reduce_dense=reduce_dense,
             no_cnn=no_cnn,
+            nConvChannels=config.get("nConvChannels", 64),
         )
 
     def build(self, input_shape):
-        super().build(input_shape)
         # validate input shape
         if len(input_shape) != 3:
             raise ValueError(
@@ -383,18 +550,23 @@ class SpikeNet1D(tf.keras.layers.Layer):
         # ---- Build sub-layers ----
         # 1. Temporal Extractor
         # Input to this is (Batch * Channels, Time, 1)
-        time_steps = input_shape[2]
-        self.temporal_extractor.build((None, time_steps, 1))
+        time_steps = 32
+        if not self.temporal_extractor.built:
+            self.temporal_extractor.build((None, time_steps, 1))
 
         # 2. Dense Fusion
         # The extractor outputs 64 features per channel (from the 3rd conv/global pool)
         # Input shape becomes (Batch, Channels * 64)
-        fusion_input_dim = self.nChannels * 64
-        self.dense_fusion.build((None, fusion_input_dim))
+        fusion_input_dim = (
+            self.nChannels * self.nConvChannels
+        )  # 6 channels * 64 convChannels = 384
+        # Explicitly build the dense layers so they create their weight variables
+        if not self.dense_fusion.built:
+            self.dense_fusion.build((None, fusion_input_dim))
 
-        # 3. Dense Out
-        # Dense fusion outputs (Batch, nFeatures * 2)
-        self.dense_out.build((None, self.nFeatures * 2))
+        # The output of dense_fusion is nFeatures * 2
+        if not self.dense_out.built:
+            self.dense_out.build((None, self.nFeatures * 2))
 
         super().build(input_shape)
 
@@ -402,13 +574,313 @@ class SpikeNet1D(tf.keras.layers.Layer):
         return (input_shape[0], self.nFeatures)
 
 
+SpikeNet: TypeAlias = SpikeNet1D | SpikeNet2D
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeEncoder(tf.keras.layers.Layer):
+    def __init__(
+        self,
+        spikeNets: List[SpikeNet],
+        params: Params,
+        max_nb_spikes: int,
+        max_spikes_per_group: int,
+        conv_dim: int,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.spikeNets = spikeNets
+        if not isinstance(self.spikeNets, list):
+            self.spikeNets = [self.spikeNets]  # Ensure it's always a list
+
+        self.params = params
+        self.max_nb_spikes = max_nb_spikes
+        self.max_spikes_per_group = max_spikes_per_group
+        self.conv_dim = conv_dim
+        # Mark that this layer handles a list of inputs
+        # self._supports_masking = True
+
+    def call(self, inputs, training=False):
+        dtype = self.compute_dtype
+        # IMPORTANT: 'inputs' is a LIST of tensors: [group0, group1, ...]
+        # Not a dictionary!
+        encoded_groups = []
+
+        for g in range(len(inputs)):
+            group_input = inputs[g]
+            max_spikes = self.max_spikes_per_group
+            n_ch = self.params.nChannelsPerGroup[g]
+
+            # Reshape to 3D for Conv: (Batch*MaxSpks, Channels, Time)
+            x = tf.reshape(group_input, [-1, n_ch, 32])
+            x = tf.cast(x, dtype)  # Ensure correct dtype for the spikeNet
+
+            # Forward pass through the specific tower
+            x = self.spikeNets[g](
+                x, training=training
+            )  # Output shape: (Batch*MaxSpks, nFeatures)
+
+            # Reshape back to (Batch, MaxSpks, Features)
+            x = tf.reshape(x, [-1, max_spikes, self.params.nFeatures])
+            encoded_groups.append(x)
+
+        return encoded_groups
+
+    def compute_output_shape(self, input_shape):
+        # Help Keras infer the shapes since there's a loop
+        # input_shape is a list of shapes
+        return [
+            (shape[0], self.max_spikes_per_group, self.params.nFeatures)
+            for shape in input_shape
+        ]
+
+    def build(self, input_shape):
+        # No trainable weights in this layer, but we need to call build on sub-layers
+        for g in range(len(input_shape)):
+            self.spikeNets[g].build((None, self.params.nChannelsPerGroup[g], 32))
+        super().build(input_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        # turn params in serializable dict with only necessary info
+        params_dict = {
+            "nGroups": self.params.nGroups,
+            "nChannelsPerGroup": self.params.nChannelsPerGroup,
+            "nFeatures": self.params.nFeatures,
+        }
+        # turns spikeNets into a list of their configs (assuming they are serializable)
+        serialized_nets = [tf.keras.layers.serialize(net) for net in self.spikeNets]
+        config.update(
+            {
+                "params": params_dict,
+                "spikeNets": serialized_nets,
+                "conv_dim": self.conv_dim,
+                "max_nb_spikes": self.max_nb_spikes,
+                "max_spikes_per_group": self.max_spikes_per_group,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        # Reconstruct params object from dict
+        params_dict = config.pop("params")
+
+        class Params:
+            pass
+
+        params = Params()
+        for key, value in params_dict.items():
+            setattr(params, key, value)
+
+        # Reconstruct spikeNets from their configs
+        spikeNets_configs = config.pop("spikeNets", [])
+        spikeNets = [
+            tf.keras.layers.deserialize(net_config) for net_config in spikeNets_configs
+        ]
+        return cls(spikeNets=spikeNets, params=params, **config)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeSequenceProcessor(tf.keras.layers.Layer):
+    """
+    Encapsulates the logic for processing spike groups into a single sequence.
+    Typically involves:
+    1. SpikeEncoder (per group) -> latents
+    2. AddNullSpike (per group) -> to handle padding
+    3. Concatenation
+    4. GlobalSequenceGather -> reorder to time sequence
+    5. Masking (for the whole sequence, will be passed downstream to LSTM/Transformer)
+    """
+
+    def __init__(
+        self,
+        spike_encoder: SpikeEncoder,
+        n_groups: int,
+        n_features: int,
+        max_spikes_per_group: int,
+        max_nb_spikes: int,
+        device="/cpu:0",
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.spike_encoder = spike_encoder
+        self.n_groups = n_groups
+        self.n_features = n_features
+        self.max_spikes_per_group = max_spikes_per_group
+        self.max_nb_spikes = max_nb_spikes
+        self.device = device
+
+        # Compute offsets statically
+        self.offsets = []
+        curr_offset = 0
+        for g in range(self.n_groups):
+            self.offsets.append(curr_offset)
+            # +1 because of the Null Spike added to each group
+            curr_offset += self.max_spikes_per_group + 1
+
+        self.add_null_spike_layers = [
+            AddNullSpike(n_features=self.n_features, name=f"add_null_spike_group{g}")
+            for g in range(self.n_groups)
+        ]
+
+        self.sequence_reconstructor = GlobalSequenceGather(
+            n_groups=self.n_groups,
+            group_dim=self.n_features,
+            offsets=self.offsets,
+            max_nb_spikes=self.max_nb_spikes,
+        )
+
+        self.safe_mask_creation = SafeMaskCreation(name="safe_mask_creation")
+        self.masking_layer = MaskingLayer(name="masking_layer_before_rnn")
+        self.supports_masking = (
+            True  # This layer will produce a mask for downstream layers
+        )
+
+    def build(self, input_shape):
+        # input_shape is a list of shapes
+        # inputsToSpikeNets shapes + indices shapes + inputGroups shape
+        # We don't need to do much here as sub-layers are built on call or have fixed logic
+
+        # TODO
+        self.spike_encoder.build(
+            input_shape[: self.n_groups]
+        )  # Build spike encoder with the first n_groups input shapes
+
+        for g in range(self.n_groups):
+            # they each receive (Batch, MaxSpikesPerGroup, nFeatures) after the spike encoder and before the gather
+            self.add_null_spike_layers[g].build(
+                (None, self.max_spikes_per_group, self.n_features)
+            )
+
+        # receives the concatenated groups of shape (Batch, n_groups * (MaxSpikesPerGroup + 1), nFeatures) and indices of shape (Batch, SeqLen) and inputGroups of shape (Batch, SeqLen)
+        self.sequence_reconstructor.build(
+            [
+                (
+                    None,
+                    self.n_groups * (self.max_spikes_per_group + 1),
+                    self.n_features,
+                ),
+                (None, self.max_nb_spikes),
+                (None, self.max_nb_spikes),
+            ]
+        )
+
+        # receives inputGroups of shape (Batch, SeqLen) to create the mask, and also receives the features of shape (Batch, SeqLen, nFeatures) to apply the mask
+        self.safe_mask_creation.build(
+            [(None, self.max_nb_spikes), (None, self.max_nb_spikes, self.n_features)]
+        )
+
+        self.masking_layer.build(
+            [(None, self.max_nb_spikes), (None, self.max_nb_spikes, self.n_features)]
+        )
+
+        super().build(input_shape)
+
+    def call(self, inputs, training=False):
+        """
+        inputs: List containing:
+         - [inputsToSpikeNets...] (nGroups tensors)
+         - [indices...] (nGroups tensors)
+         - inputGroups (1 tensor)
+        """
+
+        inputs_to_spike_nets = inputs[: self.n_groups]
+        indices = inputs[self.n_groups : 2 * self.n_groups]
+        input_groups = inputs[-1]
+
+        with get_device_context(self.device):
+            # 1. ENCODE
+            group_latents_raw = self.spike_encoder(
+                inputs_to_spike_nets, training=training
+            )
+
+            all_group_latents = []
+            for g, latent in enumerate(group_latents_raw):
+                full_emb = self.add_null_spike_layers[g](latent)
+                all_group_latents.append(full_emb)
+
+            # 2. RECONSTRUCT: Interleave groups back into the temporal sequence
+            pool = kops.concatenate(all_group_latents, axis=1)
+
+            # 3. GATHER
+            all_features = self.sequence_reconstructor([pool, indices, input_groups])
+
+            # 4. MASKING
+            mymask = self.safe_mask_creation(input_groups)
+            masked_features = self.masking_layer([mymask, all_features])
+
+            # Sum inputs for legacy/diagnostics
+            sum_features = kops.sum(masked_features, axis=1)
+
+            # The layer returns the processed features sequence and the mask
+            # But standard Keras layers return one tensor usually, or tuple.
+            # We return (masked_features, mymask, sum_features)
+            # However, Keras functional model might prefer single tensor output or list.
+            # Let's return the main features, and maybe attached mask?
+            # Actually downstream logic expects (allFeatures, mymask, sumFeatures) roughly.
+
+            return masked_features, mymask, sum_features, all_features
+
+    def compute_mask(self, inputs, mask=None):
+        # The mask is based on the inputGroups tensor, which is the last element in inputs
+        input_groups = inputs[-1]
+        return self.safe_mask_creation(input_groups)
+
+    def compute_output_shape(self, input_shape):
+        # input_shape is a list of shapes:
+        # [spike_nets_shapes..., indices_shapes..., group_sequence_shape]
+        # group_sequence is the last element
+        group_seq_shape = input_shape[-1]
+        batch_size = group_seq_shape[0]
+        seq_len = group_seq_shape[1]  # same as max nb spikes
+
+        # Returns: (masked_features, mymask, sum_features, all_features)
+        return [
+            (batch_size, seq_len, self.n_features),  # masked_features
+            (batch_size, seq_len),  # mymask
+            (batch_size, self.n_features),  # sum_features
+            (batch_size, seq_len, self.n_features),  # all_features
+        ]
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "spike_encoder": tf.keras.utils.serialize_keras_object(
+                    self.spike_encoder
+                ),
+                "n_groups": self.n_groups,
+                "n_features": self.n_features,
+                "max_spikes_per_group": self.max_spikes_per_group,
+                "max_nb_spikes": self.max_nb_spikes,
+                "device": self.device,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        spike_encoder_config = config.pop("spike_encoder")
+        spike_encoder = tf.keras.utils.deserialize_keras_object(spike_encoder_config)
+        return cls(spike_encoder=spike_encoder, **config)
+
+
 ########### CONVOLUTIONAL NETWORK CLASS #####################
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class MaskedSequential(tf.keras.Sequential):
+    def __init__(self, layers=None, name=None):
+        super().__init__(layers=layers, name=name)
+        self.supports_masking = True
+
+    def compute_mask(self, inputs, mask=None):
+        # This tells the Sequential block to pass the mask
+        # to the layers inside it instead of destroying it.
+        return mask
 
 
 ########### TRANSFORMER ENCODER CLASS #####################
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="GroupAttentionFusion"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class GroupAttentionFusion(tf.keras.layers.Layer):
     """
     Fuses features from multiple spike groups using Self-Attention.
@@ -423,9 +895,11 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         self.num_heads = num_heads
         self.device = device
 
-        with tf.device(self.device):
+        with get_device_context(self.device):
             self.mha = tf.keras.layers.MultiHeadAttention(
-                num_heads=num_heads, key_dim=embed_dim // num_heads
+                num_heads=num_heads,
+                key_dim=embed_dim // num_heads,
+                name="group_attention",
             )
             self.norm = tf.keras.layers.LayerNormalization()
             self.dropout = tf.keras.layers.Dropout(0.1)
@@ -434,14 +908,13 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
 
     def call(self, inputs, mask=None):
         # inputs: List of tensors, each shape (Batch, Time, Features)
-        with tf.device(self.device):
+        with get_device_context(self.device):
             # 1. Stack groups: (Batch, Time, Groups, Features)
             x = tf.stack(inputs, axis=2)
 
             # 2. Add Group Embeddings
             # Broadcast embeddings across Batch and Time
-            embeddings = tf.cast(self.group_embeddings, x.dtype)
-            x = x + embeddings
+            x = x + self.group_embeddings
 
             shape = tf.shape(x)
             B, T = shape[0], shape[1]
@@ -514,8 +987,9 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         self.group_embeddings = self.add_weight(
             name="group_embeddings",
             shape=(1, 1, self.n_groups, self.embed_dim),
-            initializer="uniform",
+            initializer="glorot_uniform",
             trainable=True,
+            dtype="float32",
         )
         # build sublayers
         # attention operates on (batch*time, n_groups, embed_dim)
@@ -529,8 +1003,11 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         super().build(input_shape)
 
     def compute_mask(self, inputs, mask=None):
-        # Propagate the input mask to the output
-        return mask
+        if mask is None:
+            return None
+        # Reduce mask from (Batch, Time, nGroups) to (Batch, Time)
+        # using any() because a time step is valid if any group has valid data
+        return kops.any(mask, axis=-1)
 
     def compute_output_shape(self, input_shape):
         # Output shape: (Batch, Time, n_groups * embed_dim)
@@ -538,9 +1015,184 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
         return (batch_size, time_steps, self.n_groups * self.embed_dim)
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="MaskedGlobalAveragePooling1D"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class GlobalSequenceGather(tf.keras.layers.Layer):
+    """
+    Gathers features from the concatenated pool of all groups back into the original temporal sequence order.
+    """
+
+    def __init__(self, n_groups, group_dim, offsets, max_nb_spikes, **kwargs):
+        super().__init__(**kwargs)
+        self.n_groups = n_groups
+        self.group_dim = group_dim
+        self.max_nb_spikes = max_nb_spikes
+        self.offsets = kops.convert_to_tensor(offsets, dtype="int32")
+
+    def build(self, input_shape):
+        # learnable embedding for each group
+        self.group_embeddings = self.add_weight(
+            name="group_embeddings",
+            shape=(self.n_groups, self.group_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.null_identity = self.add_weight(
+            name="null_identity",
+            shape=(1, self.group_dim),
+            initializer="zeros",
+            trainable=False,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        pool, indices_list, group_sequence = inputs
+        dtype = self.compute_dtype
+
+        # 1. Vectorized Global Index Calculation
+        # pool shape: (Batch, Total_Spikes, Features)
+        batch_size = kops.shape(pool)[0]
+        seq_len = kops.shape(group_sequence)[1]
+
+        # Stack indices: (n_groups, Batch, SeqLen)
+        stacked_indices = kops.stack(indices_list, axis=0)
+        offsets_expanded = self.offsets[:, None, None]
+
+        # options: (n_groups, Batch, SeqLen) -> global positions within the pool
+        options = stacked_indices + offsets_expanded
+
+        # Pick the correct group's index for every time step
+        # Since kops.take doesn't do batch_dims, we pick based on the group_sequence ID
+        safe_group_seq = kops.where(
+            group_sequence == -1, 0, kops.cast(group_sequence, "int32")
+        )
+
+        # We use a masking strategy to flatten the options into the final global_indices
+        # This replaces the 'for' loop and 'kops.where' chain
+        group_mask = kops.one_hot(
+            safe_group_seq, num_classes=self.n_groups
+        )  # (B, Seq, nGroups)
+        group_mask = kops.transpose(group_mask, [2, 0, 1])  # (nGroups, B, Seq)
+
+        # Extract the specific indices for each group and sum them
+        # (This is a standard XLA trick for 'gathering from a list of tensors')
+        global_indices = kops.sum(kops.cast(options, "float32") * group_mask, axis=0)
+        global_indices = kops.cast(global_indices, "int32")  # (Batch, SeqLen)
+
+        # 2. BATCH TAKE: Flattening for kops.take
+        # kops.take usually works on a single axis. To do batch take:
+        # We shift global_indices by the batch offset
+        batch_offsets = kops.arange(batch_size, dtype="int32") * kops.shape(pool)[1]
+        flat_global_indices = kops.reshape(
+            global_indices + batch_offsets[:, None], [-1]
+        )
+
+        # Flatten the pool: (Batch * Total_Spikes, Features)
+        flat_pool = kops.reshape(pool, [-1, self.group_dim])
+
+        # Perform the take
+        sequence_features = kops.take(flat_pool, flat_global_indices, axis=0)
+        sequence_features = kops.reshape(
+            sequence_features, [batch_size, seq_len, self.group_dim]
+        )
+
+        # 3. Anatomical Shank Identity
+        lookup_table = kops.concatenate(
+            [
+                self.group_embeddings,
+                kops.cast(self.null_identity, self.group_embeddings.dtype),
+            ],
+            axis=0,
+        )
+
+        safe_ids = kops.where(
+            group_sequence == -1, self.n_groups, kops.cast(group_sequence, "int32")
+        )
+        identities = kops.take(lookup_table, kops.reshape(safe_ids, [-1]), axis=0)
+        identities = kops.reshape(identities, [batch_size, seq_len, self.group_dim])
+
+        return kops.cast(sequence_features, dtype) + kops.cast(identities, dtype)
+
+    def call_old(self, inputs):
+        pool, indices_list, group_sequence = inputs
+
+        # Start with a zero-filled sequence
+        # Shape: (Batch, SeqLen, Features)
+        batch_size = kops.shape(pool)[0]
+        seq_len = kops.shape(group_sequence)[1]
+        features = kops.shape(pool)[2]
+
+        # Map indices to global pool positions
+        global_indices = kops.zeros_like(group_sequence, dtype="int32")
+
+        for g, offset in enumerate(self.offsets):
+            idx_g = indices_list[g]
+            condition = kops.equal(group_sequence, g)
+            # If the sequence at time t belongs to group g,
+            # pick the spike at its relative index + offset
+            global_indices = kops.where(condition, idx_g + offset, global_indices)
+
+        # gather spike fatures
+        sequence_features = tf.gather(pool, global_indices, batch_dims=1)
+
+        # group id embedding
+        lookup_table = tf.concat(
+            [
+                self.group_embeddings,
+                tf.cast(self.null_identity, self.group_embeddings.dtype),
+            ],
+            axis=0,
+        )
+        safe_group_ids = tf.where(
+            group_sequence == -1, self.n_groups, tf.cast(group_sequence, tf.int32)
+        )
+        identities = tf.gather(
+            lookup_table, safe_group_ids
+        )  # batch x seq_len x group_dim
+
+        # Batch gather
+        return sequence_features + identities
+
+    def compute_output_shape(self, input_shape):
+        # input_shape[2] is the shape of 'group_sequence' (Batch, SeqLen)
+        batch_size = input_shape[2][0]
+        seq_len = self.max_nb_spikes  # or input_shape[2][1]
+        return (batch_size, seq_len, self.group_dim)
+
+    def build(self, input_shape):
+        # learnable embedding for each group
+        self.group_embeddings = self.add_weight(
+            name="group_embeddings",
+            shape=(self.n_groups, self.group_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.null_identity = self.add_weight(
+            name="null_identity",
+            shape=(1, self.group_dim),
+            initializer="zeros",
+            trainable=False,
+        )
+        super().build(input_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_groups": self.n_groups,
+                "group_dim": self.group_dim,
+                "offsets": self.offsets,
+                "max_nb_spikes": self.max_nb_spikes,
+                "device": self.device,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
     """Global Average Pooling that respects masking"""
 
@@ -550,12 +1202,15 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
         self.supports_masking = True
 
     def call(self, inputs, mask=None):
-        with tf.device(self.device):
+        with get_device_context(self.device):
             if mask is not None:
                 # Convert mask to float and add dimension for broadcasting
-                mask_float = kops.cast(mask, "float32")  # [batch, seq_len]
                 # expand mask to match input dimensions [batch, seq_len, 1]
-                mask_expanded = kops.expand_dims(mask_float, axis=-1)
+                mask_expanded = kops.expand_dims(mask, axis=-1)
+                # Cast mask to input dtype to avoid multiplication errors with bool
+                mask_expanded = kops.cast(
+                    mask_expanded, self.compute_dtype or inputs.dtype
+                )
 
                 # Apply mask to inputs
                 masked_inputs = inputs * mask_expanded
@@ -568,7 +1223,9 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
                 count_inputs = kops.maximum(count_inputs, 1.0)
 
                 # Calculate average
-                return sum_inputs / count_inputs
+                outputs = sum_inputs / count_inputs
+                outputs._keras_mask = None  # Clear mask after pooling
+                return outputs
             else:
                 return kops.mean(inputs, axis=1)
 
@@ -597,33 +1254,29 @@ def create_attention_mask_from_padding_mask(padding_mask):
     Args:
         padding_mask: Boolean mask where True indicates valid positions
     Returns:
-        attention_mask: Float mask for attention weights
+        attention_mask: Boolean mask for attention weights (3D: [batch, q_len, k_len])
     """
     if padding_mask is None:
         return None
 
-    # Convert to float (1.0 for valid, 0.0 for padded)
-    attention_mask = kops.cast(padding_mask, "float32")
+    # Cast to boolean if it's float (multiplicative mask)
+    if kops.dtype(padding_mask) != "bool":
+        padding_mask = kops.cast(padding_mask, "bool")
 
-    # Create 4D mask for attention: [batch_size, 1, seq_len, seq_len]
-    mask_shape = kops.shape(attention_mask)
-    seq_len = mask_shape[1]  # assuming shape is [batch_size, seq_len]
+    # Create 3D mask for attention: [batch_size, seq_len, seq_len]
+    mask_shape = kops.shape(padding_mask)
+    seq_len = mask_shape[1]
 
-    # Expand to [batch_size, 1, 1, seq_len] for broadcasting
-    attention_mask = kops.expand_dims(kops.expand_dims(attention_mask, 1), 1)
+    # Expand to [batch_size, 1, seq_len] for broadcasting across queries
+    padding_mask = kops.expand_dims(padding_mask, 1)
 
-    # Create mask for key/value positions [batch_size, 1, seq_len, seq_len]
-    attention_mask = kops.tile(attention_mask, [1, 1, seq_len, 1])
-
-    return attention_mask
+    return padding_mask
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="PositionalEncoding"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class PositionalEncoding(tf.keras.layers.Layer):
     # increase max_len if you have longer sequences
-    def __init__(self, max_len=10000, d_model=128, **kwargs):
+    def __init__(self, max_len=512, d_model=128, **kwargs):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         self.d_model = d_model
@@ -641,19 +1294,34 @@ class PositionalEncoding(tf.keras.layers.Layer):
         pe[:, 0::2] = np.sin(position * div_term)
         pe[:, 1::2] = np.cos(position * div_term)
 
-        self.pe = tf.constant(pe, dtype=tf.float32)
+        self.pe = self.add_weight(
+            name="positional_encoding",
+            shape=(self.max_len, self.d_model),
+            initializer=tf.keras.initializers.Constant(pe),
+            trainable=False,
+        )
+        self.pe_weight = self.add_weight(
+            name="pe_weight",
+            shape=(),
+            initializer="ones",
+            trainable=True,
+        )
 
-        if input_shape[-1] != self.d_model:
-            raise ValueError(
-                f"Input feature dimension {input_shape[-1]} doesn't match d_model {self.d_model}"
-            )
+    def call(self, x, mask=None):
+        with get_device_context(self.device):
+            target_dtype = self.compute_dtype
 
-        super().build(input_shape)
+            # 1. Scale input: pre-calculate sqrt(d_model) as a float first
+            # This becomes a single constant in the XLA graph
+            sqrt_d_model = kops.cast(np.sqrt(self.d_model), target_dtype)
+            x = x * sqrt_d_model
 
-    def call(self, x):
-        with tf.device(self.device):
-            seq_len = tf.shape(x)[1]
-        return x + self.pe[:seq_len, :]
+            # 2. Static Addition: No slicing!
+            # XLA will now 'bake' self.pe into the GPU kernel
+            pe = kops.cast(self.pe, target_dtype)
+            weight = kops.cast(self.pe_weight, target_dtype)
+
+        return x + (pe * weight)
 
     def get_config(self):
         base_config = super().get_config()
@@ -671,7 +1339,7 @@ class PositionalEncoding(tf.keras.layers.Layer):
         This is necessary for serialization/deserialization.
         """
         layer_config = {
-            "max_len": config.get("max_len", 1000),
+            "max_len": config.get("max_len", 500),
             "d_model": config.get("d_model", 128),
             "device": config.get("device", "/cpu:0"),
         }
@@ -680,33 +1348,102 @@ class PositionalEncoding(tf.keras.layers.Layer):
     def compute_output_shape(self, input_shape):
         return input_shape
 
+    def compute_mask(self, inputs, mask=None):
+        return mask  # Pass through the mask unchanged
+
+    def build(self, input_shape):
+        # Create positional encoding matrix
+        pe = np.zeros((self.max_len, self.d_model))
+        position = np.arange(0, self.max_len)[:, np.newaxis]
+        div_term = np.exp(
+            np.arange(0, self.d_model, 2) * -(np.log(10000.0) / self.d_model)
+        )
+
+        pe[:, 0::2] = np.sin(position * div_term)
+        pe[:, 1::2] = np.cos(position * div_term)
+
+        self.pe = self.add_weight(
+            name="positional_encoding",
+            shape=(self.max_len, self.d_model),
+            initializer=tf.keras.initializers.Constant(pe),
+            trainable=False,
+        )
+        self.pe_weight = self.add_weight(
+            name="pe_weight",
+            shape=(),
+            initializer="ones",
+            trainable=True,
+        )
+        super().build(input_shape)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SafeMaskCreation(tf.keras.layers.Layer):
+    """
+    Create boolean mask without unnecessary casting.
+    True where valid (not equal to -1).
+    """
+
+    def call(self, batchedInputGroups):
+        pad_value = -1
+        # Create boolean mask
+        padding_mask = kops.not_equal(batchedInputGroups, pad_value)
+        return padding_mask
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
 
 def safe_mask_creation(batchedInputGroups, pad_value=-1):
     """
-    Create mask without casting the original sparse tensor
+    Create boolean mask without unnecessary casting.
+    True where valid (not equal to pad_value).
     """
-    # If input is sparse, convert to dense immediately without intermediate casting
-    if isinstance(batchedInputGroups, tf.SparseTensor):
-        # Convert sparse to dense in one operation
-        batchedInputGroups = tf.sparse.to_dense(
-            batchedInputGroups,
-            default_value=float(pad_value),  # Use float pad_value to avoid casting
-        )
-
-    # Ensure we're working with float32 from the start
-    if batchedInputGroups.dtype != tf.float32:
-        batchedInputGroups = kops.cast(batchedInputGroups, "float32")
-
-    # Create mask using only dense operations
-    padding_mask = kops.where(
-        kops.equal(batchedInputGroups, float(pad_value)), 0.0, 1.0
-    )
+    # Create boolean mask
+    padding_mask = kops.not_equal(batchedInputGroups, pad_value)
     return padding_mask
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="TransformerEncoderBlock"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class ResidualWrapper(tf.keras.layers.Layer):
+    """
+    Wraps a layer to add a residual connection: output = layer(input) + input
+    """
+
+    def __init__(self, layer_to_wrap: tf.keras.layers.Layer, **kwargs):
+        super().__init__(**kwargs)
+        self.layer_to_wrap = layer_to_wrap
+        self.supports_masking = True  # Keep masking support if the wrapped layer supports it (eg transformer encoder block)
+
+    def call(self, inputs, mask=None, training=False):
+        output = self.layer_to_wrap(inputs, mask=mask, training=training)
+        return output + inputs
+
+    def compute_mask(self, inputs, mask=None):
+        return mask
+
+    def compute_output_shape(self, input_shape):
+        return self.layer_to_wrap.compute_output_shape(input_shape)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {"layer_to_wrap": tf.keras.utils.serialize_keras_object(self.layer_to_wrap)}
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        layer_config = config.pop("layer_to_wrap")
+        layer = tf.keras.utils.deserialize_keras_object(layer_config)
+        return cls(layer, **config)
+
+    def build(self, input_shape):
+        super().build(input_shape)
+        self.layer_to_wrap.build(input_shape)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class TransformerEncoderBlock(tf.keras.layers.Layer):
     """
         A custom Transformer Encoder Block layer with multi-head attention and feedforward network.
@@ -719,7 +1456,6 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         d_model=64,
         num_heads=8,
         ff_dim1=256,
-        ff_dim2=64,
         dropout_rate=0.5,
         device="/cpu:0",
         **kwargs,
@@ -729,30 +1465,113 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         self.d_model = d_model
         self.num_heads = num_heads
         self.ff_dim1 = ff_dim1
-        self.ff_dim2 = ff_dim2
+        self.ff_dim2 = (
+            self.d_model
+        )  # Output dimension matches input for residual connection
         self.dropout_rate = dropout_rate
         self.device = device
+        self.supports_masking = True  # To indicate that this layer supports masking
 
-        with tf.device(self.device):
+        with get_device_context(self.device):
             # Layer normalization at the beginning
             self.norm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
             # Multi-head attention
             self.mha = tf.keras.layers.MultiHeadAttention(
-                num_heads=num_heads, key_dim=d_model // num_heads
+                num_heads=num_heads,
+                key_dim=d_model // num_heads,
+                name="mha",
             )
 
             # Dropout after attention
             self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
 
             # Feedforward network
-            self.ff_layer1 = tf.keras.layers.Dense(self.ff_dim1, activation="relu")
-            self.ff_layer2 = tf.keras.layers.Dense(self.ff_dim2, activation="relu")
+            self.ff_layer1 = tf.keras.layers.Dense(self.ff_dim1, activation="gelu")
+            self.ff_layer2 = tf.keras.layers.Dense(self.ff_dim2)
 
             # Final layer normalization
             self.norm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
         self.supports_masking = True  # To indicate that this layer supports masking
+
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the transformer encoder block.
+        The output maintains the same shape as input but with ff_dim2 features.
+        """
+        batch_size, seq_length, _ = input_shape
+        return (batch_size, seq_length, self.ff_dim2)
+
+    def call(self, x, mask=None, training=False):
+        with get_device_context(self.device):
+            # Layer norm at the beginning
+            x_norm = self.norm1(x)
+
+            # create attention mask if needed
+            attention_mask = None
+            if mask is not None:
+                attention_mask = create_attention_mask_from_padding_mask(mask)
+
+            # Multi-head attention with residual connection
+            attn_output = self.mha(
+                query=x_norm,
+                value=x_norm,
+                attention_mask=attention_mask,
+                query_mask=None,
+                key_mask=None,
+                training=training,
+            )
+            attn_output = self.dropout1(attn_output, training=training)
+
+            if self.residual:
+                x = x + attn_output  # Residual connection
+
+            # Feedforward network
+            x_norm2 = self.norm2(x)
+            ff_output = self.ff_layer1(x_norm2)
+            ff_output = self.ff_layer2(ff_output)
+
+            # Final layer norm and residual connection
+            x = x + ff_output
+
+        return x
+
+    def compute_mask(self, inputs, mask=None):
+        """
+        Propagate the input mask to the output.
+        """
+        return mask
+
+    def get_config(self):
+        """Return the config of the layer for serialization."""
+        config = super().get_config()
+        config.update(
+            {
+                "d_model": self.d_model,
+                "num_heads": self.num_heads,
+                "ff_dim1": self.ff_dim1,
+                "dropout_rate": self.dropout_rate,
+                "device": self.device,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Create a new instance of the layer from its config.
+        This is necessary for serialization/deserialization.
+        """
+        # The deserialized layers are not used; just pass config values to the constructor.
+        layer_config = {
+            "d_model": config.get("d_model", 64),
+            "num_heads": config.get("num_heads", 8),
+            "ff_dim1": config.get("ff_dim1", 256),
+            "dropout_rate": config.get("dropout_rate", 0.5),
+            "device": config.get("device", "/cpu:0"),
+        }
+        return cls(**layer_config)
 
     def build(self, input_shape):
         """
@@ -775,7 +1594,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
                 f"Input feature dimension {feature_dim} doesn't match d_model {self.d_model}"
             )
 
-        with tf.device(self.device):
+        with get_device_context(self.device):
             # Build layer normalization layers
             self.norm1.build(input_shape)
             self.norm2.build(input_shape)
@@ -796,81 +1615,6 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
 
         # Mark this layer as built
         super().build(input_shape)
-
-    def compute_output_shape(self, input_shape):
-        """
-        Compute the output shape of the transformer encoder block.
-        The output maintains the same shape as input but with ff_dim2 features.
-        """
-        batch_size, seq_length, _ = input_shape
-        return (batch_size, seq_length, self.ff_dim2)
-
-    def call(self, x, mask=None, training=False):
-        with tf.device(self.device):
-            # Layer norm at the beginning
-            x_norm = self.norm1(x)
-
-            # create attention mask if needed
-            attention_mask = None
-            if mask is not None:
-                attention_mask = create_attention_mask_from_padding_mask(mask)
-                attention_mask = kops.cast(attention_mask, "float32")
-
-            # Multi-head attention with residual connection
-            attn_output = self.mha(
-                x_norm, x_norm, attention_mask=attention_mask, training=training
-            )
-            attn_output = self.dropout1(attn_output, training=training)
-
-            if self.residual:
-                x = x + attn_output  # Residual connection
-
-            # Feedforward network
-            ff_output = self.ff_layer1(x)
-            ff_output = self.ff_layer2(ff_output)
-
-            # Final layer norm and residual connection
-            x = self.norm2(x + ff_output)
-
-        return x
-
-    def compute_mask(self, inputs, mask=None):
-        """
-        Propagate the input mask to the output.
-        """
-        return mask
-
-    def get_config(self):
-        """Return the config of the layer for serialization."""
-        config = super().get_config()
-        config.update(
-            {
-                "d_model": self.d_model,
-                "num_heads": self.num_heads,
-                "ff_dim1": self.ff_dim1,
-                "ff_dim2": self.ff_dim2,
-                "dropout_rate": self.dropout_rate,
-                "device": self.device,
-            }
-        )
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        """
-        Create a new instance of the layer from its config.
-        This is necessary for serialization/deserialization.
-        """
-        # The deserialized layers are not used; just pass config values to the constructor.
-        layer_config = {
-            "d_model": config.get("d_model", 64),
-            "num_heads": config.get("num_heads", 8),
-            "ff_dim1": config.get("ff_dim1", 256),
-            "ff_dim2": config.get("ff_dim2", 64),
-            "dropout_rate": config.get("dropout_rate", 0.5),
-            "device": config.get("device", "/cpu:0"),
-        }
-        return cls(**layer_config)
 
 
 ########### END OF TRANSFORMER ENCODER CLASS #####################
@@ -986,105 +1730,92 @@ def serialize_single_spike(clu, spike):
     return example_proto.SerializeToString()
 
 
-# @tf.function
+@tf.function
 def parse_serialized_sequence(
-    params, tensors, batched=False, count_spikes=False
-):  # featDesc, ex_proto,
-    """
-    Parse a serialized spike sequence example.
-    Args:
-        params: parameters of the network
-        tensors: parsed tensors from the TFRecord example
-        batched: Whether data is batched
+    params: Params,
+    tensors: Dict[str, tf.Tensor],
+    count_spikes: bool = False,
+    sorted_indices: bool = None,
+    max_spikes: Optional[int] = None,
+    max_spikes_per_group: Optional[int] = None,
+):
+    # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
+    tensors = dict(tensors)
+    if max_spikes is None:
+        max_spikes = getattr(params, "max_nb_spikes", 512)
+    if max_spikes_per_group is None:
+        max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 128)
 
-    Returns:
-        Parsed tensors with reshaped spike data.
-        In particular, each "group" tensor is reshaped to [num_spikes, nChannelsPerGroup[g], 32].
-        If batched, the shape should be [batchSize, num_spikes_per_batch, nChannelsPerGroup[g], 32] but is then reshaped to merge batch and spikes, giving:
-        [batchSize * num_spikes_per_batch, nChannelsPerGroup[g], 32].
-    """
-    tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
-    # Pierre 13/02/2021: Why use sparse.to_dense, and not directly a FixedLenFeature?
-    # Probably because he wanted a variable length <> inputs sequences
-    tensors["groups"] = tf.reshape(tensors["groups"], [-1])
+    if max_spikes is not None:
+        actual_total = tf.shape(tensors["groups"].indices)[0]
+        tf.debugging.assert_less_equal(
+            actual_total,
+            max_spikes,
+            message=f"A sample exceeded {max_spikes} total spikes. Actual: {actual_total}. Consider increasing max_spikes or filtering your dataset.",
+        )
+    # 1. Handle Metadata (Vectorized to avoid CPU overhead)
+    lengths = []
+    default = -1
+    for key in ["pos", "groups", "indexInDat"]:
+        if isinstance(tensors[key], tf.SparseTensor):
+            num_groups = tf.shape(tensors[key].indices)[
+                0
+            ]  # keep track of groups for later processing
+            padded_sparse = tf.sparse.reset_shape(tensors[key], new_shape=[max_spikes])
+            tensors[key] = tf.sparse.to_dense(padded_sparse, default_value=default)
+        if key == "pos":
+            tensors[key] = tf.reshape(tensors[key], [params.dimOutput])
 
-    tensors["indexInDat"] = tf.sparse.to_dense(tensors["indexInDat"], default_value=-1)
-    # keep a raw version of indexInDat before reshaping
-    tensors["indexInDat_raw"] = tf.identity(tensors["indexInDat"])
-    # reshape indexInDat to be a flat array
-    tensors["indexInDat"] = tf.reshape(tensors["indexInDat"], [-1])
-
+    # 3. Process each group to fixed-size dense blocks
     for g in range(params.nGroups):
-        # here 32 correspond to the number of discretized time bin for a spike
-        zeros = tf.constant(np.zeros([params.nChannelsPerGroup[g], 32]), tf.float32)
-        tensors["group" + str(g)] = tf.sparse.reshape(tensors["group" + str(g)], [-1])
-        tensors["group" + str(g)] = tf.sparse.to_dense(tensors["group" + str(g)])
-        tensors["group" + str(g)] = tf.reshape(tensors["group" + str(g)], [-1])
-        if batched:
-            tensors["group" + str(g)] = tf.reshape(
-                tensors["group" + str(g)],
-                [params.batchSize, -1, params.nChannelsPerGroup[g], 32],
-            )
-            if count_spikes:
-                group_batched = tensors["group" + str(g)]
-                # nonzero mask per sample
-                nonzero_mask = tf.logical_not(
-                    tf.equal(
-                        tf.reduce_sum(
-                            tf.cast(tf.equal(group_batched, zeros), tf.int32),
-                            axis=[2, 3],
-                        ),
-                        32 * params.nChannelsPerGroup[g],
-                    )
-                )
+        group_key = f"group{g}"
 
-                # spike counts per sample (shape = [batchSize])
-                spike_counts = tf.reduce_sum(tf.cast(nonzero_mask, tf.int32), axis=1)
+        spike_size = params.nChannelsPerGroup[g] * 32
+        flat_max_size = max_spikes_per_group * spike_size
+        total_entries = tf.shape(tensors[group_key].indices)[0]
+        actual_spike_count = total_entries // spike_size
 
-                # store result in tensors
-                tensors[f"group{g}_spikes_count"] = spike_counts
+        lengths.append(actual_spike_count)  # Keep track of actual spike count per group
 
-        # WARN: even if batched: gather all together, meaning batch and spikes are merged
-        tensors["group" + str(g)] = tf.reshape(
-            tensors["group" + str(g)], [-1, params.nChannelsPerGroup[g], 32]
+        tf.debugging.assert_less_equal(
+            actual_spike_count,
+            max_spikes_per_group,
+            message=f"Group {g} exceeded {max_spikes_per_group} spikes. Actual: {actual_spike_count}. Consider increasing max_spikes_per_group or filtering your dataset.",
         )
-        # Pierre 12/03/2021: the batchSize and timesteps are gathered together
-        nonZeros = tf.logical_not(
-            tf.equal(
-                tf.reduce_sum(
-                    input_tensor=tf.cast(
-                        tf.equal(tensors["group" + str(g)], zeros), tf.int32
-                    ),
-                    axis=[1, 2],
-                ),
-                32 * params.nChannelsPerGroup[g],
-            )
+
+        # Convert Sparse to Dense
+        padded_spikes = tf.sparse.reset_shape(
+            tensors[group_key], new_shape=[flat_max_size]
         )
-        # nonZeros: control that the voltage measured is not 0, at all channels and time bin inside the detected spike
-        tensors["group" + str(g)] = tf.gather(
-            tensors["group" + str(g)], tf.where(nonZeros)
-        )[:, 0, :, :]
-        # I don't understand why it can then call [:,0,:,:] as the output tensor of gather should have the same
-        # shape as tensors["group"+str(g)"], [-1,params.nChannels[g],32] ...
+        raw_flat = tf.sparse.to_dense(padded_spikes, default_value=0.0)
+
+        tensors[group_key] = tf.reshape(
+            raw_flat, [max_spikes_per_group, params.nChannelsPerGroup[g], 32]
+        )
+
+        if count_spikes:
+            tensors[f"group{g}_spikes_count"] = actual_spike_count
+
+    # 5. Length and Masking
+    # Keep track of actual length for SafeMaskCreation
+    tensors["total_nb_spikes"] = tf.cast(num_groups, tf.int32)
+    tensors["max_spikes_in_groups"] = tf.reduce_max(tf.stack(lengths))
 
     return tensors
 
 
-def parse_serialized_spike(featDesc, ex_proto, batched=False):
+@tf.function
+def parse_serialized_spike(featDesc, ex_proto):
     """
     Parse a serialized spike example.
     Args:
         featDesc: Feature description for parsing
         ex_proto: Serialized TFRecord example
-        batched: Whether data is batched
 
     Returns:
         Parsed tensors
     """
-    if batched:
-        tensors = tf.io.parse_example(serialized=ex_proto, features=featDesc)
-    else:
-        tensors = tf.io.parse_single_example(serialized=ex_proto, features=featDesc)
+    tensors = tf.io.parse_single_example(serialized=ex_proto, features=featDesc)
     return tensors
 
 
@@ -1095,9 +1826,14 @@ def import_true_pos(feature):
     """
     Returns a function that adds true position (the feature array) to the parsed tensors.
     """
+    feature_tensor = tf.convert_to_tensor(feature)
 
     def change_feature(vals):
-        vals["pos"] = tf.gather(feature, vals["pos_index"])
+        idx = tf.cast(vals["pos_index"], tf.int32)
+        vals["pos"] = tf.gather(feature_tensor, idx)
+        vals["pos"] = tf.reshape(
+            vals["pos"], [feature_tensor.shape[1]]
+        )  # reshape to (2,) for consistency
         return vals
 
     return change_feature
@@ -1165,13 +1901,12 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with white noise
         """
-        with tf.device(self.device):
-            noise = tf.random.normal(
-                shape=tf.shape(neural_data),
-                mean=0.0,
-                stddev=self.white_noise_std,
-                dtype=neural_data.dtype,
-            )
+        noise = tf.random.normal(
+            shape=tf.shape(neural_data),
+            mean=0.0,
+            stddev=self.white_noise_std,
+            dtype=neural_data.dtype,
+        )
         return neural_data + noise
 
     def add_constant_offset(self, neural_data: tf.Tensor, axis: int = -2) -> tf.Tensor:
@@ -1185,30 +1920,27 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with constant offset
         """
-        with tf.device(self.device):
-            # Create offset shape - same as neural_data but with 1 along time dimension
-            shape = tf.shape(neural_data)
-            offset_shape = tf.concat(
-                [
-                    shape[
-                        : axis + 1
-                    ],  # Keep dimensions up to and including channel axis
-                    [1],  # Make time dimension 1 for broadcasting
-                    shape[axis + 2 :],  # Keep remaining dimensions
-                ],
-                axis=0,
-            )
+        # Create offset shape - same as neural_data but with 1 along time dimension
+        shape = tf.shape(neural_data)
+        offset_shape = tf.concat(
+            [
+                shape[: axis + 1],  # Keep dimensions up to and including channel axis
+                [1],  # Make time dimension 1 for broadcasting
+                shape[axis + 2 :],  # Keep remaining dimensions
+            ],
+            axis=0,
+        )
 
-            # Generate offset noise
-            offset = tf.random.normal(
-                shape=offset_shape,
-                mean=0.0,
-                stddev=self.offset_noise_std,
-                dtype=neural_data.dtype,
-            )
+        # Generate offset noise
+        offset = tf.random.normal(
+            shape=offset_shape,
+            mean=0.0,
+            stddev=self.offset_noise_std,
+            dtype=neural_data.dtype,
+        )
 
-            # Apply offset to neural data
-            augmented_data = neural_data + offset
+        # Apply offset to neural data
+        augmented_data = neural_data + offset
 
         return augmented_data
 
@@ -1225,20 +1957,20 @@ class NeuralDataAugmentation:
         Returns:
             Augmented neural data with cumulative noise
         """
-        with tf.device(self.device):
-            # Generate random noise for each time step
-            noise_increments = tf.random.normal(
-                shape=tf.shape(neural_data),
-                mean=0.0,
-                stddev=self.cumulative_noise_std,
-                dtype=neural_data.dtype,
-            )
+        # Generate random noise for each time step
+        noise_increments = tf.random.normal(
+            shape=tf.shape(neural_data),
+            mean=0.0,
+            stddev=self.cumulative_noise_std,
+            dtype=neural_data.dtype,
+        )
 
-            # Compute cumulative sum along time axis to create random walk
-            cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
+        # Compute cumulative sum along time axis to create random walk
+        cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
 
         return neural_data + cumulative_noise
 
+    @tf.function
     def augment_sample(
         self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
     ) -> tf.Tensor:
@@ -1263,6 +1995,36 @@ class NeuralDataAugmentation:
         augmented_data = self.add_cumulative_noise(augmented_data, time_axis=time_axis)
 
         return augmented_data
+
+    @tf.function
+    def augment_spike_group_vectorized(self, group_data: tf.Tensor) -> tf.Tensor:
+        # 1. Prepare shapes for broadcasting
+        # result shape: [num_augs, spikes, channels, time]
+        num_spikes = tf.shape(group_data)[0]
+        channels = tf.shape(group_data)[1]
+        time_bins = tf.shape(group_data)[2]
+
+        output_shape = [self.num_augmentations, num_spikes, channels, time_bins]
+
+        # 2. Add White Noise (Independently for every augmentation)
+        # Total randomness in one go
+        white_noise = tf.random.normal(output_shape, stddev=self.white_noise_std)
+
+        # 3. Constant Offset (One per channel per augmentation)
+        # Shape: [num_augs, 1, channels, 1]
+        offset_noise = tf.random.normal(
+            [self.num_augmentations, 1, channels, 1], stddev=self.offset_noise_std
+        )
+
+        # 4. Cumulative Noise (Random walk per augmentation)
+        # Shape: [num_augs, num_spikes, channels, time]
+        cum_noise = tf.cumsum(
+            tf.random.normal(output_shape, stddev=self.cumulative_noise_std), axis=-1
+        )
+
+        # 5. Combine everything using broadcasting
+        # group_data [None, spikes, channels, time] + noises
+        return group_data[tf.newaxis, ...] + white_noise + offset_noise + cum_noise
 
     def augment_spike_group(self, group_data: tf.Tensor) -> tf.Tensor:
         """
@@ -1318,247 +2080,91 @@ class NeuralDataAugmentation:
         return self.augment_sample(neural_data, time_axis, channel_axis)
 
 
-def parse_serialized_sequence_with_augmentation(
-    params,
-    tensors,
-    augmentation_config: Optional[NeuralDataAugmentation] = None,
-    batched=False,
-    count_spikes=False,
-):
-    """
-    Parse serialized sequence with optional data augmentation.
-
-    Args:
-        params: Parameters object containing nGroups, nChannelsPerGroup, etc.
-        tensors: Dictionary of parsed tensors from TFRecord
-        augmentation_config: Optional augmentation configuration
-        batched: Whether data is batched
-
-    Returns:
-        Dictionary of parsed and optionally augmented tensors
-    """
-    # Original parsing logic
-    tensors["groups"] = tf.sparse.to_dense(tensors["groups"], default_value=-1)
-    tensors["groups"] = tf.reshape(tensors["groups"], [-1])
-    tensors["indexInDat"] = tf.sparse.to_dense(tensors["indexInDat"], default_value=-1)
-    tensors["indexInDat"] = tf.reshape(tensors["indexInDat"], [-1])
-
-    # Store original group data for potential augmentation
-    original_groups = {}
-
-    for g in range(params.nGroups):
-        # Original processing logic
-        zeros = tf.constant(np.zeros([params.nChannelsPerGroup[g], 32]), tf.float32)
-        tensors["group" + str(g)] = tf.sparse.reshape(tensors["group" + str(g)], [-1])
-        tensors["group" + str(g)] = tf.sparse.to_dense(tensors["group" + str(g)])
-        tensors["group" + str(g)] = tf.reshape(tensors["group" + str(g)], [-1])
-
-        if batched:
-            tensors["group" + str(g)] = tf.reshape(
-                tensors["group" + str(g)],
-                [params.batchSize, -1, params.nChannelsPerGroup[g], 32],
-            )
-            if count_spikes:
-                group_batched = tensors["group" + str(g)]
-                # nonzero mask per sample
-                nonzero_mask = tf.logical_not(
-                    tf.equal(
-                        tf.reduce_sum(
-                            tf.cast(tf.equal(group_batched, zeros), tf.int32),
-                            axis=[2, 3],
-                        ),
-                        32 * params.nChannelsPerGroup[g],
-                    )
-                )
-
-                # spike counts per sample (shape = [batchSize])
-                spike_counts = tf.reduce_sum(tf.cast(nonzero_mask, tf.int32), axis=1)
-
-                # store result in tensors
-                tensors[f"group{g}_spikes_count"] = spike_counts
-
-        # Reshape for processing
-        tensors["group" + str(g)] = tf.reshape(
-            tensors["group" + str(g)], [-1, params.nChannelsPerGroup[g], 32]
-        )
-
-        # Filter non-zero entries
-        nonZeros = tf.logical_not(
-            tf.equal(
-                tf.reduce_sum(
-                    input_tensor=tf.cast(
-                        tf.equal(tensors["group" + str(g)], zeros), tf.int32
-                    ),
-                    axis=[1, 2],
-                ),
-                32 * params.nChannelsPerGroup[g],
-            )
-        )
-
-        tensors["group" + str(g)] = tf.gather(
-            tensors["group" + str(g)], tf.where(nonZeros)
-        )[:, 0, :, :]
-
-        # Store original data for augmentation
-        original_groups["group" + str(g)] = tensors["group" + str(g)]
-
-    # Apply augmentation if configured
-    if augmentation_config is not None:
-        augmented_tensors = apply_group_augmentation(
-            tensors, original_groups, params, augmentation_config
-        )
-        return augmented_tensors
-
-    return tensors
-
-
+@tf.function
 def apply_group_augmentation(
     tensors: Dict[str, tf.Tensor],
     original_groups: Dict[str, tf.Tensor],
-    params,
+    params: Params,
     augmentation_config: NeuralDataAugmentation,
-) -> Dict[str, tf.Tensor]:
+    count_spikes: bool = False,
+):
     """
-    Apply augmentation to group-based neural data using the augmentation_config methods.
-
-    Args:
-        tensors: Original parsed tensors
-        original_groups: Dictionary of group data tensors
-        params: Parameters object
-        augmentation_config: Augmentation configuration
-
-    Returns:
-        Dictionary with augmented data
+    Apply augmentation to each group and replicate metadata efficiently.
     """
-
-    # Option to keep original tensor as first in stack
+    num_augs = augmentation_config.num_augmentations
     keep_original = getattr(augmentation_config, "keep_original", False)
-    print("keep_original tensors:", keep_original)
-    augmented_copies = []
 
-    if keep_original:
-        # Add original tensors as first copy
-        orig_tensors = tensors.copy()
-        for g in range(params.nGroups):
-            group_key = f"group{g}"
-            if group_key in original_groups:
-                orig_tensors[group_key] = original_groups[group_key]
-        orig_tensors["groups"] = tensors["groups"]
-        orig_tensors["pos"] = tensors["pos"]
-        orig_tensors["indexInDat"] = tensors["indexInDat"]
-        orig_tensors["time"] = tensors["time"]
-        augmented_copies.append(orig_tensors)
-
-    for aug_idx in range(augmentation_config.num_augmentations):
-        aug_tensors = tensors.copy()
-        for g in range(params.nGroups):
-            group_key = f"group{g}"
-            if group_key in original_groups:
-                group_data = original_groups[group_key]
-                # Use the augmentation_config's method directly
-                augmented_group = augmentation_config.augment_spike_group(group_data)
-                aug_tensors[group_key] = augmented_group
-        aug_tensors["groups"] = tensors["groups"]
-        aug_tensors["pos"] = tensors["pos"]
-        aug_tensors["indexInDat"] = tensors["indexInDat"]
-        aug_tensors["time"] = tensors["time"]
-        augmented_copies.append(aug_tensors)
-
-    # Stack augmented copies
     result_tensors = {}
-    n_total = len(augmented_copies)
+    # --- 1. Vectorized Spike Augmentation ---
     for g in range(params.nGroups):
-        group_key = f"group{g}"
-        if group_key in tensors:
-            stacked_groups = tf.stack(
-                [aug[group_key] for aug in augmented_copies], axis=0
-            )
-            result_tensors[group_key] = stacked_groups
+        g_key = f"group{g}"
+        group_data = original_groups[g_key]  # Shape: [Spikes, Chan, Time]
 
-    # Replicate metadata
-    result_tensors["groups"] = tf.repeat(
-        tf.expand_dims(tensors["groups"], 0),
-        n_total,
-        axis=0,
-    )
-    result_tensors["indexInDat"] = tf.repeat(
-        tf.expand_dims(tensors["indexInDat"], 0),
-        n_total,
-        axis=0,
-    )
-    result_tensors["pos"] = tf.repeat(
-        tf.expand_dims(tensors["pos"], 0),
-        n_total,
-        axis=0,
-    )
-    result_tensors["time"] = tf.repeat(
-        tf.expand_dims(tensors["time"], 0),
-        n_total,
-        axis=0,
-    )
-    print("result_tensors keys:", result_tensors.keys())
+        # now that ours groups are fixed size and already padded, we need a mask to avoid augmenting the padded part
+        is_real_spike = tf.reduce_any(
+            tf.not_equal(group_data, 0.0), axis=[1, 2]
+        )  # Shape: [Spikes]
+        # broadcast to match group_data shape
+        is_real_spike = is_real_spike[
+            tf.newaxis, :, tf.newaxis, tf.newaxis
+        ]  # Shape: [1, Spikes, 1, 1]
+
+        # Generate ALL noise for ALL augmentations in 3 big API calls
+        # Shape: [num_augs, Spikes, Chan, Time]
+        noise_shape = tf.concat([[num_augs], tf.shape(group_data)], axis=0)
+
+        white = tf.random.normal(
+            noise_shape, stddev=augmentation_config.white_noise_std
+        )
+        offset = tf.random.normal(
+            [num_augs, 1, tf.shape(group_data)[1], 1],
+            stddev=augmentation_config.offset_noise_std,
+        )
+        cum_noise = tf.cumsum(
+            tf.random.normal(
+                noise_shape, stddev=augmentation_config.cumulative_noise_std
+            ),
+            axis=-1,
+        )
+
+        # Broadcast the original data to match noise shape
+        augmented_versions = group_data[tf.newaxis, ...] + white + offset + cum_noise
+
+        # zero out the padded spikes to ensure they remain unchanged after augmentations
+        augmented_versions = tf.where(is_real_spike, augmented_versions, 0.0)
+
+        if keep_original:
+            result_tensors[g_key] = tf.concat(
+                [group_data[tf.newaxis, ...], augmented_versions], axis=0
+            )
+        else:
+            result_tensors[g_key] = augmented_versions
+
+    # --- 2. Lightning Fast Metadata Replication ---
+    # We don't re-calculate indices! We just repeat what Step 1 produced.
+    metadata_keys = [
+        "pos_index",
+        "pos",
+        "groups",
+        "length",
+        "total_nb_spikes",
+        "time",
+        "time_behavior",
+        "indexInDat",
+        "max_spikes_in_groups",
+    ] + [f"indices{g}" for g in range(params.nGroups)]
+    if count_spikes:
+        metadata_keys += [f"group{g}_spikes_count" for g in range(params.nGroups)]
+    n_total = num_augs + (1 if keep_original else 0)
+
+    for key in metadata_keys:
+        if key in tensors:
+            # Repeat the pre-calculated tensor N times
+            result_tensors[key] = tf.repeat(
+                tensors[key][tf.newaxis, ...], n_total, axis=0
+            )
 
     return result_tensors
-
-
-def create_flatten_augmented_groups_fn(params, num_augmentations):
-    """
-    Create a function for flattening augmented groups that can be used with flat_map.
-    This is needed for tf.experimental graph compatibility (no lambda functions).
-
-    Args:
-        params: Parameters object
-        num_augmentations: Number of augmentations per original sample
-
-    Returns:
-        Function that can be used with dataset.flat_map()
-    """
-
-    def map_flatten_augmented_groups(data_dict):
-        """
-        Flatten augmented groups to create individual samples from each augmentation.
-
-        Args:
-            data_dict: Dictionary with augmented tensors
-
-        Returns:
-            tf.data.Dataset with flattened individual samples
-        """
-        return flatten_augmented_groups(data_dict, params, num_augmentations)
-
-    return map_flatten_augmented_groups
-
-
-def flatten_augmented_groups(data_dict, params, num_augmentations):
-    """
-    Flatten augmented groups to create individual samples from each augmentation.
-
-    Args:
-        data_dict: Dictionary with augmented tensors
-        params: Parameters object
-        num_augmentations: Number of augmentations per original sample
-
-    Returns:
-        tf.data.Dataset with flattened individual samples
-    """
-    # Create a dictionary where each key maps to a tensor containing all augmented samples
-    flattened_dict = {}
-
-    # Handle group data
-    for g in range(params.nGroups):
-        group_key = f"group{g}"
-        if group_key in data_dict:
-            # data_dict[group_key] has shape [num_augmentations, num_spikes, channels, time_bins]
-            # We want to flatten the first dimension
-            flattened_dict[group_key] = data_dict[group_key]
-
-    # Handle metadata (already stacked with shape [num_augmentations, ...])
-    flattened_dict["groups"] = data_dict["groups"]
-    flattened_dict["indexInDat"] = data_dict["indexInDat"]
-    flattened_dict["pos"] = data_dict["pos"]
-    flattened_dict["time"] = data_dict["time"]
-
-    return tf.data.Dataset.from_tensor_slices(flattened_dict)
 
 
 def parse_tfrecord_with_augmentation(
@@ -1587,7 +2193,7 @@ def parse_tfrecord_with_augmentation(
     )  # [time_steps, channels]
 
     # Extract labels
-    labels = parsed_features.get("labels", None)
+    parsed_features.get("labels", None)
 
     # Apply augmentation
     augmented_data = augmentation_config.create_augmented_copies(neural_data)
@@ -1595,9 +2201,7 @@ def parse_tfrecord_with_augmentation(
     return augmented_data
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="LinearizationLayer"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class LinearizationLayer(tf.keras.layers.Layer):
     """
     A simple layer to linearize Euclidean data into a maze-like linear track.
@@ -1614,12 +2218,12 @@ class LinearizationLayer(tf.keras.layers.Layer):
         self.device = kwargs.pop("device", "/cpu:0")
         super().__init__(**kwargs)
         # Convert to TensorFlow constants
-        maze_points = np.array(maze_points, dtype=np.float32).reshape(-1, 2)
-        ts_proj = np.array(ts_proj, dtype=np.float32).reshape(-1)
+        if maze_points is None or ts_proj is None:
+            raise ValueError("maze_points and ts_proj cannot be None")
+        maze_points = np.array(maze_points).reshape(-1, 2)
+        ts_proj = np.array(ts_proj).reshape(-1)
         self.maze_points = tf.constant(maze_points, dtype=tf.float32)
         self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
-        print("maze_points shape:", self.maze_points.shape)
-        print("ts_proj shape:", self.ts_proj.shape)
 
     def call(self, euclidean_data):
         """
@@ -1633,15 +2237,14 @@ class LinearizationLayer(tf.keras.layers.Layer):
         linear_pos : a tensor of shape (N,) that represents linear position.
 
         """
-        with tf.device(self.device):
-            # Ensure consistent dtype
-            euclidean_data = kops.cast(euclidean_data, "float32")
-
+        with get_device_context(self.device):
             # Expand dimensions for broadcasting
             # euclidean_data: [batch_size, features] -> [batch_size, 1, features]
             # maze_points: [num_points, features] -> [1, num_points, features]
             euclidean_expanded = kops.expand_dims(euclidean_data, axis=1)
-            maze_expanded = kops.expand_dims(self.maze_points, axis=0)
+            maze_expanded = kops.cast(
+                kops.expand_dims(self.maze_points, axis=0), euclidean_data.dtype
+            )
 
             # Calculate squared distances
             distance_matrix = kops.sum(
@@ -1652,9 +2255,12 @@ class LinearizationLayer(tf.keras.layers.Layer):
             best_points = kops.cast(kops.argmin(distance_matrix, axis=1), tf.int32)
 
             # Gather results
-            projected_pos = kops.take(self.maze_points, best_points)
-            linear_pos = kops.take(self.ts_proj, best_points)
-            linear_pos = kops.cast(linear_pos, "float32")
+            projected_pos = kops.cast(
+                kops.take(self.maze_points, best_points), euclidean_data.dtype
+            )
+            linear_pos = kops.cast(
+                kops.take(self.ts_proj, best_points), euclidean_data.dtype
+            )
 
         return [projected_pos, linear_pos]
 
@@ -1689,8 +2295,8 @@ class LinearizationLayer(tf.keras.layers.Layer):
         Create a new instance of the layer from its config.
         This is necessary for serialization/deserialization.
         """
-        maze_points = config.get("maze_points")
-        ts_proj = config.get("ts_proj")
+        maze_points = config.get("maze_points", None)
+        ts_proj = config.get("ts_proj", None)
         device = config.get("device", "/cpu:0")
         return cls(
             maze_points=maze_points,
@@ -1708,12 +2314,9 @@ class LinearizationLayer(tf.keras.layers.Layer):
             raise ValueError(
                 f"Input to LinearizationLayer must be of shape (batch, 2), got {input_shape}"
             )
-        super().build(input_shape)
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="LinearPosWeighting"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class LinearPosWeighting(tf.keras.layers.Layer):
     """
     A layer to weight the first 2 dimensions of position outputs by
@@ -1745,9 +2348,7 @@ class LinearPosWeighting(tf.keras.layers.Layer):
         return weighted_output
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="DynamicDenseWeightLayer"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class DynamicDenseWeightLayer(tf.keras.layers.Layer):
     """Layer that calls fitted DenseWeight for each batch dynamically"""
 
@@ -1761,7 +2362,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
     def _compute_batch_weights(self, linearized_pos):
         """Compute weights for a batch using fitted DenseWeight"""
         # Convert tensor to numpy for DenseWeight
-        with tf.device(self.device):
+        with get_device_context(self.device):
             if hasattr(linearized_pos, "numpy"):
                 linearized_np = linearized_pos.numpy()
             else:
@@ -1777,32 +2378,23 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         """
         Dynamically compute weights for current batch using fitted DenseWeight
         """
-        with tf.device(self.device):
+        with get_device_context(self.device):
             # Use tf.py_function to call the fitted DenseWeight
             weights = tf.py_function(
-                func=self._compute_batch_weights, inp=[linearized_pos], Tout=tf.float32
+                func=self._compute_batch_weights, inp=[linearized_pos]
             )
 
             # Set shape (tf.py_function loses shape info)
-            batch_size = tf.shape(linearized_pos)[0]
+            tf.shape(linearized_pos)[0]
             weights.set_shape([None])
 
         return weights
 
     def get_config(self):
         base_config = super().get_config()
-        try:
-            training_data_list = self.training_data.tolist()
-        except AttributeError:
-            training_data_list = (
-                self.training_data.numpy().tolist()
-                if hasattr(self.training_data, "numpy")
-                else self.training_data
-            )
         return {
             **base_config,
             "fitted_dw_alpha": self.alpha,
-            "training_data": training_data_list,
             "device": self.device,
         }
 
@@ -1815,7 +2407,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         fitted_dw_config = config.get("fitted_dw_alpha")
         training_data = config.get("training_data")
         fitted_dw = DenseWeight(fitted_dw_config)
-        device = config.get("device", "/cpu:0")
+        config.get("device", "/cpu:0")
         if training_data is not None:
             fitted_dw.fit(training_data)
         # return cls(fitted_denseweight=fitted_dw, device=device)
@@ -1824,9 +2416,7 @@ class DynamicDenseWeightLayer(tf.keras.layers.Layer):
         )
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="UMazeProjectionLayer"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def __init__(self, grid_size, smoothing_factor=0.01, maze_params=None, **kwargs):
         """
@@ -1947,6 +2537,7 @@ class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         config = super().get_config()
         config.update(
             {
+                "grid_size": self.grid_size,
                 "maze_params": self.maze_params_dict,
                 "smoothing_factor": self.smoothing_factor,
             }
@@ -1955,20 +2546,19 @@ class UMazeProjectionLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     @classmethod
     def from_config(cls, config):
-        maze_params = config.get("maze_params", None)
-        smoothing_factor = config.get("smoothing_factor", 0.01)
-        grid_size = config.get("grid_size", 50)
+        maze_params = config.pop("maze_params", None)
+        smoothing_factor = config.pop("smoothing_factor", 0.01)
+        grid_size = config.pop("grid_size", 50)
         return cls(
+            grid_size=grid_size,
             maze_params=maze_params,
             smoothing_factor=smoothing_factor,
-            grid_size=grid_size,
+            **config,
         )
 
 
 # Custom layer that combines feature_output and UMazeProjectionLayer
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="FeatureOutputWithUMaze"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class FeatureOutputWithUMaze(tf.keras.layers.Layer):
     def __init__(self, orig_layer_config, maze_params=None, **kwargs):
         super().__init__(**kwargs)
@@ -2067,9 +2657,7 @@ def get_last_dense_layers_before_output(
     return dense_layers[:k][::-1]  # reverse so closest layers come last
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="GaussianHeatmapLayer"
-)
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     """
     Layer that generates Gaussian heatmaps for given true positions.
@@ -2086,38 +2674,31 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         maze_params=None,
         **kwargs,
     ):
+        self.deviceName = kwargs.pop("device", None)
         tf.keras.layers.Layer.__init__(self, **kwargs)
         SpatialConstraintsMixin.__init__(
             self, grid_size=grid_size, maze_params=maze_params
         )
-        # Convert numpy array to Python list immediately for serialization
-        if hasattr(training_positions, "tolist"):
-            self.training_positions = (
-                training_positions  # Keep original for computation
-            )
-            self._training_positions_serializable = (
-                training_positions.tolist()
-            )  # For config
-        else:
-            self.training_positions = training_positions
-            self._training_positions_serializable = training_positions
-        self.grid_size = grid_size
-        self.sigma = float(sigma)
-        self.eps = float(eps)
-        self.neg = float(neg)
+        self.training_positions = training_positions
+        self.eps = eps
+        self.sigma = sigma
+        self.neg = neg
         self.maze_params = maze_params
 
         self._initialize_computed_attributes()
 
         # final dense layer to map features to logits
         self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
-        self._validate_training_positions()
 
     def _initialize_computed_attributes(self):
-        self.EPS = self.eps
-        self.NEG = tf.constant(self.neg, tf.float32)
-        self.occ = self.occupancy_map(self.training_positions)
-        self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        self.EPS = self.common_eps
+        self.NEG = self.common_neg
+        if self.training_positions is not None:
+            self._validate_training_positions()
+            self.occ = self.occupancy_map(self.training_positions)
+            self.WMAP = self.weight_map_from_occ(self.occ, alpha=0.5)
+        elif not hasattr(self, "WMAP"):
+            self.WMAP = tf.ones((self.GRID_H, self.GRID_W), dtype=tf.float32)
         self.gaussian_kernel = self._create_gaussian_kernel(self.sigma)
 
     def _create_gaussian_kernel(self, sigma):
@@ -2127,7 +2708,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         xx, yy = np.meshgrid(ax, ax)
         kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
         kernel = kernel / np.sum(kernel)
-        return tf.constant(kernel, dtype=tf.float32)
+        return tf.constant(kernel)
 
     def _validate_training_positions(self):
         """Validate that training positions don't fall in forbidden regions"""
@@ -2153,9 +2734,10 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         logits_flat = self.feature_to_logits_map(inputs)
         logits_hw = kops.reshape(logits_flat, (-1, self.GRID_H, self.GRID_W))
         # smooth logits with a gaussian kernel to avoid spiky predictions
+        kernel = kops.cast(self.gaussian_kernel[:, :, None, None], logits_hw.dtype)
         logits_hw = tf.nn.conv2d(
             logits_hw[:, :, :, None],
-            self.gaussian_kernel[:, :, None, None],
+            kernel,
             strides=[1, 1, 1, 1],
             padding="SAME",
         )[:, :, :, 0]
@@ -2165,29 +2747,16 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         return logits_flat
 
     def gaussian_heatmap_targets(self, pos_batch, sigma=None):
+        """Unified method for generating Gaussian targets using Mixin logic"""
         if sigma is None:
             sigma = self.sigma
-        # pos_batch: [B, 2] true [x,y] positions
-        X = self.Xc_tf[None]
-        Y = self.Yc_tf[None]
+        return self.gaussian_heatmap_targets_tf(pos_batch, sigma=sigma)
 
-        dx = pos_batch[:, 0][:, None, None] - X
-        dy = pos_batch[:, 1][:, None, None] - Y
-        gauss = kops.exp(-(dx**2 + dy**2) / (2 * sigma**2))
-
-        # Apply forbidden mask here too
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        allowed_mask = kops.cast(allowed_mask, "float32")
-        gauss *= allowed_mask
-
-        # Safer normalization
-        gauss_sum = kops.sum(gauss, axis=[1, 2], keepdims=True)
-        gauss = kops.where(
-            gauss_sum > self.EPS,
-            gauss / (gauss_sum + self.EPS),
-            gauss / kops.sum(allowed_mask),
+    def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
+        """Unified decoding logic using Mixin's method"""
+        return self.decode_and_uncertainty_tf(
+            logits_hw, mode=mode, return_probs=return_probs
         )
-        return gauss
 
     def positions_to_bins(self, pos):
         xs = np.clip((pos[:, 0] * self.GRID_W).astype(int), 0, self.GRID_W - 1)
@@ -2267,10 +2836,10 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         valid_mask = (occ > 0) & (~forbid_mask)
 
         if log_scale:
-            inv = np.zeros_like(occ, dtype=np.float32)
+            inv = np.zeros_like(occ)
             inv[valid_mask] = 1.0 / np.log1p(occ[valid_mask] + eps)
         else:
-            inv = np.zeros_like(occ, dtype=np.float32)
+            inv = np.zeros_like(occ)
             inv[valid_mask] = (1.0 / (occ[valid_mask] + eps)) ** alpha
 
         # Normalize mean weight on valid bins ≈ 1
@@ -2282,91 +2851,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             inv[valid_mask] = np.clip(inv[valid_mask], 0.0, max_weight)
 
         # Forbidden + zero-count bins remain 0
-        return tf.constant(inv, dtype=tf.float32)
-
-    def decode_and_uncertainty(self, logits_hw, mode="argmax", return_probs=False):
-        """
-        Decode predicted heatmap into expected [x, y] position,
-        computing confidence/uncertainty metrics while excluding forbidden bins.
-
-        Args:
-            logits_hw: [B, H, W] unnormalized logits from the model
-            mode: 'expectation' or 'argmax' (default) for decoding method
-            #FIX: for now argmax is default since expectation can yield positions in forbidden region (eg predictions in both left and right arm, center of mass yields a point outside maze)
-
-        Returns:
-            mean_pos: [B, 2] expected position [ex, ey]
-            maxp: [B] max probability of any allowed bin
-            Hn: [B] normalized entropy over allowed bins (0-1)
-            var: [B] total variance (varx + vary)
-        """
-        B, H, W = tf.shape(logits_hw)[0], tf.shape(logits_hw)[1], tf.shape(logits_hw)[2]
-
-        # Mask forbidden bins in logits
-        masked_logits = tf.where(self.forbid_mask_tf[None] > 0, self.NEG, logits_hw)
-
-        # Flatten grid for softmax
-        logits_flat = tf.reshape(masked_logits, [B, H * W])
-        log_probs_flat = tf.nn.log_softmax(logits_flat, axis=-1)
-        probs_flat = tf.exp(log_probs_flat)
-        probs = tf.reshape(probs_flat, [B, H, W])
-
-        # Explicitly zero forbidden bins
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        allowed_mask = tf.cast(allowed_mask, tf.float32)
-        probs_allowed = probs * allowed_mask
-
-        # Renormalize over allowed bins
-        probs_allowed /= (
-            tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True) + self.EPS
-        )
-
-        if mode == "expectation":
-            # Expected position using only allowed bins
-            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
-            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
-        elif mode == "argmax":
-            # Argmax bin (always inside allowed region)
-            idx = tf.argmax(
-                tf.reshape(probs_allowed, [B, H * W]), axis=-1, output_type=tf.int64
-            )
-            W64 = tf.cast(W, tf.int64)
-            iy = idx // W64  # for debugging
-            ix = idx % W64
-            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
-            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
-        else:
-            raise ValueError("mode must be 'expectation' or 'argmax'")
-
-        if mode == "expectation":
-            # Variance
-            varx = tf.reduce_sum(
-                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
-            )
-            vary = tf.reduce_sum(
-                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
-            )
-            var = varx + vary
-        else:
-            var = tf.zeros([B])
-
-        # Max probability
-        maxp = tf.reduce_max(tf.reshape(probs_allowed, [B, H * W]), axis=1)
-
-        # Entropy (only allowed bins)
-        probs_flat_allowed = tf.reshape(probs_allowed, [B, H * W])
-        H_entropy = -tf.reduce_sum(
-            probs_flat_allowed * tf.math.log(probs_flat_allowed + self.EPS), axis=1
-        )
-        n_allowed = tf.cast(tf.reduce_sum(allowed_mask), tf.float32)
-        Hn = H_entropy / tf.math.log(n_allowed + self.EPS)  # normalized entropy (0-1)
-        xy = tf.stack([ex, ey], axis=-1)
-        # xy = self.project_out_of_forbid(xy)
-
-        if return_probs:
-            return xy, maxp, Hn, var, probs_allowed
-        else:
-            return xy, maxp, Hn, var
+        return tf.constant(inv)
 
     def project_out_of_forbid(self, xy, forbid_box=None):
         """
@@ -2452,14 +2937,6 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def get_config(self):
         """Return the config dict for serialization"""
         config = tf.keras.layers.Layer.get_config(self)
-        # Convert numpy arrays to lists
-        training_pos = getattr(
-            self, "_training_positions_serializable", self.training_positions
-        )
-        if hasattr(training_pos, "tolist"):
-            training_pos = training_pos.tolist()
-        elif hasattr(training_pos, "numpy"):
-            training_pos = training_pos.numpy().tolist()
 
         # Convert TensorFlow tensors to Python scalars
         neg_value = self.neg
@@ -2468,12 +2945,14 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         config.update(
             {
-                "training_positions": training_pos,
+                "training_positions": None,  # Avoid storing large arrays
                 "grid_size": self.grid_size,
                 "eps": float(self.eps),
                 "sigma": float(self.sigma),
                 "neg": neg_value,
                 "maze_params": self.maze_params,
+                "WMAP": self.WMAP.numpy().tolist() if hasattr(self, "WMAP") else None,
+                "device": self.deviceName,
             }
         )
         return config
@@ -2481,18 +2960,13 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     @classmethod
     def from_config(cls, config):
         """Create layer from config dict"""
-        # Convert training_positions back to numpy array if needed
-        if isinstance(config["training_positions"], list):
-            config["training_positions"] = np.array(config["training_positions"])
-        layer_config = {
-            "training_positions": config["training_positions"],
-            "grid_size": config.get("grid_size", (45, 45)),
-            "eps": config.get("eps", 1e-8),
-            "sigma": config.get("sigma", 0.03),
-            "neg": config.get("neg", -100),
-            "maze_params": config.get("maze_params", None),
-        }
-        return cls(**layer_config)
+        wmap = config.pop("WMAP", None)
+        obj = cls(**config)
+        if wmap is not None:
+            obj.WMAP = tf.constant(wmap, dtype=tf.float32)
+            # Re-initialize computed attributes to ensure consistency
+            obj._initialize_computed_attributes()
+        return obj
 
     def build(self, input_shape):
         """Build the layer - called automatically by Keras"""
@@ -2504,10 +2978,8 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         super().build(input_shape)
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="GaussianHeatmapLosses"
-)
-class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
     """
     A simple wrapup class to hold various loss functions and handle keras symbols. Inherits from
     GaussianHeatmapLayer to access masks and constants.
@@ -2515,24 +2987,40 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
     def __init__(
         self,
-        training_positions,
-        grid_size,
-        l_function_layer_params=None,
+        l_function_layer_params,
+        training_positions=None,
+        grid_size=(45, 45),
         eps=1e-8,
         sigma=0.03,
         neg=-100,
         maze_params=None,
         sinkhorn_eps=0.4,
+        loss_type="safe_kl",
+        WMAP=None,
+        scale=False,
+        name="gaussian_heatmap_losses",
         **kwargs,
     ):
         """
         Args:
             heatmap_layer: An instance of GaussianHeatmapLayer to provide masks and constants.
         """
-        tf.keras.layers.Layer.__init__(self, **kwargs)
+        policy = tf.keras.mixed_precision.global_policy()
+        self.storage_dtype = policy.compute_dtype
+
+        self.deviceName = kwargs.pop("device", None)
+        self.return_batch = kwargs.pop("return_batch", False)
+        tf.keras.losses.Loss.__init__(self, name=name, **kwargs)
         SpatialConstraintsMixin.__init__(
             self, grid_size=grid_size, maze_params=maze_params
         )
+        self.loss_type = loss_type
+        if WMAP is not None:
+            self.WMAP = tf.cast(tf.constant(WMAP), tf.float32)
+        else:
+            self.WMAP = None
+
+        self.scale = scale
         # Convert numpy array to Python list immediately for serialization
         if hasattr(training_positions, "tolist"):
             self.training_positions = (
@@ -2551,74 +3039,73 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self.neg = float(neg)
         self.maze_params = maze_params
         self.l_function_layer_params = l_function_layer_params
-        if self.l_function_layer_params is not None:
-            self.l_function_layer = LinearizationLayer(
-                maze_points=self.l_function_layer_params["maze_points"],
-                ts_proj=self.l_function_layer_params["ts_proj"],
-                device=self.l_function_layer_params.pop("device", None),
-                name=self.l_function_layer_params.get("name", "linearization_layer"),
-            )
-        else:
-            self.l_function_layer = None
+        self.l_function_layer = LinearizationLayer(
+            maze_points=self.l_function_layer_params["maze_points"],
+            ts_proj=self.l_function_layer_params["ts_proj"],
+            device=self.l_function_layer_params.pop("device", self.deviceName),
+            name=self.l_function_layer_params.get("name", "linearization_layer"),
+        )
         self.sinkhorn_eps = sinkhorn_eps
 
-        allowed_mask = kops.cast(self.get_allowed_mask(use_tensorflow=True), "float32")
-        allowed_mask_flat = kops.reshape(allowed_mask, (-1,))  # [H*W]
+        with get_device_context(self.deviceName):
+            self.allowed_mask_tf = tf.cast(
+                self.get_allowed_mask(use_tensorflow=True), tf.float32
+            )
+            self.forbid_mask_tf = tf.cast(1.0 - self.allowed_mask_tf, tf.float32)
+            self.NEG = tf.cast(tf.constant(self.neg), tf.float32)
+            self.EPS = tf.cast(tf.constant(self.eps), tf.float32)
 
-        # keep only allowed coordinates
-        mask_indices = kops.where(allowed_mask_flat > 0)[0]  # [N_allowed]
-        mask_indices = kops.reshape(mask_indices, (-1,))  # ensure 1D
-        # store to map [H,W] to allowed indices
-        self.allowed_indices = mask_indices  # store for reference
+            self.allowed_mask_flat = kops.reshape(self.allowed_mask_tf, (-1,))  # [H*W]
 
-        self.N_valid = kops.shape(mask_indices)[0]
-        self._precompute_cost_matrix()
+            # keep only allowed coordinates
+            mask_indices = kops.where(self.allowed_mask_flat > 0)[0]  # [N_allowed]
+            mask_indices = kops.reshape(mask_indices, (-1,))  # ensure 1D
+            # store to map [H,W] to allowed indices
+            self.allowed_indices = tf.constant(
+                mask_indices,
+                dtype=tf.int32,
+                name="allowed_indices",
+            )
 
-    def call(self, inputs, loss_type="safe_kl", **kwargs):
+            self.N_valid = kops.shape(mask_indices)[0]
+            self._precompute_cost_matrix()
+
+    def call(self, y_true, y_pred):
         """
         Compute loss in a Keras symbolic-safe way.
-
-        Args:
-            inputs: Dictionary with keys 'logits' and 'targets'
-            loss_type: 'weighted' or 'kl' or 'safe_kl'
-
-        Returns:
-            loss: Scalar loss tensor
         """
-        if not isinstance(inputs, dict):
-            # assume (logits, targets) or [logits, targets]
-            if isinstance(inputs, (list, tuple)) and len(inputs) >= 2:
-                logits_hw, target_hw = inputs[0], inputs[1]
-            else:
-                raise ValueError("Expected dict or (logits, targets) pair")
-        else:
-            logits_hw = inputs["logits"]
-            target_hw = inputs["targets"]
+        with get_device_context(self.deviceName):
+            pred_shape = kops.shape(y_pred)
+            true_shape = kops.shape(y_true)
+            if len(pred_shape) == 2:
+                y_pred = kops.reshape(
+                    y_pred,
+                    (-1, self.GRID_H, self.GRID_W),
+                )
 
-        if loss_type == "weighted":
-            return self._weighted_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "kl":
-            return self._kl_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "safe_kl":
-            return self._safe_kl_heatmap_loss(logits_hw, target_hw, **kwargs)
-        elif loss_type == "wasserstein":
-            return self._safe_kl_wasserstein_heatmap_loss(
-                logits_hw, target_hw, **kwargs
-            )
-        else:
-            raise ValueError("Unknown loss_type:" + str(loss_type))
+            if true_shape[1] == 2:
+                # If input is (B, 2), assume it's (x,y) and convert to heatmap targets
+                y_true = self.gaussian_heatmap_targets_tf(y_true)
+
+            y_true = kops.cast(y_true, y_pred.dtype)
+            if self.loss_type == "weighted":
+                return self._weighted_heatmap_loss(y_pred, y_true, wmap=self.WMAP)
+            elif self.loss_type == "kl":
+                return self._kl_heatmap_loss(
+                    y_pred, y_true, wmap=self.WMAP, scale=self.scale
+                )
+            elif self.loss_type == "safe_kl":
+                return self._safe_kl_heatmap_loss(
+                    y_pred, y_true, wmap=self.WMAP, scale=self.scale
+                )
+            elif self.loss_type == "wasserstein":
+                return self._safe_kl_wasserstein_heatmap_loss(y_pred, y_true)
+            else:
+                raise ValueError("Unknown loss_type:" + str(self.loss_type))
 
     def get_config(self):
         """Return the config dict for serialization"""
-        config = tf.keras.layers.Layer.get_config(self)
-        # Convert numpy arrays to lists
-        training_pos = getattr(
-            self, "_training_positions_serializable", self.training_positions
-        )
-        if hasattr(training_pos, "tolist"):
-            training_pos = training_pos.tolist()
-        elif hasattr(training_pos, "numpy"):
-            training_pos = training_pos.numpy().tolist()
+        config = tf.keras.losses.Loss.get_config(self)
 
         # Convert TensorFlow tensors to Python scalars
         neg_value = self.neg
@@ -2640,13 +3127,17 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         config.update(
             {
-                "training_positions": training_pos,
+                "training_positions": self._training_positions_serializable,
                 "grid_size": self.grid_size,
                 "l_function_layer_params": l_function_layer_params_serializable,
-                "eps": float(self.eps),
-                "sigma": float(self.sigma),
+                "eps": self.eps,
+                "sigma": self.sigma,
                 "neg": neg_value,
                 "maze_params": self.maze_params,
+                "sinkhorn_eps": self.sinkhorn_eps,
+                "loss_type": self.loss_type,
+                "scale": self.scale,
+                "WMAP": self.WMAP,
             }
         )
         return config
@@ -2654,11 +3145,8 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
     @classmethod
     def from_config(cls, config):
         """Create layer from config dict"""
-        # Convert training_positions back to numpy array if needed
-        if isinstance(config["training_positions"], list):
-            config["training_positions"] = np.array(config["training_positions"])
         layer_config = {
-            "training_positions": config["training_positions"],
+            "training_positions": config.get("training_positions"),
             "grid_size": config.get("grid_size", (45, 45)),
             "eps": config.get("eps", 1e-8),
             "sigma": config.get("sigma", 0.03),
@@ -2672,14 +3160,8 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def build(self, input_shape):
         """Build the layer"""
         super().build(input_shape)
-        self.allowed_mask_tf = kops.cast(
-            self.get_allowed_mask(use_tensorflow=True), tf.float32
-        )
-        self.forbid_mask_tf = kops.cast(1 - self.allowed_mask_tf, "float32")
 
-        self.NEG = tf.constant(self.neg, tf.float32)
-        self.EPS = self.eps
-
+    @tf.function
     def _weighted_heatmap_loss(self, logits_hw, target_hw, wmap=None):
         batch_size = kops.shape(logits_hw)[0]
 
@@ -2696,9 +3178,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # apply weights
         if wmap is None:
             wmap = self.WMAP
-        weights = kops.expand_dims(wmap, 0) * kops.expand_dims(
-            kops.cast(self.allowed_mask_tf, "float32"), 0
-        )
+        weights = kops.expand_dims(wmap, 0) * kops.expand_dims(self.allowed_mask_tf, 0)
 
         se = kops.square(probs - target_hw)
         # normalize by sum of weights to keep scale stable
@@ -2710,6 +3190,7 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         return kops.mean(loss_per_sample)
 
+    @tf.function
     def _kl_heatmap_loss(self, logits_hw, target_hw, wmap=None, scale=False):
         """
         Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
@@ -2734,14 +3215,11 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Process targets with safety checks
         allowed_mask = kops.expand_dims(self.allowed_mask_tf, 0)
-        allowed_mask = kops.cast(allowed_mask, "float32")
         P = target_hw * allowed_mask
         P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
         safe_eps = kops.maximum(self.EPS, 1e-8)
 
-        uniform_fallback = allowed_mask / kops.sum(
-            kops.cast(self.allowed_mask_tf, "float32")
-        )
+        uniform_fallback = allowed_mask / kops.sum(self.allowed_mask_tf)
         P = kops.where(
             P_sum > safe_eps,
             P / (P_sum + safe_eps),
@@ -2767,9 +3245,9 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         # Apply weighting
         if wmap is not None:
             weights = kops.expand_dims(wmap, 0)
-            valid_mask = kops.cast(weights > 0, "float32")
+            valid_mask = weights > 0
             kl = kl * weights
-            loss_per_sample = kops.sum(kl, axis=[1, 1]) / (
+            loss_per_sample = kops.sum(kl, axis=[1, 2]) / (
                 kops.sum(weights * valid_mask) + safe_eps
             )
             final_loss = kops.mean(loss_per_sample)
@@ -2784,14 +3262,13 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         return final_loss
 
+    @tf.function
     def _safe_kl_heatmap_loss(
         self,
         logits_hw,
         target_hw,
         wmap=None,
         scale=False,
-        return_batch=False,
-        reduction=None,
     ):
         """
         Numerically stable KL divergence loss between target heatmap (P) and predicted (Q).
@@ -2799,11 +3276,10 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         """
         batch_size = tf.shape(logits_hw)[0]
         allowed_mask = self.allowed_mask_tf
-        allowed_mask = kops.cast(allowed_mask, "float32")
 
         # Clip logits for stability and apply forbid mask
         masked_logits = kops.where(
-            kops.expand_dims(kops.cast(self.forbid_mask_tf, "float32"), 0) > 0,
+            kops.expand_dims(self.forbid_mask_tf, 0) > 0,
             self.NEG,
             logits_hw,
         )
@@ -2830,95 +3306,127 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # Apply weighting map if provided
         if wmap is not None:
-            weights = wmap[None]
+            weights = kops.cast(wmap[None], "float32")
             valid_mask = kops.cast(weights > 0, "float32")
             wsum = kops.sum(weights * valid_mask) + self.EPS
             kl = kl * (kops.sum(weights) / wsum)
 
-        if return_batch or reduction == "none":
-            return kl  # [B]
-        else:
-            loss = kops.mean(kl)
-            if scale:
-                loss /= 100.0
-            return loss
+        loss = kops.mean(kl)
+        if scale:
+            loss /= 100.0
+        return loss
 
     def _precompute_cost_matrix(self):
         """
         Precompute cost matrix using only keras.ops so it works symbolically
         across backends (TF, JAX, Torch).
         """
+        with get_device_context(self.deviceName):
+            # Build coordinate grid [H, W, 2] in symbolic form
+            xs = kops.linspace(0.0, 1.0, self.GRID_W)  # [W]
+            ys = kops.linspace(0.0, 1.0, self.GRID_H)  # [H]
+            xs = kops.broadcast_to(xs[None, :], (self.GRID_H, self.GRID_W))
+            ys = kops.broadcast_to(ys[:, None], (self.GRID_H, self.GRID_W))
+            coords = kops.stack([xs, ys], axis=-1)  # [H, W, 2]
+            coords = kops.reshape(coords, (-1, 2))  # [N, 2] where N=H*W
 
-        # Build coordinate grid [H, W, 2] in symbolic form
-        xs = kops.linspace(0.0, 1.0, self.GRID_W)  # [W]
-        ys = kops.linspace(0.0, 1.0, self.GRID_H)  # [H]
-        xs = kops.broadcast_to(xs[None, :], (self.GRID_H, self.GRID_W))
-        ys = kops.broadcast_to(ys[:, None], (self.GRID_H, self.GRID_W))
-        coords = kops.stack([xs, ys], axis=-1)  # [H, W, 2]
-        coords = kops.reshape(coords, (-1, 2))  # [N, 2] where N=H*W
+            coords_allowed = kops.take(
+                coords, self.allowed_indices, axis=0
+            )  # [N_allowed, 2]
+            # Apply your linearization function (kept symbolic)
+            _, lin_coords = self.l_function_layer(coords_allowed)  # [N_valid, 1]
+            lin_coords = kops.reshape(lin_coords, (-1,))  # [N]
 
-        coords_allowed = kops.take(
-            coords, self.allowed_indices, axis=0
-        )  # [N_allowed, 2]
-        # Apply your linearization function (kept symbolic)
-        _, lin_coords = self.l_function_layer(coords_allowed)  # [N_valid, 1]
-        lin_coords = kops.reshape(lin_coords, (-1,))  # [N]
+            # Build cost matrix |li - lj|
+            li = kops.expand_dims(lin_coords, 0)  # [1, N_valid]
+            lj = kops.expand_dims(lin_coords, 1)  # [N_valid, 1]
+            diff = li - lj  # [N_valid, N_valid]
+            C = kops.abs(diff)
+            C_raw = C.numpy()  # Evaluate to numpy for rescaling
 
-        # Build cost matrix |li - lj|
-        li = kops.expand_dims(lin_coords, 0)  # [1, N_valid]
-        lj = kops.expand_dims(lin_coords, 1)  # [N_valid, 1]
-        diff = li - lj  # [N_valid, N_valid]
-        C = kops.abs(diff)
+            # --- Make sure cost_matrix and lin_coords are stored as eager tensors
 
-        # --- Make sure cost_matrix and lin_coords are stored as eager tensors
-        # Try to evaluate them to numpy (this will succeed when called eagerly during __init__).
-        # If that fails (rare), fall back to storing them as non-trainable tf.Variable
+            C_rescaled, info = rescale_cost_matrix(C_raw)
+            C_fixed = tf.constant(C_rescaled, dtype=tf.float32)
+            # store as eager tf.constant so they won't be graph-captured later
+            self.cost_matrix = kops.cast(C_fixed, self.storage_dtype)
+            self.lin_coords = tf.constant(lin_coords.numpy(), self.storage_dtype)
 
-        C_np = tf.keras.backend.get_value(C)
-        C_rescaled, info = rescale_cost_matrix(C_np)
-        lin_coords_np = tf.keras.backend.get_value(lin_coords)
-        # store as eager tf.constant so they won't be graph-captured later
-        self.cost_matrix = tf.constant(C_rescaled, dtype=tf.float32)
-        self.lin_coords = tf.constant(lin_coords_np, dtype=tf.float32)
+            ####
+            # Sinkhorn kernel
+            ####
+            # # compute kernel once and store as CPU-side constant; don't keep gradient tracking
+            # eps_tf = tf.cast(self.sinkhorn_eps, self.storage_dtype)
+            # self.kernel = tf.constant(
+            #     kops.exp(-self.cost_matrix / eps_tf), self.storage_dtype
+            # )
+            # self.M = self.kernel * self.cost_matrix
 
-        # compute kernel once and store as CPU-side constant; don't keep gradient tracking
-        eps_tf = tf.cast(self.sinkhorn_eps, tf.float32)
-        with tf.device("/CPU:0"):
-            kernel_np = tf.keras.backend.get_value(
-                kops.exp(-tf.cast(self.cost_matrix, tf.float32) / eps_tf)
-            )
-            M_np = kernel_np * tf.keras.backend.get_value(self.cost_matrix)
-            self.kernel = tf.constant(kernel_np, dtype=tf.float32)
-            self.M = tf.constant(M_np, dtype=tf.float32)
+    def _precompute_linear_cost_matrix(self):
+        """
+        Refactored: Instead of a matrix, we precompute a sorted indexing map
+        to allow O(N) Wasserstein via 1D CDF.
+        """
+        # 1. Build coordinate grid [H*W, 2]
+        xs = kops.linspace(0.0, 1.0, self.GRID_W)
+        ys = kops.linspace(0.0, 1.0, self.GRID_H)
+        xs, ys = kops.meshgrid(xs, ys)
+        self.all_grid_coords = kops.stack(
+            [kops.reshape(xs, (-1,)), kops.reshape(ys, (-1,))], axis=-1
+        )
 
-        # make sure these won't be part of gradients
-        self.cost_matrix = tf.stop_gradient(tf.cast(self.cost_matrix, tf.float32))
-        self.kernel = tf.stop_gradient(tf.cast(self.kernel, tf.float32))
-        self.M = tf.stop_gradient(tf.cast(self.M, tf.float32))
+        # 2. Get coords for allowed cells
+        coords_allowed = kops.take(self.all_grid_coords, self.allowed_indices, axis=0)
 
+        # 3. Get 1D Maze Positions (linearized) if possible
+        if self.l_function_layer is not None:
+            _, lin_coords = self.l_function_layer(coords_allowed)
+            lin_coords = kops.reshape(lin_coords, (-1,))
+
+            # 4. CRITICAL: Sort allowed_indices by their 1D position
+            # This ensures cumsum() follows the maze path
+            lin_coords_np = tf.keras.backend.get_value(lin_coords)
+            sort_idx = np.argsort(lin_coords_np)
+
+            # Update allowed_indices to be in maze-order
+            original_allowed_np = tf.keras.backend.get_value(self.allowed_indices)
+            sorted_allowed_np = original_allowed_np[sort_idx]
+
+            # Store as constant
+            self.allowed_indices_sorted = tf.constant(sorted_allowed_np, dtype=tf.int32)
+        else:
+            # Fallback to standard order
+            self.allowed_indices_sorted = self.allowed_indices
+
+    @tf.function
     def _safe_kl_wasserstein_heatmap_loss(
         self,
         logits_hw,
         target_hw,
         alpha=None,
         sinkhorn_iters=20,
-        return_batch=False,
-        reduction=None,
+        **kwargs,
     ):
         """
         KL divergence + optional Wasserstein distance (Sinkhorn)
         using precomputed linearized maze cost matrix.
         """
+        dtype = logits_hw.dtype
         if alpha is None:
             alpha = 1  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
-        allowed_mask = kops.cast(self.allowed_mask_tf, "float32")
+        allowed_mask = kops.cast(self.allowed_mask_tf, dtype)
+        forbid_mask = kops.cast(self.forbid_mask_tf, dtype)
+        cost_matrix = kops.cast(self.cost_matrix, dtype)
+        target_hw = kops.cast(target_hw, dtype)
+        NEG = kops.cast(self.NEG, dtype)
+        EPS = kops.cast(self.EPS, dtype)
 
         # Mask + logits flatten
         masked_logits = kops.where(
-            kops.expand_dims(kops.cast(self.forbid_mask_tf, "float32"), 0) > 0,
-            self.NEG,
+            kops.expand_dims(forbid_mask, 0) > 0,
+            NEG,
             logits_hw,
         )
         logits_flat = kops.reshape(
@@ -2929,42 +3437,80 @@ class GaussianHeatmapLosses(tf.keras.layers.Layer, SpatialConstraintsMixin):
         P = target_hw * allowed_mask
         P_sum = kops.sum(P, axis=[1, 2], keepdims=True)
         P = kops.where(
-            P_sum > self.EPS,
-            P / (P_sum + self.EPS),
+            P_sum > EPS,
+            P / (P_sum + EPS),
             allowed_mask / kops.sum(allowed_mask),
         )
-        P = P / (kops.sum(P, axis=[1, 2], keepdims=True) + self.EPS)
+        P = P / (kops.sum(P, axis=[1, 2], keepdims=True) + EPS)
         P_flat = kops.reshape(P, (batch_size, self.GRID_H * self.GRID_W))
 
         # --- KL(P||Q) ---
-        # q_probs = kops.softmax(logits_flat/(3*1e-2), axis=-1)
         q_probs = kops.softmax(logits_flat, axis=-1)
 
         P_allowed = tf.gather(P_flat, self.allowed_indices, axis=1)  # [B, N_valid]
         q_allowed = tf.gather(q_probs, self.allowed_indices, axis=1)  # [B, N_valid]
 
-        ce = -kops.sum(P_allowed * kops.log(q_allowed + self.EPS), axis=-1)
-        entropy = -kops.sum(P_allowed * tf.math.log(P_allowed + self.EPS), axis=-1)
+        ce = -kops.sum(P_allowed * kops.log(q_allowed + EPS), axis=-1)
+        entropy = -kops.sum(P_allowed * tf.math.log(P_allowed + EPS), axis=-1)
         kl = ce - entropy  # [B]
-
-        # small numeric epsilon
-        tiny = 1e-9
 
         # --- Wasserstein penalty ---
         if alpha > 0.0:
             # use precomputed CPU-side constants (self.kernel, self.cost_matrix)
             P_allowed = P_allowed / (kops.sum(P_allowed, axis=1, keepdims=True) + 1e-9)
             q_allowed = q_allowed / (kops.sum(q_allowed, axis=1, keepdims=True) + 1e-9)
-            temp = kops.matmul(P_allowed, self.cost_matrix)  # [batch, N]
+            temp = kops.matmul(P_allowed, cost_matrix)  # [batch, N]
             W = kops.sum(temp * q_allowed, axis=1)  # [batch]
-            loss = kl + alpha * W
+            loss = kl + alpha * kops.log(W + kops.expand_dims(EPS, 0))
         else:
             loss = kl
 
-        if return_batch or reduction == "none":
-            return loss
+        return kops.reshape(loss, (-1, 1))
+
+    def _safe_linear_kl_wasserstein_heatmap_loss(
+        self,
+        logits_hw,
+        target_hw,
+        alpha=1.0,
+    ):
+        batch_size = kops.shape(logits_hw)[0]
+
+        # 1. Flatten and extract maze-ordered valid cells
+        logits_flat = kops.reshape(logits_hw, (batch_size, -1))
+        target_flat = kops.reshape(target_hw, (batch_size, -1))
+
+        # Pull out only the allowed cells in their 1D-maze-order
+        p_valid = kops.take(target_flat, self.allowed_indices_sorted, axis=1)
+        q_logits_valid = kops.take(logits_flat, self.allowed_indices_sorted, axis=1)
+
+        # 2. Probability Normalization
+        # Q: Softmax only over the valid maze path
+        q_valid = kops.softmax(q_logits_valid, axis=-1)
+
+        # P: Normalize targets to ensure they sum to 1.0 (True distribution)
+        p_valid = p_valid / (kops.sum(p_valid, axis=-1, keepdims=True) + self.EPS)
+
+        # 3. KL Divergence (Spatial-agnostic point comparison)
+        # Equivalent to 2D KL because mass is only in the allowed cells
+        kl = kops.sum(
+            p_valid * (kops.log(p_valid + self.EPS) - kops.log(q_valid + self.EPS)),
+            axis=-1,
+        )
+
+        # 4. 1D Wasserstein (Maze-aware spatial comparison)
+        if alpha > 0.0:
+            # Earth Mover Distance in 1D = Integral of |CDF_P - CDF_Q|
+            cdf_p = kops.cumsum(p_valid, axis=-1)
+            cdf_q = kops.cumsum(q_valid, axis=-1)
+
+            # This penalizes mass the further it has to move along the maze path
+            w_dist = kops.sum(kops.abs(cdf_p - cdf_q), axis=-1)
+
+            loss = kl + (alpha * w_dist)
         else:
-            return kops.mean(loss)
+            loss = kl
+
+        return kops.mean(loss)
 
     def compute_output_shape(self, input_shape):
         """
@@ -3045,7 +3591,7 @@ def rescale_cost_matrix(
       - multiply by global_target so max ~ global_target
     It tries to ensure the mean cost within `local_radius` of sample_true_indices is <= local_target.
     """
-    C = np.array(C_orig, dtype=np.float64)
+    C = np.array(C_orig, dtype=np.float32)
     N = C.shape[0]
     assert C.shape[0] == C.shape[1]
 
@@ -3125,66 +3671,6 @@ def rescale_cost_matrix(
     }
 
 
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="KLHeatmapLoss"
-)
-class KLHeatmapLoss(tf.keras.losses.Loss):
-    def __init__(
-        self,
-        gaussian_loss_layer: GaussianHeatmapLosses,
-        wmap=None,
-        scale=False,
-        **kwargs,
-    ):
-        self.loss_type = kwargs.pop("loss_type", "safe_kl")
-        super().__init__(reduction="none", **kwargs)
-        # only serialize the config of the layer, not the layer itself
-        self.gaussian_loss_layer_config = gaussian_loss_layer.get_config()
-        self.wmap = wmap
-        self.scale = scale
-
-        self.gaussian_loss_layer = GaussianHeatmapLosses.from_config(
-            self.gaussian_loss_layer_config
-        )
-
-    def call(self, y_true, y_pred):
-        # y_pred should be logits in shape [B, H, W]
-        # y_true should be target heatmap in shape [B, H, W]
-        loss_inputs = {"logits": y_pred, "targets": y_true}
-        return self.gaussian_loss_layer(
-            loss_inputs,
-            loss_type=self.loss_type,
-            wmap=self.wmap,
-            scale=self.scale,
-            return_batch=True,
-        )
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "gaussian_loss_config": self.gaussian_loss_config,
-                "wmap": self.wmap,
-                "scale": self.scale,
-                "loss_type": self.loss_type,
-            }
-        )
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        # Reconstruct the layer from saved config
-        gaussian_loss_layer = GaussianHeatmapLosses.from_config(
-            config["gaussian_loss_config"]
-        )
-        return cls(
-            gaussian_loss_layer=gaussian_loss_layer,
-            wmap=config.get("wmap"),
-            scale=config.get("scale", False),
-            loss_type=config.get("loss_type", "safe_kl"),
-        )
-
-
 def bin_class(example, GRID_W, GRID_H, stride, FORBID):
     """
     Map true (x,y) position to discrete bin class, -1 if forbidden.
@@ -3207,6 +3693,7 @@ def bin_class(example, GRID_W, GRID_H, stride, FORBID):
     return tf.where(forbidden_here, -1, bin_cls)
 
 
+@keras.saving.register_keras_serializable(package="neuroencoders")
 class DenseLossProcessor:
     """Processor for Dense Loss with dynamic weight computation"""
 
@@ -3230,7 +3717,7 @@ class DenseLossProcessor:
         if self.verbose:
             print("Fitting DenseWeight model on full dataset for imbalance analysis...")
 
-        with tf.device(self.device):
+        with get_device_context(self.device):
             # Convert to numpy if needed
             if hasattr(full_training_positions, "numpy"):
                 training_pos_np = full_training_positions.numpy()
@@ -3296,8 +3783,8 @@ class DenseLossProcessor:
         Create a new instance of the DenseLossProcessor from its config.
         This is necessary for serialization/deserialization.
         """
-        maze_points = tf.constant(config.pop("maze_points"), dtype=tf.float32)
-        ts_proj = tf.constant(config.pop("ts_proj"), dtype=tf.float32)
+        maze_points = tf.constant(config.pop("maze_points"))
+        ts_proj = tf.constant(config.pop("ts_proj"))
         alpha = config.pop("alpha", 1.0)
 
         fitted_dw_config = config.pop("fitted_dw", None)
@@ -3351,462 +3838,464 @@ class MemoryUsageCallbackExtended(tf.keras.callbacks.Callback):
         # deleted the clear_session() call to avoid issues with custom layers
 
 
-def _get_loss_function(
-    loss_name: str,
-    alpha: float,
-    delta: float,
-    gaussian_loss_layer: Optional[GaussianHeatmapLayer] = None,
-) -> tf.keras.losses.Loss:
-    """Helper function to get loss function by name with reduction='none'"""
-    if loss_name == "mse":
-        return tf.keras.losses.MeanSquaredError(reduction="none")
-    elif loss_name == "mae":
-        return tf.keras.losses.MeanAbsoluteError(reduction="none")
-    elif loss_name == "huber":
-        return tf.keras.losses.Huber(delta=delta, reduction="none")
-    elif loss_name == "msle":
-        return tf.keras.losses.MeanSquaredLogarithmicError(reduction="none")
-    elif loss_name == "logcosh":
-        return tf.keras.losses.LogCosh(reduction="none")
-    elif loss_name == "binary_crossentropy":
-        return tf.keras.losses.BinaryCrossentropy(reduction="none")
-    elif loss_name == "categorical_crossentropy":
-        return tf.keras.losses.SparseCategoricalCrossentropy(reduction="none")
-    elif loss_name == "mse_plus_msle":
-
-        def combined_loss_mse(y_true, y_pred):
-            mse = tf.keras.losses.MeanSquaredError(reduction="none")(y_true, y_pred)
-            msle = tf.keras.losses.MeanSquaredLogarithmicError(reduction="none")(
-                y_true, y_pred
-            )
-            return mse + alpha * msle
-
-        return combined_loss_mse
-    elif loss_name == "cyclic_mae":  # for head direction in radians
-
-        def cyclical_mae_rad(y_true, y_pred):
-            return tf.keras.backend.minimum(
-                tf.keras.backend.abs(y_pred - y_true),
-                tf.keras.backend.minimum(
-                    tf.keras.backend.abs(y_pred - y_true + 2 * np.pi),
-                    tf.keras.backend.abs(y_pred - y_true - 2 * np.pi),
-                ),
-            )
-
-        return cyclical_mae_rad
-    elif loss_name == "kl_heatmap":
-        if gaussian_loss_layer is None:
-            raise ValueError("gaussian_layer must be provided for kl_heatmap loss")
-        return KLHeatmapLoss(gaussian_loss_layer, scale=False)
-        # reduction is already none
-
-    else:
-        raise ValueError(f"Loss function {loss_name} not recognized")
-
-
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="ContrastiveLossLayer"
-)
-class ContrastiveLossLayer(tf.keras.layers.Layer):
+class ContrastiveVisualizer(tf.keras.callbacks.Callback):
     def __init__(
         self,
-        temperature=0.1,
-        sigma=0.1,
-        eps=1e-8,
-        name="contrastive_loss_layer",
+        viz_x,
+        viz_y,
+        encoder_model,
+        epoch_freq=1,
+        save_dir: str = "log_viz",
+    ):
+        super().__init__()
+        self.viz_x = viz_x
+        self.viz_y = viz_y
+        self.encoder_model = encoder_model
+        self.epoch_freq = epoch_freq
+        self.save_dir = save_dir
+
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % self.epoch_freq != 0:
+            return
+
+        # 1. Get Latents for PCA
+        try:
+            # We want the output of the full encoder (after Transformer blocks)
+            # but before any final projection/pooling if you stopped at MHA
+            latents = self.encoder_model.predict(self.viz_x, verbose=0)
+
+            # If output is (batch, seq, dim), average across spikes for cleaner clusters
+            if len(latents.shape) > 2:
+                latents = np.mean(latents, axis=1)
+        except Exception as e:
+            print(f"\n[Visualizer] Latent extraction failed: {e}")
+            return
+
+        # 2. PCA Projection
+        proj = PCA(n_components=2).fit_transform(latents)
+
+        # 3. Plot PCA Scatter
+        plt.figure(figsize=(10, 7))
+        sc = plt.scatter(
+            proj[:, 0], proj[:, 1], c=self.viz_y, cmap="plasma", s=20, alpha=0.6
+        )
+        plt.colorbar(sc, label="Target Value")
+        plt.title(f"Latent Space - Epoch {epoch + 1}")
+        plt.xlabel("PC 1")
+        plt.ylabel("PC 2")
+        plt.grid(True, linestyle="--", alpha=0.3)
+
+        plt.savefig(os.path.join(self.save_dir, f"latent_epoch_{epoch + 1:03d}.png"))
+        plt.close()
+
+        # 4. Save Attention Map Snapshot (using your working logic)
+        self._save_attn_snapshot(epoch)
+
+    def _save_attn_snapshot(self, epoch):
+        try:
+            # Mirror your working function indexing
+            transformer_encoder = self.encoder_model.get_layer("transformer_encoder")
+            internal_block = transformer_encoder.layers[1]
+
+            # Sub-model for prefix
+            prefix_model = tf.keras.Model(
+                inputs=self.encoder_model.input, outputs=transformer_encoder.input
+            )
+            x = prefix_model(self.viz_x, training=False)
+
+            # Handle mask/tensor list
+            mask = None
+            if isinstance(x, (list, tuple)):
+                mask = x[1] if len(x) > 1 else None
+                x = x[0]
+
+            # Apply internal norm1
+            x_norm = internal_block.norm1(x)
+
+            # Create attention mask
+            attention_mask = None
+            if mask is not None:
+                attention_mask = create_attention_mask_from_padding_mask(mask)
+
+            # Get weights (Trial 0, Head 0)
+            _, weights = internal_block.mha(
+                query=x_norm,
+                value=x_norm,
+                attention_mask=attention_mask,
+                return_attention_scores=True,
+                training=False,
+            )
+            attn_map = tf.cast(weights[0, 0], tf.float32).numpy()  # [seq_len, seq_len]
+
+            # Plot and save map
+            plt.figure(figsize=(8, 6))
+            plt.imshow(attn_map, cmap="viridis", aspect="equal")
+            plt.title(f"Attention Snapshot - Epoch {epoch + 1}")
+            plt.colorbar(label="Weight")
+            plt.savefig(os.path.join(self.save_dir, f"attn_epoch_{epoch + 1:03d}.png"))
+            plt.close()
+
+        except Exception as e:
+            print(f"\n[Visualizer] Attention snapshot failed: {e}")
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class PositionError2D(tf.keras.metrics.Metric, SpatialConstraintsMixin):
+    """
+    Keras Metric to calculate 2D position error (Euclidean distance)
+    by decoding heatmap logits.
+    """
+
+    def __init__(
+        self,
+        grid_size: Tuple[int, int] = (45, 45),
+        maze_params: Optional[Dict] = None,
+        name="pos_error_2d",
         **kwargs,
     ):
+        # Handle the case where a config dictionary is passed directly (legacy support)
+        if isinstance(grid_size, dict) and "grid_size" in grid_size:
+            config = grid_size
+            grid_size = config.get("grid_size", (45, 45))
+            maze_params = config.get("maze_params", None)
+        elif isinstance(grid_size, dict) and "gaussian_heatmap_layer" in grid_size:
+            # Another variant of legacy support
+            config = grid_size.get("gaussian_heatmap_layer", {})
+            grid_size = config.get("grid_size", (45, 45))
+            maze_params = config.get("maze_params", None)
+
+        tf.keras.metrics.Metric.__init__(self, name=name, **kwargs)
+        SpatialConstraintsMixin.__init__(
+            self, grid_size=grid_size, maze_params=maze_params
+        )
+
+        # We store them for get_config reconstruction
+        self._grid_size = grid_size
+        self._maze_params = maze_params
+
+        self.total_dist = self.add_weight(name="total_dist", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
+
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        # Decode heatmap logits using unified mixin method
+        rank = y_pred.shape.rank
+        if rank is None:
+            rank = tf.rank(y_pred)
+
+        if rank == 2:
+            logits_hw = tf.reshape(y_pred, [-1, self.GRID_H, self.GRID_W])
+        else:
+            logits_hw = y_pred
+
+        # Decode using the mixin's unified method
+        # Using expectation for smoothness in training logs
+        xy, _, _, _ = self.decode_and_uncertainty_tf(logits_hw, mode="expectation")
+
+        # Ensure xy is float32 for metric calculation
+        xy = tf.cast(xy, tf.float32)
+        y_true_coords = tf.cast(y_true[:, :2], tf.float32)
+        dist = tf.sqrt(tf.reduce_sum(tf.square(xy - y_true_coords), axis=-1))
+
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, self.dtype)
+            dist = dist * sample_weight
+            self.count.assign_add(tf.reduce_sum(sample_weight))
+        else:
+            self.count.assign_add(tf.cast(tf.shape(y_true)[0], self.dtype))
+
+        self.total_dist.assign_add(tf.reduce_sum(dist))
+
+    def result(self):
+        return self.total_dist / (self.count + tf.keras.backend.epsilon())
+
+    def reset_state(self):
+        self.total_dist.assign(0.0)
+        self.count.assign(0.0)
+
+    def get_config(self):
+        config = tf.keras.metrics.Metric.get_config(self)
+        config.update(
+            {
+                "grid_size": list(self._grid_size),
+                "maze_params": self._maze_params,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class AngularErrorMetric(tf.keras.metrics.Metric):
+    """
+    Keras Metric for angular error.
+    Handles both radians (1 col) and unit vectors (2 cols).
+    """
+
+    def __init__(self, name="angular_error", **kwargs):
         super().__init__(name=name, **kwargs)
-        self.temperature = temperature
-        self.sigma = sigma
-        self.eps = eps
+        self.total_error = self.add_weight(name="total_error", initializer="zeros")
+        self.count = self.add_weight(name="count", initializer="zeros")
 
-    def call(self, inputs):
-        """
-        Args:
-            inputs: A dictionary with keys:
-                - 'z': (N, D) latent vectors (from LSTM or Transformer output)
-                - 'pos': (N, dimOutput) ground-truth positions. Will be sliced to (N, 2).
-        Returns:
-            Scalar contrastive loss value.
-        """
-        z, pos = inputs
-        return self.distance_weighted_nt_xent(z, pos)
+    def update_state(self, y_true, y_pred, sample_weight=None):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
+        y_true_shape = tf.shape(y_true)
+        error = tf.cond(
+            tf.equal(y_true_shape[1], 1),
+            # True branch: Radians
+            lambda: tf.abs((y_pred - y_true + np.pi) % (2 * np.pi) - np.pi),
+            # False branch: Unit Vectors
+            lambda: tf.acos(
+                tf.clip_by_value(
+                    tf.reduce_sum(y_pred * y_true, axis=-1)
+                    / (tf.norm(y_pred, axis=-1) * tf.norm(y_true, axis=-1) + 1e-8),
+                    -1.0,
+                    1.0,
+                )
+            ),
+        )
+        if sample_weight is not None:
+            sample_weight = tf.cast(sample_weight, self.dtype)
+            error = error * sample_weight
+            self.count.assign_add(tf.reduce_sum(sample_weight))
+        else:
+            self.count.assign_add(tf.cast(tf.shape(y_true)[0], self.dtype))
 
-    def distance_weighted_nt_xent(self, z, pos):
-        """
-        Contrastive loss based on spatial distance in XY space.
+        self.total_error.assign_add(tf.reduce_sum(error))
 
-        Args:
-            z: (N, D) latent vectors (from LSTM or Transformer output)
-            pos: (N, 1) ground-truth linearized positions.
-            sigma: Spatial kernel width.
-                   NOTE: If positions are normalized [0,1], sigma should be small (e.g., 0.1).
-                   If positions are normalized between 0-1 (as they should), a value for sigma like 0.05-0.2 is recommended.
-            temperature: NT-Xent scaling parameter.
-        """
+    def result(self):
+        return self.total_error / (self.count + tf.keras.backend.epsilon())
 
-        # Ensure we operate on float32/float16
-        dtype = z.dtype
+    def reset_state(self):
+        self.total_error.assign(0.0)
+        self.count.assign(0.0)
 
-        # 1. Get dynamic batch size (Crucial Fix for "None" error)
-        N = tf.shape(z)[0]
 
-        # 2. Normalize latents to unit length
-        # This ensures dot product = cosine similarity
-        z = tf.math.l2_normalize(z, axis=1)
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class CyclicMAE(tf.keras.losses.Loss):
+    def __init__(self, high=2 * np.pi, name="cyclic_mae", **kwargs):
+        policy = tf.keras.mixed_precision.global_policy()
+        self.storage_dtype = policy.compute_dtype
+        self.return_batch = kwargs.pop("return_batch", False)
+        super().__init__(name=name, **kwargs)
+        self.high = high
 
-        # 3. Compute pairwise Cosine Similarity Logits
-        # Shape: (N, N)
-        logits = tf.matmul(z, z, transpose_b=True)
-        logits = logits / tf.cast(self.temperature, dtype)
+    def call(self, y_true, y_pred):
+        # Ensure types match
+        y_true = tf.cast(y_true, dtype=y_pred.dtype)
 
-        # 4. Compute Pairwise Spatial Distances (linearized positions)
-        pos_1d = tf.cast(pos, dtype=dtype)
+        # Calculate raw difference
+        delta = y_pred - y_true
 
-        # Compute pairwise absolute distances:
-        # d_ij = |pos[i] - pos[j]|
-        d = tf.abs(pos_1d - tf.transpose(pos_1d))  # (N, N)
+        # Replace % with tf.math.mod
+        # Formula: ((delta + half) % high) - half
+        half = self.high / 2.0
 
-        # 5. Compute Distance Weights (Soft Positives)
-        # w_ij = exp( - d_ij^2 / (2*sigma^2) )
-        sigma_sq = tf.cast(self.sigma**2, dtype)
-        w = tf.exp(-0.5 * tf.square(d) / sigma_sq)
+        # This handles the wrapping around the 'high' boundary (e.g., 2*pi)
+        dist = tf.math.mod(delta + half, self.high) - half
+        dist = tf.abs(dist)
+        dist = kops.reshape(dist, (-1, 1))  # Ensure output is (batch_size,)
 
-        # 6. Mask Self-Similarity (Diagonal)
-        # We don't want the network to learn "I am similar to myself" (trivial)
-        mask_diag = tf.eye(N, dtype=dtype)
-        w = w * (1.0 - mask_diag)  # Zero out diagonal weights
-
-        # Normalize weights per row so they sum to 1 (conceptually similar to soft labels)
-        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + self.eps
-        w_norm = w / w_sum
-
-        # 7. Compute Softmax Log-Probabilities
-        # Standard NT-Xent/InfoNCE denominator includes all negatives AND positives
-        # We mask the self-similarity (diagonal) from the logits with a large negative number
-        # so it doesn't affect the softmax denominator.
-        logits_masked = logits + (-1e9) * mask_diag
-        log_prob = tf.nn.log_softmax(logits_masked, axis=1)
-
-        # 8. Compute Loss
-        # Cross entropy with soft targets w_norm
-        loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
-
-        return tf.reduce_mean(loss_per_anchor)
+        return dist
 
     def get_config(self):
         config = super().get_config()
+        config.update({"high": self.high})
+        return config
+
+
+@tf.keras.utils.register_keras_serializable(package="neuroencoders")
+def scaled_sigmoid(x, high=2 * np.pi):
+    # Scales 0->1 to 0->2pi
+    return tf.math.sigmoid(x) * high
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class ContrastiveRegressionLoss(tf.keras.losses.Loss):
+    """
+    Contrastive Loss based on NT-Xent with spatial weighting (linearized positions) and other target weighting functions.
+    computing the NT-Xent loss directly without internal layers.
+    """
+
+    def __init__(
+        self,
+        target_structure: Dict[str, Dict[str, Any]],
+        temperature: float = 0.4,
+        sigma: float = 0.1,
+        l_function_params: Optional[Dict] = None,
+        name: str = "contrastive_loss",
+        **kwargs,
+    ):
+        policy = tf.keras.mixed_precision.global_policy()
+        self.storage_dtype = policy.compute_dtype
+        self.target_structure = target_structure
+        self.return_batch = kwargs.pop("return_batch", False)
+        self.deviceName = kwargs.pop("device", None)
+        super().__init__(name=name, **kwargs)
+        self.temperature = float(temperature)
+        self.sigma = float(sigma)
+        self.l_function_params = l_function_params
+        self.eps = 1e-8
+
+        self.l_function = None
+        if l_function_params is not None:
+            self.l_function = LinearizationLayer(**l_function_params)
+
+        if not self.l_function:
+            raise ValueError(
+                "ContrastiveRegressionLoss requires l_function_params for position weighting. "
+            )
+
+    def call(self, y_true, y_pred):
+        """
+        Compute the contrastive regression loss.
+        inputs: y_true: (batch, 2+) coords + others, y_pred: (batch, D) latent
+        outputs: scalar loss value (or batch of losses if return_batch=True or reduction='none')
+        """
+        # y_true: (batch, 2+) coords, y_pred: (batch, D) latent
+        # Ensure float32 for numerical stability (mixed precision)
+        dtype = y_pred.dtype
+        y_true = kops.cast(y_true, dtype)
+        z = y_pred
+
+        # Normalize latents to unit length for cosine similarity
+        N = kops.shape(z)[0]
+        z = tf.math.l2_normalize(z, axis=1)
+        # Similarity matrix
+        w = tf.ones((N, N), dtype=dtype)
+
+        # Use target_structure to apply the correct distance logic for each component
+        for name, info in self.target_structure.items():
+            start, end = info["slice"]
+            val = y_true[:, start:end]
+
+            if name in ["pos_2d", "pos_lin"]:
+                # Euclidean Kernel
+
+                # 1. Get positions for weighting (linearized or 2D)
+                if self.l_function is not None:
+                    _, linearized_pos = self.l_function(val)
+                    pos = tf.reshape(linearized_pos, [-1])
+                elif kops.shape(val)[1] == 1:
+                    pos = tf.reshape(val, [-1])
+                else:
+                    raise ValueError(
+                        "ContrastiveRegressionLoss requires l_function_params to compute position weights. "
+                        "Please provide l_function_params for the LinearizationLayer."
+                    )
+
+                # 3. Compute pairwise Cosine Similarity Logits
+                logits = tf.matmul(z, z, transpose_b=True) / self.temperature
+
+                # 4. Compute Pairwise Spatial Distances
+                if len(pos.shape) == 1:
+                    pos = tf.reshape(pos, [-1, 1])
+
+                if pos.shape[-1] > 1:
+                    r = tf.reduce_sum(tf.square(pos), axis=1, keepdims=True)
+                    d2 = r - 2 * tf.matmul(pos, pos, transpose_b=True) + tf.transpose(r)
+                    d2 = tf.maximum(d2, self.eps)
+                else:
+                    d2 = tf.abs(pos - tf.transpose(pos))
+
+                # 5. Distance weighting (soft positives)
+                kernel = tf.exp(-0.5 * d2 / (self.sigma**2))
+                w *= kops.cast(kernel, dtype)
+
+            elif name == "hd":  # head direction in radians
+                # Circular Kernel (Cosine similarity)
+                # If val is 1D (radians), use cos(theta1 - theta2)
+                cos_sim = tf.cos(val[:, None] - val[None, :])
+                # Normalize to [0, 1] range
+                w *= kops.cast((cos_sim + 1.0) / 2.0, dtype)
+            elif name == "direction":  # bool towards/away from shock
+                matches = tf.equal(val[:, 0][:, None], val[:, 0][None, :])
+                w *= kops.cast(matches, dtype)
+
+            elif name in ["speed", "thigmo"]:
+                # Simple Linear Difference Kernel
+                d_lin = tf.abs(val[:, None] - val[None, :])
+                w *= kops.cast(kops.exp(-d_lin / self.sigma), dtype)
+
+        mask_diag = tf.eye(N, dtype=dtype)
+        w = w * (1.0 - mask_diag)  # Mask self-similarity
+
+        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + self.eps
+        w_norm = w / w_sum
+
+        # 6. Compute Softmax Log-Probabilities masking diagonal
+        logits = tf.matmul(z, z, transpose_b=True) / self.temperature
+        logits_masked = logits + -1e9 * mask_diag
+        log_prob = tf.nn.log_softmax(logits_masked, axis=1)
+
+        # 7. Cross entropy with soft targets
+        loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
+
+        return kops.reshape(loss_per_anchor, (-1, 1))
+
+    def get_config(self):
+        config = super().get_config()
+
+        if self.l_function_params is not None:
+            # handle l function layer params serialization
+            l_function_layer_params_serializable = self.l_function_params.copy()
+            for k, v in l_function_layer_params_serializable.items():
+                try:
+                    v = v.numpy().tolist()
+                except AttributeError:
+                    # Handle case where these aren't TensorFlow tensors
+                    v = v.tolist() if hasattr(v, "tolist") else v
+                l_function_layer_params_serializable[k] = v
+        else:
+            l_function_layer_params_serializable = None
+
         config.update(
             {
                 "temperature": self.temperature,
                 "sigma": self.sigma,
-                "eps": self.eps,
+                "l_function_params": l_function_layer_params_serializable,
+                "target_structure": self.target_structure,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config):
-        return cls(
-            temperature=config.get("temperature", 0.1),
-            sigma=config.get("sigma", 0.1),
-            eps=config.get("eps", 1e-8),
-        )
-
-
-@tf.keras.utils.register_keras_serializable(
-    package="neuroencoders", name="MultiColumnLossLayer"
-)
-class MultiColumnLossLayer(tf.keras.layers.Layer):
-    def __init__(
-        self,
-        column_losses: Optional[Dict[str, str]] = None,
-        column_weights: Optional[Dict[str, float]] = None,
-        alpha: float = 1.0,
-        delta: float = 1.0,
-        name: str = "multi_output_loss_layer",
-        gaussian_layer=None,
-        target_hw=None,
-        merge_columns: Optional[List[List[int]]] = None,
-        merge_losses: Optional[List[str]] = None,
-        merge_weights: Optional[List[float]] = None,
-        **kwargs,
-    ):
-        """
-        Args:
-            column_losses (dict): Dictionary mapping column specifications to loss names.
-                Example: {"0": "mse", "1,2": "huber"} means column 0 uses MSE and columns 1 and 2 use Huber loss.
-            column_weights (dict): Dictionary mapping column specifications to weights.
-                Example: {"0": 1.0, "1,2": 0.5} means column 0 has weight 1.0 and columns 1 and 2 have weight 0.5.
-            alpha (float): Hyperparameter for losses like Huber or MSLE.
-            name (str): Name of the layer.
-            gaussian_layer: Optional Gaussian layer for certain loss functions.
-            merge_columns (List[List[int]]): List of column groups to process together.
-                Example: [[0, 1], [2, 3]] means columns 0,1 are processed together and columns 2,3 are processed together.
-            merge_losses (List[str]): Loss function names for each merged column group.
-                Must have same length as merge_columns if provided.
-            merge_weights (List[float]): Weights for each merged column group.
-                Must have same length as merge_columns if provided.
-            **kwargs: Additional keyword arguments for the Layer constructor.
-        """
-        super().__init__(name=name, **kwargs)
-        self.column_losses = column_losses or {}
-        self.column_weights = column_weights or {}
-        self.alpha = alpha
-        self.delta = delta
-        self.merge_columns = merge_columns or []
-        self.merge_losses = merge_losses or []
-        self.merge_weights = merge_weights or []
-        self.gaussian_layer = gaussian_layer
-
-        # Validate merge parameters
-        if self.merge_columns:
-            if self.merge_losses and len(self.merge_losses) != len(self.merge_columns):
-                raise ValueError("merge_losses must have same length as merge_columns")
-            if self.merge_weights and len(self.merge_weights) != len(
-                self.merge_columns
-            ):
-                raise ValueError("merge_weights must have same length as merge_columns")
-
-            # Fill in defaults for merge_losses and merge_weights if not provided
-            if not self.merge_losses:
-                self.merge_losses = ["mse"] * len(self.merge_columns)
-            if not self.merge_weights:
-                self.merge_weights = [1.0] * len(self.merge_columns)
-
-        # Create loss functions for merged columns
-        self.merged_loss_functions = []
-        for loss_name in self.merge_losses:
-            self.merged_loss_functions.append(
-                _get_loss_function(loss_name, self.alpha, self.delta, gaussian_layer)
-            )
-
-        # Create individual column loss functions (for backwards compatibility)
-        self.individual_losses = {}
-        self.individual_weights = {}
-
-        for col_spec, loss_name in self.column_losses.items():
-            self.individual_losses[col_spec] = _get_loss_function(
-                loss_name, self.alpha, self.delta, gaussian_layer
-            )
-            self.individual_weights[col_spec] = self.column_weights.get(col_spec, 1.0)
-
-    def _add_losses_to_model(self, model):
-        """
-        Utility to add all individual losses to model for tracking.
-        """
-        for col_spec, loss_fn in self.individual_losses.items():
-            loss_name = "loss_col_{}".format(col_spec)
-            model.add_loss(
-                lambda y_true, y_pred: loss_fn(y_true, y_pred), name=loss_name
-            )
-
-    def _parse_column_spec(self, col_spec: str) -> List[int]:
-        """Parse column specification like '0' or '1,2' into list of integers."""
-        if "," in col_spec:
-            return [int(x.strip()) for x in col_spec.split(",")]
-        else:
-            return [int(col_spec)]
-
-    def call(self, y_true, y_pred):
-        """
-        Compute the combined loss.
-        Args:
-            y_true: True values with shape (batch_size, num_columns)
-            y_pred: Predicted values with shape (batch_size, num_columns)
-        Returns:
-            Combined loss tensor with shape (batch_size,)
-        """
-        total_loss = tf.zeros(tf.shape(y_true)[0], dtype=y_true.dtype)
-
-        # Track which columns have been processed to avoid double-counting
-        processed_columns = set()
-
-        # Process merged columns first
-        for i, (col_group, loss_fn, weight) in enumerate(
-            zip(self.merge_columns, self.merged_loss_functions, self.merge_weights)
-        ):
-            # Extract the merged columns
-            y_true_merged = tf.gather(
-                y_true, col_group, axis=1
-            )  # Shape: (batch_size, len(col_group))
-            y_pred_merged = tf.gather(
-                y_pred, col_group, axis=1
-            )  # Shape: (batch_size, len(col_group))
-
-            # Compute loss for merged columns
-            merged_loss = loss_fn(y_true_merged, y_pred_merged)
-            total_loss += weight * merged_loss
-
-            # Mark these columns as processed
-            processed_columns.update(col_group)
-
-        # Process individual columns that weren't part of any merged group
-        for col_spec, loss_fn in self.individual_losses.items():
-            columns = self._parse_column_spec(col_spec)
-
-            # Skip if any of these columns were already processed in merged groups
-            if any(col in processed_columns for col in columns):
-                continue
-
-            if len(columns) == 1:
-                # Single column
-                col_idx = columns[0]
-                y_true_col = y_true[:, col_idx]
-                y_pred_col = y_pred[:, col_idx]
-                loss_val = loss_fn(y_true_col, y_pred_col)
-            else:
-                # Multiple columns (legacy support for comma-separated specs)
-                y_true_cols = tf.gather(y_true, columns, axis=1)
-                y_pred_cols = tf.gather(y_pred, columns, axis=1)
-                loss_val = loss_fn(y_true_cols, y_pred_cols)
-
-            weight = kops.cast(self.individual_weights[col_spec], dtype="float32")
-            total_loss += weight * loss_val
-
-            # Mark these columns as processed
-            processed_columns.update(columns)
-
-        return total_loss
-
-    def get_config(self):
-        """Return the config of the layer for serialization."""
-        config = super().get_config()
-        config.update(
-            {
-                "column_losses": self.column_losses,
-                "column_weights": self.column_weights,
-                "alpha": self.alpha,
-                "delta": self.delta,
-                "merge_columns": self.merge_columns,
-                "merge_losses": self.merge_losses,
-                "merge_weights": self.merge_weights,
-            }
-        )
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        layer_config = {
-            "column_losses": config.get("column_losses", {}),
-            "column_weights": config.get("column_weights", {}),
-            "alpha": config.get("alpha", 1.0),
-            "delta": config.get("delta", 1.0),
-            "merge_columns": config.get("merge_columns", []),
-            "merge_losses": config.get("merge_losses", []),
-            "merge_weights": config.get("merge_weights", []),
-        }
-        config.update(layer_config)
-        return cls(**config)
-
-    def build(self, input_shape):
-        """
-        Build the layer. This method is called once the input shape is known.
-
-        Args:
-            input_shape: Can be a single shape tuple or a list of two shape tuples
-                        [y_true_shape, y_pred_shape] if called with two inputs,
-                        or a single shape if called with one input (assuming both have same shape)
-        """
-        # Handle both single input shape and list of input shapes
-        if (
-            isinstance(input_shape, list)
-            and len(input_shape) == 2
-            and (
-                isinstance(input_shape[0], (tuple, tf.TensorShape))
-                and isinstance(input_shape[1], (tuple, tf.TensorShape))
-            )
-        ):
-            # Two inputs: y_true and y_pred
-            y_true_shape, y_pred_shape = input_shape
-
-            # Validate that both inputs have the same shape
-            if y_true_shape != y_pred_shape:
-                raise ValueError(
-                    f"y_true and y_pred must have the same shape. "
-                    f"Got y_true: {y_true_shape}, y_pred: {y_pred_shape}"
-                )
-
-            self.input_shape_value = y_true_shape
-        else:
-            # Single input shape (both inputs assumed to have same shape)
-            self.input_shape_value = input_shape
-
-        # Validate input shape
-        if len(self.input_shape_value) < 2:
-            raise ValueError(
-                f"Input must be at least 2D (batch_size, num_columns). "
-                f"Got shape: {self.input_shape_value}"
-            )
-
-        self.num_columns = self.input_shape_value[-1]
-
-        # Validate column indices in merge_columns
-        for i, col_group in enumerate(self.merge_columns):
-            for col_idx in col_group:
-                if col_idx >= self.num_columns or col_idx < 0:
-                    raise ValueError(
-                        f"Column index {col_idx} in merge_columns[{i}] is out of range. "
-                        f"Input has {self.num_columns} columns (indices 0-{self.num_columns - 1})"
-                    )
-
-        # Validate column indices in individual losses
-        for col_spec in self.column_losses.keys():
-            columns = self._parse_column_spec(col_spec)
-            for col_idx in columns:
-                if col_idx >= self.num_columns or col_idx < 0:
-                    raise ValueError(
-                        f"Column index {col_idx} in column_losses['{col_spec}'] is out of range. "
-                        f"Input has {self.num_columns} columns (indices 0-{self.num_columns - 1})"
-                    )
-
-        super().build(input_shape)
-
-    def compute_output_shape(self, input_shape):
-        """
-        Compute the output shape of the layer.
-
-        Args:
-            input_shape: Can be a single shape tuple or a list of two shape tuples
-                        [y_true_shape, y_pred_shape] if called with two inputs,
-                        or a single shape if called with one input
-
-        Returns:
-            tuple: Output shape (batch_size,) - returns a scalar loss per sample
-        """
-        # Handle both single input shape and list of input shapes
-        if isinstance(input_shape, list) and len(input_shape) == 2:
-            # Two inputs: y_true and y_pred
-            batch_size = input_shape[0][0]  # Get batch size from first input
-        else:
-            # Single input shape
-            batch_size = input_shape[0]  # Get batch size
-
-        # Return shape: (batch_size,) - one scalar loss per sample in the batch
-        return (batch_size,)
 
 
 # Register custom layers and losses for Keras serialization
-keras_utils.get_custom_objects()["DynamicDenseWeightLayer"] = DynamicDenseWeightLayer
-keras_utils.get_custom_objects()["spikeNet"] = spikeNet
+keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
 keras_utils.get_custom_objects()["SpikeNet1D"] = SpikeNet1D
-keras_utils.get_custom_objects()["TransformerEncoderBlock"] = TransformerEncoderBlock
-keras_utils.get_custom_objects()["PositionalEncoding"] = PositionalEncoding
+keras_utils.get_custom_objects()["SpikeNet2D"] = SpikeNet2D
+keras_utils.get_custom_objects()["SpikeEncoder"] = SpikeEncoder
+keras_utils.get_custom_objects()["SpikeSequenceProcessor"] = SpikeSequenceProcessor
+keras_utils.get_custom_objects()["MaskedSequential"] = MaskedSequential
+keras_utils.get_custom_objects()["GroupAttentionFusion"] = GroupAttentionFusion
+keras_utils.get_custom_objects()["GlobalSequenceGather"] = GlobalSequenceGather
 keras_utils.get_custom_objects()["MaskedGlobalAveragePooling1D"] = (
     MaskedGlobalAveragePooling1D
 )
+keras_utils.get_custom_objects()["PositionalEncoding"] = PositionalEncoding
+keras_utils.get_custom_objects()["SafeMaskCreation"] = SafeMaskCreation
+keras_utils.get_custom_objects()["ResidualWrapper"] = ResidualWrapper
+keras_utils.get_custom_objects()["TransformerEncoderBlock"] = TransformerEncoderBlock
+keras_utils.get_custom_objects()["DynamicDenseWeightLayer"] = DynamicDenseWeightLayer
+keras_utils.get_custom_objects()["UMazeProjectionLayer"] = UMazeProjectionLayer
+keras_utils.get_custom_objects()["FeatureOutputWithUMaze"] = FeatureOutputWithUMaze
 keras_utils.get_custom_objects()["GaussianHeatmapLayer"] = GaussianHeatmapLayer
 keras_utils.get_custom_objects()["GaussianHeatmapLosses"] = GaussianHeatmapLosses
-keras_utils.get_custom_objects()["KLHeatmapLoss"] = KLHeatmapLoss
-keras_utils.get_custom_objects()["DenseWeight"] = DenseWeight
+keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
+keras_utils.get_custom_objects()["PositionError2D"] = PositionError2D
+keras_utils.get_custom_objects()["AngularErrorMetric"] = AngularErrorMetric
+keras_utils.get_custom_objects()["CyclicMAE"] = CyclicMAE
+keras_utils.get_custom_objects()["ContrastiveRegressionLoss"] = (
+    ContrastiveRegressionLoss
+)
 keras_utils.get_custom_objects()["LinearizationLayer"] = LinearizationLayer
 keras_utils.get_custom_objects()["MemoryUsageCallbackExtended"] = (
     MemoryUsageCallbackExtended
 )
-keras_utils.get_custom_objects()["MultiColumnLossLayer"] = MultiColumnLossLayer
-keras_utils.get_custom_objects()["ContrastiveLossLayer"] = ContrastiveLossLayer
-keras_utils.get_custom_objects()["GroupAttentionFusion"] = GroupAttentionFusion
 keras_utils.get_custom_objects()["ContrastiveMonitor"] = ContrastiveMonitor
-keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
-keras_utils.get_custom_objects()["_get_loss_function"] = _get_loss_function

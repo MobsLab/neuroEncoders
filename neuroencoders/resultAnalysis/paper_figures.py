@@ -45,6 +45,7 @@ from neuroencoders.utils.viz_params import (
     EC,
     MIDDLE_COLOR,
     SAFE_COLOR,
+    SAFE_COLOR_PREDICTED,
     SHOCK_COLOR,
     get_pvalue_stars,
     white_viridis,
@@ -128,12 +129,15 @@ class PaperFigures:
         """Unified suffix list preparation."""
         if suffixes is None:
             suffixes = [self.suffix] if not hasattr(self, "suffixes") else self.suffixes
+
         if isinstance(suffixes, str):
             suffixes = [suffixes]
 
         if "_training" in suffixes:
             suffixes.remove("_training")
             suffixes.insert(0, "_training")
+
+        self.suffixes = suffixes
         return suffixes
 
     def _extract_bayes_spike_counts(self, times, ws):
@@ -211,7 +215,10 @@ class PaperFigures:
         """
         Method to load the results of the neural network prediction.
         """
-        self.suffixes = self._prepare_suffixes(suffixes)
+
+        if not hasattr(self, "suffixes"):
+            self._prepare_suffixes(suffixes)
+
         base_results_path = os.path.join(self.projectPath.experimentPath, "results")
 
         for suffix in self.suffixes:
@@ -353,6 +360,11 @@ class PaperFigures:
         """
         Quickly load the bayesian decoding on the data, using the trainerBayes.
         """
+        if self.trainerBayes is None:
+            raise ValueError(
+                "Bayes trainer not loaded. Please load the bayes trainer first."
+            )
+
         if kwargs.get(
             "load_bayesMatrices", False
         ) or self.trainerBayes.config.extra_kwargs.get("load_bayesMatrices", False):
@@ -372,7 +384,9 @@ class PaperFigures:
                 kwargs["redo"] = True
                 self._create_decoding_bayes_matrices(**kwargs)
 
-        self.suffixes = self._prepare_suffixes(suffixes)
+        if not hasattr(self, "suffixes"):
+            self._prepare_suffixes(suffixes)
+
         base_results_path = self.trainerBayes.folderResult
 
         for suffix in self.suffixes:
@@ -523,7 +537,7 @@ class PaperFigures:
             suffix = f"_{phase}"
         if suffix is None:
             suffix = self.suffix
-        if not suffix.startswith("_"):
+        if isinstance(suffix, str) and not suffix.startswith("_"):
             suffix = f"_{suffix}"
         if not isinstance(suffix, list):
             suffix = [suffix]
@@ -843,7 +857,7 @@ class PaperFigures:
         show: bool = True,
         block: bool = False,
         save: bool = False,
-        extended_zone: bool = False,
+        extended_zone: bool = True,
         **kwargs,
     ):
         num_sess = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
@@ -904,13 +918,6 @@ class PaperFigures:
             # 2. Occupancy Calculation and Z-Test for Proportions
             shock_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Shock")])
             safe_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Safe")])
-            if extended_zone:
-                shock_mask = shock_mask | is_in_zone(
-                    pos, ZONEDEF[ZONELABELS.index("ShockCenter")]
-                )
-                safe_mask = safe_mask | is_in_zone(
-                    pos, ZONEDEF[ZONELABELS.index("SafeCenter")]
-                )
 
             shock_count = np.sum(shock_mask)
             safe_count = np.sum(safe_mask)
@@ -922,6 +929,17 @@ class PaperFigures:
                 safe_count / total_time_points if total_time_points > 0 else 0
             )
 
+            if extended_zone:
+                safe_mask_extended = safe_mask | is_in_zone(
+                    pos, ZONEDEF[ZONELABELS.index("SafeCenter")]
+                )
+                safe_count_extended = np.sum(safe_mask_extended)
+                safe_occupancy_extended = (
+                    safe_count_extended / total_time_points
+                    if total_time_points > 0
+                    else 0
+                )
+
             # Perform Two-Sample Z-Test for Proportions (Shock count vs Safe count)
             # This is the statistically correct way to compare two proportions based on counts.
             if total_time_points > 0:
@@ -929,8 +947,12 @@ class PaperFigures:
                 # N must be total time points for both groups
                 nobs = np.array([total_time_points, total_time_points])
 
+                if extended_zone:
+                    counts = np.concatenate((counts, [safe_count_extended]))
+                    nobs = np.concatenate((nobs, [total_time_points]))
+
                 # Check if there is enough variance to run the test
-                if np.sum(nobs) > 0 and np.all(counts > 0):
+                if np.sum(nobs) > 0 and np.all(counts > 0) and not extended_zone:
                     z_stat, p_value = proportions_ztest(
                         counts, nobs=nobs, alternative="two-sided"
                     )
@@ -949,6 +971,11 @@ class PaperFigures:
                     "Stars": p_stars,  # Store star string
                 }
             )
+
+            if extended_zone:
+                session_occupancy_data[-1]["ExtSafe Occupancy"] = (
+                    safe_occupancy_extended
+                )
 
             # 3. Map Plotting (First Row)
             map_ax = map_axs[i]
@@ -1010,6 +1037,13 @@ class PaperFigures:
             * 1.25  # Increased buffer for stars
         )
 
+        if extended_zone:
+            max_occupancy = max(
+                max_occupancy,
+                max([d.get("ExtSafe Occupancy", 0) for d in session_occupancy_data])
+                * 1.25,
+            )
+
         for i, data in enumerate(session_occupancy_data):
             bar_ax = bar_axs[i]
 
@@ -1017,19 +1051,21 @@ class PaperFigures:
             zones = ["Shock", "Safe"]
             occupancy_values = [data["Shock Occupancy"], data["Safe Occupancy"]]
 
-            # Assuming SHOCK_COLOR and SAFE_COLOR are defined globally
             colors = [SHOCK_COLOR, SAFE_COLOR]
+
+            if extended_zone:
+                zones.append("ExtSafe")
+                occupancy_values.append(data["ExtSafe Occupancy"])
+                colors.append(SAFE_COLOR_PREDICTED)
 
             # Plot the bar chart
             bar_ax.bar(zones, occupancy_values, color=colors)
             bar_ax.axhline(
-                0.215
-                if not extended_zone
-                else 0.465,  # expected occupancy if exploration is uniform
+                0.215,  # expected occupancy if exploration is uniform
                 linestyle="--",
                 color="gray",
                 lw=1.6,
-            )  # Add reference line at y=0.215
+            )
 
             # Add value labels on top of bars
             for j, val in enumerate(occupancy_values):
@@ -1059,6 +1095,8 @@ class PaperFigures:
             bar_ax.set_ylim(0, max_occupancy)  # Constant Y-limit for comparison
             bar_ax.set_yticks(np.linspace(0, max_occupancy, 3))  # Set few ticks
             bar_ax.tick_params(axis="x", rotation=0)
+            bar_ax.set_xticks(range(len(zones)))
+            bar_ax.set_xticklabels(zones, rotation=45, ha="right")
 
             # Only label the Y-axis on the first bar plot for clarity
             if i == 0:
@@ -1196,15 +1234,18 @@ class PaperFigures:
         timeWindow: int,
         DataHelper: DataHelper,
         suffix: str = None,
-        save: bool = True,
+        open: bool = True,
         dimOutput: int = 1,
         **kwargs,
     ):
         """
         Summary figure saved as a multipage PDF.
-        Page 1: Behavior & Error Maps
-        Page 2+: Trajectories (2 suffixes per page)
+        Page 1: Behavior, Error Maps, Correlations, Summary Stats
+        Page 2+: Trajectories (1 suffix per page for detailed view)
         """
+
+        paired = kwargs.get("paired", True)
+
         if kwargs.get("mouse_name", None) is not None:
             title_content = f"M{kwargs.get('mouse_name')} - "
         else:
@@ -1214,19 +1255,28 @@ class PaperFigures:
         # 1. Setup PDF Path
         filename = f"summary_id_card_{timeWindow}ms.pdf"
         save_path = os.path.join(self.folderFigures, filename)
-
         print(f"Generating PDF at: {save_path}")
+
+        # Compute Entropy Threshold from Training Data (20% percentile of lowest entropy)
+        try:
+            train_entropy = self.resultsNN_phase["_training"]["predLoss"][idWindow]
+            if train_entropy is not None:
+                thresh_entropy = np.percentile(
+                    train_entropy, kwargs.get("threshold", 20)
+                )
+            else:
+                thresh_entropy = None
+        except KeyError:
+            thresh_entropy = None
+            print(
+                "Warning: No training entropy found. Certainty plots will be skipped or empty."
+            )
 
         with PdfPages(save_path) as pdf:
             # =========================================================
-            # PAGE 1: Summary Behavior + Error Maps
+            # PAGE 1: Summary Behavior + Error Maps + Stats
             # =========================================================
-            fig1 = plt.figure(
-                figsize=(8.27, 11.69)
-            )  # Landscape A4-ish, or use (8.27, 11.69) for Portrait
-            # Let's use Portrait for vertical stacking
-            fig1.set_size_inches(10, 14)
-
+            fig1 = plt.figure(figsize=(10, 14), constrained_layout=True)
             gs = gridspec.GridSpec(12, 3, figure=fig1)
 
             # --- Top: Summary Behavior (Rows 0-1) ---
@@ -1246,10 +1296,10 @@ class PaperFigures:
                 show=False,
                 block=False,
                 save=False,
-                extended_zone=kwargs.get("extended_zone", False),
+                extended_zone=kwargs.get("extended_zone", True),
             )
 
-            # On row 3, add a text box for error map title
+            # --- Row 3: Text ---
             ax_text = fig1.add_subplot(gs[3, :])
             ax_text.axis("off")  # Hide the axis
             ax_text.text(
@@ -1289,173 +1339,444 @@ class PaperFigures:
                 f"Summary: {title_content} ({timeWindow}ms)",
                 fontsize=14,
             )
-            plt.tight_layout()
-            pdf.savefig(fig1)
+            pdf.savefig(fig1, bbox_inches=None)
             plt.close(fig1)
 
-            # =========================================================
-            # PAGES 2+: Decoding Performance (Trajectories)
-            # =========================================================
-            # We want ~4 rows per page.
-            # Since 1 suffix = 2 rows (dim 0 and dim 1), we can fit 2 suffixes per page.
+            fig1_bis = plt.figure(figsize=(10, 14), constrained_layout=True)
+            # --- Bottom (new page): Correlations & Boxplots ---
+            # Calculate how many columns we need per row (e.g., if you have 4 suffixes, it's 2x2)
+            num_suffixes = len(self.suffixes)
+            num_cols = (num_suffixes + 1) // 2  # Ceiling division for columns
 
-            suffixes_per_page = 3 if dimOutput == 1 else 2
-            with_hist_distribution = kwargs.get("with_hist_distribution", True)
+            gs_bis = gridspec.GridSpec(4, num_cols, figure=fig1_bis)
 
-            # Chunk the suffixes list
-            for i in range(0, len(self.suffixes), suffixes_per_page):
-                page_suffixes = self.suffixes[i : i + suffixes_per_page]
+            # Row 1-4: Correlation Plots (Entropy vs Error) - now using 2 rows in the subgrid
+            gs_corr = gs_bis[0:2, :].subgridspec(2, num_cols)
 
-                fig_page = plt.figure(figsize=(14, 11))  # Paysage
+            for i, suff in enumerate(self.suffixes):
+                # Determine row (0 or 1) and column for the current suffix
+                row_idx = i // num_cols
+                col_idx = i % num_cols
+                ax = fig1_bis.add_subplot(gs_corr[row_idx, col_idx])
 
-                # Each suffix needs 2 rows.
-                # Total rows needed = len(page_suffixes) * 2.
-                # We allocate a generic GridSpec with ample rows
-                total_page_rows = (
-                    3 if dimOutput == 1 else 4
-                )  # Fixed to 4 rows (2 suffixes) for consistency
-                gs_page = gridspec.GridSpec(
-                    total_page_rows, 1, figure=fig_page, hspace=0.4
+                # Data Validation
+                if (
+                    self.resultsNN_phase[suff]["linPred"][idWindow] is None
+                    or self.resultsNN_phase[suff]["predLoss"][idWindow] is None
+                ):
+                    continue
+
+                # Calculate Linear Error and Entropy
+                lin_err = np.abs(
+                    self.resultsNN_phase[suff]["linPred"][idWindow]
+                    - self.resultsNN_phase[suff]["linTruePos"][idWindow]
+                )
+                entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
+                maxp = self.resultsNN_phase_pkl[suff][idWindow]["maxp"]
+
+                # 1. Plot the density heatmap
+                saut = 40
+                ax.plot(
+                    entropy[::saut],
+                    lin_err[::saut],
+                    "o",
+                    color="blue",
+                    alpha=0.6,
+                    markersize=3,
+                )
+                new_ax = ax.twiny()  # Create a new axis that shares the same y-axis
+                new_ax.plot(
+                    maxp[::saut],
+                    lin_err[::saut],
+                    "o",
+                    color="red",
+                    alpha=0.6,
+                    markersize=3,
                 )
 
-                current_row_idx = 0
+                # 2. Calculate and plot Linear Fit (Red Line)
+                # We use np.polyfit to get slope (m) and intercept (b)
+                # y = mx + b
+                legends = []
+                handles = []
+                for metric, color, ax_to_plot in zip(
+                    [entropy, maxp],
+                    ["blue", "red"],
+                    [ax, new_ax],
+                ):
+                    idx = np.isfinite(metric) & np.isfinite(
+                        lin_err
+                    )  # Ensure no NaNs/Infs
+                    if np.any(idx):
+                        m, b = np.polyfit(metric[idx], lin_err[idx], 1)
+                        x_range = np.array([np.min(metric[idx]), np.max(metric[idx])])
+                        ax_to_plot.plot(
+                            x_range,
+                            m * x_range + b,
+                            color=color,
+                            lw=2,
+                        )
+                        handles.append(plt.Line2D([0], [0], color=color, lw=2))
+                        legends.append(
+                            f"{'Entropy' if color == 'blue' else 'MaxP'} Fit: y={m:.2f}x"
+                        )
+                ax.legend(handles, legends, fontsize=8)
 
-                for suffix in page_suffixes:
-                    # Create subgridspec for this specific suffix (2 rows)
-                    # Columns: 5 if hist, 4 if not
-                    ncols = 6 if with_hist_distribution else 5
+                # add top ax for new ax (visible xticks on line)
+                ax.set_xlabel("Entropy")
+                new_ax.set_xlabel("Max Probability")
+                ax.set_ylabel("Linear Error")
+                ax.set_title(f"Certainty - {suff.strip('_')}")
 
-                    # Select the 2 rows for this suffix
-                    gs_suffix = gs_page[
-                        current_row_idx : current_row_idx + dimOutput, 0
-                    ].subgridspec(2, ncols)
+            # Boxplot: Linear Error across suffixes (All vs High Speed)
+            ax_box = fig1_bis.add_subplot(gs_bis[3:, :])
+            data_box = []
+            labels_box = []
+            colors_box = []
+            colors_map = {
+                "All": "lightblue",
+                "All+Cert": "darkblue",
+                "Fast": "salmon",
+                "Fast+Cert": "darkred",
+            }
+            conditions_box = [
+                ("All", False, None),
+                ("All+Cert", False, thresh_entropy),
+                ("Fast", True, None),
+                ("Fast+Cert", True, thresh_entropy),
+            ]
 
-                    axs_list = []
-                    first_ax_ref = None
+            for suff in self.suffixes:
+                if self.resultsNN_phase[suff]["linPred"][idWindow] is None:
+                    continue
+                lin_err = np.abs(
+                    self.resultsNN_phase[suff]["linPred"][idWindow]
+                    - self.resultsNN_phase[suff]["linTruePos"][idWindow]
+                )
+                speed_mask = self.resultsNN_phase[suff]["speedMask"][idWindow]
+                entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
 
-                    for r in range(dimOutput):  # 2 Dimensions
-                        # Main Trajectory Plot
-                        if r == 0:
-                            ax_main = fig_page.add_subplot(gs_suffix[r, 0:4])
-                            first_ax_ref = ax_main
+                for cond_name, use_speed, thresh in conditions_box:
+                    mask = np.ones(len(lin_err), dtype=bool)
+                    if use_speed:
+                        if speed_mask is not None:
+                            mask = mask & speed_mask
                         else:
-                            ax_main = fig_page.add_subplot(
-                                gs_suffix[r, 0:4], sharex=first_ax_ref
+                            raise ValueError(
+                                f"Speed mask is required for condition '{cond_name}' but not found."
                             )
-                        axs_list.append(ax_main)
 
-                        # Histogram Plot
-                        if with_hist_distribution:
-                            ax_dist = fig_page.add_subplot(
-                                gs_suffix[r, 4], sharey=ax_main
+                    if thresh is not None:
+                        if entropy is not None:
+                            mask = mask & (entropy <= thresh)
+                        else:
+                            mask = np.zeros(len(lin_err), dtype=bool)
+
+                    if np.any(mask):
+                        data_box.append(lin_err[mask])
+                        labels_box.append(f"{suff}\n{cond_name}")
+                        colors_box.append(colors_map[cond_name])
+            if data_box:
+                # 1. Create custom positions with gaps
+                # We want a gap after every 4 conditions (All, All+Cert, Fast, Fast+Cert)
+                positions = []
+                current_pos = 1
+                for i in range(len(data_box)):
+                    positions.append(current_pos)
+                    if (i + 1) % 4 == 0:
+                        current_pos += 2  # Add a bigger space between suffixes
+                    else:
+                        current_pos += 1
+
+                # 2. Create the Violin Plot at specific positions
+                vp = ax_box.violinplot(
+                    data_box,
+                    positions=positions,
+                    showmeans=False,
+                    showmedians=False,
+                    showextrema=False,
+                    widths=0.7,
+                )
+
+                # 3. Style the Violins
+                for i, body in enumerate(vp["bodies"]):
+                    body.set_facecolor(colors_box[i])
+                    body.set_edgecolor("white")
+                    body.set_alpha(0.3)
+                    body.set_linewidth(1)
+
+                # 4. Custom Median and "Spread"
+                for i, data in enumerate(data_box):
+                    x_pos = positions[i]
+                    med = np.median(data)
+
+                    # Ensure median is valid for log scale (must be > 0)
+                    if med > 0:
+                        # FIX: Use a higher zorder and draw the median AFTER setting log scale
+                        # OR use a transform-aware approach. hlines is usually fine,
+                        # but zorder=10 ensures it sits on top of the violin fill.
+                        ax_box.hlines(
+                            med,
+                            x_pos - 0.3,
+                            x_pos + 0.3,
+                            colors=colors_box[i],
+                            linewidth=4,  # Slightly thinner for log scale clarity
+                            zorder=10,  # Bring to very front
+                        )
+
+                    # Plot the "Spread"
+                    jitter = np.random.normal(0, 0.05, size=len(data))
+                    ax_box.scatter(
+                        x_pos + jitter,
+                        data,
+                        color=colors_box[i],
+                        s=8,
+                        alpha=0.3,
+                        zorder=5,
+                        edgecolors="none",
+                    )
+
+                # 5. Paired Lines (Adjusted for new positions)
+                if paired and len(data_box) > 1:
+                    for i in range(len(data_box) - 1):
+                        # Only draw lines within the same group (don't cross the gap)
+                        if (i + 1) % 4 != 0:
+                            if len(data_box[i]) == len(data_box[i + 1]):
+                                for j in range(len(data_box[i])):
+                                    ax_box.plot(
+                                        [positions[i] + 0.1, positions[i + 1] - 0.1],
+                                        [data_box[i][j], data_box[i + 1][j]],
+                                        color="gray",
+                                        alpha=0.1,
+                                        linewidth=0.5,
+                                        zorder=1,
+                                    )
+
+                # Formatting
+                ax_box.set_yscale("log")  # Set this before setting ticks
+                ax_box.set_ylabel("Linear Error (log scale)", fontsize=12)
+                ax_box.set_xticks(positions)
+                ax_box.set_xticklabels(
+                    labels_box, rotation=45, ha="right", fontsize="small"
+                )
+
+                for i in range(0, len(positions), 4):
+                    # Get the start of this group and the end of this group
+                    group_start = positions[i] - 0.5
+                    group_end = positions[min(i + 3, len(positions) - 1)] + 0.5
+
+                    if (i // 4) % 2 == 0:
+                        ax_box.axvspan(
+                            group_start, group_end, color="gray", alpha=0.05, zorder=0
+                        )
+
+                    if i > 0:
+                        ax_box.axvline(
+                            x=group_start - 0.5,
+                            color="black",
+                            linestyle=":",
+                            alpha=0.2,
+                            zorder=1,
+                        )
+                ax_box.set_xlim(positions[0] - 1, positions[-1] + 1)
+
+            pdf.savefig(fig1_bis, bbox_inches=None)
+            plt.close(fig1_bis)
+
+            # =========================================================
+            # PAGES 2+: Trajectories (1 Suffix per Page for 4 conditions)
+            # =========================================================
+            with_hist_distribution = kwargs.get("with_hist_distribution", True)
+
+            for suffix in self.suffixes:
+                # We need 4 conditions * dimOutput rows.
+                # Conditions: All, All+Cert, Fast, Fast+Cert.
+                all_conditions = [
+                    ("All Preds", False, None),
+                    ("All + Certainty", False, thresh_entropy),
+                    ("Speed Thresholded", True, None),
+                    ("Speed + Certainty", True, thresh_entropy),
+                ]
+
+                # Base Data for this suffix
+                posIndex = self.resultsNN_phase[suffix]["posIndex"][idWindow]
+                timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
+                speedMask = self.resultsNN_phase[suffix]["speedMask"][idWindow]
+                entropy = self.resultsNN_phase[suffix]["predLoss"][idWindow]
+
+                if dimOutput == 1:
+                    pos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                    inferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
+                    training_data = self.resultsNN_phase["_training"]["linTruePos"][
+                        idWindow
+                    ]
+                elif dimOutput == 2:
+                    pos = self.resultsNN_phase[suffix]["truePos"][idWindow][:, :2]
+                    inferring = self.resultsNN_phase[suffix]["fullPred"][idWindow][
+                        :, :2
+                    ]
+                    training_data = self.resultsNN_phase["_training"]["truePos"][
+                        idWindow
+                    ][:, :2]
+                else:
+                    raise ValueError("dimOutput must be 1 or 2.")
+
+                # Split conditions into pages (e.g., 2 conditions per page)
+                conditions_per_page = 2
+                chunked_conditions = [
+                    all_conditions[i : i + conditions_per_page]
+                    for i in range(0, len(all_conditions), conditions_per_page)
+                ]
+
+                for page_idx, conditions_chunk in enumerate(chunked_conditions):
+                    fig_page = plt.figure(figsize=(14, 10))
+
+                    nrows_per_cond = dimOutput
+                    total_rows = len(conditions_chunk) * nrows_per_cond
+                    gs_page = gridspec.GridSpec(
+                        total_rows, 1, figure=fig_page, hspace=0.4
+                    )
+                    current_row = 0
+
+                    for cond_name, use_speed, thresh in conditions_chunk:
+                        # Determine Selection Mask
+                        selection = np.ones(len(pos), dtype=bool)
+                        if use_speed and speedMask is not None:
+                            selection = selection & speedMask
+
+                        if thresh is not None and entropy is not None:
+                            selection = selection & (entropy <= thresh)
+
+                        # Create Axes
+                        ncols = 6 if with_hist_distribution else 5
+                        gs_cond = gs_page[
+                            current_row : current_row + dimOutput, 0
+                        ].subgridspec(dimOutput, ncols)
+
+                        axs_list = []
+                        first_ax_ref = None
+
+                        for r in range(dimOutput):
+                            if r == 0:
+                                ax_main = fig_page.add_subplot(gs_cond[r, 0:4])
+                                first_ax_ref = ax_main
+                            else:
+                                ax_main = fig_page.add_subplot(
+                                    gs_cond[r, 0:4], sharex=first_ax_ref
+                                )
+                            axs_list.append(ax_main)
+
+                            if with_hist_distribution:
+                                ax_dist = fig_page.add_subplot(
+                                    gs_cond[r, 4], sharey=ax_main
+                                )
+                                ax_dist.tick_params(
+                                    axis="y", left=False, labelleft=False
+                                )
+                                axs_list.append(ax_dist)
+
+                        # Call overview_fig with explicit selection
+                        overview_fig(
+                            pos=pos,
+                            inferring=inferring,
+                            selection=selection,
+                            posIndex=posIndex,
+                            timeStepsPred=timeStepsPred,
+                            speedMask=None,  # Handled in selection
+                            useSpeedMask=False,  # Handled in selection
+                            concat_epochs=True,
+                            dimOutput=dimOutput,
+                            show=False,
+                            save=False,
+                            close=False,
+                            training_data=training_data,
+                            join_points=False,
+                            axs=np.array(axs_list),
+                            fig=fig_page,
+                            show_legend=current_row == total_rows - dimOutput,
+                        )
+
+                        axs_list[0].set_title(
+                            f"Phase: {suffix.strip('_')} - {cond_name}"
+                        )
+
+                        # Compute stats
+                        if dimOutput == 2:
+                            error = np.linalg.norm(inferring - pos, axis=1)
+                        else:
+                            error = np.abs(inferring - pos)
+
+                        # Masked Error
+                        masked_error = error[selection]
+
+                        mean_error = np.nan
+                        median_error = np.nan
+                        if len(masked_error) > 0:
+                            mean_error = np.mean(masked_error)
+                            median_error = np.median(masked_error)
+
+                        freeze = inEpochsMask(
+                            self.behaviorData["positionTime"][
+                                self.resultsNN_phase[suffix]["posIndex"][idWindow]
+                            ],
+                            self.behaviorData["Times"]["FreezeEpoch"],
+                        )
+
+                        text = (
+                            f"Mean Error: {mean_error:.3f}\n"
+                            f"Median Error: {median_error:.3f}\n"
+                            f"Samples: {len(masked_error)}"
+                        )
+                        axs_list[0].text(
+                            0.75,
+                            -0.1,
+                            text,
+                            horizontalalignment="right",
+                            verticalalignment="top",
+                            transform=axs_list[0].transAxes,
+                            fontsize="small",
+                        )
+
+                        # Plot Error Matrix in the last available column
+                        last_col_ax = fig_page.add_subplot(gs_cond[:, -1])
+                        last_col_ax.axis("off")
+
+                        # Need linpos for error matrix
+                        linpos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                        linpred = self.resultsNN_phase[suffix]["linPred"][idWindow]
+
+                        if len(selection) > 0 and np.sum(selection) > 0:
+                            self._plot_single_error_matrix(
+                                linpos[selection],
+                                linpred[selection],
+                                last_col_ax,
                             )
-                            ax_dist.tick_params(axis="y", left=False, labelleft=False)
-                            axs_list.append(ax_dist)
 
-                    # Plot Data
-                    posIndex = self.resultsNN_phase[suffix]["posIndex"][idWindow]
-                    timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
-                    speedMask = self.resultsNN_phase[suffix]["speedMask"][idWindow]
-                    linpos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
-                    lininferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
+                        current_row += dimOutput
 
-                    if dimOutput == 1:
-                        pos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
-                        inferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
-                        training_data = self.resultsNN_phase["_training"]["linTruePos"][
-                            idWindow
-                        ]
-                    elif dimOutput == 2:
-                        pos = self.resultsNN_phase[suffix]["truePos"][idWindow][:, :2]
-                        inferring = self.resultsNN_phase[suffix]["fullPred"][idWindow][
-                            :, :2
-                        ]
-                        training_data = self.resultsNN_phase["_training"]["truePos"][
-                            idWindow
-                        ][:, :2]
-                    else:
-                        raise ValueError("dimOutput must be 1 or 2.")
-                    overview_fig(
-                        pos=pos,
-                        inferring=inferring,
-                        selection=np.ones_like(
-                            self.resultsNN_phase[suffix]["speedMask"][idWindow],
-                            dtype=bool,
-                        ),
-                        posIndex=posIndex,
-                        timeStepsPred=timeStepsPred,
-                        speedMask=speedMask,
-                        useSpeedMask=True,
-                        concat_epochs=True,
-                        dimOutput=dimOutput,
-                        show=False,
-                        save=False,
-                        close=False,
-                        training_data=training_data,
-                        join_points=False,
-                        axs=np.array(axs_list),
-                        fig=fig_page,
-                    )
-                    axs_list[0].set_title(
-                        f"Phase: {suffix.strip('_')}",
-                    )
-                    freeze = inEpochsMask(
-                        self.behaviorData["positionTime"][
-                            self.resultsNN_phase[suffix]["posIndex"][idWindow]
-                        ],
-                        self.behaviorData["Times"]["FreezeEpoch"],
-                    )
-                    if dimOutput == 2:
-                        error = np.linalg.norm(inferring - pos, axis=1)
-                    else:
-                        error = np.abs(inferring - pos)
-                    mean_error = np.mean(error[speedMask])
-                    median_error = np.median(error[speedMask])
-                    random_pred = np.random.permutation(pos)
-                    chance_medianerror = np.median(np.abs(random_pred - pos)[speedMask])
-                    chance_meanerror = np.mean(np.abs(random_pred - pos)[speedMask])
-                    text = (
-                        f"Mean Error {dimOutput}D : {mean_error:.3f} (random {chance_meanerror:.3f})\n"
-                        f"Median Error {dimOutput}D: {median_error:.3f} (random {chance_medianerror:.3f})\n"
-                        f"Freeze Fraction: {np.mean(freeze):.3f}"
-                    )
-                    axs_list[0].text(
-                        0.75,
-                        -0.3,
-                        text,
-                        horizontalalignment="right",
-                        verticalalignment="top",
-                        transform=axs_list[0].transAxes,
-                        fontsize="small",
-                    )
+                    plt.tight_layout()
+                    pdf.savefig(fig_page)
+                    plt.close(fig_page)
 
-                    last_col_ax = fig_page.add_subplot(
-                        gs_suffix[:, -1]
-                    )  # all columns, first row
-                    last_col_ax.axis("off")  # Hide the axis
-                    self._plot_single_error_matrix(
-                        linpos[speedMask],
-                        lininferring[speedMask],
-                        last_col_ax,
-                    )
-
-                    current_row_idx += dimOutput  # Move down 2 rows for next suffix
-
-                plt.tight_layout()
-                pdf.savefig(fig_page)
-                plt.close(fig_page)
             # =========================================================
             # PAGES after+: Link with bayesian decoder and spike sorting
             # =========================================================
-            bayesian_page = plt.figure(figsize=(11.69, 8.27))  # Portrait A4
-            bayesian_page.set_size_inches(14, 10)
-            # get (2,3) gridspec axes
+            bayesian_page = plt.figure(figsize=(14, 10), constrained_layout=True)
             gs_bayes = gridspec.GridSpec(2, 3, figure=bayesian_page)
             bayesian_axs = [
                 bayesian_page.add_subplot(gs_bayes[i, j])
                 for i in range(2)
                 for j in range(3)
             ]
+
+            # Prepare bayesian predicated matrices
+            try:
+                self._create_decoding_bayes_matrices(
+                    winMS=timeWindow, suffix="_training"
+                )
+            except Exception as e:
+                print(f"Could not create decoding bayes matrices: {e}")
+
             try:
                 self.bayesian_neurons_summary(
                     fig=bayesian_page,
@@ -1463,14 +1784,15 @@ class PaperFigures:
                     show=False,
                     block=False,
                     save=False,
+                    winMS=timeWindow,
                 )
             except Exception as e:
                 print(f"Could not generate bayesian summary page: {e}")
-                # delete temp pdf file
-                os.remove(save_path)
-                raise e
-            plt.tight_layout()
-            pdf.savefig(bayesian_page)
+                import traceback
+
+                traceback.print_exc()
+
+            pdf.savefig(bayesian_page, bbox_inches=None)
             plt.close(bayesian_page)
 
         print("PDF generation complete.")
@@ -1478,13 +1800,13 @@ class PaperFigures:
         # =========================================================
         # OPEN THE PDF
         # =========================================================
-        if save:  # Using the 'save' flag to decide if we open it, or you can add an 'open_pdf' arg
+        if open:
             try:
-                if platform.system() == "Darwin":  # macOS
+                if platform.system() == "Darwin":
                     subprocess.call(("open", save_path))
-                elif platform.system() == "Windows":  # Windows
+                elif platform.system() == "Windows":
                     os.startfile(save_path)
-                else:  # linux variants
+                else:
                     subprocess.call(("xdg-open", save_path))
             except Exception as e:
                 print(f"Could not open PDF automatically: {e}")
@@ -5017,6 +5339,11 @@ class PaperFigures:
                 - show (bool): If True, displays the figure. Default is True if axs is None, else False.
                 - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
         """
+        if not hasattr(self, "trainerBayes") or self.trainerBayes is None:
+            raise ValueError(
+                "trainerBayes is not available. Please run Bayesian training first."
+            )
+
         # kwargs processing
         plot_high_quality = kwargs.get("plot_high_quality", False)
         save = kwargs.get("save", True if axs is None else False)
@@ -5131,60 +5458,84 @@ class PaperFigures:
             ax.axis("off")
 
         # --- Panel 2: Position Coverage ---
-        ax = axs[2]
+        ax = axs[3] if has_linear and hasattr(self, "decoded_fullBehavior") else axs[2]
         ax.hist(bayes_mat["linearPreferredPos"], bins=20, alpha=0.7, color="teal")
         ax.set_xlabel("Linear Position")
         ax.set_title("Pos Coverage in Training Data")
 
-        # --- Panel 3: Quality Metrics (Mutual Info) ---
-        ax = axs[3]
-        colors = np.array(["blue"] * len(ordered_mi))
-        colors[high_quality_mask] = "red"
+        # --- Panel 3: Predicted Linear Tuning Curves (mov epochs) or Quality Metrics (Mutual Info) ---
+        ax = axs[4] if has_linear and hasattr(self, "decoded_fullBehavior") else axs[3]
+        if has_linear and hasattr(self, "decoded_fullBehavior"):
+            self.plot_linear_tuning_curves(
+                ax=ax,
+                fullBehavior=self.decoded_fullBehavior,
+                title="Predicted LT Curves",
+                is_predicted=True,
+                sort_map=self.trainerBayes.linearPosArgSort,
+                **kwargs,
+            )
+        else:
+            colors = np.array(["blue"] * len(ordered_mi))
+            colors[high_quality_mask] = "red"
 
-        ax.plot(ordered_mi, "o-", alpha=0.3, zorder=0, color="gray", linewidth=0.5)
-        ax.scatter(
-            np.arange(len(ordered_mi)), ordered_mi, c=colors, alpha=0.8, zorder=1, s=15
-        )
-        ax.set_title("Mutual Information (ordered)")
-        ax.set_xlabel("Neuron Index")
-        ax.set_ylabel("Mutual Information")
+            ax.plot(ordered_mi, "o-", alpha=0.3, zorder=0, color="gray", linewidth=0.5)
+            ax.scatter(
+                np.arange(len(ordered_mi)),
+                ordered_mi,
+                c=colors,
+                alpha=0.8,
+                zorder=1,
+                s=15,
+            )
+            ax.set_title("Mutual Information (ordered)")
+            ax.set_xlabel("Neuron Index")
+            ax.set_ylabel("Mutual Information")
 
-        # --- Panel 4: Best Linear Tuning Curves (High Quality Only) ---
-        ax = axs[4]
+        # --- Panel 4: Predicted Linear Tuning Curves (all speeds) ---
+        ax = axs[5] if has_linear and hasattr(self, "decoded_fullBehavior") else axs[4]
         if has_linear:
-            if not hasattr(self, "decoded_fullBehavior"):
-                if high_quality_mask.sum() > 0:
-                    print(
-                        "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
-                    )
-                    title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
-                    self.plot_linear_tuning_curves(
-                        ax=ax, mask=high_quality_mask, title=title, **kwargs
-                    )
-                else:
-                    ax.text(
-                        0.5, 0.5, "No High Quality Fields", ha="center", va="center"
-                    )
-                    ax.axis("off")
-
-            else:
+            if hasattr(self, "decoded_fullBehavior"):
                 self.plot_linear_tuning_curves(
                     ax=ax,
                     fullBehavior=self.decoded_fullBehavior,
-                    title="Linear Tuning Curves (w/ANN predictions)",
+                    title="Predicted LT Curves (All Speeds)",
                     is_predicted=True,
                     sort_map=self.trainerBayes.linearPosArgSort,
+                    use_speed_filter=False,
                     **kwargs,
                 )
-        # --- Panel 5: Last Ordered Place Field ---
-        neuron_last = (
-            bayes_mat["linearPosArgSort"][-1]
-            if not plot_high_quality
-            else high_quality_indices[-1]
-        )
-        self._plot_single_place_field(
-            axs[5], neuron_last, pos_x, pos_y, epoch, "Last Ordered Place Field"
-        )
+            elif high_quality_mask.sum() > 0:
+                print(
+                    "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
+                )
+                title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
+                self.plot_linear_tuning_curves(
+                    ax=ax, mask=high_quality_mask, title=title, **kwargs
+                )
+            else:
+                ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
+                ax.axis("off")
+
+        if has_linear and hasattr(self, "decoded_fullBehavior"):
+            self.plot_linear_tuning_curves(
+                ax=axs[2],
+                fullBehavior=self.behaviorData,
+                title="LT Curves (All Speeds)",
+                is_predicted=False,
+                sort_map=self.trainerBayes.linearPosArgSort,
+                use_speed_filter=False,
+                **kwargs,
+            )
+        else:
+            # --- Panel 5: Last Ordered Place Field ---
+            neuron_last = (
+                bayes_mat["linearPosArgSort"][-1]
+                if not plot_high_quality
+                else high_quality_indices[-1]
+            )
+            self._plot_single_place_field(
+                axs[5], neuron_last, pos_x, pos_y, epoch, "Last Ordered Place Field"
+            )
 
         # --- Finalize and Save ---
         if save or show:
