@@ -3,8 +3,7 @@ import pytest
 import tensorflow as tf
 
 from neuroencoders.fullEncoder.nnUtils import (
-    ContrastiveLossLayer,
-    MultiColumnLossLayer,
+    ContrastiveRegressionLoss,
     _get_loss_function,
 )
 
@@ -65,7 +64,11 @@ def test_get_loss_function_cyclic():
 
 
 def test_contrastive_loss_layer():
-    layer = ContrastiveLossLayer(temperature=0.1, sigma=0.1)
+    layer = ContrastiveRegressionLoss(
+        target_structure={"pos_2d": {"dim": 1, "slice": 0, "activation": None}},
+        temperature=0.1,
+        sigma=0.1,
+    )
 
     # Identical positions and latents
     z = tf.random.normal((4, 128))
@@ -74,32 +77,6 @@ def test_contrastive_loss_layer():
     loss = layer([pos, z])  # respect the input format of [y_true, y_pred]
     assert loss.shape == ()
     assert loss >= 0
-
-
-def test_multi_column_loss_layer():
-    # Test grouping columns
-    # Column 0: MSE, Columns 1,2: Huber
-    column_losses = {"0": "mse", "1,2": "huber"}
-    column_weights = {"0": 1.0, "1,2": 0.5}
-
-    layer = MultiColumnLossLayer(
-        column_losses=column_losses, column_weights=column_weights
-    )
-
-    y_true = tf.random.normal((8, 3))
-    y_pred = tf.random.normal((8, 3))
-
-    # We need to build/call to initialize
-    loss = layer(y_true, y_pred)
-
-    assert loss.shape == (8,)
-
-    # Test merge_columns
-    layer_merged = MultiColumnLossLayer(
-        merge_columns=[[0, 1]], merge_losses=["mse"], merge_weights=[1.0]
-    )
-    loss_merged = layer_merged(y_true, y_pred)
-    assert loss_merged.shape == (8,)
 
 
 def test_get_loss_function_invalid():

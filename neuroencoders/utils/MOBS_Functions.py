@@ -1009,8 +1009,13 @@ class Mouse_Results(Params, PaperFigures):
             if not isinstance(self.windows, list):
                 self.windows = [str(self.windows)]
 
+        # to be in dir you need to have a folder named + at least one csv file inside
         in_dir = [
-            os.path.isdir(os.path.join(self.folderResult, d)) for d in self.windows
+            os.path.isdir(os.path.join(self.folderResult, d))
+            and os.path.isfile(
+                os.path.join(self.folderResult, d, "posIndex_training.csv")
+            )
+            for d in self.windows
         ]
         if not all(in_dir):
             warn(

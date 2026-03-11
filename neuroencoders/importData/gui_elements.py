@@ -3538,6 +3538,12 @@ class OversamplingVisualizer:
         pos_before = self.extract_positions_from_dataset(dataset_before, max_samples)
         pos_after = self.extract_positions_from_dataset(dataset_after, max_samples)
 
+        # save the pos_after as a numpy file for later analysis
+        if path is not None:
+            import os
+
+            np.save(os.path.join(os.path.dirname(path), "pos_after.npy"), pos_after)
+
         print(f"Before oversampling: {len(pos_before)} samples")
         print(f"After oversampling: {len(pos_after)} samples")
         print(f"Oversampling ratio: {len(pos_after) / len(pos_before):.2f}x")

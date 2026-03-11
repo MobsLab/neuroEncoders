@@ -28,9 +28,9 @@ def gaussian_params():
 
 def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
     losses_layer = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params,
         l_function_layer_params=mock_l_layer_params,
         loss_type="safe_kl",
+        **gaussian_params,
     )
 
     # Create bfloat16 inputs
@@ -47,7 +47,9 @@ def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
 
 
 def test_contrastive_loss_layer_mp():
-    contrastive_layer = nnUtils.ContrastiveLossLayer()
+    contrastive_layer = nnUtils.ContrastiveRegressionLoss(
+        target_structure={"pos_2d": {"dim": 1, "slice": 0, "activation": None}},
+    )
 
     batch_size = 8
     z = tf.random.normal((batch_size, 64), dtype=tf.bfloat16)
@@ -57,39 +59,6 @@ def test_contrastive_loss_layer_mp():
 
     assert loss.dtype == tf.float32
     assert not tf.math.is_nan(loss)
-
-
-def test_multi_column_loss_layer_mp(gaussian_params, mock_l_layer_params):
-    gh_losses = nnUtils.GaussianHeatmapLosses(
-        **gaussian_params, l_function_layer_params=mock_l_layer_params
-    )
-
-    multi_loss = nnUtils.MultiColumnLossLayer(
-        column_losses={"0": "mse", "1": "kl_heatmap"},
-        gaussian_params=gh_losses.get_config(),
-    )
-    print(f"managed to instantiate MultiColumnLossLayer with kl_heatmap: {multi_loss}")
-
-    batch_size = 4
-    y_true = tf.random.uniform((batch_size, 2), dtype=tf.bfloat16)
-    # y_pred for kl_heatmap expects logits, we just need the right shape
-    y_pred = tf.random.normal((batch_size, 2), dtype=tf.bfloat16)
-
-    # MultiColumnLossLayer with kl_heatmap expects (B, H, W) for heatmap column
-    # This is handled by _get_loss_function(kl_heatmap)
-    # Actually, MultiColumnLossLayer slices y_true, y_pred.
-
-    # Let's test a simpler MSE aggregation first
-    multi_loss_simple = nnUtils.MultiColumnLossLayer(
-        column_losses={"0": "mse", "1": "mae"}
-    )
-    y_true = tf.random.uniform((batch_size, 2), dtype=tf.bfloat16)
-    y_pred = tf.random.uniform((batch_size, 2), dtype=tf.bfloat16)
-
-    loss = multi_loss_simple(y_true, y_pred)
-
-    assert loss.dtype == tf.float32
-    assert not tf.math.is_nan(tf.reduce_mean(loss))
 
 
 def test_cyclical_mae_rad_mp():
