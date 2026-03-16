@@ -630,7 +630,7 @@ def overview_fig(
         dim_names = ["Direction"]
     elif target.lower() == "posandheaddirectionandthigmo":
         if dimOutput == 2:
-            dim_names = ["X", "Y"]
+            dim_names = ["X", "Y", "Linear Position", "Distance to Wall"]
         else:
             dim_names = ["X", "Y", "Head Direction", "Distance to Wall"]
 

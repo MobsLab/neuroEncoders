@@ -5,8 +5,10 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple, TypeAlias
 
+import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 from sklearn.decomposition import PCA
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
@@ -3671,7 +3673,7 @@ def rescale_cost_matrix(
     }
 
 
-def bin_class(example, GRID_W, GRID_H, stride, FORBID):
+def bin_class(example, GRID_W, GRID_H, FORBID, stride=None):
     """
     Map true (x,y) position to discrete bin class, -1 if forbidden.
     """
@@ -3679,17 +3681,19 @@ def bin_class(example, GRID_W, GRID_H, stride, FORBID):
     x = tf.cast(tf.clip_by_value(pos[0] * GRID_W, 0, GRID_W - 1), tf.int32)
     y = tf.cast(tf.clip_by_value(pos[1] * GRID_H, 0, GRID_H - 1), tf.int32)
 
-    # downscale to coarser grid
-    x_coarse = x // stride
-    y_coarse = y // stride
+    if stride is not None:
+        # downscale to coarser grid
+        x = x // stride
+        y = y // stride
 
     bin_cls = y * GRID_W + x
-    # Map forbidden bins to a dummy class that we'll exclude by giving it zero target mass:
-    coarse_W = GRID_W // stride
-    bin_cls = y_coarse * coarse_W + x_coarse  # ✅ FIXED: was y * GRID_W + x
 
-    # Check if forbidden
-    forbidden_here = tf.greater(FORBID[y_coarse * stride, x_coarse * stride], 0)
+    if stride is not None:
+        # Check if forbidden
+        forbidden_here = tf.greater(FORBID[y * stride, x * stride], 0)
+    else:
+        forbidden_here = tf.gather_nd(FORBID, tf.stack([y, x], axis=-1))
+
     return tf.where(forbidden_here, -1, bin_cls)
 
 
@@ -3844,8 +3848,10 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
         viz_x,
         viz_y,
         encoder_model,
+        params,
         epoch_freq=1,
         save_dir: str = "log_viz",
+        trial_idx: Optional[int] = 0,
     ):
         super().__init__()
         self.viz_x = viz_x
@@ -3853,6 +3859,8 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
         self.encoder_model = encoder_model
         self.epoch_freq = epoch_freq
         self.save_dir = save_dir
+        self.trial_idx = trial_idx if trial_idx is not None else 0
+        self.params = params
 
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
@@ -3882,7 +3890,7 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
         sc = plt.scatter(
             proj[:, 0], proj[:, 1], c=self.viz_y, cmap="plasma", s=20, alpha=0.6
         )
-        plt.colorbar(sc, label="Target Value")
+        plt.colorbar(sc, label="Target Value (LinPos)")
         plt.title(f"Latent Space - Epoch {epoch + 1}")
         plt.xlabel("PC 1")
         plt.ylabel("PC 2")
@@ -3928,7 +3936,10 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
                 return_attention_scores=True,
                 training=False,
             )
-            attn_map = tf.cast(weights[0, 0], tf.float32).numpy()  # [seq_len, seq_len]
+            trial_weights = weights[self.trial_idx]  # [heads, seq, seq]
+            attn_map = tf.cast(
+                tf.reduce_mean(trial_weights, axis=0), tf.float32
+            ).numpy()  # average over heads -> [seq, seq]
 
             # Plot and save map
             plt.figure(figsize=(8, 6))
@@ -3938,8 +3949,191 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
             plt.savefig(os.path.join(self.save_dir, f"attn_epoch_{epoch + 1:03d}.png"))
             plt.close()
 
+            # Create a grouped colorbar/labels for the heatmap axes
+            groups_for_trial = self.viz_x["groups"][self.trial_idx].numpy()
+            valid_len = np.sum(groups_for_trial != -1)
+
+            # Slice the map to remove padding from the visual
+            clean_attn = attn_map[:valid_len, :valid_len]
+
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(clean_attn, cmap="viridis", xticklabels=5, yticklabels=5)
+            plt.title(f"Mean Attention - Epoch {epoch + 1} (Non-padded spikes only)")
+            plt.savefig(
+                os.path.join(self.save_dir, f"sns_attn_epoch_{epoch + 1:03d}.png")
+            )
+            plt.close()
+
         except Exception as e:
             print(f"\n[Visualizer] Attention snapshot failed: {e}")
+
+    def _plot_raw_spikes(self, epoch):
+        # Extract the specific best trial
+        # Note: self.viz_x must contain the keys used in your example
+        example = {k: v[self.trial_idx] for k, v in self.viz_x.items()}
+
+        n_groups = self.params.nGroups  # Or params.nGroups
+        fig, axs = plt.subplots(n_groups, 1, figsize=(12, 2 * n_groups), sharex=True)
+
+        cmap_pool = [
+            "tab10",
+            "Set1",
+            "Set2",
+            "Set3",
+            "Dark2",
+            "Paired",
+            "Accent",
+            "tab20",
+            "tab20b",
+            "tab20c",
+            "Pastel1",
+            "Pastel2",
+        ]
+        # Pre-config groups
+        cmaps = [plt.get_cmap(name) for name in cmap_pool[:n_groups]]
+
+        # Plot limited spikes for clarity (e.g., first 100)
+        num_spikes = min(100, int(example["length"]))
+
+        for i in range(num_spikes):
+            idx_group = int(example["groups"][i])
+            if idx_group == -1:
+                continue  # Skip padding
+
+            # Identify spike data
+            target_data = example[f"group{idx_group}"]
+            spike_idx = int(example[f"indices{idx_group}"][i])
+
+            if spike_idx == 0:
+                continue  # Padded spike
+
+            spike_to_plot = target_data[spike_idx - 1]
+            start_of_spike = example["indexInDat"][i] - 16
+            time_axis = np.arange(start_of_spike, start_of_spike + 32)
+
+            ax = axs[idx_group]
+            for ch in range(spike_to_plot.shape[0]):
+                ax.plot(
+                    time_axis,
+                    spike_to_plot[ch, :],
+                    c=cmaps[idx_group](ch),
+                    alpha=0.5,
+                    lw=1,
+                )
+
+        axs[-1].set_xlabel("Sample Index")
+        fig.suptitle(f"Input Spikes (Trial {self.trial_idx}) - Epoch {epoch + 1}")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f"spikes_epoch_{epoch + 1:03d}.png"))
+        plt.close()
+
+    def _combined_save_attn_snapshot(self, epoch):
+        try:
+            cmap_pool = [
+                "tab10",
+                "Set1",
+                "Set2",
+                "Set3",
+                "Dark2",
+                "Paired",
+                "Accent",
+                "tab20",
+                "tab20b",
+                "tab20c",
+                "Pastel1",
+                "Pastel2",
+            ]
+            # 1. Extraction Logic (Same as before)
+            transformer_encoder = self.encoder_model.get_layer("transformer_encoder")
+            internal_block = transformer_encoder.layers[1]
+            prefix_model = tf.keras.Model(
+                inputs=self.encoder_model.input, outputs=transformer_encoder.input
+            )
+            x_raw = prefix_model(self.viz_x, training=False)
+
+            mask = x_raw[1] if isinstance(x_raw, (list, tuple)) else None
+            x_raw = x_raw[0] if isinstance(x_raw, (list, tuple)) else x_raw
+
+            x_norm = internal_block.norm1(x_raw)
+            _, weights = internal_block.mha(
+                query=x_norm,
+                value=x_norm,
+                attention_mask=create_attention_mask_from_padding_mask(mask)
+                if mask is not None
+                else None,
+                return_attention_scores=True,
+                training=False,
+            )
+
+            # 2. Prepare Data
+            # Average heads and slice to valid (non-padded) sequence length
+            groups_for_trial = self.viz_x["groups"][self.trial_idx].numpy()
+            valid_len = np.sum(groups_for_trial != -1)
+            # Use first 100 max for visual clarity
+            plot_len = min(200, valid_len)
+
+            attn_map = tf.reduce_mean(weights[self.trial_idx], axis=0)[
+                :plot_len, :plot_len
+            ].numpy()
+            example = {k: v[self.trial_idx] for k, v in self.viz_x.items()}
+
+            # 3. Setup GridSpec (1 row for spikes, 1 row for attention)
+            fig = plt.figure(figsize=(12, 14))
+            gs = gridspec.GridSpec(2, 1, height_ratios=[1, 2], hspace=0.05)
+
+            ax_spikes = fig.add_subplot(gs[0])
+            ax_attn = fig.add_subplot(gs[1])
+
+            # 4. Plot Spikes (Aligned to the attention columns)
+            cmaps = [plt.get_cmap(name) for name in cmap_pool[: self.params.nGroups]]
+
+            for i in range(plot_len):
+                g_idx = int(groups_for_trial[i])
+                spike_idx = int(example[f"indices{g_idx}"][i])
+                if spike_idx == 0:
+                    continue
+
+                wave = example[f"group{g_idx}"][spike_idx - 1]  # [channels, samples]
+                # Center the waveform at the column index 'i'
+                time_axis = np.linspace(i - 0.4, i + 0.4, wave.shape[1])
+
+                for ch in range(wave.shape[0]):
+                    ax_spikes.plot(
+                        time_axis,
+                        wave[ch, :],
+                        color=cmaps[g_idx](ch),
+                        lw=0.8,
+                        alpha=0.7,
+                    )
+
+            ax_spikes.set_title(f"Aligned Spikes & Attention - Epoch {epoch + 1}")
+            ax_spikes.set_ylabel("Voltage")
+            ax_spikes.set_xlim(-0.5, plot_len - 0.5)
+            ax_spikes.axis("off")  # Cleaner look
+
+            # 5. Plot Attention Map
+            im = ax_attn.imshow(attn_map, cmap="viridis", aspect="auto", origin="upper")
+            ax_attn.set_xlabel("Key Spike Index")
+            ax_attn.set_ylabel("Query Spike Index")
+
+            # Colorbar
+            plt.colorbar(
+                im,
+                ax=ax_attn,
+                orientation="horizontal",
+                fraction=0.05,
+                pad=0.1,
+                label="Mean Attention Weight",
+            )
+
+            plt.savefig(
+                os.path.join(self.save_dir, f"combined_viz_epoch_{epoch + 1:03d}.png"),
+                bbox_inches="tight",
+            )
+            plt.close()
+
+        except Exception as e:
+            print(f"\n[Visualizer] Combined snapshot failed: {e}")
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
