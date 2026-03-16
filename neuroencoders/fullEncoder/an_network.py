@@ -1056,14 +1056,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         ### Create neccessary arrays
         windowSizeMS = kwargs.pop("windowSizeMS", 36)
+        if isinstance(windowSizeMS, list):
+            print("Multiple window sizes provided:", windowSizeMS)
+            winMS_max = max(windowSizeMS)
+        else:
+            winMS_max = windowSizeMS
+
         scheduler = kwargs.get("scheduler", "cosine")
         isPredLoss = kwargs.get("isPredLoss", False)
         earlyStop = kwargs.get("earlyStop", False)
         strideFactor = kwargs.get("strideFactor", 1)
 
         load_model = kwargs.get("load_model", False)
+
         if not isinstance(windowSizeMS, int):
-            windowSizeMS = int(windowSizeMS)
+            winMS_max = int(winMS_max)
 
         epochMask = {}
         totMask = {}
@@ -1071,53 +1078,43 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         checkpointPath = {}
 
         # Manage folders
-        os.makedirs(os.path.join(self.folderModels, str(windowSizeMS)), exist_ok=True)
-        os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)), exist_ok=True)
+        os.makedirs(os.path.join(self.folderModels, str(winMS_max)), exist_ok=True)
+        os.makedirs(os.path.join(self.folderResult, str(winMS_max)), exist_ok=True)
+        os.makedirs(os.path.join(self.folderResultSleep, str(winMS_max)), exist_ok=True)
         os.makedirs(
-            os.path.join(self.folderResultSleep, str(windowSizeMS)), exist_ok=True
+            os.path.join(self.folderModels, str(winMS_max), "full"), exist_ok=True
         )
         os.makedirs(
-            os.path.join(self.folderModels, str(windowSizeMS), "full"), exist_ok=True
-        )
-        os.makedirs(
-            os.path.join(self.folderModels, str(windowSizeMS), "savedModels"),
+            os.path.join(self.folderModels, str(winMS_max), "savedModels"),
             exist_ok=True,
         )
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             os.makedirs(
-                os.path.join(self.folderModels, str(windowSizeMS), "predLoss"),
+                os.path.join(self.folderModels, str(winMS_max), "predLoss"),
                 exist_ok=True,
             )
             csvLogger["predLoss"] = tf.keras.callbacks.CSVLogger(
                 os.path.join(
                     self.folderModels,
-                    str(windowSizeMS),
+                    str(winMS_max),
                     "predLoss",
                     "predLossmodel.log",
                 )
             )
         # Manage callbacks
         csvLogger["full"] = tf.keras.callbacks.CSVLogger(
-            os.path.join(self.folderModels, str(windowSizeMS), "full", "fullmodel.log")
+            os.path.join(self.folderModels, str(winMS_max), "full", "fullmodel.log")
         )
         for key in csvLogger.keys():
             checkpointPath[key] = os.path.join(
                 self.folderModels,
-                str(windowSizeMS),
+                str(winMS_max),
                 key,
                 "{epoch:02d}-{val_loss:.2f}.weights.h5",
             )
 
         ## Get speed filter:
         speedMask = behaviorData["Times"]["speedFilter"]
-
-        ## Get datasets
-        if strideFactor > 1:
-            filename = (
-                f"dataset_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
-            )
-        else:
-            filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
 
         # Manage masks
         epochMask["train"] = inEpochsMask(
@@ -1135,9 +1132,104 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             totMask[key] = speedMask * epochMask[key]
 
         augmentation_config = NeuralDataAugmentation(device=self.deviceName, **kwargs)
-        datasets, counts = self._dataset_loading_pipeline(
-            filename, windowSizeMS, behaviorData, totMask, augmentation_config, **kwargs
-        )
+
+        ## Get datasets
+        if strideFactor > 1:
+            filename = f"dataset_stride{str(winMS_max)}_factor{str(strideFactor)}.tfrec"
+        else:
+            filename = f"dataset_stride{str(winMS_max)}.tfrec"
+
+        if isinstance(windowSizeMS, int) or len(windowSizeMS) == 1:
+            datasets, counts = self._dataset_loading_pipeline(
+                filename,
+                winMS_max,
+                behaviorData,
+                totMask,
+                augmentation_config,
+                **kwargs,
+            )
+        elif isinstance(windowSizeMS, list):
+
+            def get_interleaved_dataset(
+                window_sizes: list,
+                weights: Optional[list] = None,
+                **kwargs,
+            ):
+                sub_datasets_train = []
+                sub_datasets_test = []
+                sub_counts = []
+                print(
+                    "Loading and preparing interleaved datasets for window sizes:",
+                    window_sizes,
+                )
+                ## Get datasets
+                for ws in window_sizes:
+                    # FIX: missing logic from neuroEncoder
+                    # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
+                    tmp_stride_factor = strideFactor
+                    windowStride = round(ws / 1000 / tmp_stride_factor, 4)
+                    if windowStride < 0.036:
+                        windowStride = 0.036
+                        if ws / 1000 == 0.036:
+                            # this way we dont have to recreate them.
+                            tmp_stride_factor = 1
+
+                    print(
+                        f"Processing window size {ws} ms with stride factor {tmp_stride_factor}..."
+                    )
+                    if tmp_stride_factor > 1:
+                        filename = f"dataset_stride{str(ws)}_factor{str(tmp_stride_factor)}.tfrec"
+                    else:
+                        filename = f"dataset_stride{str(ws)}.tfrec"
+
+                    # Call your existing pipeline for each window size
+                    # Note: Ensure you disable .repeat() and .batch() inside the pipeline
+                    # so you can interleave individual examples first.
+                    ds, counts = self._dataset_loading_pipeline(
+                        filename,
+                        ws,
+                        behaviorData,
+                        totMask,
+                        augmentation_config,
+                        is_interleaving_subdataset=True,
+                        **kwargs,
+                    )
+                    sub_datasets_train.append(ds["train"])
+                    if "test" in ds:
+                        sub_datasets_test.append(ds["test"])
+                    sub_counts.append(counts)
+
+                # Interleave them
+                interleaved_ds_train = tf.data.Dataset.sample_from_datasets(
+                    sub_datasets_train, weights=weights, stop_on_empty_dataset=False
+                )
+
+                interleaved_ds_test = tf.data.Dataset.sample_from_datasets(
+                    sub_datasets_test, weights=weights, stop_on_empty_dataset=True
+                )
+
+                batch_size = kwargs.get("batch_size", self.params.batch_size)
+                interleaved_ds_train = interleaved_ds_train.batch(
+                    batch_size, drop_remainder=True
+                )
+                interleaved_ds_train = interleaved_ds_train.repeat().prefetch(
+                    tf.data.AUTOTUNE
+                )
+
+                interleaved_ds_test = interleaved_ds_test.batch(
+                    batch_size, drop_remainder=True
+                ).prefetch(tf.data.AUTOTUNE)
+
+                interleaved_ds = {
+                    "train": interleaved_ds_train,
+                    "test": interleaved_ds_test,
+                }
+
+                return interleaved_ds, sub_counts
+
+            datasets, subcounts = get_interleaved_dataset(windowSizeMS, **kwargs)
+            counts = subcounts[windowSizeMS.index(max(windowSizeMS))]
+
         if kwargs.get("return_datasets", False):
             return datasets, counts
 
@@ -1174,27 +1266,43 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # If keeping original, we have n_aug + 1 samples total
             n_total_aug = n_aug + 1 if kwargs.get("keep_original", True) else n_aug
             # In your main pipeline where you calculate steps_per_epoch:
-            actual_rep_factors = np.minimum(
-                max_count / np.maximum(counts["train"], 1e-8), 20.0
-            )
-            actual_balanced_size = np.sum(counts["train"] * actual_rep_factors)
 
-            steps_per_epoch = np.floor(
-                (actual_balanced_size * n_total_aug) / (self.params.batch_size)
-            ).astype(int)
+            if isinstance(windowSizeMS, list):
+                total_balanced_size = 0
+                for c in subcounts:
+                    mc = c["train"].max()
+                    actual_rep = np.ceil(
+                        np.minimum(mc / np.maximum(c["train"], 1e-8), 15.0)
+                    ).astype(int)
+                    total_balanced_size += np.sum(c["train"] * actual_rep)
+
+                steps_per_epoch = np.floor(
+                    (total_balanced_size * n_total_aug) / (self.params.batch_size)
+                ).astype(int)
+            else:
+                actual_rep_factors = np.ceil(
+                    np.minimum(max_count / np.maximum(counts["train"], 1e-8), 15.0)
+                ).astype(int)
+                actual_balanced_size = np.sum(counts["train"] * actual_rep_factors)
+
+                steps_per_epoch = np.floor(
+                    (actual_balanced_size * n_total_aug) / (self.params.batch_size)
+                ).astype(int)
         else:
             print(
                 "no data augmentation or class balancing, using original dataset size for steps per epoch calculation"
             )
-            num_train_samples = np.sum(epochMask["train"])
+            num_train_samples = np.sum(totMask["train"])
+            multiplier = len(windowSizeMS) if isinstance(windowSizeMS, list) else 1
             steps_per_epoch = np.floor(
-                num_train_samples / self.params.batch_size
+                (num_train_samples * multiplier)
+                / (self.params.batch_size * strideFactor)
             ).astype(int)
 
         print("Steps per epoch:", steps_per_epoch)
 
         ## prepare contrastive visualizer callback
-        viz_batch = datasets["test"].take(2)
+        viz_batch = datasets["test"].take(5)
         viz_inputs = []
         viz_linpos = []
         l_function = self.Linearizer.pykeops_linearization
@@ -1206,6 +1314,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             k: np.concatenate([batch[k] for batch in viz_inputs], axis=0)
             for k in viz_inputs[0].keys()
         }
+        try:
+            groups = viz_inputs["groups"]
+            neg1_counts = np.sum(groups == -1, axis=1)
+            best_row_idx = np.argmin(neg1_counts)
+        except KeyError:
+            best_row_idx = None
+
         viz_linpos = np.concatenate(viz_linpos, axis=0)
 
         ### Train the model(s)
@@ -1230,7 +1345,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         csv_hist = pd.read_csv(
                             os.path.join(
                                 self.folderModels,
-                                str(windowSizeMS),
+                                str(winMS_max),
                                 "full",
                                 "fullmodel.log",
                             )
@@ -1259,7 +1374,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     os.path.exists(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(winMS_max),
                             "full",
                             "fullModelLosses.png",
                         )
@@ -1267,7 +1382,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     or os.path.exists(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(winMS_max),
                             "predLoss",
                             "predLossModelLosses.png",
                         )
@@ -1275,7 +1390,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 ) and not kwargs.get("fine_tune", False):
                     print(
                         "Loading previous losses from",
-                        os.path.join(self.folderModels, str(windowSizeMS)),
+                        os.path.join(self.folderModels, str(winMS_max)),
                     )
                     continue
                 if not kwargs.get("fine_tune", False):
@@ -1354,20 +1469,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         self.log_dir = os.path.join(
                             self.folderResult,
                             "logs",
-                            str(windowSizeMS),
+                            str(winMS_max),
                             key,
                             datetime.now().strftime("%Y%m%d-%H%M%S"),
                         )
                         tb_callbacks = tf.keras.callbacks.TensorBoard(
                             log_dir=self.log_dir,
                             histogram_freq=1,
-                            profile_batch=(10, 500),
+                            # profile_batch=(10, 500),
                         )
                         print(f"starting tensorboard at {self.log_dir}")
                     run = wandb.init(
                         entity="touseul",
                         project="SoMuchBetter",
-                        name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{windowSizeMS}ms",
+                        name=f"{prefix}{os.path.basename(os.path.dirname(self.projectPath.xml))}_{os.path.basename(self.projectPath.experimentPath)}_{key}_{winMS_max}ms",
                         notes=f"{os.path.basename(self.projectPath.experimentPath)}_{key}",
                         # sync_tensorboard=True,
                         config=ann_config,
@@ -1400,10 +1515,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         MemoryUsageCallbackExtended(),
                         ContrastiveMonitor(),
                         ContrastiveVisualizer(
-                            viz_inputs,
-                            viz_linpos,
-                            self.viz_encoder,
+                            viz_x=viz_inputs,
+                            viz_y=viz_linpos,
+                            encoder_model=self.viz_encoder,
+                            params=self.params,
                             save_dir=self.log_dir if is_tbcallback else None,
+                            trial_idx=best_row_idx,
                         ),
                     ]
                 else:
@@ -1414,10 +1531,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         MemoryUsageCallbackExtended(),
                         ContrastiveMonitor(),
                         ContrastiveVisualizer(
-                            viz_inputs,
-                            viz_linpos,
-                            self.viz_encoder,
+                            viz_x=viz_inputs,
+                            viz_y=viz_linpos,
+                            encoder_model=self.viz_encoder,
+                            params=self.params,
                             save_dir=self.log_dir if is_tbcallback else None,
+                            trial_idx=best_row_idx,
                         ),
                     ]
 
@@ -1459,13 +1578,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
                 self.losses_fig(
                     self.trainLosses[key],
-                    os.path.join(self.folderModels, str(windowSizeMS)),
+                    os.path.join(self.folderModels, str(winMS_max)),
                     valLosses=valLosses,
                 )
                 self.model.save_weights(
                     os.path.join(
                         self.folderModels,
-                        str(windowSizeMS),
+                        str(winMS_max),
                         "savedModels",
                         "full_cp.weights.h5",
                     ),
@@ -1474,7 +1593,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.model.save(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(winMS_max),
                             "savedModels",
                             "full_model.keras",
                         )
@@ -1525,6 +1644,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         batch_size = kwargs.get("batch_size", self.params.batch_size)
         speedMask = kwargs.get("speedMask", None)
         inference_mode = kwargs.get("inference_mode", False)
+        is_interleaving_subdataset = kwargs.get("is_interleaving_subdataset", False)
         if inference_mode and shuffle:
             raise ValueError(
                 "Shuffle should be set to False in inference mode to ensure deterministic outputs."
@@ -1577,7 +1697,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             targets_dict = {}
             for name, spec in self.target_structure.items():
                 start_idx, end_idx = spec["slice"]
-                targets_dict[name] = vals["pos"][:, start_idx:end_idx]
+                targets_dict[name] = vals["pos"][..., start_idx:end_idx]
 
             # latent targets are the 2D position for contrastive regression
             # TODO: ensure that contrastive regression is always wrt the 2D position
@@ -1673,13 +1793,36 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     deterministic=False,
                 )
 
-            dataset = dataset.batch(batch_size, drop_remainder=True)
-            dataset = dataset.prefetch(tf.data.AUTOTUNE)
+            # --- PRE-BATCHING SAVING POINT ---
+            # Save the dataset state here: Unbatched, Unrepeated, Contains 'pos'
+            save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
+            save_parsed_parquet = kwargs.get("save_parsed_parquet", None)
+            useSpeedMask = kwargs.get(
+                "useSpeedMask", kwargs.get("useSpeedFilter", False)
+            )
+            should_save = not useSpeedMask
+
+            if should_save:
+                if save_parsed_tfrec is not None:
+                    path = f"{save_parsed_tfrec}_{key}.tfrec"
+                    print(f"Saving {key} dataset to {path} (Pre-batching)...")
+                    self._save_single_dataset_to_tfrec(dataset, path)
+                if save_parsed_parquet is not None:
+                    path = f"{save_parsed_parquet}_{key}.parquet"
+                    print(f"Saving {key} dataset to {path} (Pre-batching)...")
+                    self._save_single_dataset_to_parquet(dataset, path)
+
+            if not is_interleaving_subdataset and (
+                batch_size is not None and batch_size > 1
+            ):
+                print("Batching the dataset with batch size:", batch_size)
+                dataset = dataset.batch(batch_size, drop_remainder=True)
+                dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
             dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
 
-            if key != "test":
+            if key != "test" and not is_interleaving_subdataset:
                 # handle dataset ran out of data by repeating it
                 dataset = dataset.repeat()
 
@@ -1900,29 +2043,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 "Augmentation must be enabled and config provided to create optimized parse function."
             )
 
-    def _save_datasets_to_tfrec(self, datasets, base_path):
-        """
-        Save parsed datasets to new TFRecord files.
+    def _save_single_dataset_to_tfrec(self, dataset, output_path):
+        """Helper to save a single unbatched, non-repeating dataset to TFRecord"""
 
-        Parameters
-        ----------
-        datasets : dict
-            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
-        base_path : str
-            Base path for saved TFRecord files. Files will be saved as:
-            {base_path}_train.tfrec, {base_path}_test.tfrec, etc.
-        """
-
+        # Serialize function
         def serialize_example(example_dict):
-            """Serialize a single example to TFRecord format"""
-            # Create feature dict for serialization
             feature_dict = {}
-
             for key, value in example_dict.items():
                 if isinstance(value, tf.Tensor):
                     value = value.numpy()
-
-                # Handle different data types
                 if isinstance(value, np.ndarray):
                     if value.dtype in [np.float32, np.float64]:
                         feature_dict[key] = tf.train.Feature(
@@ -1933,7 +2062,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             int64_list=tf.train.Int64List(value=value.flatten())
                         )
                     else:
-                        # For other types, convert to bytes
                         feature_dict[key] = tf.train.Feature(
                             bytes_list=tf.train.BytesList(value=[value.tobytes()])
                         )
@@ -1951,61 +2079,75 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     feature_dict[key] = tf.train.Feature(
                         bytes_list=tf.train.BytesList(value=[value])
                     )
-
-            # Create an Example proto
             example_proto = tf.train.Example(
                 features=tf.train.Features(feature=feature_dict)
             )
             return example_proto.SerializeToString()
 
-        # Save each dataset
+        if os.path.exists(output_path):
+            print(f"File {output_path} already exists. Skipping save.")
+            return
+
+        writer = tf.io.TFRecordWriter(output_path)
+        try:
+            # Iterate safely (handle tuples if present, though unmapped dataset should be dict)
+            for batch in tqdm(dataset, desc=f"Writing to TFRecord: {output_path}"):
+                if isinstance(batch, tuple):
+                    inputs, targets = batch
+                    # Merge targets back into inputs if needed
+                    # But at this stage 'pos' should be in inputs if not mapped yet.
+                    # If mapped, targets usually contains 'pos'.
+                    combined = {**inputs, **targets}
+                else:
+                    combined = batch
+
+                serialized = serialize_example(combined)
+                writer.write(serialized)
+        finally:
+            writer.close()
+        print(f"Successfully saved to {output_path}")
+
+    def _save_single_dataset_to_parquet(self, dataset, output_path):
+        """Helper to save a single unbatched, non-repeating dataset to Parquet"""
+        if os.path.exists(output_path):
+            print(f"File {output_path} already exists. Skipping save.")
+            return
+
+        df = self.convert_tfrec_to_pandas(
+            dataset, desc=f"Converting to Pandas: {output_path}"
+        )
+        if df.shape[0] > 0:
+            df.to_parquet(output_path)
+            print(f"Successfully saved to {output_path}")
+        else:
+            print(f"No data to save for {output_path}")
+
+    def _save_datasets_to_tfrec(self, datasets, base_path):
+        """
+        Legacy wrapper: Use _save_single_dataset_to_tfrec for individual datasets.
+        This function handles iteration over dataset dict for backward compatibility.
+        Warning: This may fail if datasets are batched or infinite (train).
+        """
         for key, dataset in datasets.items():
-            output_path = f"{base_path}_{key}.tfrec"
-            print(f"Saving {key} dataset to {output_path}...")
-
-            writer = tf.io.TFRecordWriter(os.path.abspath(output_path))
-
-            try:
-                for batch in tqdm(dataset, desc=f"Writing {key} to TFRecord"):
-                    if isinstance(batch, tuple):
-                        inputs, _ = batch  # Usually (inputs, targets)
-                    else:
-                        inputs = batch
-
-                    serialized = serialize_example(inputs)
-                    writer.write(serialized)
-            finally:
-                writer.close()
-
-            print(f"Successfully saved {key} dataset to {output_path}")
+            path = f"{base_path}_{key}.tfrec"
+            # It's safer to not save 'train' here as it's likely infinite
+            if key == "train":
+                print(
+                    "Skipping 'train' dataset in legacy save (likely infinite). Use internal saving logic."
+                )
+                continue
+            self._save_single_dataset_to_tfrec(dataset, path)
 
     def _save_datasets_to_parquet(self, datasets, base_path):
-        """
-        Save parsed datasets to Parquet files using pandas logic.
-
-        Parameters
-        ----------
-        datasets : dict
-            Dictionary of tf.data.Dataset objects to save (e.g., {'train': dataset, 'test': dataset})
-        base_path : str
-            Base path for saved Parquet files. Files will be saved as:
-            {base_path}_{key}.parquet
-        """
-
+        """Legacy wrapper"""
         for key, dataset in datasets.items():
-            output_path = f"{base_path}_{key}.parquet"
-            print(f"Saving {key} dataset to {output_path}...")
-
-            df = self.convert_tfrec_to_pandas(
-                dataset, desc=f"Converting {key} to Pandas"
-            )
-
-            if df.shape[0] > 0:
-                # Some columns might still be lists, which Parquet handles fine as nesting or objects.
-                df.to_parquet(output_path)
-                print(f"Successfully saved {key} dataset to {output_path}")
-            else:
-                print(f"No data to save for {key}")
+            path = f"{base_path}_{key}.parquet"
+            if key == "train":
+                print(
+                    "Skipping 'train' dataset in legacy save (likely infinite). Use internal saving logic."
+                )
+                continue
+            self._save_single_dataset_to_parquet(dataset, path)
 
     def convert_tfrec_to_pandas(
         self, dataset, flatten=True, desc="Converting to Pandas"
@@ -2875,110 +3017,75 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # instead of oversampling on such tiny grid, we take a coarser grid mesh
         stride = 5
         self.coarse_H, self.coarse_W = GRID_H // stride, GRID_W // stride
+        forbid_fine = self.GaussianHeatmap.forbid_mask_tf.numpy()
+        FORBID_coarse = np.zeros((self.coarse_H, self.coarse_W), dtype=bool)
+
+        for y in range(self.coarse_H):
+            for x in range(self.coarse_W):
+                block = forbid_fine[
+                    y * stride : (y + 1) * stride, x * stride : (x + 1) * stride
+                ]
+                if np.any(block > 0):
+                    FORBID_coarse[y, x] = True
+        forbid_coarse_tf = tf.constant(FORBID_coarse, dtype=tf.bool)
 
         def map_bin_class(ex):
             return nnUtils.bin_class(
                 ex,
-                GRID_H,
-                GRID_W,
-                stride,
-                self.GaussianHeatmap.forbid_mask_tf,
+                self.coarse_H,
+                self.coarse_W,
+                forbid_coarse_tf,
             )
 
-        def filter_for_oversampling(ex):
-            return tf.greater_equal(map_bin_class(ex), 0)
-
-        # should not be useful as true positions are already allowed!
-        dataset = dataset.filter(filter_for_oversampling)
+        coarse_H, coarse_W = self.coarse_H, self.coarse_W
 
         positions = self.GaussianHeatmap.training_positions
-        # filter position by map_bin_class
-        bins = self.GaussianHeatmap.positions_to_bins(positions)
+        x_c_np = (positions[:, 0] * coarse_W).astype(np.int32).clip(0, coarse_W - 1)
+        y_c_np = (positions[:, 1] * coarse_H).astype(np.int32).clip(0, coarse_H - 1)
+        coarse_bins = y_c_np * coarse_W + x_c_np
 
-        # Convert fine bins → coarse bins
-        # Map to coarse bins
-        # Step 1: compute fine x,y indices
-        x_fine = bins % GRID_W
-        y_fine = bins // GRID_W
+        counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
+            np.float32
+        )
 
-        # Step 2: downscale to coarse grid
-        x_coarse = x_fine // stride
-        y_coarse = y_fine // stride
-
-        # Step 3: coarse bin index
-        coarse_bins = y_coarse * self.coarse_W + x_coarse  # shape same as positions
-        counts = np.bincount(
-            coarse_bins, minlength=self.coarse_H * self.coarse_W
-        ).astype(np.float32)
-
-        # Flatten FORBID for easy masking
-        # Forbidden bins in coarse space (if you want to respect FORBID also at coarse level)
-        FORBID_coarse = np.zeros((self.coarse_H, self.coarse_W), dtype=bool)
-        for y in range(self.coarse_H):
-            for x in range(self.coarse_W):
-                # If any fine bin inside coarse cell is forbidden, mark whole cell forbidden
-                if np.any(
-                    self.GaussianHeatmap.forbid_mask_tf[
-                        y * stride : (y + 1) * stride,
-                        x * stride : (x + 1) * stride,
-                    ]
-                    > 0
-                ):
-                    FORBID_coarse[y, x] = True
         FORBID_flat = FORBID_coarse.flatten()
         counts[FORBID_flat] = 0  # set forbidden bins to 0 count
 
-        allowed_bins = (counts > 0) & (~FORBID_flat)
+        allowed_bins = counts > 0
 
         # compute oversampling ratios relative to max count among allowed bins
         max_count = counts.max()
-        rep_factors = max_count / np.maximum(counts[allowed_bins], 1e-8)
-        rep_factors = np.minimum(rep_factors, 15.0)  # clip to avoid extreme repeats
-        rep_factors_tf = tf.constant(rep_factors, tf.float32)
 
-        allowed_idx = np.where(allowed_bins)[0]
-        bin_to_allowed_idx = -np.ones_like(allowed_bins, dtype=int)
-        bin_to_allowed_idx[allowed_idx] = np.arange(len(allowed_idx))
-        # convert to tensor
-        allowed_bins = tf.constant(allowed_bins)
-        bin_to_allowed_idx = tf.constant(bin_to_allowed_idx)
+        rep_factors = np.ones_like(counts)
+        rep_factors[allowed_bins] = np.ceil(max_count / counts[allowed_bins])
+        rep_factors = np.minimum(rep_factors, 15.0).astype(
+            np.int64
+        )  # clip to avoid extreme repeats
+        rep_factors_tf = tf.constant(rep_factors, dtype=tf.int64)
+        dataset_before_oversampling = dataset
 
         # Map each example to repeated dataset
         def map_repeat(ex):
-            mapped_cls = map_bin_class(ex)
-            allowed_idx_val = tf.gather(bin_to_allowed_idx, mapped_cls)
-
-            safe_idx = tf.maximum(allowed_idx_val, 0)  # -1 becomes 0
-            # find idx in rep_factors (only allowed bins)
-            repeats = tf.cast(
-                tf.math.ceil(tf.gather(rep_factors_tf, safe_idx)), tf.int64
+            idx = map_bin_class(ex)
+            # If forbidden (-1), repeat 0 times (filter out)
+            num_repeats = tf.cond(
+                idx >= 0,
+                lambda: tf.gather(rep_factors_tf, idx),
+                lambda: tf.constant(0, dtype=tf.int64),
             )
-            repeats = tf.where(
-                allowed_idx_val >= 0, repeats, tf.constant(0, dtype=tf.int64)
-            )
+            return tf.data.Dataset.from_tensors(ex).repeat(num_repeats)
 
-            def repeat_fn():
-                return tf.data.Dataset.from_tensors(ex).repeat(repeats)
-
-            def empty_fn():
-                return tf.data.Dataset.from_tensors(ex).take(0)
-
-            return tf.cond(repeats > 0, repeat_fn, empty_fn)
-
-        dataset_before_oversampling = dataset
-        # Save this before the oversampling block
         dataset = dataset.flat_map(map_repeat)
+
         # shuffle after repeating to mix repeated samples
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=10000, seed=42)
+            dataset = dataset.shuffle(buffer_size=20000, seed=42)
+
         dataset_after_oversampling = dataset  # Save this before the oversampling block
 
         # Calculate expected counts after oversampling
-        expected_counts_after = counts.copy()
-        # Map the rep_factors (which only exist for allowed_bins) back to the full grid
-        full_rep_factors = np.ones_like(counts)
-        full_rep_factors[allowed_bins] = np.ceil(rep_factors)
-        expected_counts_after *= full_rep_factors
+        expected_counts_after = counts * rep_factors
+
         from neuroencoders.importData.gui_elements import OversamplingVisualizer
 
         if not os.path.exists(

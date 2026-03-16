@@ -3542,6 +3542,7 @@ class OversamplingVisualizer:
         if path is not None:
             import os
 
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             np.save(os.path.join(os.path.dirname(path), "pos_after.npy"), pos_after)
 
         print(f"Before oversampling: {len(pos_before)} samples")
@@ -3614,6 +3615,7 @@ class OversamplingVisualizer:
 
         plt.tight_layout()
         if path is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             fig.savefig(path)
             print(f"Saved figure to {path}")
         plt.close(fig)

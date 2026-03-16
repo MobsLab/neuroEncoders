@@ -856,7 +856,7 @@ class PaperFigures:
         axs=None,
         show: bool = True,
         block: bool = False,
-        save: bool = False,
+        save: bool = True,
         extended_zone: bool = True,
         **kwargs,
     ):
@@ -1295,7 +1295,7 @@ class PaperFigures:
                 axs=target_axs,
                 show=False,
                 block=False,
-                save=False,
+                save=True,
                 extended_zone=kwargs.get("extended_zone", True),
             )
 
@@ -1331,7 +1331,7 @@ class PaperFigures:
                 axs=target_axs,
                 show=False,
                 block=False,
-                save=False,
+                save=True,
                 error_type=kwargs.get("error_type", "lin"),
             )
 
@@ -1783,7 +1783,7 @@ class PaperFigures:
                     axs=bayesian_axs,
                     show=False,
                     block=False,
-                    save=False,
+                    save=True,
                     winMS=timeWindow,
                 )
             except Exception as e:

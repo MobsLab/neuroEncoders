@@ -12,9 +12,14 @@ import psutil
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [0.108, 0.252, 0.504]  # only kept for new dataset
+win_values = [
+    [0.036, 0.108],
+    [0.036, 0.108, 0.252],
+    [0.036, 0.108, 0.252, 0.504],
+]  # only kept for new dataset
 # Mice name
 mice_nb = [
-    "M1199_PAG",
+    # "M1199_PAG",
     "M994_PAG",
     "M1239_MFB",
     "M1230_Novel",
@@ -31,6 +36,7 @@ mice_nb = [
 ]
 ####
 nameExp = "consensus_v5_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
+nameExp = "consensus_v6_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -80,10 +86,12 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         if xml_file:
             break
 
+    win_tmp = win if not isinstance(win, list) else max(win)
+
     if (
         os.path.exists(
             os.path.join(
-                dir, nameExp, "results", str(int(win * 1000)), "featurePred.csv"
+                dir, nameExp, "results", str(int(win_tmp * 1000)), "featurePred.csv"
             )
         )
         or os.path.exists(
@@ -91,7 +99,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 dir,
                 nameExp,
                 "results",
-                str(int(win * 1000)),
+                str(int(win_tmp * 1000)),
                 f"featurePred_{phase}.csv",
             )
         )
@@ -100,7 +108,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 dir,
                 nameExp,
                 "results",
-                str(int(win * 1000)),
+                str(int(win_tmp * 1000)),
                 "featurePred_training.csv",
             )
         )
@@ -110,7 +118,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_LSTM",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     "featurePred.csv",
                 )
             )
@@ -122,7 +130,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_LSTM",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     f"featurePred_{phase}.csv",
                 )
             )
@@ -134,7 +142,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_LSTM",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     "featurePred_training.csv",
                 )
             )
@@ -146,7 +154,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_Transformer",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     "featurePred_training.csv",
                 )
             )
@@ -158,7 +166,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_Transformer",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     "featurePred.csv",
                 )
             )
@@ -170,7 +178,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_Transformer",
                     "results",
-                    str(int(win * 1000)),
+                    str(int(win_tmp * 1000)),
                     f"featurePred_{phase}.csv",
                 )
             )
@@ -184,7 +192,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                     dir,
                     nameExp + "_Transformer",
                     "figures",
-                    f"summary_id_card_{int(win * 1000)}ms.pdf",
+                    f"summary_id_card_{int(win_tmp * 1000)}ms.pdf",
                 )
             )
             and not lstmAndTransfo
@@ -201,32 +209,35 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             "ann",
             xml_file,
             "--window",
-            str(win),
-            "--striding",
-            str(win),
-            "-e",
-            nbEpochs,
-            "--gpu",
-            "--target",
-            target,
-            "--early_stop",
-            "--no_dense",
-            "--n_features",
-            "64",
-            "--dim_factor",
-            "3",
-            "--n_transformers",
-            "3",
-            "--loss_type",
-            "wasserstein",
-            "--reduce_dense",
-            "--contrastive_loss",
-            "--plot_id",
-            # "--predicted_loss",
-            # "--transform_w_log",
-            # "--mixed_loss",
-            # "--no_gaussian",
         ]
+        windows = win if isinstance(win, list) else [win]
+        cmd_ann.extend(map(str, windows))
+        cmd_ann.extend(
+            [
+                "-e",
+                nbEpochs,
+                "--gpu",
+                "--target",
+                target,
+                "--early_stop",
+                "--no_dense",
+                "--n_features",
+                "64",
+                "--dim_factor",
+                "3",
+                "--n_transformers",
+                "3",
+                "--loss_type",
+                "wasserstein",
+                "--reduce_dense",
+                "--contrastive_loss",
+                "--plot_id",
+                # "--predicted_loss",
+                # "--transform_w_log",
+                # "--mixed_loss",
+                # "--no_gaussian",
+            ]
+        )
         if lstmAndTransfo:
             cmd_ann += ["--lstm", "--name", nameExp + "_LSTM"]
         else:
@@ -235,7 +246,10 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             cmd_ann += ["--test_sleep"]
         if useStridingFactor:
             cmd_ann += ["--striding_factor", str(stridingFactor)]
+        else:
+            cmd_ann += ["--striding", str(win)]
 
+        win = win if not isinstance(win, list) else max(win)
         cmd_bayes = [
             "/usr/bin/env",
             "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
