@@ -11,15 +11,21 @@ import matplotlib.axes
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
 import pynapple as nap
 import seaborn as sns
 import tqdm
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 from scipy.ndimage import gaussian_filter
 from scipy.stats import binned_statistic_2d, sem, zscore
+from shapely.geometry import MultiPoint, Point, Polygon
+from shapely.ops import unary_union
+from sklearn.cluster import DBSCAN
 from statsmodels.stats.proportion import proportions_ztest
 
 from neuroencoders.importData.epochs_management import inEpochsMask
@@ -47,6 +53,7 @@ from neuroencoders.utils.viz_params import (
     SAFE_COLOR,
     SAFE_COLOR_PREDICTED,
     SHOCK_COLOR,
+    SHOCK_COLOR_PREDICTED,
     get_pvalue_stars,
     white_viridis,
 )
@@ -64,6 +71,7 @@ class PaperFigures:
         phase=None,
         sleep=False,
         verbose=True,
+        **kwargs,
     ):
         self.phase = phase
         suffix = f"_{phase}" if phase is not None else ""
@@ -97,6 +105,9 @@ class PaperFigures:
         self.resultsBayes_phase = dict()
         self.resultsNN_phase_pkl = dict()
         self.resultsBayes_phase_pkl = dict()
+        # Define consistent figure geometry across pages for homogeneous PDF output.
+        self.PDF_FIGSIZE = tuple(kwargs.get("pdf_figsize", (12, 16)))
+        self.PDF_DPI = int(kwargs.get("pdf_dpi", 300))
         if sleep:
             from neuroencoders.resultAnalysis.paper_figures_sleep import (
                 PaperFiguresSleep,
@@ -206,7 +217,8 @@ class PaperFigures:
 
     def _save_fig(self, fig, filename_base, block=False):
         """Helper to save figure in PNG and SVG formats."""
-        fig.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
         plt.show(block=block)
         for ext in [".png", ".svg"]:
             fig.savefig(os.path.join(self.folderFigures, f"{filename_base}{ext}"))
@@ -630,15 +642,19 @@ class PaperFigures:
         else:
             fig = ax.get_figure()
 
-        normalize = kwargs.get("normalize", True)
-        scaling_method = kwargs.get("scaling", "minmax")
-        mask = kwargs.get("mask", None)
+        calc_kwargs = dict(kwargs)
+        cax = calc_kwargs.pop("cax", None)
+        add_colorbar = calc_kwargs.pop("add_colorbar", True)
+        normalize = calc_kwargs.pop("normalize", True)
+        scaling_method = calc_kwargs.pop("scaling", "minmax")
+        mask = calc_kwargs.pop("mask", None)
+        title = calc_kwargs.pop("title", "Linear Tuning Curves")
 
         lin_place_fields, bin_edges = self.trainerBayes.calculate_linear_tuning_curve(
             l_function=l_function,
             behaviorData=fullBehavior,
             use_speed_filter=use_speed_filter,
-            **kwargs,
+            **calc_kwargs,
         )
         if sort_map is None:
             preferred_linear_positions = []
@@ -689,6 +705,7 @@ class PaperFigures:
             fields = ordered_lin_place_fields
             cmap = "viridis"
             norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
+            cb_label = "Firing Rate"
 
         fields = fields[mask] if mask is not None else fields
         im = ax.imshow(fields, cmap, norm, origin="lower")
@@ -698,9 +715,29 @@ class PaperFigures:
         ax.set_xticks(x_ticks)
         ax.set_xticklabels(x_labels)
         ax.set_xlabel("Linear Position")
-        ax.set_ylabel("Neuron Index")
-        ax.set_title(kwargs.get("title", "Linear Tuning Curves"))
-        fig.colorbar(im, ax=ax, label=cb_label)
+        ax.set_ylabel(f"Neuron Index ({len(ordered_lin_place_fields)} neurons)")
+        ax.set_title(title)
+        if add_colorbar:
+            if cax is not None:
+                cbar = fig.colorbar(
+                    im,
+                    cax=cax,
+                    label=cb_label,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                cbar = fig.colorbar(
+                    im,
+                    ax=ax,
+                    label=cb_label,
+                    location="bottom",
+                    orientation="horizontal",
+                )
+
+            cbar.outline.set_visible(False)
+
+        return im, cb_label
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=False):
         idWindow = self.timeWindows.index(timeWindow)
@@ -858,9 +895,19 @@ class PaperFigures:
         block: bool = False,
         save: bool = True,
         extended_zone: bool = True,
+        convex_hull: bool = True,
         **kwargs,
     ):
-        num_sess = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
+        num_sess_post = kwargs.get("num_sess_post", 3)
+        num_sess = sum(
+            [
+                1
+                for _, sess_time in DataHelper.fullBehavior["Times"][
+                    "SessionEpochs"
+                ].items()
+                if sum(sess_time) > 0
+            ]
+        )
 
         # --- Figure Setup ---
         num_cols = num_sess
@@ -890,9 +937,9 @@ class PaperFigures:
         DataHelper.fullBehavior["Times"]["SessionEpochs"] = dict(
             sorted(
                 DataHelper.fullBehavior["Times"]["SessionEpochs"].items(),
-                key=lambda item: sort_map.index(item[0])
-                if item[0] in sort_map
-                else len(sort_map),
+                key=lambda item: (
+                    sort_map.index(item[0]) if item[0] in sort_map else len(sort_map)
+                ),
             )
         )
         after_cond = False
@@ -907,6 +954,10 @@ class PaperFigures:
             if sess_name.lower() == "cond":
                 after_cond = True
             # 1. Data Filtering
+            if sess_name.lower() == "post" or sess_name.lower() == "extinction":
+                sess_time = np.array(sess_time).reshape(-1, 2)
+                sess_time = sess_time[:num_sess_post]
+
             mask = inEpochsMask(
                 DataHelper.fullBehavior["positionTime"], sess_time
             ).flatten()
@@ -940,6 +991,60 @@ class PaperFigures:
                     else 0
                 )
 
+            if convex_hull and stim_mask.sum() > 0:
+                stim_pos_array = DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                # clustering
+                clustering = DBSCAN(eps=0.15, min_samples=1).fit(
+                    DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                )
+                labels = clustering.labels_
+                hulls = []
+                unique_labels = set(labels)
+
+                for label in unique_labels:
+                    cluster_points = stim_pos_array[labels == label]
+                    points_geom = MultiPoint(cluster_points)
+                    buffered_hull = points_geom.buffer(0.04).convex_hull
+                    hulls.append(buffered_hull)
+
+                total_shock_zone = unary_union(hulls)
+                pos_shapely = [Point(xy) for xy in pos]
+                shock_mask_convex_mask = [
+                    total_shock_zone.contains(p) for p in pos_shapely
+                ]
+                shock_convex_count = np.sum(shock_mask_convex_mask)
+                shock_occupancy_convex = (
+                    shock_convex_count / total_time_points
+                    if total_time_points > 0
+                    else 0
+                )
+
+                # as a control/comparison, also calculate occupancy for the convex hull of the safe zone (create symetric hull w small jitter)
+                # take all shock hulls, and simply do a symmetry wrt x coordinates (symmetric = 1 - x) with a small jitter to avoid perfect overlap
+                safe_hulls = []
+                for h in hulls:
+                    x_hull, y_hull = h.exterior.xy
+                    x_hull, y_hull = np.array(x_hull), np.array(y_hull)
+                    x_hull_sym = (
+                        np.ones_like(x_hull)
+                        - x_hull
+                        + np.random.uniform(-0.02, 0.02, size=x_hull.shape)
+                    )
+                    y_hull_sym = y_hull + np.random.uniform(
+                        -0.02, 0.02, size=y_hull.shape
+                    )
+                    safe_hulls.append(Polygon(zip(x_hull_sym, y_hull_sym)).convex_hull)
+                total_safe_zone = unary_union(safe_hulls)
+                safe_mask_convex_mask = [
+                    total_safe_zone.contains(p) for p in pos_shapely
+                ]
+                safe_convex_count = np.sum(safe_mask_convex_mask)
+                safe_occupancy_convex = (
+                    safe_convex_count / total_time_points
+                    if total_time_points > 0
+                    else 0
+                )
+
             # Perform Two-Sample Z-Test for Proportions (Shock count vs Safe count)
             # This is the statistically correct way to compare two proportions based on counts.
             if total_time_points > 0:
@@ -950,6 +1055,14 @@ class PaperFigures:
                 if extended_zone:
                     counts = np.concatenate((counts, [safe_count_extended]))
                     nobs = np.concatenate((nobs, [total_time_points]))
+
+                if convex_hull and stim_mask.sum() > 0:
+                    counts = np.concatenate(
+                        (counts, [shock_convex_count, safe_convex_count])
+                    )
+                    nobs = np.concatenate(
+                        (nobs, [total_time_points, total_time_points])
+                    )
 
                 # Check if there is enough variance to run the test
                 if np.sum(nobs) > 0 and np.all(counts > 0) and not extended_zone:
@@ -976,6 +1089,11 @@ class PaperFigures:
                 session_occupancy_data[-1]["ExtSafe Occupancy"] = (
                     safe_occupancy_extended
                 )
+            if convex_hull and stim_mask.sum() > 0:
+                session_occupancy_data[-1]["CvxShock Occupancy"] = (
+                    shock_occupancy_convex
+                )
+                session_occupancy_data[-1]["CvxSafe Occupancy"] = safe_occupancy_convex
 
             # 3. Map Plotting (First Row)
             map_ax = map_axs[i]
@@ -987,7 +1105,7 @@ class PaperFigures:
             map_ax.plot(
                 pos[:, 0],
                 pos[:, 1],
-                c="xkcd:dark grey",
+                c="xkcd:grey",
                 alpha=0.6,
                 zorder=2,
                 linewidth=0.5,
@@ -1018,9 +1136,31 @@ class PaperFigures:
                     zorder=3,
                 )
 
+                if convex_hull and stim_mask.sum() > 0:
+                    for h in hulls:
+                        x_hull, y_hull = h.exterior.xy
+                        map_ax.plot(x_hull, y_hull, color=SHOCK_COLOR, linewidth=2)
+                        map_ax.fill(
+                            x_hull,
+                            y_hull,
+                            facecolor=SHOCK_COLOR,
+                            alpha=0.2,
+                        )
+                    for h in safe_hulls:
+                        x_hull, y_hull = h.exterior.xy
+                        map_ax.plot(x_hull, y_hull, color=SAFE_COLOR, linewidth=2)
+                        map_ax.fill(
+                            x_hull,
+                            y_hull,
+                            facecolor=SAFE_COLOR,
+                            alpha=0.2,
+                        )
+
             map_ax.set_title(f"{sess_name}")
             if sess_name.lower() == "cond":
                 map_ax.set_title(f"{sess_name} (n_stims = {np.sum(stim_mask)})")
+            if sess_name.lower() == "post" or sess_name.lower() == "extinction":
+                map_ax.set_title(f"{sess_name} (n_sess = {len(sess_time)})")
             map_ax.set_aspect("equal", adjustable="box")
             map_ax.set_xlim(0, 1)
             map_ax.set_ylim(0, 1)
@@ -1044,6 +1184,18 @@ class PaperFigures:
                 * 1.25,
             )
 
+        if convex_hull and stim_mask.sum() > 0:
+            max_occupancy = max(
+                max_occupancy,
+                max([d.get("CvxShock Occupancy", 0) for d in session_occupancy_data])
+                * 1.25,
+            )
+            max_occupancy = max(
+                max_occupancy,
+                max([d.get("CvxSafe Occupancy", 0) for d in session_occupancy_data])
+                * 1.25,
+            )
+
         for i, data in enumerate(session_occupancy_data):
             bar_ax = bar_axs[i]
 
@@ -1057,6 +1209,23 @@ class PaperFigures:
                 zones.append("ExtSafe")
                 occupancy_values.append(data["ExtSafe Occupancy"])
                 colors.append(SAFE_COLOR_PREDICTED)
+
+            if convex_hull and stim_mask.sum() > 0:
+                zones.append("CvxShock")
+                occupancy_values.append(data["CvxShock Occupancy"])
+                colors.append(SHOCK_COLOR_PREDICTED)
+                zones.append("CvxSafe")
+                occupancy_values.append(data["CvxSafe Occupancy"])
+                colors.append(SAFE_COLOR_PREDICTED)
+
+            sorted_list = ["Shock", "CvxShock", "CvxSafe", "Safe", "Extsafe"]
+            order_map = {zone: i for i, zone in enumerate(sorted_list)}
+            combined = zip(zones, occupancy_values, colors)
+            sorted_combined = sorted(
+                combined,
+                key=lambda x: order_map.get(x[0], 999),
+            )
+            zones, occupancy_values, colors = map(list, zip(*sorted_combined))
 
             # Plot the bar chart
             bar_ax.bar(zones, occupancy_values, color=colors)
@@ -1109,10 +1278,16 @@ class PaperFigures:
             fig.suptitle(
                 "Behavioral Analysis Summary: Occupancy Maps and Zone Occupancy per Session",
             )
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            if (
+                fig.get_tight_layout() is None
+            ):  # Only adjust if tight_layout hasn't been called yet
+                fig.tight_layout(rect=[0, 0.03, 1, 0.95])
             plt.show(block=block)
         if save:
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+            if (
+                fig.get_tight_layout() is None
+            ):  # Only adjust if tight_layout hasn't been called yet
+                fig.tight_layout(rect=[0, 0.03, 1, 0.95])
             fig.savefig(
                 os.path.join(self.folderFigures, "summary_behavior.png"),
                 dpi=300,
@@ -1130,6 +1305,7 @@ class PaperFigures:
         show: bool = True,
         block: bool = False,
         save: bool = False,
+        cax=None,
         error_type: str = "lin",
         **kwargs,
     ):
@@ -1150,12 +1326,14 @@ class PaperFigures:
             fig, axs = plt.subplots(
                 1,
                 len(suffix_list),
+                layout="constrained",
             )
             if len(suffix_list) == 1:
                 axs = np.array([[axs]])
         else:
             axs = np.array(axs).flatten()
-            fig = axs[0].get_figure()
+            fig = None
+
         axs = axs.flatten()
 
         for i, suffix in enumerate(suffix_list):
@@ -1191,11 +1369,15 @@ class PaperFigures:
             cmap_name = kwargs.get("cmap", "coolwarm")
             cmap = plt.get_cmap(cmap_name)
 
-            axs[i].imshow(
+            errormat = axs[i].imshow(
                 mean_error_matrix.T,
                 origin="lower",
                 cmap=cmap,
                 extent=[0, 1, 0, 1],
+                norm=mcolors.Normalize(
+                    vmin=0,
+                    vmax=1 if error_type == "lin" else np.sqrt(2),
+                ),
                 # interpolation="nearest",
             )
             axs[i].plot(MAZE_COORDS[:, 0], MAZE_COORDS[:, 1], color="black", lw=2)
@@ -1207,14 +1389,40 @@ class PaperFigures:
             for spine in axs[i].spines.values():
                 spine.set_visible(False)
             axs[i].set_title(f"{suffix.strip('_')}")
+
+        curr_fig = axs[0].get_figure()
+        if cax is not None:
+            cbar = curr_fig.colorbar(
+                errormat,
+                cax=cax,
+                orientation="horizontal",
+            )
+        else:
+            cbar = curr_fig.colorbar(
+                errormat,
+                ax=axs[:],
+                shrink=0.5,
+                location="top",
+                orientation="horizontal",
+                pad=0.1,
+            )
+
+        cbar.outline.set_visible(False)
+
         if show:
             fig.suptitle(
                 f"Error map ({error_type}) for {timeWindow}ms window",
             )
-            plt.tight_layout()
+            if (
+                fig.get_tight_layout() is None
+            ):  # Only adjust if tight_layout hasn't been called yet
+                fig.tight_layout()
             plt.show(block=block)
         if save:
-            plt.tight_layout()
+            if (
+                fig.get_tight_layout() is None
+            ):  # Only adjust if tight_layout hasn't been called yet
+                fig.tight_layout()
             fig.savefig(
                 os.path.join(
                     self.folderFigures,
@@ -1244,8 +1452,6 @@ class PaperFigures:
         Page 2+: Trajectories (1 suffix per page for detailed view)
         """
 
-        paired = kwargs.get("paired", True)
-
         if kwargs.get("mouse_name", None) is not None:
             title_content = f"M{kwargs.get('mouse_name')} - "
         else:
@@ -1257,543 +1463,44 @@ class PaperFigures:
         save_path = os.path.join(self.folderFigures, filename)
         print(f"Generating PDF at: {save_path}")
 
-        # Compute Entropy Threshold from Training Data (20% percentile of lowest entropy)
-        try:
-            train_entropy = self.resultsNN_phase["_training"]["predLoss"][idWindow]
-            if train_entropy is not None:
-                thresh_entropy = np.percentile(
-                    train_entropy, kwargs.get("threshold", 20)
-                )
-            else:
-                thresh_entropy = None
-        except KeyError:
-            thresh_entropy = None
-            print(
-                "Warning: No training entropy found. Certainty plots will be skipped or empty."
-            )
+        # Compute Entropy Threshold from Training Data
+        thresh_entropy = self._get_entropy_threshold(idWindow, kwargs)
+
+        # Define consistent figure geometry across pages for homogeneous PDF output.
+        self.PDF_FIGSIZE = tuple(kwargs.get("pdf_figsize", (12, 16)))
+        self.PDF_DPI = int(kwargs.get("pdf_dpi", 300))
 
         with PdfPages(save_path) as pdf:
             # =========================================================
-            # PAGE 1: Summary Behavior + Error Maps + Stats
+            # PAGE 1: Summary Behavior + Error Maps
             # =========================================================
-            fig1 = plt.figure(figsize=(10, 14), constrained_layout=True)
-            gs = gridspec.GridSpec(12, 3, figure=fig1)
-
-            # --- Top: Summary Behavior (Rows 0-1) ---
-            nrows_beh = 2
-            ncols_beh = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
-            gs_summary = gs[0 : nrows_beh + 1, :].subgridspec(nrows_beh, ncols_beh)
-
-            target_axs = [
-                fig1.add_subplot(gs_summary[i, j])
-                for i in range(nrows_beh)
-                for j in range(ncols_beh)
-            ]
-
-            self.summary_behavior(
-                DataHelper,
-                axs=target_axs,
-                show=False,
-                block=False,
-                save=True,
-                extended_zone=kwargs.get("extended_zone", True),
+            self._plot_summary_page_1(
+                timeWindow, DataHelper, title_content, kwargs, pdf=pdf
             )
 
-            # --- Row 3: Text ---
-            ax_text = fig1.add_subplot(gs[3, :])
-            ax_text.axis("off")  # Hide the axis
-            ax_text.text(
-                0.5,
-                0.5,
-                "Error Maps on movement epochs",
-                horizontalalignment="center",
-                verticalalignment="center",
-                fontsize=16,
-                fontweight="bold",
+            # =========================================================
+            # PAGE 2: Correlations, Histograms & Boxplots
+            # =========================================================
+            self._plot_summary_page_2(
+                timeWindow, idWindow, thresh_entropy, kwargs, pdf=pdf
             )
 
-            # --- Middle: Error Maps (Rows 4-5) ---
-            # Leaving row 3 empty as spacing
-            start_row_map = 4
-            nrows_map = 2
-            ncols_map = len(self.suffixes)
-            gs_error_maps = gs[
-                start_row_map : start_row_map + nrows_map + 1, :
-            ].subgridspec(nrows_map, ncols_map)
-
-            target_axs = [
-                fig1.add_subplot(gs_error_maps[0, j]) for j in range(ncols_map)
-            ]
-
-            self.error_map(
+            # =========================================================
+            # PAGES 2+: Trajectories
+            # =========================================================
+            self._plot_summary_trajectories(
                 timeWindow,
-                suffix_list=self.suffixes,
-                axs=target_axs,
-                show=False,
-                block=False,
-                save=True,
-                error_type=kwargs.get("error_type", "lin"),
+                idWindow,
+                dimOutput,
+                thresh_entropy,
+                kwargs,
+                pdf=pdf,
             )
-
-            fig1.suptitle(
-                f"Summary: {title_content} ({timeWindow}ms)",
-                fontsize=14,
-            )
-            pdf.savefig(fig1, bbox_inches=None)
-            plt.close(fig1)
-
-            fig1_bis = plt.figure(figsize=(10, 14), constrained_layout=True)
-            # --- Bottom (new page): Correlations & Boxplots ---
-            # Calculate how many columns we need per row (e.g., if you have 4 suffixes, it's 2x2)
-            num_suffixes = len(self.suffixes)
-            num_cols = (num_suffixes + 1) // 2  # Ceiling division for columns
-
-            gs_bis = gridspec.GridSpec(4, num_cols, figure=fig1_bis)
-
-            # Row 1-4: Correlation Plots (Entropy vs Error) - now using 2 rows in the subgrid
-            gs_corr = gs_bis[0:2, :].subgridspec(2, num_cols)
-
-            for i, suff in enumerate(self.suffixes):
-                # Determine row (0 or 1) and column for the current suffix
-                row_idx = i // num_cols
-                col_idx = i % num_cols
-                ax = fig1_bis.add_subplot(gs_corr[row_idx, col_idx])
-
-                # Data Validation
-                if (
-                    self.resultsNN_phase[suff]["linPred"][idWindow] is None
-                    or self.resultsNN_phase[suff]["predLoss"][idWindow] is None
-                ):
-                    continue
-
-                # Calculate Linear Error and Entropy
-                lin_err = np.abs(
-                    self.resultsNN_phase[suff]["linPred"][idWindow]
-                    - self.resultsNN_phase[suff]["linTruePos"][idWindow]
-                )
-                entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
-                maxp = self.resultsNN_phase_pkl[suff][idWindow]["maxp"]
-
-                # 1. Plot the density heatmap
-                saut = 40
-                ax.plot(
-                    entropy[::saut],
-                    lin_err[::saut],
-                    "o",
-                    color="blue",
-                    alpha=0.6,
-                    markersize=3,
-                )
-                new_ax = ax.twiny()  # Create a new axis that shares the same y-axis
-                new_ax.plot(
-                    maxp[::saut],
-                    lin_err[::saut],
-                    "o",
-                    color="red",
-                    alpha=0.6,
-                    markersize=3,
-                )
-
-                # 2. Calculate and plot Linear Fit (Red Line)
-                # We use np.polyfit to get slope (m) and intercept (b)
-                # y = mx + b
-                legends = []
-                handles = []
-                for metric, color, ax_to_plot in zip(
-                    [entropy, maxp],
-                    ["blue", "red"],
-                    [ax, new_ax],
-                ):
-                    idx = np.isfinite(metric) & np.isfinite(
-                        lin_err
-                    )  # Ensure no NaNs/Infs
-                    if np.any(idx):
-                        m, b = np.polyfit(metric[idx], lin_err[idx], 1)
-                        x_range = np.array([np.min(metric[idx]), np.max(metric[idx])])
-                        ax_to_plot.plot(
-                            x_range,
-                            m * x_range + b,
-                            color=color,
-                            lw=2,
-                        )
-                        handles.append(plt.Line2D([0], [0], color=color, lw=2))
-                        legends.append(
-                            f"{'Entropy' if color == 'blue' else 'MaxP'} Fit: y={m:.2f}x"
-                        )
-                ax.legend(handles, legends, fontsize=8)
-
-                # add top ax for new ax (visible xticks on line)
-                ax.set_xlabel("Entropy")
-                new_ax.set_xlabel("Max Probability")
-                ax.set_ylabel("Linear Error")
-                ax.set_title(f"Certainty - {suff.strip('_')}")
-
-            # Boxplot: Linear Error across suffixes (All vs High Speed)
-            ax_box = fig1_bis.add_subplot(gs_bis[3:, :])
-            data_box = []
-            labels_box = []
-            colors_box = []
-            colors_map = {
-                "All": "lightblue",
-                "All+Cert": "darkblue",
-                "Fast": "salmon",
-                "Fast+Cert": "darkred",
-            }
-            conditions_box = [
-                ("All", False, None),
-                ("All+Cert", False, thresh_entropy),
-                ("Fast", True, None),
-                ("Fast+Cert", True, thresh_entropy),
-            ]
-
-            for suff in self.suffixes:
-                if self.resultsNN_phase[suff]["linPred"][idWindow] is None:
-                    continue
-                lin_err = np.abs(
-                    self.resultsNN_phase[suff]["linPred"][idWindow]
-                    - self.resultsNN_phase[suff]["linTruePos"][idWindow]
-                )
-                speed_mask = self.resultsNN_phase[suff]["speedMask"][idWindow]
-                entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
-
-                for cond_name, use_speed, thresh in conditions_box:
-                    mask = np.ones(len(lin_err), dtype=bool)
-                    if use_speed:
-                        if speed_mask is not None:
-                            mask = mask & speed_mask
-                        else:
-                            raise ValueError(
-                                f"Speed mask is required for condition '{cond_name}' but not found."
-                            )
-
-                    if thresh is not None:
-                        if entropy is not None:
-                            mask = mask & (entropy <= thresh)
-                        else:
-                            mask = np.zeros(len(lin_err), dtype=bool)
-
-                    if np.any(mask):
-                        data_box.append(lin_err[mask])
-                        labels_box.append(f"{suff}\n{cond_name}")
-                        colors_box.append(colors_map[cond_name])
-            if data_box:
-                # 1. Create custom positions with gaps
-                # We want a gap after every 4 conditions (All, All+Cert, Fast, Fast+Cert)
-                positions = []
-                current_pos = 1
-                for i in range(len(data_box)):
-                    positions.append(current_pos)
-                    if (i + 1) % 4 == 0:
-                        current_pos += 2  # Add a bigger space between suffixes
-                    else:
-                        current_pos += 1
-
-                # 2. Create the Violin Plot at specific positions
-                vp = ax_box.violinplot(
-                    data_box,
-                    positions=positions,
-                    showmeans=False,
-                    showmedians=False,
-                    showextrema=False,
-                    widths=0.7,
-                )
-
-                # 3. Style the Violins
-                for i, body in enumerate(vp["bodies"]):
-                    body.set_facecolor(colors_box[i])
-                    body.set_edgecolor("white")
-                    body.set_alpha(0.3)
-                    body.set_linewidth(1)
-
-                # 4. Custom Median and "Spread"
-                for i, data in enumerate(data_box):
-                    x_pos = positions[i]
-                    med = np.median(data)
-
-                    # Ensure median is valid for log scale (must be > 0)
-                    if med > 0:
-                        # FIX: Use a higher zorder and draw the median AFTER setting log scale
-                        # OR use a transform-aware approach. hlines is usually fine,
-                        # but zorder=10 ensures it sits on top of the violin fill.
-                        ax_box.hlines(
-                            med,
-                            x_pos - 0.3,
-                            x_pos + 0.3,
-                            colors=colors_box[i],
-                            linewidth=4,  # Slightly thinner for log scale clarity
-                            zorder=10,  # Bring to very front
-                        )
-
-                    # Plot the "Spread"
-                    jitter = np.random.normal(0, 0.05, size=len(data))
-                    ax_box.scatter(
-                        x_pos + jitter,
-                        data,
-                        color=colors_box[i],
-                        s=8,
-                        alpha=0.3,
-                        zorder=5,
-                        edgecolors="none",
-                    )
-
-                # 5. Paired Lines (Adjusted for new positions)
-                if paired and len(data_box) > 1:
-                    for i in range(len(data_box) - 1):
-                        # Only draw lines within the same group (don't cross the gap)
-                        if (i + 1) % 4 != 0:
-                            if len(data_box[i]) == len(data_box[i + 1]):
-                                for j in range(len(data_box[i])):
-                                    ax_box.plot(
-                                        [positions[i] + 0.1, positions[i + 1] - 0.1],
-                                        [data_box[i][j], data_box[i + 1][j]],
-                                        color="gray",
-                                        alpha=0.1,
-                                        linewidth=0.5,
-                                        zorder=1,
-                                    )
-
-                # Formatting
-                ax_box.set_yscale("log")  # Set this before setting ticks
-                ax_box.set_ylabel("Linear Error (log scale)", fontsize=12)
-                ax_box.set_xticks(positions)
-                ax_box.set_xticklabels(
-                    labels_box, rotation=45, ha="right", fontsize="small"
-                )
-
-                for i in range(0, len(positions), 4):
-                    # Get the start of this group and the end of this group
-                    group_start = positions[i] - 0.5
-                    group_end = positions[min(i + 3, len(positions) - 1)] + 0.5
-
-                    if (i // 4) % 2 == 0:
-                        ax_box.axvspan(
-                            group_start, group_end, color="gray", alpha=0.05, zorder=0
-                        )
-
-                    if i > 0:
-                        ax_box.axvline(
-                            x=group_start - 0.5,
-                            color="black",
-                            linestyle=":",
-                            alpha=0.2,
-                            zorder=1,
-                        )
-                ax_box.set_xlim(positions[0] - 1, positions[-1] + 1)
-
-            pdf.savefig(fig1_bis, bbox_inches=None)
-            plt.close(fig1_bis)
-
-            # =========================================================
-            # PAGES 2+: Trajectories (1 Suffix per Page for 4 conditions)
-            # =========================================================
-            with_hist_distribution = kwargs.get("with_hist_distribution", True)
-
-            for suffix in self.suffixes:
-                # We need 4 conditions * dimOutput rows.
-                # Conditions: All, All+Cert, Fast, Fast+Cert.
-                all_conditions = [
-                    ("All Preds", False, None),
-                    ("All + Certainty", False, thresh_entropy),
-                    ("Speed Thresholded", True, None),
-                    ("Speed + Certainty", True, thresh_entropy),
-                ]
-
-                # Base Data for this suffix
-                posIndex = self.resultsNN_phase[suffix]["posIndex"][idWindow]
-                timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
-                speedMask = self.resultsNN_phase[suffix]["speedMask"][idWindow]
-                entropy = self.resultsNN_phase[suffix]["predLoss"][idWindow]
-
-                if dimOutput == 1:
-                    pos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
-                    inferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
-                    training_data = self.resultsNN_phase["_training"]["linTruePos"][
-                        idWindow
-                    ]
-                elif dimOutput == 2:
-                    pos = self.resultsNN_phase[suffix]["truePos"][idWindow][:, :2]
-                    inferring = self.resultsNN_phase[suffix]["fullPred"][idWindow][
-                        :, :2
-                    ]
-                    training_data = self.resultsNN_phase["_training"]["truePos"][
-                        idWindow
-                    ][:, :2]
-                else:
-                    raise ValueError("dimOutput must be 1 or 2.")
-
-                # Split conditions into pages (e.g., 2 conditions per page)
-                conditions_per_page = 2
-                chunked_conditions = [
-                    all_conditions[i : i + conditions_per_page]
-                    for i in range(0, len(all_conditions), conditions_per_page)
-                ]
-
-                for page_idx, conditions_chunk in enumerate(chunked_conditions):
-                    fig_page = plt.figure(figsize=(14, 10))
-
-                    nrows_per_cond = dimOutput
-                    total_rows = len(conditions_chunk) * nrows_per_cond
-                    gs_page = gridspec.GridSpec(
-                        total_rows, 1, figure=fig_page, hspace=0.4
-                    )
-                    current_row = 0
-
-                    for cond_name, use_speed, thresh in conditions_chunk:
-                        # Determine Selection Mask
-                        selection = np.ones(len(pos), dtype=bool)
-                        if use_speed and speedMask is not None:
-                            selection = selection & speedMask
-
-                        if thresh is not None and entropy is not None:
-                            selection = selection & (entropy <= thresh)
-
-                        # Create Axes
-                        ncols = 6 if with_hist_distribution else 5
-                        gs_cond = gs_page[
-                            current_row : current_row + dimOutput, 0
-                        ].subgridspec(dimOutput, ncols)
-
-                        axs_list = []
-                        first_ax_ref = None
-
-                        for r in range(dimOutput):
-                            if r == 0:
-                                ax_main = fig_page.add_subplot(gs_cond[r, 0:4])
-                                first_ax_ref = ax_main
-                            else:
-                                ax_main = fig_page.add_subplot(
-                                    gs_cond[r, 0:4], sharex=first_ax_ref
-                                )
-                            axs_list.append(ax_main)
-
-                            if with_hist_distribution:
-                                ax_dist = fig_page.add_subplot(
-                                    gs_cond[r, 4], sharey=ax_main
-                                )
-                                ax_dist.tick_params(
-                                    axis="y", left=False, labelleft=False
-                                )
-                                axs_list.append(ax_dist)
-
-                        # Call overview_fig with explicit selection
-                        overview_fig(
-                            pos=pos,
-                            inferring=inferring,
-                            selection=selection,
-                            posIndex=posIndex,
-                            timeStepsPred=timeStepsPred,
-                            speedMask=None,  # Handled in selection
-                            useSpeedMask=False,  # Handled in selection
-                            concat_epochs=True,
-                            dimOutput=dimOutput,
-                            show=False,
-                            save=False,
-                            close=False,
-                            training_data=training_data,
-                            join_points=False,
-                            axs=np.array(axs_list),
-                            fig=fig_page,
-                            show_legend=current_row == total_rows - dimOutput,
-                        )
-
-                        axs_list[0].set_title(
-                            f"Phase: {suffix.strip('_')} - {cond_name}"
-                        )
-
-                        # Compute stats
-                        if dimOutput == 2:
-                            error = np.linalg.norm(inferring - pos, axis=1)
-                        else:
-                            error = np.abs(inferring - pos)
-
-                        # Masked Error
-                        masked_error = error[selection]
-
-                        mean_error = np.nan
-                        median_error = np.nan
-                        if len(masked_error) > 0:
-                            mean_error = np.mean(masked_error)
-                            median_error = np.median(masked_error)
-
-                        freeze = inEpochsMask(
-                            self.behaviorData["positionTime"][
-                                self.resultsNN_phase[suffix]["posIndex"][idWindow]
-                            ],
-                            self.behaviorData["Times"]["FreezeEpoch"],
-                        )
-
-                        text = (
-                            f"Mean Error: {mean_error:.3f}\n"
-                            f"Median Error: {median_error:.3f}\n"
-                            f"Samples: {len(masked_error)}"
-                        )
-                        axs_list[0].text(
-                            0.75,
-                            -0.1,
-                            text,
-                            horizontalalignment="right",
-                            verticalalignment="top",
-                            transform=axs_list[0].transAxes,
-                            fontsize="small",
-                        )
-
-                        # Plot Error Matrix in the last available column
-                        last_col_ax = fig_page.add_subplot(gs_cond[:, -1])
-                        last_col_ax.axis("off")
-
-                        # Need linpos for error matrix
-                        linpos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
-                        linpred = self.resultsNN_phase[suffix]["linPred"][idWindow]
-
-                        if len(selection) > 0 and np.sum(selection) > 0:
-                            self._plot_single_error_matrix(
-                                linpos[selection],
-                                linpred[selection],
-                                last_col_ax,
-                            )
-
-                        current_row += dimOutput
-
-                    plt.tight_layout()
-                    pdf.savefig(fig_page)
-                    plt.close(fig_page)
 
             # =========================================================
             # PAGES after+: Link with bayesian decoder and spike sorting
             # =========================================================
-            bayesian_page = plt.figure(figsize=(14, 10), constrained_layout=True)
-            gs_bayes = gridspec.GridSpec(2, 3, figure=bayesian_page)
-            bayesian_axs = [
-                bayesian_page.add_subplot(gs_bayes[i, j])
-                for i in range(2)
-                for j in range(3)
-            ]
-
-            # Prepare bayesian predicated matrices
-            try:
-                self._create_decoding_bayes_matrices(
-                    winMS=timeWindow, suffix="_training"
-                )
-            except Exception as e:
-                print(f"Could not create decoding bayes matrices: {e}")
-
-            try:
-                self.bayesian_neurons_summary(
-                    fig=bayesian_page,
-                    axs=bayesian_axs,
-                    show=False,
-                    block=False,
-                    save=True,
-                    winMS=timeWindow,
-                )
-            except Exception as e:
-                print(f"Could not generate bayesian summary page: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-            pdf.savefig(bayesian_page, bbox_inches=None)
-            plt.close(bayesian_page)
+            self._plot_summary_bayesian(timeWindow, pdf=pdf)
 
         print("PDF generation complete.")
 
@@ -1803,13 +1510,937 @@ class PaperFigures:
         if open:
             try:
                 if platform.system() == "Darwin":
-                    subprocess.call(("open", save_path))
+                    subprocess.call(["open", save_path])
                 elif platform.system() == "Windows":
                     os.startfile(save_path)
                 else:
-                    subprocess.call(("xdg-open", save_path))
+                    subprocess.call(["xdg-open", save_path])
             except Exception as e:
-                print(f"Could not open PDF automatically: {e}")
+                print(f"Could not open PDF: {e}")
+
+    def _get_entropy_threshold(self, idWindow, kwargs):
+        try:
+            train_entropy = self.resultsNN_phase["_training"]["predLoss"][idWindow]
+            if train_entropy is not None:
+                return np.percentile(train_entropy, kwargs.get("threshold", 20))
+        except KeyError:
+            print(
+                "Warning: No training entropy found. Certainty plots will be skipped or empty."
+            )
+        return None
+
+    def _plot_summary_page_1(
+        self, timeWindow, DataHelper, title_content, kwargs, pdf=None
+    ):
+        fig1 = plt.figure(figsize=self.PDF_FIGSIZE, constrained_layout=False)
+        fig1.set_size_inches(*self.PDF_FIGSIZE, forward=True)
+        fig1.set_rasterized(True)
+
+        gs = gridspec.GridSpec(7, 3, figure=fig1)
+
+        # --- Top: Summary Behavior (Rows 0-1) ---
+        nrows_beh = 2
+        ncols_beh = len(DataHelper.fullBehavior["Times"]["SessionEpochs"])
+        gs_summary = gs[0 : nrows_beh + 1, :].subgridspec(nrows_beh, ncols_beh)
+
+        target_axs = [
+            fig1.add_subplot(gs_summary[i, j])
+            for i in range(nrows_beh)
+            for j in range(ncols_beh)
+        ]
+
+        self.summary_behavior(
+            DataHelper,
+            axs=target_axs,
+            show=False,
+            block=False,
+            save=False,
+            extended_zone=kwargs.get("extended_zone", True),
+            convex_hull=kwargs.get("convex_hull", True),
+        )
+
+        # --- Row 3: Text ---
+        ax_text = fig1.add_subplot(gs[3, :])
+        ax_text.axis("off")
+        ax_text.text(
+            0.5,
+            0.5,
+            "Error Maps on movement epochs",
+            horizontalalignment="center",
+            verticalalignment="center",
+            fontsize=16,
+            fontweight="bold",
+        )
+
+        # --- Middle: Error Maps (Rows 4-5) ---
+        start_row_map = 4
+        nrows_map = 2
+        ncols_map = len(self.suffixes)
+        gs_error_maps = gs[start_row_map : start_row_map + nrows_map, :].subgridspec(
+            nrows_map, ncols_map, height_ratios=[0.1, 0.9]
+        )
+        cax = fig1.add_subplot(
+            gs_error_maps[0, ncols_map // 2 - 1 : ncols_map // 2 + 1]
+        )
+
+        gs_inner_maps = gs_error_maps[1:, :].subgridspec(1, ncols_map)
+        target_axs = [fig1.add_subplot(gs_inner_maps[:, j]) for j in range(ncols_map)]
+
+        self.error_map(
+            timeWindow,
+            suffix_list=self.suffixes,
+            axs=target_axs,
+            cax=cax,
+            show=False,
+            block=False,
+            save=False,
+            error_type=kwargs.get("error_type", "lin"),
+        )
+
+        fig1.suptitle(
+            f"Summary: {title_content} ({timeWindow}ms)",
+            fontsize=14,
+        )
+        fig1.subplots_adjust(
+            left=0.05,
+            right=0.98,
+            bottom=0.04,
+            top=0.94,
+            wspace=0.22,
+            hspace=0.55,
+        )
+        if pdf is not None:
+            pdf.savefig(fig1, dpi=self.PDF_DPI, bbox_inches=None)
+        else:
+            plt.show()
+        plt.close(fig1)
+
+    def _plot_summary_page_2(
+        self, timeWindow, idWindow, thresh_entropy, kwargs, pdf=None
+    ):
+        fig1_bis = plt.figure(figsize=self.PDF_FIGSIZE, constrained_layout=False)
+        fig1_bis.set_size_inches(*self.PDF_FIGSIZE, forward=True)
+        fig1_bis.set_rasterized(True)
+
+        paired = kwargs.get("paired", False)
+        num_suffixes = len(self.suffixes)
+        num_rows = (num_suffixes + 1) // 4
+        if num_rows == 0:
+            num_rows = 1
+
+        n_total_rows = 3 + num_rows
+        unif_height_ratio = 1 / n_total_rows
+        gs_bis = gridspec.GridSpec(
+            n_total_rows,
+            4,
+            figure=fig1_bis,
+            height_ratios=[unif_height_ratio / num_rows] * num_rows
+            + [unif_height_ratio * 2]
+            + [unif_height_ratio] * 2,
+            # oversampling or correlation plot,
+            # histograms
+            # barplot + violinplot
+        )
+
+        # --- Row 0: Oversampling summary from training positions ---
+        succeeded = self._plot_oversampling_summary(
+            timeWindow, idWindow, fig1_bis, gs_bis, num_rows
+        )
+        if not succeeded:
+            # --- Row 0-n: Correlation Plots ---
+            gs_corr = gs_bis[0:num_rows, :].subgridspec(num_rows, 4)
+            for i, suff in enumerate(self.suffixes):
+                row_idx = i % num_rows
+                col_idx = i // num_rows
+                ax = fig1_bis.add_subplot(gs_corr[row_idx, col_idx])
+                self._plot_correlation_scatter(
+                    suff, idWindow, ax=ax, show_legend=(i == 0)
+                )
+
+        # --- Prepare Data for Bar/Violin Plots ---
+        data_box, labels_box, colors_box, phase_box, cond_box = (
+            self._prepare_boxplot_data(idWindow, thresh_entropy)
+        )
+
+        # --- Row 4: Training Histograms ---
+        self._plot_prediction_histograms(
+            timeWindow, idWindow, fig1_bis, gs_bis, num_rows
+        )
+
+        # --- Row 5+: Barplot & Violinplot ---
+        gs_barplot = gs_bis[1 + num_rows : 3 + num_rows, :].subgridspec(2, 1)
+
+        # Barplot
+        ax_mean_barplot = fig1_bis.add_subplot(gs_barplot[0, 0])
+        if data_box:
+            df_box = pd.DataFrame(
+                {
+                    "Linear Error": np.concatenate(data_box),
+                    "Phase": np.concatenate(
+                        [[suff] * len(data) for suff, data in zip(phase_box, data_box)]
+                    ),
+                    "Speeds/Certainty": np.concatenate(
+                        [[cond] * len(data) for cond, data in zip(cond_box, data_box)]
+                    ),
+                    "Color": np.concatenate(
+                        [
+                            [color] * len(data)
+                            for color, data in zip(colors_box, data_box)
+                        ]
+                    ),
+                }
+            )
+            sns.barplot(
+                data=df_box,
+                errorbar="se",
+                x="Phase",
+                y="Linear Error",
+                hue="Speeds/Certainty",
+                palette=df_box.drop_duplicates("Speeds/Certainty")
+                .set_index("Speeds/Certainty")["Color"]
+                .to_dict(),
+                alpha=0.7,
+                ax=ax_mean_barplot,
+            )
+            ax_mean_barplot.set_ylabel("Mean Linear Error")
+            ax_mean_barplot.set_xlabel("")
+            ax_mean_barplot.set_title("Mean Linear Error across Phases")
+            # Move legend to upper right outside the plot
+            ax_mean_barplot.legend(
+                title="Condition",
+                bbox_to_anchor=(1.05, 1),
+                loc="upper left",
+                borderaxespad=0.0,
+            )
+
+        # Violinplot
+        ax_box = fig1_bis.add_subplot(gs_barplot[1, 0])
+        if data_box:
+            self._plot_violin(
+                data_box, labels_box, colors_box, ax=ax_box, paired=paired
+            )
+
+        fig1_bis.subplots_adjust(
+            left=0.05,
+            right=0.98,
+            bottom=0.04,
+            top=0.95,
+            wspace=0.32,
+            hspace=0.8,
+        )
+        if pdf is not None:
+            pdf.savefig(fig1_bis, dpi=self.PDF_DPI, bbox_inches=None)
+        else:
+            plt.show()
+        plt.close(fig1_bis)
+
+    def _plot_correlation_scatter(self, suff, idWindow, ax=None, show_legend=False):
+        if (
+            self.resultsNN_phase[suff]["linPred"][idWindow] is None
+            or self.resultsNN_phase[suff]["predLoss"][idWindow] is None
+        ):
+            return
+
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.get_figure()
+        lin_err = np.abs(
+            self.resultsNN_phase[suff]["linPred"][idWindow]
+            - self.resultsNN_phase[suff]["linTruePos"][idWindow]
+        )
+        entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
+        maxp = self.resultsNN_phase_pkl[suff][idWindow]["maxp"]
+
+        saut = 40
+        ax.plot(
+            entropy[::saut],
+            lin_err[::saut],
+            "o",
+            color="blue",
+            alpha=0.6,
+            markersize=3,
+        )
+        new_ax = ax.twiny()
+        new_ax.plot(
+            maxp[::saut],
+            lin_err[::saut],
+            "o",
+            color="red",
+            alpha=0.6,
+            markersize=3,
+        )
+
+        legends, handles = [], []
+        for metric, color, ax_to_plot in zip(
+            [entropy, maxp], ["blue", "red"], [ax, new_ax]
+        ):
+            idx = np.isfinite(metric) & np.isfinite(lin_err)
+            if np.any(idx):
+                m, b = np.polyfit(metric[idx], lin_err[idx], 1)
+                x_range = np.array([np.min(metric[idx]), np.max(metric[idx])])
+                ax_to_plot.plot(x_range, m * x_range + b, color=color, lw=2)
+                handles.append(Line2D([0], [0], color=color, lw=2))
+                legends.append(
+                    f"{'Entropy' if color == 'blue' else 'MaxP'} Fit: y={m:.2f}x"
+                )
+        if show_legend and handles:
+            ax.legend(handles, legends, fontsize=8, loc="lower right")
+
+        ax.set_xlabel("Entropy")
+        new_ax.set_xlabel("Max Probability")
+        ax.set_ylabel("Linear Error")
+        ax.set_title(f"Certainty - {suff.strip('_')}")
+
+        return fig
+
+    def _prepare_boxplot_data(self, idWindow, thresh_entropy):
+        data_box, labels_box, colors_box = [], [], []
+        phase_box, cond_box = [], []
+
+        colors_map = {
+            "All": "lightblue",
+            "All+Cert": "darkblue",
+            "Fast": "salmon",
+            "Fast+Cert": "darkred",
+        }
+        conditions_box = [
+            ("All", False, None),
+            ("All+Cert", False, thresh_entropy),
+            ("Fast", True, None),
+            ("Fast+Cert", True, thresh_entropy),
+        ]
+
+        for suff in self.suffixes:
+            if self.resultsNN_phase[suff]["linPred"][idWindow] is None:
+                continue
+            lin_err = np.abs(
+                self.resultsNN_phase[suff]["linPred"][idWindow]
+                - self.resultsNN_phase[suff]["linTruePos"][idWindow]
+            )
+            speed_mask = self.resultsNN_phase[suff]["speedMask"][idWindow]
+            entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
+
+            for cond_name, use_speed, thresh in conditions_box:
+                mask = np.ones(len(lin_err), dtype=bool)
+                if use_speed and speed_mask is not None:
+                    mask = mask & speed_mask
+                elif use_speed:
+                    raise ValueError(f"Speed mask missing for '{cond_name}'")
+
+                if thresh is not None:
+                    if entropy is not None:
+                        mask = mask & (entropy <= thresh)
+                    else:
+                        mask = np.zeros(len(lin_err), dtype=bool)
+
+                if np.any(mask):
+                    data_box.append(lin_err[mask])
+                    labels_box.append(f"{suff}\n{cond_name}")
+                    colors_box.append(colors_map[cond_name])
+                    phase_box.append(suff.strip("_"))
+                    cond_box.append(cond_name)
+
+        return data_box, labels_box, colors_box, phase_box, cond_box
+
+    def _plot_oversampling_summary(
+        self, timeWindow, idWindow, fig=None, gs=None, num_row=None, bins=40
+    ):
+        """Plot before/after oversampling occupancy and linearized distributions."""
+        if fig is None or gs is None or num_row is None:
+            fig = plt.figure(figsize=self.PDF_FIGSIZE, constrained_layout=False)
+            fig.set_size_inches(*self.PDF_FIGSIZE, forward=True)
+            gs = gridspec.GridSpec(1, 4, figure=fig)
+            num_rows = 1
+        else:
+            num_rows = num_row
+
+        gs_oversampling = gs[0:num_rows, :].subgridspec(1, 4)
+        ax_before = fig.add_subplot(gs_oversampling[0, 0])
+        ax_after = fig.add_subplot(gs_oversampling[0, 1])
+        ax_diff = fig.add_subplot(gs_oversampling[0, 2])
+        ax_hist = fig.add_subplot(gs_oversampling[0, 3])
+        succeeded = True
+
+        try:
+            pos_before = self.resultsNN_phase["_training"]["truePos"][idWindow][:, :2]
+            speed_mask = self.resultsNN_phase["_training"]["speedMask"][
+                idWindow
+            ].astype(bool)
+            pos_before = pos_before[speed_mask]
+        except Exception:
+            pos_before = None
+            succeeded = False
+
+        pos_after_path = os.path.join(
+            self.projectPath.folderResult,
+            str(timeWindow),
+            "pos_after.npy",
+        )
+        pos_after = (
+            np.load(pos_after_path)[:, :2] if os.path.exists(pos_after_path) else None
+        )
+
+        def _hist2d_density(positions):
+            if positions is None or len(positions) == 0:
+                return None
+            hist, xedges, yedges = np.histogram2d(
+                positions[:, 0],
+                positions[:, 1],
+                bins=bins,
+                range=[[0, 1], [0, 1]],
+            )
+            return hist.T, [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+
+        before_pack = _hist2d_density(pos_before)
+        after_pack = _hist2d_density(pos_after)
+
+        if before_pack is None:
+            succeeded = False
+            for ax in [ax_before, ax_after, ax_diff, ax_hist]:
+                ax.axis("off")
+            ax_before.text(
+                0.5,
+                0.5,
+                "No training data available",
+                ha="center",
+                va="center",
+                transform=ax_before.transAxes,
+            )
+            return
+
+        before_hist, extent = before_pack
+        before_density = (
+            before_hist / np.sum(before_hist)
+            if np.sum(before_hist) > 0
+            else before_hist
+        )
+        im0 = ax_before.imshow(
+            before_density,
+            origin="lower",
+            extent=extent,
+            cmap="Blues",
+            interpolation="none",
+        )
+        fig.colorbar(im0, ax=ax_before, fraction=0.046, pad=0.04)
+        ax_before.set_aspect("equal", adjustable="box")
+        ax_before.set_xticks([])
+        ax_before.set_yticks([])
+        for spine in ax_before.spines.values():
+            spine.set_visible(False)
+        ax_before.set_title("Training occupancy")
+        ax_before.set_xlabel("X")
+        ax_before.set_ylabel("Y")
+
+        if after_pack is not None:
+            after_hist, _ = after_pack
+            after_density = (
+                after_hist / np.sum(after_hist)
+                if np.sum(after_hist) > 0
+                else after_hist
+            )
+
+            im1 = ax_after.imshow(
+                after_density,
+                origin="lower",
+                extent=extent,
+                cmap="Blues",
+                interpolation="none",
+            )
+            fig.colorbar(im1, ax=ax_after, fraction=0.046, pad=0.04)
+            ax_after.set_title("Oversampled occupancy")
+            ax_after.set_xlabel("X")
+            ax_after.set_ylabel("Y")
+            ax_after.set_aspect("equal", adjustable="box")
+            ax_after.set_xticks([])
+            ax_after.set_yticks([])
+            for spine in ax_after.spines.values():
+                spine.set_visible(False)
+
+            diff = after_density - before_density
+            vmax = np.nanmax(np.abs(diff)) if np.any(np.isfinite(diff)) else 1.0
+            vmax = vmax if vmax > 0 else 1.0
+            im2 = ax_diff.imshow(
+                diff,
+                origin="lower",
+                extent=extent,
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+                interpolation="none",
+            )
+            fig.colorbar(im2, ax=ax_diff, fraction=0.046, pad=0.04)
+            ax_diff.set_title("Density diff (after-before)")
+            ax_diff.set_xlabel("X")
+            ax_diff.set_ylabel("Y")
+            ax_diff.set_aspect("equal", adjustable="box")
+            ax_diff.set_xticks([])
+            ax_diff.set_yticks([])
+            for spine in ax_diff.spines.values():
+                spine.set_visible(False)
+        else:
+            succeeded = False
+            ax_after.axis("off")
+            ax_after.text(
+                0.5,
+                0.5,
+                "No pos_after.npy",
+                ha="center",
+                va="center",
+                transform=ax_after.transAxes,
+            )
+            ax_diff.axis("off")
+
+        lin_before = self.l_function(pos_before)[1].flatten()
+        ax_hist.hist(
+            lin_before,
+            bins=30,
+            density=True,
+            alpha=0.55,
+            color="gray",
+            label="Training",
+        )
+        if pos_after is not None:
+            lin_after = self.l_function(pos_after)[1].flatten()
+            ax_hist.hist(
+                lin_after,
+                bins=30,
+                density=True,
+                alpha=0.55,
+                color="tab:orange",
+                label="Oversampled",
+            )
+        else:
+            succeeded = False
+        ax_hist.set_title("Linearized distribution")
+        ax_hist.set_xlabel("Linear Position")
+        # show one xticks every 0.25 of the linearized space
+        ax_hist.set_xticks(np.arange(0, 1.01, 0.25))
+        ax_hist.set_xlim(0, 1)
+        ax_hist.set_ylabel("Density")
+        ax_hist.legend(fontsize=8, loc="upper right")
+
+        return succeeded
+
+    def _plot_prediction_histograms(
+        self, timeWindow, idWindow, fig=None, gs=None, row=None
+    ):
+        if fig is None or gs is None or row is None:
+            fig = plt.figure(figsize=self.PDF_FIGSIZE, constrained_layout=False)
+            fig.set_size_inches(*self.PDF_FIGSIZE, forward=True)
+            gs = gridspec.GridSpec(3, 4, figure=fig)
+            row = 0
+
+        gs_histogram = gs[row : row + 1, :].subgridspec(1, len(self.suffixes))
+        oversampled = os.path.exists(
+            os.path.join(
+                self.projectPath.folderResult,
+                str(timeWindow),
+                "oversampling_effect.png",
+            )
+        )
+
+        for i, suff in enumerate(self.suffixes):
+            ax_hist = fig.add_subplot(gs_histogram[0, i])
+            pos_after_path = os.path.join(
+                self.projectPath.folderResult,
+                str(timeWindow),
+                "pos_after.npy",
+            )
+            pos_after = False
+            if not os.path.exists(pos_after_path):
+                warnings.warn(
+                    "Expected oversampling data not found. Showing vanilla training set."
+                )
+                training_pos = self.resultsNN_phase["_training"]["featureTrue"][
+                    idWindow
+                ][:, :2]
+            else:
+                pos_after = True
+                training_pos = np.load(pos_after_path)[:, :2]
+
+            lin_training = self.l_function(training_pos)[1]
+            lin_suff_true = self.resultsNN_phase[suff]["linTruePos"][idWindow]
+            lin_suff_pred = self.resultsNN_phase[suff]["linPred"][idWindow]
+
+            ax_hist.hist(
+                lin_training,
+                bins=30,
+                alpha=0.5,
+                label=(
+                    f"Training {'Oversampled' if oversampled and pos_after else 'Original'}"
+                ),
+                color="xkcd:pale purple",
+                density=True,
+            )
+            ax_hist.hist(
+                lin_suff_true,
+                bins=30,
+                alpha=0.5,
+                label=f"{suff} True",
+                color="xkcd:dark pink",
+                density=True,
+            )
+            ax_hist.hist(
+                lin_suff_pred,
+                bins=30,
+                alpha=0.5,
+                label=f"{suff} Pred",
+                color="tab:blue",
+                density=True,
+            )
+            ax_hist.set_title(f"Distrib - {suff.strip('_')}")
+            ax_hist.set_xlabel("Linear Position")
+
+        handles = [
+            Line2D([0], [0], color="xkcd:pale purple", lw=4, alpha=0.5),
+            Line2D([0], [0], color="xkcd:dark pink", lw=4, alpha=0.5),
+            Line2D([0], [0], color="tab:blue", lw=4, alpha=0.5),
+        ]
+        training_label = f"Training {'(Oversampled)' if oversampled else '(Original)'}"
+        labels = [
+            training_label,
+            "True Position",
+            "Predicted Position",
+        ]
+        if len(self.suffixes) > 0:
+            legend_ax = fig.axes[-1]
+            legend_ax.legend(
+                handles,
+                labels,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                frameon=True,
+                fontsize=8,
+            )
+
+    def _plot_violin(self, data_box, labels_box, colors_box, ax=None, paired=True):
+        if ax is None:
+            fig, ax = plt.subplots()
+        positions = []
+        current_pos = 1
+        for i in range(len(data_box)):
+            positions.append(current_pos)
+            if (i + 1) % 4 == 0:
+                current_pos += 2
+            else:
+                current_pos += 1
+
+        vp = ax.violinplot(
+            data_box,
+            positions=positions,
+            showmeans=False,
+            showmedians=False,
+            showextrema=False,
+            widths=0.7,
+        )
+
+        for i, body in enumerate(vp["bodies"]):
+            body.set_facecolor(colors_box[i])
+            body.set_edgecolor("white")
+            body.set_alpha(0.3)
+            body.set_linewidth(1)
+
+        for i, data in enumerate(data_box):
+            x_pos = positions[i]
+            med = np.median(data)
+            if med > 0:
+                ax.hlines(
+                    med,
+                    x_pos - 0.3,
+                    x_pos + 0.3,
+                    colors=colors_box[i],
+                    linewidth=10,
+                    zorder=10,
+                )
+            # Scatter points
+            jitter = np.random.normal(0, 0.05, size=len(data))
+            ax.scatter(
+                x_pos + jitter,
+                data,
+                color=colors_box[i],
+                s=2,
+                alpha=0.05,
+                zorder=5,
+                edgecolors="none",
+            )
+
+        if paired and len(data_box) > 1:
+            for i in range(len(data_box) - 1):
+                if (i + 1) % 4 != 0 and len(data_box[i]) == len(data_box[i + 1]):
+                    for j in range(len(data_box[i])):
+                        ax.plot(
+                            [positions[i] + 0.1, positions[i + 1] - 0.1],
+                            [data_box[i][j], data_box[i + 1][j]],
+                            color="gray",
+                            alpha=0.1,
+                            linewidth=0.5,
+                            zorder=1,
+                        )
+
+        ax.set_yscale("log")
+        # Use ScalarFormatter for non-scientific notation ticks
+        # First only show a few ticks, then format them with FuncFormatter
+        ax.yaxis.set_major_locator(ticker.LogLocator(base=10.0, numticks=5))
+        ax.yaxis.set_minor_locator(
+            ticker.LogLocator(base=10.0, subs="auto", numticks=10)
+        )
+        ax.yaxis.set_major_formatter(
+            ticker.FuncFormatter(lambda y, _: "{:g}".format(y))
+        )
+        # hide the minor tick labels but keep the ticks
+        ax.yaxis.set_minor_formatter(ticker.FuncFormatter(lambda y, _: ""))
+
+        ax.set_ylabel("Linear Error (log scale)", fontsize=12)
+        ax.set_xticks(positions)
+        ax.set_xticklabels("")
+
+        for i in range(0, len(positions), 4):
+            group_start = positions[i] - 0.5
+            group_end = positions[min(i + 3, len(positions) - 1)] + 0.5
+            if (i // 4) % 2 == 0:
+                ax.axvspan(group_start, group_end, color="gray", alpha=0.05, zorder=0)
+            if i > 0:
+                ax.axvline(
+                    x=group_start - 0.5,
+                    color="black",
+                    linestyle=":",
+                    alpha=0.2,
+                    zorder=1,
+                )
+        ax.set_xlim(positions[0] - 1, positions[-1] + 1)
+
+    def _plot_summary_trajectories(
+        self, timeWindow, idWindow, dimOutput, thresh_entropy, kwargs, pdf=None
+    ):
+        with_hist_distribution = kwargs.get("with_hist_distribution", True)
+        all_conditions = [
+            ("All Preds", False, None),
+            ("All + Certainty", False, thresh_entropy),
+            ("Speed Thresholded", True, None),
+            ("Speed + Certainty", True, thresh_entropy),
+        ]
+
+        for suffix in self.suffixes:
+            posIndex = self.resultsNN_phase[suffix]["posIndex"][idWindow]
+            # Use real timestamps if available to show time in seconds
+            if hasattr(self, "behaviorData") and "positionTime" in self.behaviorData:
+                try:
+                    timeStepsPred = self.behaviorData["positionTime"][posIndex]
+                except Exception:
+                    timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
+            else:
+                timeStepsPred = self.resultsNN_phase[suffix]["time"][idWindow]
+            speedMask = self.resultsNN_phase[suffix]["speedMask"][idWindow]
+            entropy = self.resultsNN_phase[suffix]["predLoss"][idWindow]
+
+            if dimOutput == 1:
+                pos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                inferring = self.resultsNN_phase[suffix]["linPred"][idWindow]
+                training_data = self.resultsNN_phase["_training"]["linTruePos"][
+                    idWindow
+                ]
+            elif dimOutput == 2:
+                pos = self.resultsNN_phase[suffix]["truePos"][idWindow][:, :2]
+                inferring = self.resultsNN_phase[suffix]["fullPred"][idWindow][:, :2]
+                training_data = self.resultsNN_phase["_training"]["truePos"][idWindow][
+                    :, :2
+                ]
+            else:
+                raise ValueError("dimOutput must be 1 or 2.")
+
+            conditions_per_page = 2
+            chunked_conditions = [
+                all_conditions[i : i + conditions_per_page]
+                for i in range(0, len(all_conditions), conditions_per_page)
+            ]
+
+            for page_idx, conditions_chunk in enumerate(chunked_conditions):
+                fig_page = plt.figure(
+                    figsize=self.PDF_FIGSIZE, constrained_layout=False
+                )
+                fig_page.set_size_inches(*self.PDF_FIGSIZE, forward=True)
+                fig_page.set_rasterized(True)
+
+                nrows_per_cond = dimOutput
+                total_rows = len(conditions_chunk) * nrows_per_cond
+                gs_page = gridspec.GridSpec(total_rows, 1, figure=fig_page, hspace=0.4)
+                current_row = 0
+
+                for cond_name, use_speed, thresh in conditions_chunk:
+                    selection = np.ones(len(pos), dtype=bool)
+                    if use_speed and speedMask is not None:
+                        selection = selection & speedMask
+                    if thresh is not None and entropy is not None:
+                        selection = selection & (entropy <= thresh)
+
+                    ncols = 6 if with_hist_distribution else 5
+                    gs_cond = gs_page[
+                        current_row : current_row + dimOutput, 0
+                    ].subgridspec(dimOutput, ncols)
+
+                    axs_list = []
+                    first_ax_ref = None
+
+                    for r in range(dimOutput):
+                        if r == 0:
+                            ax_main = fig_page.add_subplot(gs_cond[r, 0:4])
+                            first_ax_ref = ax_main
+                        else:
+                            ax_main = fig_page.add_subplot(
+                                gs_cond[r, 0:4], sharex=first_ax_ref
+                            )
+                        axs_list.append(ax_main)
+                        if with_hist_distribution:
+                            ax_dist = fig_page.add_subplot(
+                                gs_cond[r, 4], sharey=ax_main
+                            )
+                            ax_dist.tick_params(axis="y", left=False, labelleft=False)
+                            axs_list.append(ax_dist)
+
+                    overview_fig(
+                        pos=pos,
+                        inferring=inferring,
+                        selection=selection,
+                        posIndex=posIndex,
+                        timeStepsPred=timeStepsPred,
+                        speedMask=None,
+                        useSpeedMask=False,
+                        concat_epochs=True,
+                        dimOutput=dimOutput,
+                        show=False,
+                        save=False,
+                        close=False,
+                        training_data=training_data,
+                        join_points=False,
+                        axs=np.array(axs_list),
+                        fig=fig_page,
+                        show_legend=current_row == total_rows - dimOutput,
+                    )
+
+                    axs_list[0].set_title(f"Phase: {suffix.strip('_')} - {cond_name}")
+                    self._annotate_trajectory_error(
+                        axs_list[0],
+                        dimOutput,
+                        inferring,
+                        pos,
+                        selection,
+                        suffix,
+                        idWindow,
+                    )
+
+                    # Error Matrix
+                    last_col_ax = fig_page.add_subplot(gs_cond[:, -1])
+                    last_col_ax.axis("off")
+                    linpos = self.resultsNN_phase[suffix]["linTruePos"][idWindow]
+                    linpred = self.resultsNN_phase[suffix]["linPred"][idWindow]
+
+                    if len(selection) > 0 and np.sum(selection) > 0:
+                        self._plot_single_error_matrix(
+                            linpos[selection],
+                            linpred[selection],
+                            last_col_ax,
+                        )
+
+                    current_row += dimOutput
+
+                fig_page.subplots_adjust(
+                    left=0.05,
+                    right=0.98,
+                    bottom=0.04,
+                    top=0.95,
+                    wspace=0.35,
+                    hspace=0.5,
+                )
+                if pdf is not None:
+                    pdf.savefig(fig_page, dpi=self.PDF_DPI, bbox_inches=None)
+                else:
+                    plt.show()
+                plt.close(fig_page)
+
+    def _annotate_trajectory_error(
+        self, ax, dimOutput, inferring, pos, selection, suffix, idWindow
+    ):
+        if dimOutput == 2:
+            error = np.linalg.norm(inferring - pos, axis=1)
+        else:
+            error = np.abs(inferring - pos)
+
+        masked_error = error[selection]
+        mean_error = np.nan
+        median_error = np.nan
+        if len(masked_error) > 0:
+            mean_error = np.mean(masked_error)
+            median_error = np.median(masked_error)
+
+        text = (
+            f"Mean Error: {mean_error:.3f}\n"
+            f"Median Error: {median_error:.3f}\n"
+            f"Samples: {len(masked_error)}"
+        )
+        ax.text(
+            0.75,
+            -0.1,
+            text,
+            horizontalalignment="right",
+            verticalalignment="top",
+            transform=ax.transAxes,
+            fontsize="small",
+        )
+
+    def _plot_summary_bayesian(self, timeWindow, pdf=None):
+        bayesian_page = plt.figure(
+            figsize=(self.PDF_FIGSIZE[1], self.PDF_FIGSIZE[0]), constrained_layout=False
+        )
+        # Use dedicated cbar rows so shared colorbars are controlled by GridSpec.
+        gs_bayes = gridspec.GridSpec(
+            4,
+            3,
+            figure=bayesian_page,
+            height_ratios=[0.08, 1.0, 0.08, 1.0],
+        )
+        cax_train = bayesian_page.add_subplot(gs_bayes[0, 1:3])
+        cax_pred = bayesian_page.add_subplot(gs_bayes[2, 1:3])
+
+        bayesian_axs = [bayesian_page.add_subplot(gs_bayes[1, j]) for j in range(3)] + [
+            bayesian_page.add_subplot(gs_bayes[3, j]) for j in range(3)
+        ]
+
+        try:
+            self._create_decoding_bayes_matrices(winMS=timeWindow, suffix="_training")
+            self.bayesian_neurons_summary(
+                fig=bayesian_page,
+                axs=bayesian_axs,
+                cax_train=cax_train,
+                cax_pred=cax_pred,
+                show=False,
+                block=False,
+                save=True,
+                winMS=timeWindow,
+            )
+        except Exception as e:
+            print(f"Could not generate bayesian summary page: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+        bayesian_page.subplots_adjust(
+            left=0.05,
+            right=0.98,
+            bottom=0.04,
+            top=0.96,
+            wspace=0.25,
+            hspace=0.45,
+        )
+
+        if pdf is not None:
+            pdf.savefig(bayesian_page, dpi=self.PDF_DPI, bbox_inches=None)
+        else:
+            bayesian_page.show()
+        plt.close(bayesian_page)
+
+        if pdf is None:
+            return bayesian_page
 
     def hist_linerrors(
         self,
@@ -1965,7 +2596,10 @@ class PaperFigures:
         fig.suptitle(
             f"Cumulative histograms of linear position errors for phase {suffix.strip('_')}"
         )
-        fig.tight_layout()
+        if (
+            fig.get_tight_layout() is None
+        ):  # Only adjust if tight_layout hasn't been called yet
+            fig.tight_layout()
         plt.show(block=block)
         fig.savefig(
             os.path.join(
@@ -2021,6 +2655,7 @@ class PaperFigures:
         # 4. Plot
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
 
         # Note: Transpose H.T is used to align axes correctly with origin="lower"
         im = ax.imshow(
@@ -2031,8 +2666,25 @@ class PaperFigures:
             origin="lower",
         )
 
-        # 5. Add Colorbar
-        fig.colorbar(im, ax=ax)
+        # 5. Add Smaller Colorbar
+
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        fig.colorbar(im, cax=cax)
+        # 6. Add diagonal stats
+        error = np.abs(true_pos.reshape(-1) - pred_pos.reshape(-1))
+        in_diag = np.mean(error <= 0.1) * 100
+        out_diag = 100 - in_diag
+
+        ax.text(
+            0.5,
+            -0.15,
+            f"Diagonal (±0.1): {in_diag:.1f}%\nOff-Diagonal: {out_diag:.1f}%",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=9,
+        )
 
         return fig, ax
 
@@ -2986,7 +3638,8 @@ class PaperFigures:
         fig.suptitle(
             f"{loss_name} vs true error during \n{str(speed)} speed periods for phase {suffix.strip('_')}"
         )
-        fig.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
         plt.show(block=block)
         fig.savefig(
             os.path.join(
@@ -3564,7 +4217,7 @@ class PaperFigures:
                 axis=1,
             )
 
-            # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
+        # Get the filtered MSE error (ie only on fast epochs, do the mse of fullPred[speedMask,:2] and truePos[speedMask, :2])
         if speed == "fast":
             column = "lin_fast_filtered_se_error"
         elif speed == "slow":
@@ -3781,7 +4434,8 @@ class PaperFigures:
         plt.suptitle(
             f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms\n normalized by {normalized_by} position. Surprise: {plot_surprise}. Bias: {plot_bias}"
         )
-        plt.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
@@ -3890,7 +4544,8 @@ class PaperFigures:
         plt.suptitle(
             f"Heatmap of mean probability and mean euclidean error for window size {winMS} ms.\n Abs: {plot_kl}"
         )
-        plt.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
         fig.savefig(
             os.path.join(
                 self.folderFigures,
@@ -4074,7 +4729,8 @@ class PaperFigures:
             [a.set_ylabel("linear position", fontsize="xx-large") for a in ax[:, 0]]
             [ax[i, 0].set_yticks([0, 0.4, 0.8]) for i in range(len(self.timeWindows))]
         # Save figure
-        fig.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
         plt.show(block=block)
         fig.savefig(
             os.path.join(
@@ -4569,7 +5225,8 @@ class PaperFigures:
 
                 at.set_ylabel("firing rate w prediction error", color="navy")
 
-                fig.tight_layout()
+                if fig.get_layout_engine() is None:
+                    fig.tight_layout()
                 if show:
                     plt.show(block=block)
 
@@ -4960,8 +5617,9 @@ class PaperFigures:
             f"Correlation between predicted loss and Bayesian probability for phase {suffix.strip('_')}",
             fontsize="xx-large",
         )
-        plt.tight_layout()
-        plt.show(block=block)
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
+        fig.show(block=block)
         fig.savefig(
             os.path.join(
                 self.folderFigures,
@@ -5026,7 +5684,8 @@ class PaperFigures:
             f"Mean {type_error} error across suffixes for {timeWindow} ms window, speed: {speed}"
         )
         plt.xticks(rotation=45)
-        plt.tight_layout()
+        if fig.get_layout_engine() is None:
+            fig.tight_layout()
 
     def plot_ann_pred_by_phase(
         self,
@@ -5323,6 +5982,46 @@ class PaperFigures:
         ax.set_yticks([])
         ax.set_title(title)
 
+    def _compute_linear_pf_correlation(
+        self, true_behavior, predicted_behavior, timeWindow, use_speed_filter=True
+    ):
+        """Compute mean Pearson correlation across neurons for linear tuning curves."""
+        try:
+            true_fields, _ = self.trainerBayes.calculate_linear_tuning_curve(
+                l_function=self.l_function,
+                behaviorData=true_behavior,
+                use_speed_filter=use_speed_filter,
+            )
+            pred_fields, _ = self.trainerBayes.calculate_linear_tuning_curve(
+                l_function=self.l_function,
+                behaviorData=predicted_behavior,
+                use_speed_filter=use_speed_filter,
+                is_predicted=True,
+                winMS=timeWindow,
+            )
+        except Exception:
+            return np.nan
+
+        if len(true_fields) == 0 or len(pred_fields) == 0:
+            return np.nan
+
+        corr_values = []
+        n_cells = min(len(true_fields), len(pred_fields))
+        for i in range(n_cells):
+            true_pf = np.asarray(true_fields[i]).reshape(-1)
+            pred_pf = np.asarray(pred_fields[i]).reshape(-1)
+            if (
+                true_pf.shape != pred_pf.shape
+                or np.std(true_pf) == 0
+                or np.std(pred_pf) == 0
+            ):
+                continue
+            corr_values.append(stats.pearsonr(true_pf, pred_pf)[0])
+
+        if len(corr_values) == 0:
+            return np.nan
+        return float(np.nanmean(corr_values))
+
     def bayesian_neurons_summary(self, axs=None, fig=None, block=False, **kwargs):
         """
         Summary of the Bayesian neurons.
@@ -5349,6 +6048,9 @@ class PaperFigures:
         save = kwargs.get("save", True if axs is None else False)
         show = kwargs.get("show", True if axs is None else False)
         is_predicted = kwargs.get("is_predicted", False)
+        winMS = kwargs.get("winMS", self.timeWindows[0] if self.timeWindows else 100)
+        cax_train = kwargs.pop("cax_train", None)
+        cax_pred = kwargs.pop("cax_pred", None)
 
         # --- 1. Train/Load Data ---
         if kwargs.get("bayesMatrices", None) is not None:
@@ -5450,10 +6152,22 @@ class PaperFigures:
 
         # --- Pre-calculate Linear Fields ---
         has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
+        train_lt_axes = []
+        pred_lt_axes = []
+        train_lt_im = None
+        pred_lt_im = None
+        train_cb_label = None
+        pred_cb_label = None
+
         # --- Panel 1: All Linear Tuning Curves ---
         ax = axs[1]
         if has_linear:
-            self.plot_linear_tuning_curves(ax=ax, **kwargs)
+            train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+                ax=ax,
+                add_colorbar=False,
+                **kwargs,
+            )
+            train_lt_axes.append(ax)
         else:
             ax.axis("off")
 
@@ -5466,14 +6180,27 @@ class PaperFigures:
         # --- Panel 3: Predicted Linear Tuning Curves (mov epochs) or Quality Metrics (Mutual Info) ---
         ax = axs[4] if has_linear and hasattr(self, "decoded_fullBehavior") else axs[3]
         if has_linear and hasattr(self, "decoded_fullBehavior"):
-            self.plot_linear_tuning_curves(
+            corr_speed = self._compute_linear_pf_correlation(
+                self.behaviorData,
+                self.decoded_fullBehavior,
+                use_speed_filter=True,
+                timeWindow=winMS,
+            )
+            title = (
+                f"Predicted LT Curves (r={corr_speed:.3f})"
+                if np.isfinite(corr_speed)
+                else "Predicted LT Curves"
+            )
+            pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
                 ax=ax,
                 fullBehavior=self.decoded_fullBehavior,
-                title="Predicted LT Curves",
+                title=title,
                 is_predicted=True,
                 sort_map=self.trainerBayes.linearPosArgSort,
+                add_colorbar=False,
                 **kwargs,
             )
+            pred_lt_axes.append(ax)
         else:
             colors = np.array(["blue"] * len(ordered_mi))
             colors[high_quality_mask] = "red"
@@ -5495,15 +6222,28 @@ class PaperFigures:
         ax = axs[5] if has_linear and hasattr(self, "decoded_fullBehavior") else axs[4]
         if has_linear:
             if hasattr(self, "decoded_fullBehavior"):
-                self.plot_linear_tuning_curves(
+                corr_all = self._compute_linear_pf_correlation(
+                    self.behaviorData,
+                    self.decoded_fullBehavior,
+                    use_speed_filter=False,
+                    timeWindow=winMS,
+                )
+                title = (
+                    f"Predicted LT Curves (All Speeds, r={corr_all:.3f})"
+                    if np.isfinite(corr_all)
+                    else "Predicted LT Curves (All Speeds)"
+                )
+                pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
                     ax=ax,
                     fullBehavior=self.decoded_fullBehavior,
-                    title="Predicted LT Curves (All Speeds)",
+                    title=title,
                     is_predicted=True,
                     sort_map=self.trainerBayes.linearPosArgSort,
                     use_speed_filter=False,
+                    add_colorbar=False,
                     **kwargs,
                 )
+                pred_lt_axes.append(ax)
             elif high_quality_mask.sum() > 0:
                 print(
                     "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
@@ -5517,15 +6257,17 @@ class PaperFigures:
                 ax.axis("off")
 
         if has_linear and hasattr(self, "decoded_fullBehavior"):
-            self.plot_linear_tuning_curves(
+            train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
                 ax=axs[2],
                 fullBehavior=self.behaviorData,
                 title="LT Curves (All Speeds)",
                 is_predicted=False,
                 sort_map=self.trainerBayes.linearPosArgSort,
                 use_speed_filter=False,
+                add_colorbar=False,
                 **kwargs,
             )
+            train_lt_axes.append(axs[2])
         else:
             # --- Panel 5: Last Ordered Place Field ---
             neuron_last = (
@@ -5537,9 +6279,57 @@ class PaperFigures:
                 axs[5], neuron_last, pos_x, pos_y, epoch, "Last Ordered Place Field"
             )
 
+        # Shared colorbars for paired linear tuning curves (same logic as error_map).
+        if train_lt_im is not None and len(train_lt_axes) > 0:
+            if cax_train is not None:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    cax=cax_train,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    ax=train_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if train_cb_label is not None:
+                train_cbar.set_label(train_cb_label)
+            train_cbar.outline.set_visible(False)
+        elif cax_train is not None:
+            cax_train.axis("off")
+
+        if pred_lt_im is not None and len(pred_lt_axes) > 0:
+            if cax_pred is not None:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    cax=cax_pred,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    ax=pred_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if pred_cb_label is not None:
+                pred_cbar.set_label(pred_cb_label)
+            pred_cbar.outline.set_visible(False)
+        elif cax_pred is not None:
+            cax_pred.axis("off")
+
         # --- Finalize and Save ---
         if save or show:
-            plt.tight_layout()
+            if fig.get_layout_engine() is None:
+                fig.tight_layout()
 
         if save:
             filename = f"bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"

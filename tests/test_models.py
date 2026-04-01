@@ -133,7 +133,8 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
             assert output[target_name].shape == (mock_params.batch_size, spec["dim"])
 
     if "latent" in output:
-        assert output["latent"].shape == (mock_params.batch_size, mock_params.nFeatures)
+        latent_dim = model_obj.target_structure["latent"]["dim"]
+        assert output["latent"].shape == (mock_params.batch_size, latent_dim)
 
 
 def test_train_step(mock_params, mock_project, mock_linearizer):
@@ -166,9 +167,10 @@ def test_train_step(mock_params, mock_project, mock_linearizer):
         )
 
     if getattr(mock_params, "contrastive_loss", False):
-        targets["latent"] = np.zeros(
-            (mock_params.batch_size, mock_params.nFeatures)
-        ).astype(np.float32)
+        latent_dim = model_obj.target_structure["latent"]["dim"]
+        targets["latent"] = np.zeros((mock_params.batch_size, latent_dim)).astype(
+            np.float32
+        )
 
     loss = model_obj.model.train_on_batch(inputs, targets)
     assert loss is not None
@@ -208,8 +210,9 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
                 ).astype(np.float32)
 
             if getattr(mock_params, "contrastive_loss", False):
+                latent_dim = model_obj.target_structure["latent"]["dim"]
                 batch_targets["latent"] = np.zeros(
-                    (mock_params.batch_size, mock_params.nFeatures)
+                    (mock_params.batch_size, latent_dim)
                 ).astype(np.float32)
             yield (batch_inputs, batch_targets)
 

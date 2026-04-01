@@ -718,7 +718,7 @@ def overview_fig(
             alpha=0.7,
             label="True distance",
         )
-        ax_dist.set_xlabel("Time")
+        ax_dist.set_xlabel("Time (s)")
         ax_dist.set_ylabel("Distance to Wall")
         ax_dist.set_title("Distance to Wall Over Time")
         ax_dist.legend()
@@ -743,7 +743,7 @@ def overview_fig(
         ax_x_time.plot(
             timeStepsPred[selection], pos[selection, 0], "b-", alpha=0.7, label="True X"
         )
-        ax_x_time.set_xlabel("Time")
+        ax_x_time.set_xlabel("Time (s)")
         ax_x_time.set_ylabel("X Position")
         ax_x_time.set_title("X Position Over Time")
         ax_x_time.legend()
@@ -767,7 +767,7 @@ def overview_fig(
         ax_y_time.plot(
             timeStepsPred[selection], pos[selection, 1], "b-", alpha=0.7, label="True Y"
         )
-        ax_y_time.set_xlabel("Time")
+        ax_y_time.set_xlabel("Time (s)")
         ax_y_time.set_ylabel("Y Position")
         ax_y_time.set_title("Y Position Over Time")
         ax_y_time.legend()
@@ -1098,7 +1098,7 @@ def overview_fig(
                         fontsize="x-small",
                         bbox_to_anchor=(0.5, 0),
                     )
-                    ax1.set_xlabel("time")
+                    ax1.set_xlabel("Time (s)")
                 ax1.set_ylabel(f"{dim_names[dim]}")
         else:
             # Keep existing linanddirection logic
@@ -1166,7 +1166,7 @@ def overview_fig(
                 ground_truth=pos[selection, 1],
                 timestamps=np.where(selection)[0],
             )
-            ax1.set_xlabel("time")
+            ax1.set_xlabel("Time (s)")
             ax1.set_ylabel("Distance to Shock (lin. pos)")
             if with_hist_distribution and selection.sum() > 0:
                 ax2 = plt.subplot2grid((1, 5), (0, 4), sharey=ax1)
@@ -1325,6 +1325,7 @@ def overview_fig(
                 )
 
             ax2.set_title(f"{dim_names[2]}")
+            ax2.set_xlabel("Time (s)")
             ax2.set_ylabel(f"{dim_names[2]}")
 
             # --- [Plotting Distribution (KDE)] ---
@@ -1413,7 +1414,8 @@ def overview_fig(
                 ax2 = plt.subplot2grid((dimOutput, 2), (1, 1))
                 visualizer._plot_error_distribution(ax=ax2)
 
-    plt.subplots_adjust(bottom=0.15)
+    if fig.get_layout_engine() is None:
+        plt.subplots_adjust(bottom=0.15)
     if kwargs.get("save", True):
         plt.savefig(
             os.path.expanduser(
