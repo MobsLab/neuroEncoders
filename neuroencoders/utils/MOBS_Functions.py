@@ -249,9 +249,9 @@ def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
     if "TTLInfo" in keys:
         keys.remove("TTLInfo")
         TTL = Behav_data["TTLInfo"]
-        # Correct temporal scaling for TTL Info
-        start = np.atleast_1d(np.array(TTL["StartSession"]).squeeze()) * 10**6
-        stop = np.atleast_1d(np.array(TTL["StopSession"]).squeeze()) * 10**6
+        # Correct temporal scaling for TTL Info (match epoch and ThousandFrames units)
+        start = np.atleast_1d(np.array(TTL["StartSession"]).squeeze()) * 100
+        stop = np.atleast_1d(np.array(TTL["StopSession"]).squeeze()) * 100
         Other["TTLInfo"] = IntervalSet(start, stop, time_units=time_unit)
 
     if "ThousandFrames" in keys:

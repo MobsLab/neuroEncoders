@@ -11,7 +11,7 @@ import json
 # Load custom code
 import os
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
 from typing import Dict, Tuple
@@ -2373,8 +2373,8 @@ class SpatialConstraintsMixin:
         """Create instance from config"""
         grid_size = config.get("grid_size", (45, 45))
         maze_params = config.get("maze_params", None)
-        if isinstance(maze_params, dict) and (
-            "class_name" and "config" and "dtype" in maze_params
+        if isinstance(maze_params, dict) and all(
+            k in maze_params for k in ("class_name", "config", "dtype")
         ):
             # means maze_params is actually a serialized tensor/array, we need to deserialize it
             maze_params = np.array(maze_params["config"]["value"])
@@ -2391,7 +2391,7 @@ class SpatialConstraintsMixin:
         Returns:
             dict: Extracted maze boundaries.
         """
-        if isinstance(maze_params, dict) and ("class_name" and "config" in maze_params):
+        if isinstance(maze_params, dict) and all(k in maze_params for k in ("class_name", "config")):
             # means maze_params is actually a serialized tensor/array, we need to deserialize it
             maze_params = np.array(maze_params["config"]["value"])
 
