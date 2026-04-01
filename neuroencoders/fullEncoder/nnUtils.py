@@ -422,6 +422,7 @@ class SpikeNet2D(tf.keras.layers.Layer):
         self.nChannels = nChannels
         self.device = device
         self.number = number
+        self.supports_masking = True
         with get_device_context(self.device):
             # Input normalization setup (axis=1 for channels)
             self.input_normalization = ChannelwiseFixedNormalization(
@@ -711,6 +712,7 @@ class SpikeNet1D(tf.keras.layers.Layer):
         self.batch_normalization = batch_normalization
         self.device = device
         self.number = number
+        self.supports_masking = True
 
         with get_device_context(self.device):
             # Add normalization layer (axis=1 because input is (Batch, Channels, Time))
@@ -955,8 +957,7 @@ class SpikeEncoder(tf.keras.layers.Layer):
         self.max_nb_spikes = max_nb_spikes
         self.max_spikes_per_group = max_spikes_per_group
         self.conv_dim = conv_dim
-        # Mark that this layer handles a list of inputs
-        # self._supports_masking = True
+        self.supports_masking = True
 
     def call(self, inputs, mask=None, training=False):
         dtype = self.compute_dtype
@@ -1145,7 +1146,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs, training=False):
+    def call(self, inputs, mask=None, training=False):
         """
         inputs: List containing:
          - [inputsToSpikeNets...] (nGroups tensors)
@@ -1157,6 +1158,13 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
         indices = inputs[self.n_groups : 2 * self.n_groups]
         input_groups = inputs[-1]
 
+        # Optional upstream masks can be propagated by Keras as a list aligned
+        # with inputs. We combine them with the explicit validity mask computed
+        # from waveform padding.
+        incoming_group_masks = None
+        if isinstance(mask, (list, tuple)) and len(mask) >= self.n_groups:
+            incoming_group_masks = list(mask[: self.n_groups])
+
         all_group_masks = []
         for g in range(self.n_groups):
             # Create a mask for this specific group: (Batch, MaxSpikesPerGroup)
@@ -1165,6 +1173,11 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             group_data = inputs_to_spike_nets[g]
             # Shape: (Batch, MaxSpikes, Channels, Time) -> Mask: (Batch, MaxSpikes)
             g_mask = tf.reduce_any(tf.not_equal(group_data, 0.0), axis=[-1, -2])
+            if incoming_group_masks is not None and incoming_group_masks[g] is not None:
+                g_mask = tf.logical_and(
+                    g_mask,
+                    tf.cast(incoming_group_masks[g], tf.bool),
+                )
             all_group_masks.append(g_mask)
 
         with get_device_context(self.device):
