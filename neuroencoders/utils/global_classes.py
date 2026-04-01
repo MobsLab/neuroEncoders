@@ -72,6 +72,29 @@ def is_in_zone(pos, zone_def):
     )
 
 
+def get_max_nb_spikes(windowSizeMS):
+    if isinstance(windowSizeMS, str):
+        windowSizeMS = int(windowSizeMS)
+    if isinstance(windowSizeMS, list):
+        windowSizeMS = max(windowSizeMS)
+
+    if not isinstance(windowSizeMS, int):
+        raise ValueError("windowSizeMS must be an integer or a list of integers")
+
+    if windowSizeMS >= 504:
+        max_nb_spikes = 1300
+    elif windowSizeMS >= 252:
+        max_nb_spikes = 650
+    elif windowSizeMS >= 108:
+        max_nb_spikes = 400
+    elif windowSizeMS >= 36:
+        max_nb_spikes = 100
+    else:
+        max_nb_spikes = None
+
+    return max_nb_spikes
+
+
 class Project:
     """
     Class to store the paths of the project.
@@ -383,6 +406,8 @@ class DataHelper(Project):
         self.lower_x = 0.35
         self.upper_x = 0.65
         self.ylim = 0.75
+        self.fix_tracking()
+        self.get_maze_limits()
         self._define_maze_zones()
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
 
@@ -400,6 +425,43 @@ class DataHelper(Project):
             cls._skip_new = False
         setattr(obj, "_loaded_from_pickle", True)
         return obj
+
+    def fix_tracking(self, quantile_threshold=0.995):
+        """
+        Robustly scales positions to [0, 1] using percentiles to handle outliers
+        and ensures the 'bottom' starts at 0.
+        """
+        for sess_name, epoch in self.fullBehavior["Times"]["SessionEpochs"].items():
+            # Get the mask for this specific session
+            mask = ep.inEpochsMask(self.positionTime, epoch).flatten()
+
+            if np.any(mask):
+                session_pos = self.positions[mask, :2]
+
+                # 1. Identify the 'corners' using quantiles instead of absolute min/max
+                # This ignores 0.5% of extreme tracking jumps (artifacts)
+                min_pos = np.nanquantile(session_pos, 1 - quantile_threshold, axis=0)
+                max_pos = np.nanquantile(session_pos, quantile_threshold, axis=0)
+
+                # 2. Shift to 0,0
+                shifted_pos = session_pos - min_pos
+
+                # 3. Scale to 1.0 (using the new adjusted max)
+                new_range = max_pos - min_pos
+
+                # Avoid division by zero
+                new_range[new_range == 0] = 1.0
+
+                normalized_pos = shifted_pos / new_range
+
+                # 4. Hard-clip to [0, 1] to keep everything inside the box
+                normalized_pos = np.clip(normalized_pos, 0, 1)
+
+                self.positions[mask, :2] = normalized_pos
+                if hasattr(self, "old_positions"):
+                    self.old_positions[mask, :2] = normalized_pos
+
+        self.fullBehavior["Positions"] = self.positions
 
     def nGroups(self):
         """
@@ -695,16 +757,41 @@ class DataHelper(Project):
             positions = self.positions
 
         assert positions.shape[1] == 2, "positions must have 2 dimensions"
-        lower_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] < 0.5))
-        upper_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] > 0.5))
-        self.lower_x = positions[lower_mask, 0].max()
-        self.upper_x = positions[upper_mask, 0].min()
+
+        # conduct the maze limits ONLY during train/test epochs
+        train_mask = ep.inEpochsMask(
+            self.positionTime, self.fullBehavior["Times"]["trainEpochs"]
+        ).flatten()
+        test_mask = ep.inEpochsMask(
+            self.positionTime, self.fullBehavior["Times"]["testEpochs"]
+        ).flatten()
+        train_test_mask = np.logical_or(train_mask, test_mask)
+        positions = positions[train_test_mask, :2]
+
+        lower_left_mask = (positions[:, 1] < 0.75) & (positions[:, 0] < 0.5)
+        lower_right_mask = (positions[:, 1] < 0.75) & (positions[:, 0] > 0.5)
+        lower_left_positions_x = positions[lower_left_mask, 0]
+        self.lower_x = (
+            lower_left_positions_x.max()
+            if lower_left_positions_x.size > 0
+            else MAZE_COORDS[4:8, 0].min()
+        )
+        lower_right_positions_x = positions[lower_right_mask, 0]
+        self.upper_x = (
+            lower_right_positions_x.min()
+            if lower_right_positions_x.size > 0
+            else MAZE_COORDS[4:8, 0].max()
+        )
         self.xlims = [self.lower_x, self.upper_x]
 
         y_mask = np.where(
             (positions[:, 0] > self.lower_x) & (positions[:, 0] < self.upper_x)
         )
-        self.ylim = positions[y_mask, 1].min()
+        self.ylim = (
+            positions[y_mask, 1].min()
+            if len(positions[y_mask, 1]) > 0
+            else MAZE_COORDS[4:8, 1].min()
+        )
         self._define_maze_zones()
         if show:
             plt.plot(positions[:, 0], positions[:, 1], "--.")
@@ -1767,7 +1854,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 17)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -2286,6 +2373,11 @@ class SpatialConstraintsMixin:
         """Create instance from config"""
         grid_size = config.get("grid_size", (45, 45))
         maze_params = config.get("maze_params", None)
+        if isinstance(maze_params, dict) and (
+            "class_name" and "config" and "dtype" in maze_params
+        ):
+            # means maze_params is actually a serialized tensor/array, we need to deserialize it
+            maze_params = np.array(maze_params["config"]["value"])
         return cls(grid_size=grid_size, maze_params=maze_params)
 
     def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
@@ -2299,6 +2391,9 @@ class SpatialConstraintsMixin:
         Returns:
             dict: Extracted maze boundaries.
         """
+        if isinstance(maze_params, dict) and ("class_name" and "config" in maze_params):
+            # means maze_params is actually a serialized tensor/array, we need to deserialize it
+            maze_params = np.array(maze_params["config"]["value"])
 
         if maze_params is None or not isinstance(maze_params, dict):
             if maze_params is not None:
@@ -2325,6 +2420,9 @@ class SpatialConstraintsMixin:
                 "gap_y_min",
             ]
             if not all(key in maze_params for key in required_keys):
+                print(
+                    f"Provided maze_params dict is missing required keys. Found keys: {maze_params.keys()}"
+                )
                 raise ValueError(f"maze_params dict must contain keys: {required_keys}")
         return maze_params
 

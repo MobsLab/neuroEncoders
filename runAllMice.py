@@ -15,11 +15,11 @@ win_values = [0.108, 0.252, 0.504]  # only kept for new dataset
 win_values = [
     [0.036, 0.108],
     [0.036, 0.108, 0.252],
-    [0.036, 0.108, 0.252, 0.504],
+    # [0.036, 0.108, 0.252, 0.504],
 ]  # only kept for new dataset
 # Mice name
 mice_nb = [
-    # "M1199_PAG",
+    "M1199_PAG",
     "M994_PAG",
     "M1239_MFB",
     "M1230_Novel",
@@ -35,8 +35,7 @@ mice_nb = [
     "M1199_MFB",
 ]
 ####
-nameExp = "consensus_v5_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
-nameExp = "consensus_v6_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
+nameExp = "consensus_v7_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -249,21 +248,24 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         else:
             cmd_ann += ["--striding", str(win)]
 
-        win = win if not isinstance(win, list) else max(win)
+        windows = max(win) if isinstance(win, list) else win
         cmd_bayes = [
             "/usr/bin/env",
             "/home/mickey/Documents/Theotime/neuroEncoders/.venv/bin/python",
             "/home/mickey/Documents/Theotime/neuroEncoders/neuroEncoder",
             "bayes",
             xml_file,
+            "--n_features",
+            "64",
             "--window",
-            str(win),
+            str(windows),
             "-e",
             nbEpochs,
             "--target",
             target_bayes,
             "--striding",
-            str(win),
+            str(windows),
+            "--redo",
         ]
         if lstmAndTransfo:
             cmd_bayes += ["--name", nameExp + "_LSTM"]

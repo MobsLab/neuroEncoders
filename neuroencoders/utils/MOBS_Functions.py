@@ -27,7 +27,7 @@ from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
-from neuroencoders.utils.global_classes import Params, Project
+from neuroencoders.utils.global_classes import Params, Project, get_max_nb_spikes
 
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
@@ -830,7 +830,7 @@ class Mouse_Results(Params, PaperFigures):
         Params.__init__(
             self,
             helper=self.DataHelper,
-            windowSize=self.Params.windowSize,
+            windowSize=int(winMS) / 1000,
             **kwargs,
         )
         self.find_session_epochs()
@@ -1017,11 +1017,15 @@ class Mouse_Results(Params, PaperFigures):
             )
             for d in self.windows
         ]
-        if not all(in_dir):
+        if not all(in_dir) and not kwargs.get("force_windows", False):
             warn(
                 f"Some specified windows not found in {self.folderResult} for {self.mouse_name}:{[w for w, exists in zip(self.windows, in_dir) if not exists]}. Fixing..."
             )
             self.windows = [w for w, exists in zip(self.windows, in_dir) if exists]
+        else:
+            self.windows = [
+                w for w in self.windows if w in os.listdir(self.folderResult)
+            ]
 
         # order windows by their name (assuming they are named only with a number)
         self.windows.sort(key=lambda x: int(x))
@@ -1090,6 +1094,10 @@ class Mouse_Results(Params, PaperFigures):
         for i, winMS in enumerate(self.windows):
             if i == 0 and which.lower() in ["ann", "both"]:
                 if not hasattr(self, "ann") or kwargs.get("redo", False):
+                    max_nb_spikes = kwargs.pop(
+                        "max_nb_spikes", get_max_nb_spikes(winMS)
+                    )
+                    max_spikes_per_group = kwargs.pop("max_spikes_per_group", None)
                     self.ann = NNTrainer(
                         self.projects[winMS],
                         self.parameters[winMS],
@@ -1102,6 +1110,8 @@ class Mouse_Results(Params, PaperFigures):
                         # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask,
                         transform_w_log=transform_w_log,
                         denseweight=denseweight,
+                        max_nb_spikes=max_nb_spikes,
+                        max_spikes_per_group=max_spikes_per_group,
                         **kwargs,
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
@@ -1135,6 +1145,7 @@ class Mouse_Results(Params, PaperFigures):
                         project,
                         config=self.bayes_config,
                         phase=self.phase,
+                        maze_params=self.data_helper.maze_coords,
                         **kwargs,
                     )
                     if kwargs.get("load_bayesMatrices", False):

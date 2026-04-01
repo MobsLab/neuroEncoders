@@ -44,13 +44,13 @@ from neuroencoders.fullEncoder.nnUtils import (
     NeuralDataAugmentation,
     PositionError2D,
     PositionalEncoding,
+    ScaledSigmoid,
     SpikeEncoder,
     SpikeNet1D,
     SpikeNet2D,
     SpikeSequenceProcessor,
     TransformerEncoderBlock,
     UMazeProjectionLayer,
-    scaled_sigmoid,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.utils.global_classes import (
@@ -95,9 +95,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
     ):
         # Initialize SpatialConstraintsMixin
         grid_size = getattr(params, "GaussianGridSize", (45, 45))
-        maze_params = getattr(params, "maze_params", None)
+
+        # Moved the initialization of the DataHelper here
+        if kwargs.get("linearizer", None) is not None:
+            self.Linearizer = kwargs["linearizer"]
+            self.fix_linearizer(self.Linearizer.mazePoints, self.Linearizer.tsProj)
+            self.maze_params = self.Linearizer.maze_params
+        else:
+            self.maze_points = None
+            self.ts_proj = None
+            self.mazePoints_tensor = None
+            self.tsProjTensor = None
+            self.maze_params = None
+
         super(LSTMandSpikeNetwork, self).__init__(
-            grid_size=grid_size, maze_params=maze_params, **kwargs
+            grid_size=grid_size, maze_params=self.maze_params, **kwargs
         )
 
         self.clear_session()
@@ -113,14 +125,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self._setup_feature_description()
 
         self.max_nb_spikes = kwargs.get(
-            "max_nb_spikes", 400
+            "max_nb_spikes", getattr(self.params, "max_nb_spikes", 400)
         )  # maximum number of spikes per group to consider in the window, for batching purposes
         if self.max_nb_spikes is None:
             self.max_nb_spikes = int(400)
 
-        self.max_spikes_per_group = kwargs.get(
-            "max_spikes_per_group", int(self.max_nb_spikes / self.params.nGroups)
-        )
+        self.max_spikes_per_group = kwargs.get("max_spikes_per_group", None)
+        if self.max_spikes_per_group is None:
+            self.max_spikes_per_group = int(self.max_nb_spikes / self.params.nGroups)
 
         if self.params.usingMixedPrecision:
             print("Using mixed precision with float16")
@@ -131,16 +143,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         else:
             tf.keras.mixed_precision.set_global_policy("float32")
             print("Not using mixed precision, using float32")
-
-        # Moved the initialization of the DataHelper here
-        if kwargs.get("linearizer", None) is not None:
-            self.Linearizer = kwargs["linearizer"]
-            self.fix_linearizer(self.Linearizer.mazePoints, self.Linearizer.tsProj)
-        else:
-            self.maze_points = None
-            self.ts_proj = None
-            self.mazePoints_tensor = None
-            self.tsProjTensor = None
 
         self._parse_target_structure()
 
@@ -234,8 +236,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         target = self.params.target.lower()
         use_heatmap = getattr(self.params, "GaussianHeatmap", False)
 
-        def scaled_sigmoid_activation(x):
-            return scaled_sigmoid(x, high=getattr(self.params, "high_rad", 2 * np.pi))
+        # Pre-configure the scalable activation for serialization stability
+        scaled_sigmoid_activation = ScaledSigmoid(
+            high=getattr(self.params, "high_rad", 2 * np.pi)
+        )
 
         # Pos 2D dimensions: 2 for raw regression or grid size for heatmap
         pos_dim_out = 2
@@ -446,7 +450,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         {
                             "l_function_layer_params": self.lfunction_layer_params,
                             "loss_type": getattr(self.params, "loss_type", "safe_kl"),
-                            "maze_params": getattr(self, "maze_params", None),
+                            "maze_params": self.maze_params,
                             "device": self.deviceName,
                         }
                     )
@@ -595,6 +599,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.isTransformer = kwargs.get(
                 "isTransformer", getattr(self.params, "isTransformer", False)
             )
+            if not hasattr(self.params, "sequence_output_dim"):
+                # Backward-compat default used by transformer and output heads.
+                if self.isTransformer:
+                    self.params.sequence_output_dim = getattr(
+                        self.params, "nFeatures", 64
+                    ) * getattr(self.params, "dim_factor", 1)
+                else:
+                    self.params.sequence_output_dim = getattr(
+                        self.params,
+                        "lstmSize",
+                        getattr(self.params, "nFeatures", 64),
+                    )
             if not self.isTransformer:
                 self.params.sequence_output_dim = self.params.lstmSize
 
@@ -728,6 +744,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 grid_size=kwargs.get(
                     "grid_size", getattr(self.params, "GaussianGridSize", (40, 40))
                 ),
+                maze_params=self.maze_params,
                 dtype="float32",
             )
 
@@ -850,7 +867,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         """
 
         output = None
-        outputSeq = None
 
         # Apply LSTM Sequential Model
         # Masking is propagated automatically if layers support masking.
@@ -1068,6 +1084,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         strideFactor = kwargs.get("strideFactor", 1)
 
         load_model = kwargs.get("load_model", False)
+        fine_tune = kwargs.get("fine_tune", False)
 
         if not isinstance(windowSizeMS, int):
             winMS_max = int(winMS_max)
@@ -1110,7 +1127,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.folderModels,
                 str(winMS_max),
                 key,
-                "{epoch:02d}-{val_loss:.2f}.weights.h5",
+                "cp.weights.h5",
             )
 
         ## Get speed filter:
@@ -1138,6 +1155,62 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             filename = f"dataset_stride{str(winMS_max)}_factor{str(strideFactor)}.tfrec"
         else:
             filename = f"dataset_stride{str(winMS_max)}.tfrec"
+
+        # Compute normalization stats if requested
+        if kwargs.get("normalize", False):
+            print("Normalization requested. Computing statistics from training data...")
+            # Use pipeline to get the dataset exactly as training would see it (but raw values)
+            # We want raw data: no augmentation, no oversampling.
+            # Passing augmentation_config=None ensures no augmentation is applied if we also disable it in params or via flags
+            # We add enable_augmentation=False and oversampling_resampling=False to pipeline call (assuming pipeline updated)
+
+            ds_stats, _ = self._dataset_loading_pipeline(
+                filename,
+                winMS_max,
+                behaviorData,
+                totMask,
+                augmentation_config=None,
+                enable_augmentation=False,
+                oversampling_resampling=False,
+                return_datasets=True,
+                shuffle=False,  # No need to shuffle for stats
+                is_interleaving_subdataset=True,
+            )
+
+            if "train" in ds_stats and ds_stats["train"] is not None:
+                means, stds = self.compute_normalization_stats(ds_stats["train"])
+                # Updated logic: Don't put in augmentation_config for normalization
+                # Instead, set weights in the model layers DIRECTLY
+                # We need to iterate over groups and set weights for each SpikeNet
+
+                print("Setting normalization weights in model layers...")
+                for g in range(self.params.nGroups):
+                    # SpikeNets are in self.spikeNets list (if running directly)
+                    # OR inside self.spike_encoder.spikeNets if accessed via that
+                    # Let's target the model object if possible or the member variables
+                    spike_net = self.spikeNets[g]
+                    # Weights for Normalization layer: [mean, variance] (or [mean, variance, count]?)
+                    # Normalization layer expects mean and variance. Variance = std^2.
+                    mean = means[g]
+                    std = stds[g]
+                    variance = np.square(std)
+
+                    # Verify shape? mean shape [Channels].
+                    # Layer expects broadcastable?
+                    # Axis=1 (channels).
+
+                    # Use a dummy count?
+                    # Normalization layer expects mean, variance, and count
+                    # count is typically a scalar or 0-d tensor
+                    count = np.array(1.0, dtype=np.float32)
+
+                    spike_net.input_normalization.set_weights([mean, variance, count])
+
+                # Ensure augmentation config does NOT normalize twice
+                augmentation_config.normalize = False
+                print(
+                    "Normalization statistics computed and updated in MODEL layers (inference auto-norm enabled)."
+                )
 
         if isinstance(windowSizeMS, int) or len(windowSizeMS) == 1:
             datasets, counts = self._dataset_loading_pipeline(
@@ -1329,9 +1402,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             print("Training the", key, "model")
             nb_epochs_already_trained = 0
             loaded = False
-            managed_to_convert = (
-                True  # this way new checkpoints will be saved in keras3 format
-            )
 
             if load_model and os.path.exists(os.path.dirname(checkpointPath[key])):
                 if key != "predLoss":
@@ -1341,18 +1411,37 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
 
                     try:
-                        self.model.load_weights(checkpointPath[key])
-                        csv_hist = pd.read_csv(
-                            os.path.join(
-                                self.folderModels,
-                                str(winMS_max),
-                                "full",
-                                "fullmodel.log",
+                        try:
+                            self.model = tf.keras.models.load_model(
+                                os.path.join(
+                                    self.folderModels,
+                                    str(winMS_max),
+                                    "savedModels",
+                                    "full_model.keras",
+                                ),
                             )
-                        )
-                        nb_epochs_already_trained = csv_hist["epoch"].max() + 1
-                        print("nb_epochs_already_trained =", nb_epochs_already_trained)
+                        except Exception as e:
+                            print(
+                                "Could not load the full model in keras format, trying to load weights only:",
+                                e,
+                            )
+                            self.model.load_weights(checkpointPath[key])
                         loaded = True
+                        if fine_tune:
+                            csv_hist = pd.read_csv(
+                                os.path.join(
+                                    self.folderModels,
+                                    str(winMS_max),
+                                    "full",
+                                    "fullmodel.log",
+                                )
+                            )
+                            nb_epochs_already_trained = csv_hist["epoch"].max() + 1
+                            print(
+                                "nb_epochs_already_trained =", nb_epochs_already_trained
+                            )
+                        else:
+                            nb_epochs_already_trained = 0
                     except Exception as e:
                         print(
                             "Error loading weights for",
@@ -1365,10 +1454,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             if loaded:
                 print(
-                    "loaded weights for",
-                    key,
-                    "model. Fine tune is set to",
-                    kwargs.get("fine_tune", False),
+                    "loaded weights for", key, "model. Fine tune is set to", fine_tune
                 )
                 if (
                     os.path.exists(
@@ -1387,13 +1473,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "predLossModelLosses.png",
                         )
                     )
-                ) and not kwargs.get("fine_tune", False):
+                ) and not fine_tune:
                     print(
                         "Loading previous losses from",
                         os.path.join(self.folderModels, str(winMS_max)),
                     )
                     continue
-                if not kwargs.get("fine_tune", False):
+                if not fine_tune:
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue
 
@@ -1404,7 +1490,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 verbose=1,
             )
             # Manage learning rates schedule
-            if loaded and kwargs.get("fine_tune", False):
+            if loaded and fine_tune:
                 print("Fine-tuning the model with a lower learning rate, set to 0.0005")
                 self.model.optimizer.learning_rate.assign(0.0005)
             elif loaded:
@@ -1435,6 +1521,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             # NOTE: In case you need debugging, toggle this profiling line to True
             is_tbcallback = kwargs.get("tensorboard_callback", True)
+            self.log_dir = None
             if self.debug:
                 print("Debugging mode is ON")
                 if is_tbcallback:
@@ -1604,6 +1691,140 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     # wandb.tensorboard.unpatch()
                     run.finish()
 
+    def compute_normalization_stats(self, dataset, max_samples=5000):
+        """
+        Compute mean and std for each channel of each group in the dataset.
+        Uses a subset of the dataset to estimate statistics.
+
+        Handles both batched (Batch, Spikes, Channels, Time) and unbatched
+        (Spikes, Channels, Time) spike tensors.
+        """
+        print("Computing normalization statistics...")
+
+        # Initialize accumulators for all groups
+        accumulators = {}
+        for g in range(self.params.nGroups):
+            if g < len(self.params.nChannelsPerGroup):
+                n_ch = self.params.nChannelsPerGroup[g]
+                accumulators[g] = {
+                    "sum_x": np.zeros(n_ch, dtype=np.float64),
+                    "sum_sq_x": np.zeros(n_ch, dtype=np.float64),
+                    "total_count": 0,
+                }
+
+        processed_samples = 0
+
+        # Iterate over the dataset (may be batched or unbatched)
+        for input, target in dataset:
+            if processed_samples >= max_samples:
+                break
+
+            # Determine whether this element is batched.
+            # Group tensors are rank 4 when batched: (B, S, C, T)
+            # and rank 3 when unbatched: (S, C, T).
+            first_group_tensor = None
+            for g in range(self.params.nGroups):
+                g_key = f"group{g}"
+                if g_key in input:
+                    first_group_tensor = input[g_key]
+                    break
+
+            if first_group_tensor is None:
+                batch_size_curr = 1
+            elif len(first_group_tensor.shape) == 4:
+                batch_size_curr = int(tf.shape(first_group_tensor)[0].numpy())
+            else:
+                batch_size_curr = 1
+            processed_samples += batch_size_curr
+
+            # Process all groups for the current batch
+            for g in range(self.params.nGroups):
+                g_key = f"group{g}"
+                if g_key not in input or g not in accumulators:
+                    continue
+
+                acc = accumulators[g]
+                n_ch = self.params.nChannelsPerGroup[g]
+
+                # Data shape can be:
+                #   - Batched: (Batch, Spikes, Channels, Time)
+                #   - Unbatched: (Spikes, Channels, Time)
+                data = input[g_key]
+                data_rank = len(data.shape)
+
+                # Identify valid spikes (not padding; non-zero spike waveform)
+                # A spike is valid if any of its channel-time values is non-zero
+                if data_rank == 4:
+                    # Batched: reduce over channels and time dims [2, 3]
+                    is_valid = tf.reduce_any(tf.not_equal(data, 0.0), axis=[2, 3])
+                elif data_rank == 3:
+                    # Unbatched: reduce over channels and time dims [1, 2]
+                    is_valid = tf.reduce_any(tf.not_equal(data, 0.0), axis=[1, 2])
+                    # Add batch dimension to match batched path
+                    is_valid = tf.expand_dims(is_valid, axis=0)
+                    data = tf.expand_dims(data, axis=0)
+                else:
+                    print(
+                        f"Warning: Unexpected data rank {data_rank} for group {g_key}. Expected 3 or 4."
+                    )
+                    continue
+
+                # Apply mask to flat valid spikes
+                # data shape: (B, S, C, T)
+                # boolean_mask(data, is_valid) -> (TotalValidSpikesInBatch, C, T)
+                valid_data = tf.boolean_mask(data, is_valid)
+
+                if kops.shape(valid_data)[0] == 0:
+                    continue
+
+                # Compute sums
+                # We aggregate over TotalValidSpikes and Time(T)
+                # valid_data shape: (N, C, T). Transpose to (N, T, C). Reshape to (N*T, C)
+                flat_data = tf.reshape(tf.transpose(valid_data, [0, 2, 1]), [-1, n_ch])
+                flat_data_f64 = tf.cast(flat_data, tf.float64)
+
+                # Number of samples contributing to stats for this input
+                input_count = tf.cast(tf.shape(flat_data)[0], tf.int64)
+
+                # Sum over the first dimension (accumulated samples)
+                acc["sum_x"] += tf.reduce_sum(flat_data_f64, axis=0).numpy()
+                acc["sum_sq_x"] += tf.reduce_sum(
+                    tf.square(flat_data_f64), axis=0
+                ).numpy()
+                acc["total_count"] += input_count.numpy()
+
+        means = []
+        stds = []
+
+        for g in range(self.params.nGroups):
+            if g not in accumulators:
+                n_ch = (
+                    self.params.nChannelsPerGroup[g]
+                    if g < len(self.params.nChannelsPerGroup)
+                    else 1
+                )
+                means.append(np.zeros(n_ch, dtype=np.float32))
+                stds.append(np.ones(n_ch, dtype=np.float32))
+                continue
+
+            acc = accumulators[g]
+            if acc["total_count"] > 0:
+                mean = acc["sum_x"] / acc["total_count"]
+                variance = (acc["sum_sq_x"] / acc["total_count"]) - (mean**2)
+                # Avoid negative variance due to floating point errors
+                variance = np.maximum(variance, 1e-8)
+                std = np.sqrt(variance)
+
+                means.append(mean.astype(np.float32))
+                stds.append(std.astype(np.float32))
+            else:
+                print(f"Warning: No valid data found for group {g}")
+                n_ch = self.params.nChannelsPerGroup[g]
+                means.append(np.zeros(n_ch, dtype=np.float32))
+                stds.append(np.ones(n_ch, dtype=np.float32))
+
+        return means, stds
+
     def _dataset_loading_pipeline(
         self,
         filename: str,
@@ -1728,15 +1949,23 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         counts = {}
         for key in totMask.keys():
             # This is just max normalization to use if the behavioral data have not been normalized yet
+            # Note: Only scale position columns (first 2 dims), not mixed-head targets
             if onTheFlyCorrection:
-                maxPos = np.nanmax(
-                    behaviorData["Positions"][
-                        np.logical_not(
-                            np.isnan(np.sum(behaviorData["Positions"], axis=1))
-                        )
-                    ]
+                # Extract valid position rows (no NaN)
+                valid_rows = np.logical_not(
+                    np.isnan(np.sum(behaviorData["Positions"], axis=1))
                 )
-                posFeature = behaviorData["Positions"] / maxPos
+                valid_positions = behaviorData["Positions"][
+                    valid_rows, :2
+                ]  # Only first 2 cols (x, y)
+                maxPos = np.nanmax(valid_positions)
+
+                # Scale only position columns; keep any other columns unchanged
+                posFeature = behaviorData["Positions"].copy()
+                posFeature[:, :2] = (
+                    posFeature[:, :2] / maxPos
+                )  # Scale only first 2 columns
+                print(f"Scaling position columns by max value {maxPos:.4f}")
             else:
                 posFeature = behaviorData["Positions"]
 
@@ -1747,7 +1976,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
 
             # now that we have clean positions, we can resample if needed
-            if self.params.OversamplingResampling and key == "train":
+            count_before = None
+            if (
+                self.params.OversamplingResampling
+                and key == "train"
+                and kwargs.get("oversampling_resampling", True)
+            ):
                 dataset, count_before, count_after = (
                     self._apply_oversampling_resampling(
                         dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
@@ -1774,6 +2008,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # 7. Optimized Detailed Parsing / Augmentation
             is_aug_active = (
                 self.params.dataAugmentation
+                and kwargs.get("enable_augmentation", True)
                 and key != "test"
                 and not kwargs.get("inference_mode", False)
             )
@@ -1905,7 +2140,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 32,
             ]
             padded_shapes[f"indices{g}"] = [self.max_nb_spikes]
-            padding_values[f"group{g}"] = tf.constant(-1.0, dtype=tf.float32)
+            # Waveform padding must be 0.0 to match parse_serialized_sequence
+            # and all masking/validity checks in the model pipeline.
+            padding_values[f"group{g}"] = tf.constant(0.0, dtype=tf.float32)
             padding_values[f"indices{g}"] = tf.constant(0, dtype=tf.int32)
 
         return padded_shapes, padding_values
@@ -2130,24 +2367,22 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         """
         for key, dataset in datasets.items():
             path = f"{base_path}_{key}.tfrec"
-            # It's safer to not save 'train' here as it's likely infinite
-            if key == "train":
-                print(
-                    "Skipping 'train' dataset in legacy save (likely infinite). Use internal saving logic."
-                )
+            # Skip only truly infinite streams to preserve legacy helper usability.
+            card = tf.data.experimental.cardinality(dataset)
+            if card == tf.data.experimental.INFINITE_CARDINALITY:
+                print(f"Skipping infinite dataset '{key}' in legacy TFRecord save.")
                 continue
-            self._save_single_dataset_to_tfrec(dataset, path)
+            LSTMandSpikeNetwork._save_single_dataset_to_tfrec(self, dataset, path)
 
     def _save_datasets_to_parquet(self, datasets, base_path):
         """Legacy wrapper"""
         for key, dataset in datasets.items():
             path = f"{base_path}_{key}.parquet"
-            if key == "train":
-                print(
-                    "Skipping 'train' dataset in legacy save (likely infinite). Use internal saving logic."
-                )
+            card = tf.data.experimental.cardinality(dataset)
+            if card == tf.data.experimental.INFINITE_CARDINALITY:
+                print(f"Skipping infinite dataset '{key}' in legacy Parquet save.")
                 continue
-            self._save_single_dataset_to_parquet(dataset, path)
+            LSTMandSpikeNetwork._save_single_dataset_to_parquet(self, dataset, path)
 
     def convert_tfrec_to_pandas(
         self, dataset, flatten=True, desc="Converting to Pandas"
@@ -2362,7 +2597,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "full_model.keras",
                         ),
                     )
-                except:
+                except Exception as e:
+                    print(f"could not load keras model due to {e}. Trying with weights")
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
@@ -2374,24 +2610,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
-                try:
-                    self.model.load_weights(
-                        os.path.join(
-                            self.folderModels,
-                            str(windowSizeMS),
-                            "full" + "/cp.weights.h5",
-                        ),
-                    )
-                except (FileNotFoundError, ValueError):
-                    print("loading from full checkpoint failed, trying weights.h5")
-                    self.model.load_weights(
-                        os.path.join(
-                            self.folderModels,
-                            str(windowSizeMS),
-                            "full",
-                            "cp.weights.h5",
-                        ),
-                    )
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "full",
+                        "cp.weights.h5",
+                    ),
+                )
 
         # Manage the behavior
         if speedValue is None:
@@ -3014,9 +3240,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.GaussianHeatmap.GRID_H,
             self.GaussianHeatmap.GRID_W,
         )
-        # instead of oversampling on such tiny grid, we take a coarser grid mesh
-        stride = 5
-        self.coarse_H, self.coarse_W = GRID_H // stride, GRID_W // stride
+        # Instead of oversampling on the full fine grid, use a coarser mesh.
+        # Use ceil so edge bins are kept (floor would silently drop the last row/col).
+        stride = int(getattr(self.params, "oversampling_stride", 5))
+        self.coarse_H = int(np.ceil(GRID_H / stride))
+        self.coarse_W = int(np.ceil(GRID_W / stride))
         forbid_fine = self.GaussianHeatmap.forbid_mask_tf.numpy()
         FORBID_coarse = np.zeros((self.coarse_H, self.coarse_W), dtype=bool)
 
@@ -3025,21 +3253,40 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 block = forbid_fine[
                     y * stride : (y + 1) * stride, x * stride : (x + 1) * stride
                 ]
-                if np.any(block > 0):
+                # Mark coarse bin forbidden only if all underlying fine bins are forbidden.
+                if block.size > 0 and np.all(block > 0):
                     FORBID_coarse[y, x] = True
         forbid_coarse_tf = tf.constant(FORBID_coarse, dtype=tf.bool)
 
         def map_bin_class(ex):
-            return nnUtils.bin_class(
-                ex,
-                self.coarse_H,
-                self.coarse_W,
-                forbid_coarse_tf,
+            pos = ex["pos"]
+            x = tf.cast(
+                tf.clip_by_value(pos[0] * self.coarse_W, 0, self.coarse_W - 1), tf.int32
             )
+            y = tf.cast(
+                tf.clip_by_value(pos[1] * self.coarse_H, 0, self.coarse_H - 1), tf.int32
+            )
+            forbidden_here = tf.gather_nd(forbid_coarse_tf, tf.stack([y, x], axis=-1))
+            bin_cls = y * self.coarse_W + x
+            return tf.where(forbidden_here, -1, bin_cls)
 
         coarse_H, coarse_W = self.coarse_H, self.coarse_W
 
-        positions = self.GaussianHeatmap.training_positions
+        # Compute counts from the dataset that is actually being oversampled
+        # (already filtered by epochs/speed/NaNs), not from global training positions.
+        dataset_positions = []
+        for ex in dataset:
+            pos = ex["pos"].numpy()
+            if pos.shape[0] >= 2 and np.all(np.isfinite(pos[:2])):
+                dataset_positions.append(pos[:2])
+
+        if len(dataset_positions) == 0:
+            print(
+                "No valid positions found for oversampling. Returning original dataset."
+            )
+            return dataset, np.array([]), np.array([])
+
+        positions = np.asarray(dataset_positions, dtype=np.float32)
         x_c_np = (positions[:, 0] * coarse_W).astype(np.int32).clip(0, coarse_W - 1)
         y_c_np = (positions[:, 1] * coarse_H).astype(np.int32).clip(0, coarse_H - 1)
         coarse_bins = y_c_np * coarse_W + x_c_np
@@ -3049,29 +3296,38 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         )
 
         FORBID_flat = FORBID_coarse.flatten()
-        counts[FORBID_flat] = 0  # set forbidden bins to 0 count
+        counts[FORBID_flat] = 0  # For diagnostics and repeat factors.
 
         allowed_bins = counts > 0
 
-        # compute oversampling ratios relative to max count among allowed bins
-        max_count = counts.max()
+        # Use a robust target count so one outlier-dense bin does not force extreme repeats.
+        target_percentile = float(
+            getattr(self.params, "oversampling_target_percentile", 95.0)
+        )
+        max_repeat = int(getattr(self.params, "oversampling_max_repeat", 15))
+        target_count = np.percentile(counts[allowed_bins], target_percentile)
 
-        rep_factors = np.ones_like(counts)
-        rep_factors[allowed_bins] = np.ceil(max_count / counts[allowed_bins])
-        rep_factors = np.minimum(rep_factors, 15.0).astype(
-            np.int64
-        )  # clip to avoid extreme repeats
+        rep_factors = np.ones_like(counts, dtype=np.int64)
+        rep_factors[allowed_bins] = np.ceil(
+            target_count / np.maximum(counts[allowed_bins], 1.0)
+        ).astype(np.int64)
+        rep_factors = np.clip(rep_factors, 1, max_repeat)
+
+        # Keep forbidden/out-of-range samples unless explicitly requested, to avoid
+        # silently deleting data and creating holes in the empirical distribution.
+        drop_forbidden = bool(
+            getattr(self.params, "oversampling_drop_forbidden", False)
+        )
         rep_factors_tf = tf.constant(rep_factors, dtype=tf.int64)
         dataset_before_oversampling = dataset
 
         # Map each example to repeated dataset
         def map_repeat(ex):
             idx = map_bin_class(ex)
-            # If forbidden (-1), repeat 0 times (filter out)
             num_repeats = tf.cond(
                 idx >= 0,
                 lambda: tf.gather(rep_factors_tf, idx),
-                lambda: tf.constant(0, dtype=tf.int64),
+                lambda: tf.constant(0 if drop_forbidden else 1, dtype=tf.int64),
             )
             return tf.data.Dataset.from_tensors(ex).repeat(num_repeats)
 
@@ -3083,8 +3339,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         dataset_after_oversampling = dataset  # Save this before the oversampling block
 
-        # Calculate expected counts after oversampling
-        expected_counts_after = counts * rep_factors
+        # Calculate expected counts after oversampling (for coarse allowed bins).
+        expected_counts_after = counts.copy()
+        expected_counts_after[allowed_bins] = (
+            counts[allowed_bins] * rep_factors[allowed_bins]
+        )
+
+        cv_before = counts[allowed_bins].std() / max(counts[allowed_bins].mean(), 1e-8)
+        cv_after = expected_counts_after[allowed_bins].std() / max(
+            expected_counts_after[allowed_bins].mean(), 1e-8
+        )
+        print(
+            f"Oversampling coarse bins: stride={stride}, allowed={allowed_bins.sum()}, "
+            f"target_pct={target_percentile:.1f}, max_repeat={max_repeat}, "
+            f"CV before={cv_before:.4f}, CV expected after={cv_after:.4f}"
+        )
 
         from neuroencoders.importData.gui_elements import OversamplingVisualizer
 
@@ -3093,7 +3362,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.folderResult, str(windowSizeMS), "oversampling_effect.png"
             )
         ):
-            visualizer = OversamplingVisualizer(self.GaussianHeatmap)
+            visualizer = OversamplingVisualizer(
+                self.GaussianHeatmap, l_function=self.Linearizer.pykeops_linearization
+            )
             visualizer.visualize_oversampling_effect(
                 dataset_before_oversampling,
                 dataset_after_oversampling,
@@ -3903,6 +4174,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             "sigma": sigma,
             "neg": neg,
             "device": self.deviceName,
+            "maze_params": self.maze_params,
         }
         self.GaussianHeatmap = GaussianHeatmapLayer(
             **self.gaussian_heatmap_params,

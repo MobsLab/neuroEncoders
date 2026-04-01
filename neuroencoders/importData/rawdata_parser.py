@@ -1090,6 +1090,11 @@ def select_epochs(
                 # we want to select only the idx that are in the speedMask
                 idx = np.arange(idx_testSet, idx_testSet + sizeTest)
                 idx_valid = np.where(speedMaskToShowPRE[idx])[0]
+                if idx_valid.shape[0] == 0:
+                    entropiesPositions += [0]
+                    entropiesSpeeds += [0]
+                    nb_points += [0]
+                    continue
                 # The environmental variable are discretized by equally space bins
                 # such that there is 45*...*45 bins per dimension
                 # we then fit over the test set a kernel estimation of the probability distribution
