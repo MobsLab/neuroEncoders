@@ -183,7 +183,13 @@ class WaveFormComparator:
                 @tf.function
                 def filter_by_pos_index(x):
                     pos_index = x["pos_index"]
-                    return tf.equal(tf.gather(mask_tensor, pos_index), 1.0)
+                    mask_size = tf.size(mask_tensor, out_type=pos_index.dtype)
+                    is_non_negative = tf.math.greater_equal(pos_index, 0)
+                    is_in_range = tf.math.less(pos_index, mask_size)
+                    valid = tf.math.logical_and(is_non_negative, is_in_range)
+                    safe_index = tf.where(valid, pos_index, tf.zeros_like(pos_index))
+                    gathered = tf.gather(mask_tensor, safe_index)
+                    return tf.math.logical_and(valid, tf.equal(gathered, 1.0))
 
                 return filter_by_pos_index
 

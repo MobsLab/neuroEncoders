@@ -70,15 +70,15 @@ def main(args):
     xmlPath = args.path.strip("'")
     print("NEUROENCODER: PATH", xmlPath)
     # WARNING: windowSize is in s and gets converted to ms
-    if isinstance(args.window, float):
-        windowSizeMS = int(args.window * 1000)
-        windowSizeMSlist = [windowSizeMS]
-    elif isinstance(args.window, list):
-        windowSizeMSlist = [int(w * 1000) for w in args.window]
-        windowSizeMS = max(windowSizeMSlist)
+    # args.window is always a list because nargs='+' is used in argparse
+    window_values = args.window if isinstance(args.window, list) else [args.window]
+    try:
+        windowSizeMSlist = [int(float(w) * 1000) for w in window_values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Window size(s) must be numeric.") from exc
+    windowSizeMS = max(windowSizeMSlist)
+    if len(windowSizeMSlist) > 1:
         print(f"NEUROENCODER: WINDOW LIST {windowSizeMSlist} ms")
-    else:
-        raise ValueError("Window size must be a float or a list of floats.")
 
     print(f"NEUROENCODER: WINDOW {windowSizeMS} ms")
     mode = args.mode
@@ -1231,7 +1231,11 @@ if __name__ == "__main__":
             "--window",
             type=float,
             nargs="+",
-            help="defines window size, in seconds. Defaults to 0.108",
+            help=(
+                "defines one or more window sizes, in seconds. "
+                "This option accepts multiple values and returns a list. "
+                "Defaults to [0.108]"
+            ),
             default=[0.108],
         )
         p.add_argument(

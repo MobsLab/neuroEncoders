@@ -11,7 +11,6 @@ import psutil
 
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
-win_values = [0.108, 0.252, 0.504]  # only kept for new dataset
 win_values = [
     [0.036, 0.108],
     [0.036, 0.108, 0.252],
@@ -246,7 +245,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
         if useStridingFactor:
             cmd_ann += ["--striding_factor", str(stridingFactor)]
         else:
-            cmd_ann += ["--striding", str(win)]
+            striding_window = max(win) if isinstance(win, list) else win
+            cmd_ann += ["--striding", str(striding_window)]
 
         windows = max(win) if isinstance(win, list) else win
         cmd_bayes = [
