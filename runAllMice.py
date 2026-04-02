@@ -12,8 +12,9 @@ import psutil
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [
-    [0.036, 0.108],
-    [0.036, 0.108, 0.252],
+    [0.036],
+    [0.108],
+    [0.252],
     # [0.036, 0.108, 0.252, 0.504],
 ]  # only kept for new dataset
 # Mice name
@@ -34,7 +35,7 @@ mice_nb = [
     "M1199_MFB",
 ]
 ####
-nameExp = "consensus_v7_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
+nameExp = "consensus_v8_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"

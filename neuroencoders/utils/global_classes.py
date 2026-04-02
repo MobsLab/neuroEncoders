@@ -11,7 +11,9 @@ import json
 # Load custom code
 import os
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
+os.environ.setdefault(
+    "TF_CPP_MIN_LOG_LEVEL", "2"
+)  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
 from typing import Dict, Tuple
@@ -534,7 +536,9 @@ class DataHelper(Project):
         # Combine conditions to ensure we filter within [min_speed, max_speed] and exclude freeze epochs
         speed_range_mask = (smoothed_speed > min_speed) & (smoothed_speed < max_speed)
         freeze_excluded_mask = ~inEpochsMask(pos_time, freeze_epochs)
-        self.fullBehavior["Times"]["speedFilter"] = speed_range_mask & freeze_excluded_mask
+        self.fullBehavior["Times"]["speedFilter"] = (
+            speed_range_mask & freeze_excluded_mask
+        )
         print(f"forced speed filter with min {min_speed} and max {max_speed}")
 
     def get_true_target(
@@ -2402,7 +2406,9 @@ class SpatialConstraintsMixin:
         Returns:
             dict: Extracted maze boundaries.
         """
-        if isinstance(maze_params, dict) and all(k in maze_params for k in ("class_name", "config")):
+        if isinstance(maze_params, dict) and all(
+            k in maze_params for k in ("class_name", "config")
+        ):
             # means maze_params is actually a serialized tensor/array, we need to deserialize it
             maze_params = np.array(maze_params["config"]["value"])
 
