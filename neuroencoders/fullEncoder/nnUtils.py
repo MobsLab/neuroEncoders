@@ -227,14 +227,32 @@ class MaskedBatchNormalization(tf.keras.layers.Layer):
 
     def get_config(self):
         config = super().get_config()
-        config.update({"epsilon": self.epsilon, "momentum": self.momentum})
+        config.update(
+            {
+                "target_structure": self.target_structure,
+                "epsilon": self.epsilon,
+                "momentum": self.momentum,
+                "sigma": self.sigma,
+                "l_function_params": self.l_function_params,
+            }
+        )
         return config
 
     @classmethod
     def from_config(cls, config):
-        epsilon = config.get("epsilon", 1e-3)
-        momentum = config.get("momentum", 0.99)
-        return cls(epsilon=epsilon, momentum=momentum)
+        epsilon = config.pop("epsilon", 1e-3)
+        momentum = config.pop("momentum", 0.99)
+        target_structure = config.pop("target_structure", None)
+        sigma = config.pop("sigma", None)
+        l_function_params = config.pop("l_function_params", None)
+        return cls(
+            target_structure=target_structure,
+            sigma=sigma,
+            l_function_params=l_function_params,
+            epsilon=epsilon,
+            momentum=momentum,
+            **config,
+        )
 
 
 @tf.keras.utils.register_keras_serializable(package="neuroencoders")
