@@ -27,14 +27,21 @@ optional.start_freeze = Start(Behavior.("FreezeEpoch"),'s');
 optional.stop_freeze = Stop(Behavior.("FreezeEpoch"), 's');
 optional.start_stim = Start(Behavior.("StimEpoch"), 's');
 optional.stop_stim = Stop(Behavior.("StimEpoch"), 's');
-optional.PosMat = Behavior.("PosMat");
+optional.PosMat = Behavior.("PosMatInit");
+try
+    optional.MovTimes = Range(Behavior.("MovAcctsd"), 's');
+    optional.MovAcc = Data(Behavior.("MovAcctsd"));
+catch
+    optional.MovTimes = Range(Behavior.("MovAccTsd"), 's');
+    optional.MovAcc = Data(Behavior.("MovAccTsd"));
+end
 
 try
     SWR=importdata(strcat(folderData,'SWR.mat'));
 
     optional.tRipples = Range(SWR.tRipples, 's');
 catch
-    disp('No SWR data found, skipping tRipples extraction.')
+    disp('No SWR data found, skipping tRipples extraction.');
 end
 
 % Save the behavior data

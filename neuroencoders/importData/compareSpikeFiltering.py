@@ -1,6 +1,7 @@
 # Load libs
 import os
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -80,6 +81,10 @@ class WaveFormComparator:
         self.suffix = f"_{phase}" if phase is not None else ""
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
+        self.max_nb_spikes = kwargs.get("max_nb_spikes", 400)
+        self.max_spikes_per_group = kwargs.get(
+            "max_spikes_per_group", int(self.max_nb_spikes / self.params.nGroups)
+        )
         self.feat_desc = {
             # index of the position in the position array
             "pos_index": tf.io.FixedLenFeature([], tf.int64),
@@ -171,16 +176,26 @@ class WaveFormComparator:
                 )
             )
         else:
-            table = tf.lookup.StaticHashTable(
-                tf.lookup.KeyValueTensorInitializer(
-                    tf.constant(np.arange(len(epochMask)), dtype=tf.int64),
-                    tf.constant(epochMask, dtype=tf.float64),
-                ),
-                default_value=0,
-            )
-            self.dataset = self.dataset.filter(
-                lambda x: tf.equal(table.lookup(x["pos_index"]), 1.0)
-            )
+
+            def get_mask_filter(mask):
+                mask_tensor = tf.constant(mask, dtype=tf.float32)
+
+                @tf.function
+                def filter_by_pos_index(x):
+                    pos_index = x["pos_index"]
+                    mask_size = tf.size(mask_tensor, out_type=pos_index.dtype)
+                    is_non_negative = tf.math.greater_equal(pos_index, 0)
+                    is_in_range = tf.math.less(pos_index, mask_size)
+                    valid = tf.math.logical_and(is_non_negative, is_in_range)
+                    safe_index = tf.where(valid, pos_index, tf.zeros_like(pos_index))
+                    gathered = tf.gather(mask_tensor, safe_index)
+                    return tf.math.logical_and(valid, tf.equal(gathered, 1.0))
+
+                return filter_by_pos_index
+
+            filter_op = get_mask_filter(epochMask)
+            self.dataset = self.dataset.filter(filter_op)
+
             self.dataset = self.dataset.map(
                 nnUtils.import_true_pos(behavior_data["Positions"])
             )
@@ -190,13 +205,69 @@ class WaveFormComparator:
                 )
             )
 
+        def parse_serialized_sequence(vals):
+            return nnUtils.parse_serialized_sequence(
+                self.params,
+                vals,
+                max_spikes=self.max_nb_spikes,
+                max_spikes_per_group=self.max_spikes_per_group,
+                # sorted_indices = #TODO: at some point
+            )
+
         self.dataset = self.dataset.map(
-            lambda *vals: nnUtils.parse_serialized_sequence(
-                self.params, *vals, batched=False
-            ),
+            parse_serialized_sequence,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
+
+        def create_indices_callable(vals, shuffle=False):
+            return self.create_indices(vals, shuffle=shuffle)
+
+        self.dataset = self.dataset.map(
+            create_indices_callable, num_parallel_calls=tf.data.AUTOTUNE
+        )
         print(f"Dataset {dataset_name} loaded: {self}")
+
+    def create_indices(self, vals, shuffle=False):
+        """
+        Create relative indices for gathering spikes from each group.
+        The i-th spike of the group should be positioned at spikePosition[i] in the final tensor.
+
+        Args:
+            vals (dict): A dictionary containing the input tensors, including "groups" and "group{n}" for each group.
+            addLinearizationTensor (bool): Whether to add linearization tensors to the output.
+            shuffle (bool): Whether to shuffle the indices within each group for null hypothesis/control.
+        Returns:
+            dict: Updated dictionary with indices for each group. The indices are stored under the keys "indices{n}" for each group.
+        """
+        groups = vals["groups"]
+        for group_id in range(self.params.nGroups):
+            # Find positions of spikes belonging to this group
+            is_in_group = tf.equal(groups, group_id)
+
+            # 2. Use cumsum to generate sequential IDs (1, 2, 3...) for these spikes
+            # This replaces the SparseTensor logic entirely.
+            # Example: [0, 1, 0, 1] -> [0, 1, 1, 2]
+            relative_indices = tf.cast(
+                tf.cumsum(tf.cast(is_in_group, tf.int32)), tf.int32
+            )
+
+            # Ensure that relative indices do not exceed the available spike slots
+            # per group (to avoid out-of-bounds accesses when gathering).
+            max_spikes_per_group = getattr(self.params, "max_nb_spikes_per_group", None)
+            if max_spikes_per_group is not None:
+                relative_indices = tf.clip_by_value(
+                    relative_indices,
+                    clip_value_min=0,
+                    clip_value_max=max_spikes_per_group - 1,
+                )
+
+            # 3. Apply the mask so only spikes in this group have a non-zero index
+            # Example: [0, 1, 1, 2] -> [0, 1, 0, 2]
+            indices_tensor = tf.where(is_in_group, relative_indices, 0)
+
+            vals[f"indices{group_id}"] = indices_tensor
+
+        return vals
 
     def __repr__(self):
         return f"WaveFormComparator(projectPath={self.projectPath}, params={self.params}, behavior_data=Dict with keys {list(self.behavior_data.keys())}, windowSizeMS={self.windowSizeMS}, useTrain={self.useTrain}, useTest={self.useTest}, useAll={self.useAll}, sleepName={self.sleepName}, phase={self.phase})"
@@ -311,7 +382,11 @@ class WaveFormComparator:
 
     def get_NNdataset_spikepos(self):
         resData = self.dataset.map(lambda vals: vals["indexInDat"])
-        return list(resData.as_numpy_iterator())
+        # Filter out padding (-1) introduced by parse_serialized_sequence
+        return [
+            x[x != -1]
+            for x in tqdm(resData.as_numpy_iterator(), desc="Collecting spike indices")
+        ]
 
     def get_data(self):
         # Get names
@@ -328,21 +403,186 @@ class WaveFormComparator:
             filPath, dtype=np.int16, mode="r", shape=(self.number_timeSteps, nChannels)
         )
 
+    def get_batched_dataset(self, batch_size=None, shuffle=True):
+        """
+        Get a batched dataset iterator, mimicking the network input pipeline.
+        Args:
+           batch_size: If None, uses self.params.batch_size
+        Returns:
+           iterator: yielding batched dictionaries
+        """
+        bs = batch_size if batch_size is not None else self.params.batch_size
+        ds = self.dataset
+        if shuffle:
+            ds = ds.shuffle(buffer_size=1000)
 
-def reconstruct_spike_waveforms(vals, params):
+        # We need to make sure we output the same structure as the network expects
+        # The network usually expects a tuple (inputs, targets) or just inputs dictionary if custom loop
+        # Here we return the dictionary
+
+        ds = ds.batch(bs, drop_remainder=True)
+        return ds
+
+    def reconstruct_spike_waveforms(self, vals):
+        """
+        Get spike waveforms from the processed tensors (NO sparse reconstruction needed anymore).
+
+        Args:
+            vals: Dictionary containing batched tensors
+
+        Returns:
+            reconstructed_spikes: List of [batch, max_spikes, nChannels, 32] tensors per group
+        """
+        reconstructed_spikes = []
+
+        for group in range(self.params.nGroups):
+            key = f"group{group}"
+            if key in vals:
+                # The parsing already delivers [batch, max_spikes, nCh, 32]
+                reconstructed_spikes.append(vals[key])
+            else:
+                # Fallback / Placeholder
+                print(f"Warning: {key} not found in vals")
+                reconstructed_spikes.append(None)
+
+        return reconstructed_spikes
+
+    def analyze_spike_statistics(self, reconstructed_spikes):
+        """
+        Analyze statistics of spikes across the batch.
+        Args:
+            reconstructed_spikes: List of 4D tensors per group
+        """
+        print("=== SPIKE STATISTICS ===")
+        if not reconstructed_spikes:
+            return
+
+        # Assume batch dim is 0
+        batch_size = reconstructed_spikes[0].shape[0]
+
+        for i, group_data in enumerate(reconstructed_spikes):
+            if group_data is None:
+                continue
+
+            # shape: [Batch, MaxSpikes, Ch, Time]
+            # Verify if it's tensor or numpy
+            if hasattr(group_data, "numpy"):
+                data = group_data.numpy()
+            else:
+                data = group_data
+
+            # Check for non-zero spikes (energy > threshold)
+            # Flatten to [Batch*MaxSpikes, Features]
+            flat = data.reshape(-1, np.prod(data.shape[2:]))
+            norms = np.linalg.norm(flat, axis=1)
+            n_valid = np.sum(norms > 1e-6)
+
+            print(f"Group {i}: {n_valid} valid spikes in batch of {batch_size} samples")
+            print(f"  Shape: {data.shape}")
+            print(
+                f"  Mean Amp: {np.mean(np.abs(data)):.2f}, Max: {np.max(np.abs(data)):.2f}"
+            )
+
+    def plot_spike_examples(
+        self, reconstructed_spikes, batch_idx=0, group=0, max_spikes=10
+    ):
+        """
+        Plot examples of spikes from a specific batch item and group.
+        """
+        if group >= len(reconstructed_spikes) or reconstructed_spikes[group] is None:
+            print(f"Group {group} not available")
+            return
+
+        data = reconstructed_spikes[group]
+        if hasattr(data, "numpy"):
+            data = data.numpy()
+
+        # Get single batch item: [MaxSpikes, Ch, Time]
+        if batch_idx >= data.shape[0]:
+            print("Batch index out of bounds")
+            return
+
+        spikes = data[batch_idx]
+        # Filter empty slots
+        norms = np.linalg.norm(spikes.reshape(spikes.shape[0], -1), axis=1)
+        valid_indices = np.where(norms > 1e-6)[0]
+
+        if len(valid_indices) == 0:
+            print("No valid spikes in this sample.")
+            return
+
+        to_plot = valid_indices[:max_spikes]
+
+        n_plot = len(to_plot)
+        cols = 5
+        rows = (n_plot // cols) + (1 if n_plot % cols > 0 else 0)
+
+        fig, axes = plt.subplots(rows, cols, figsize=(15, 3 * rows))
+        axes = np.array(axes).flatten()
+
+        parameters = self.params
+        n_ch = parameters.nChannelsPerGroup[group]
+
+        for i, idx in enumerate(to_plot):
+            ax = axes[i]
+            # waveform: [nCh, 32]
+            wf = spikes[idx]
+            for c in range(n_ch):
+                ax.plot(wf[c], label=f"Ch{c}")
+            ax.set_title(f"Spike {idx}")
+
+        plt.tight_layout()
+        plt.show()
+
+    def check_distribution(self, reconstructed_spikes, group=0):
+        """Basic PCA check on the batch"""
+        from sklearn.decomposition import PCA
+
+        if group >= len(reconstructed_spikes) or reconstructed_spikes[group] is None:
+            return
+
+        data = reconstructed_spikes[group]  # [Batch, MaxSpikes, Ch, Time]
+        if hasattr(data, "numpy"):
+            data = data.numpy()
+
+        # Flatten all spikes in batch
+        # [Batch * MaxSpikes, Ch * Time]
+        flat_all = data.reshape(-1, np.prod(data.shape[-2:]))
+
+        # Filter zeros
+        norms = np.linalg.norm(flat_all, axis=1)
+        valid = flat_all[norms > 1e-6]
+
+        if len(valid) < 3:
+            print("Not enough spikes for PCA")
+            return
+
+        print(f"Running PCA on {len(valid)} spikes...")
+        pca = PCA(n_components=2)
+        proj = pca.fit_transform(valid)
+
+        plt.figure(figsize=(8, 6))
+        plt.scatter(proj[:, 0], proj[:, 1], alpha=0.5, s=5)
+        plt.title(f"PCA of Batch Spikes (Group {group})")
+        plt.xlabel("PC1")
+        plt.ylabel("PC2")
+        plt.show()
+
+
+def reconstruct_spike_waveforms(vals, params: Params):
     """
     Reconstruct individual spike waveforms from the processed tensors.
 
     Args:
         vals: Dictionary containing groups, group+str(g), and indices tensors
-        params: Parameters object with batchSize, nGroups, nChannelsPerGroup
+        params: Parameters object with batch_size, nGroups, nChannelsPerGroup
 
     Returns:
         reconstructed_spikes: List of [batch, nspikes, nChannels, 32] arrays per group
         spike_positions: List of positions where spikes occurred per group
         batch_assignments: Which batch each spike belongs to
     """
-    batch_size = params.batchSize
+    batch_size = params.batch_size
     reconstructed_spikes = []
     spike_positions = []
     batch_assignments = []
@@ -537,7 +777,7 @@ def plot_spike_examples(
     plt.show()
 
 
-def analyze_spike_statistics(reconstructed_spikes, params):
+def analyze_spike_statistics(reconstructed_spikes, params: Params):
     """
     Analyze statistics of reconstructed spikes across batches and groups.
     """
@@ -545,7 +785,7 @@ def analyze_spike_statistics(reconstructed_spikes, params):
 
     total_spikes_per_batch = []
 
-    for batch_idx in range(params.batchSize):
+    for batch_idx in range(params.batch_size):
         batch_total = 0
         for group in range(params.nGroups):
             group_spikes = reconstructed_spikes[group][batch_idx].numpy()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 # neuroEncoder by the Memory, Oscillations and Brain States (MOBS) team
 # 2017-2024
 # by Thibault Balenbois, Pierre Orhan, Dmitri Bryzgalov and Théotime de Charrin
@@ -20,7 +21,12 @@ from neuroencoders.importData.epochs_management import inEpochsMask
 
 # Load custom code
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
-from neuroencoders.utils.global_classes import Params, Project, save_project_to_pickle
+from neuroencoders.utils.global_classes import (
+    Params,
+    Project,
+    get_max_nb_spikes,
+    save_project_to_pickle,
+)
 
 # Meta parameters
 show_figures = False
@@ -28,6 +34,9 @@ debug = True
 overWrite_speed_filter_and_linearization = False
 redo_params = False
 redo_all_params = False
+# Modify the speed mask to be much more conservative
+min_speed = 7.5
+max_speed = 50
 
 
 def main(args):
@@ -61,7 +70,16 @@ def main(args):
     xmlPath = args.path.strip("'")
     print("NEUROENCODER: PATH", xmlPath)
     # WARNING: windowSize is in s and gets converted to ms
-    windowSizeMS = int(args.window * 1000)
+    # args.window is always a list because nargs='+' is used in argparse
+    window_values = args.window if isinstance(args.window, list) else [args.window]
+    try:
+        windowSizeMSlist = [int(float(w) * 1000) for w in window_values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Window size(s) must be numeric.") from exc
+    windowSizeMS = max(windowSizeMSlist)
+    if len(windowSizeMSlist) > 1:
+        print(f"NEUROENCODER: WINDOW LIST {windowSizeMSlist} ms")
+
     print(f"NEUROENCODER: WINDOW {windowSizeMS} ms")
     mode = args.mode
     print("NEUROENCODER: MODE", mode)
@@ -81,7 +99,7 @@ def main(args):
         os.path.expanduser(xmlPath),
         jsonPath=jsonPath,
         nameExp=args.name,
-        windowSize=args.window,
+        windowSize=windowSizeMS / 1000,
     )
     # Select the data for testing
     if mode != "decode":
@@ -128,9 +146,10 @@ def main(args):
         target=args.target,
         phase=args.phase,
         nameExp=args.name,
-        windowSize=args.window,
+        windowSize=windowSizeMS / 1000,
         force_ref=False,
         isPredLoss=isPL,
+        load_at_init=True,  # we load a new params
     )
     helpers = [DataHelper]
     if args.phase != "cond":
@@ -167,9 +186,10 @@ def main(args):
             target=args.target,
             phase="cond",
             nameExp=args.name,
-            windowSize=args.window,
+            windowSize=windowSizeMS / 1000,
             force_ref=False,
             isPredLoss=isPL,
+            load_at_init=True,  # we load a new params
         )
         # adding post test helper
         rawdata_parser.speed_filter(
@@ -205,9 +225,10 @@ def main(args):
             target=args.target,
             phase="post",
             nameExp=args.name,
-            windowSize=args.window,
+            windowSize=windowSizeMS / 1000,
             force_ref=False,
             isPredLoss=isPL,
+            load_at_init=True,  # we load a new params
         )
         helpers = [DataHelper_cond, DataHelper_post, DataHelper]
     for helper in helpers:
@@ -226,9 +247,14 @@ def main(args):
             overwrite=args.redo and overWrite_speed_filter_and_linearization,
         )
 
+        if min_speed is not None and max_speed is not None:
+            # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
+            helper.force_speed_mask(min_speed, max_speed)
+
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
+        pos_time = helper.fullBehavior["positionTime"][:, 0]
         epochMask = inEpochsMask(
-            helper.fullBehavior["positionTime"][:, 0],
+            pos_time,
             helper.fullBehavior["Times"]["trainEpochs"],
         )
         totMask = speedMask * epochMask
@@ -248,16 +274,24 @@ def main(args):
             windowSizeMS, l_function, in_place=True, show=show_figures, speedMask=True
         )
 
+    if windowSizeMS >= 504:
+        batch_size = 32
+    elif windowSizeMS >= 252:
+        batch_size = 64
+    elif windowSizeMS >= 108:
+        batch_size = 128
+    else:
+        batch_size = 256
+
     Parameters = Params(
         helper=DataHelper,
-        windowSize=args.window,
+        windowSize=windowSizeMS / 1000,
         nEpochs=args.epochs,
         phase=args.phase,
         nFeatures=args.n_features,
-        batchSize=(256 if args.window < 0.252 else 128)
-        if "1230" not in ProjectPath.xml
-        else 128,
+        batch_size=batch_size,
         save_json=True,
+        load_at_init=False,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=not args.no_dense,
@@ -291,7 +325,7 @@ def main(args):
 
     if args.striding_factor is None:
         windowStride = args.striding
-        strideFactor = round(args.window / windowStride, 4)
+        strideFactor = round(windowSizeMS / 1000 / windowStride, 4)
         # check if windowStride is an integer, if not raise an error
         if not strideFactor.is_integer():
             raise ValueError(
@@ -299,13 +333,13 @@ def main(args):
             )
     else:
         strideFactor = args.striding_factor
-        windowStride = round(args.window / strideFactor, 4)
+        windowStride = round(windowSizeMS / 1000 / strideFactor, 4)
         if windowStride < 0.036:
             warn(
                 f"The selected striding factor of {strideFactor} is too high for the selected window size of {args.window}s (would make a windowStride of {windowStride}). Setting striding to 36ms."
             )
             windowStride = 0.036
-            if args.window == 0.036:
+            if windowSizeMS / 1000 == 0.036:
                 # this way we dont have to recreate them.
                 strideFactor = 1
         # check if windowStride is a valid ms value, if not raise an error
@@ -322,7 +356,10 @@ def main(args):
 
         try:
             TrainerBayes = BayesTraining.Trainer(
-                ProjectPath, phase=args.phase, grid_size=Parameters.GaussianGridSize
+                ProjectPath,
+                phase=args.phase,
+                grid_size=Parameters.GaussianGridSize,
+                maze_params=DataHelper.maze_coords,
             )
 
             # Load or create bayesMatrices
@@ -655,7 +692,7 @@ def main(args):
         julia_spike_filter(
             ProjectPath,
             folderCode,
-            windowSize=args.window,
+            windowSize=windowSizeMS / 1000,
             windowStride=windowStride,  # This way the striding is always 36ms-based
             strideFactor=strideFactor,
             redo=False,
@@ -663,6 +700,8 @@ def main(args):
         )
 
         # Network
+        max_nb_spikes = get_max_nb_spikes(windowSizeMS)
+
         NNTrainer = Training.LSTMandSpikeNetwork(
             ProjectPath,
             Parameters,
@@ -674,6 +713,8 @@ def main(args):
             behaviorData=DataHelper.fullBehavior,
             alpha=Parameters.denseweightAlpha,
             linearizer=Linearizer,
+            jit_compile=False,
+            max_nb_spikes=max_nb_spikes,
         )
 
         if (
@@ -690,10 +731,10 @@ def main(args):
             if Parameters.dataAugmentation:
                 print("num_augmentations", num_augmentations)
                 if num_augmentations is None:
-                    num_augmentations = 4 if args.window < 0.504 else 2
+                    num_augmentations = 3
             NNTrainer.train(
                 DataHelper.fullBehavior,
-                windowSizeMS=windowSizeMS,
+                windowSizeMS=windowSizeMSlist,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
                 load_model=True,
@@ -701,15 +742,32 @@ def main(args):
                 l_function=l_function,
                 num_augmentations=num_augmentations,
                 strideFactor=strideFactor,
+                normalize=True,
             )
             T = None
 
         if Parameters.GaussianHeatmap and (
-            not os.path.exists(
-                os.path.join(
-                    NNTrainer.folderResult,
-                    str(windowSizeMS),
-                    "errorFig_2d_NN_training_inferring.png",
+            not (
+                os.path.exists(
+                    os.path.join(
+                        NNTrainer.folderResult,
+                        str(windowSizeMS),
+                        "errorFig_2d_NN_training_inferring.png",
+                    )
+                )
+                and os.path.exists(
+                    os.path.join(
+                        NNTrainer.folderResult,
+                        str(windowSizeMS),
+                        "errorFig_2d_NN_post_inferring.png",
+                    )
+                )
+                and os.path.exists(
+                    os.path.join(
+                        NNTrainer.folderResult,
+                        str(windowSizeMS),
+                        "errorFig_2d_NN_cond_inferring.png",
+                    )
                 )
             )
             or args.redo
@@ -720,6 +778,7 @@ def main(args):
                 fit_temperature=True,
                 useTrain=True,
                 useTest=False,
+                phase="fit_temperature",
                 windowSizeMS=windowSizeMS,
                 useSpeedFilter=True,
                 isPredLoss=isPL,
@@ -971,7 +1030,7 @@ def main(args):
             curr.fig_summary_id_card(
                 timeWindow=windowSizeMS,
                 DataHelper=DataHelper,
-                save=True,
+                open=True,
                 block=False,
                 mouse_name=curr.mouse_name + curr.manipe,
             )
@@ -1017,7 +1076,7 @@ def main(args):
             folderCode = os.path.dirname(os.path.realpath(__file__)) + os.path.sep
             # Right now, the thresholds are not the same
             windowStride = args.striding
-            strideFactor = round(args.window / windowStride, 4)
+            strideFactor = round(windowSizeMS / (1000 * windowStride), 4)
             # check if windowStride is an integer, if not raise an error
             if not strideFactor.is_integer():
                 raise ValueError(
@@ -1026,7 +1085,7 @@ def main(args):
             julia_spike_filter(
                 ProjectPath,
                 folderCode,
-                windowSize=args.window,
+                windowSize=windowSizeMS / 1000,
                 windowStride=windowStride,  # This way the striding is always 36ms-based
             )
             # Decode
@@ -1054,7 +1113,9 @@ def main(args):
         from neuroencoders.simpleBayes import decode_bayes as BayesTrainer
 
         ### Bayes
-        TrainerBayes = BayesTrainer.Trainer(ProjectPath)
+        TrainerBayes = BayesTrainer.Trainer(
+            ProjectPath, maze_params=DataHelper.maze_coords, phase=args.phase
+        )
         bayesMatrices = TrainerBayes.train_order_by_pos(
             DataHelper.fullBehavior, l_function=l_function
         )
@@ -1064,7 +1125,7 @@ def main(args):
         julia_spike_filter(
             ProjectPath,
             folderCode,
-            windowSize=args.window,
+            windowSize=windowSizeMS / 1000,
             windowStride=windowStride,  # This way the striding is always 36ms-based
             redo=False,
             BUFFERSIZE=144000,
@@ -1169,8 +1230,13 @@ if __name__ == "__main__":
             "-w",
             "--window",
             type=float,
-            help="defines window size, in seconds. Defaults to 0.108",
-            default=0.108,
+            nargs="+",
+            help=(
+                "defines one or more window sizes, in seconds. "
+                "This option accepts multiple values and returns a list. "
+                "Defaults to [0.108]"
+            ),
+            default=[0.108],
         )
         p.add_argument(
             "-n",

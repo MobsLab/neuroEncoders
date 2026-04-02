@@ -10,6 +10,8 @@ import json
 
 # Load custom code
 import os
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
 from typing import Dict, Tuple
@@ -68,6 +70,29 @@ def is_in_zone(pos, zone_def):
         & (pos[:, 1] >= y_min)
         & (pos[:, 1] <= y_max)
     )
+
+
+def get_max_nb_spikes(windowSizeMS):
+    if isinstance(windowSizeMS, str):
+        windowSizeMS = int(windowSizeMS)
+    if isinstance(windowSizeMS, list):
+        windowSizeMS = max(windowSizeMS)
+
+    if not isinstance(windowSizeMS, int):
+        raise ValueError("windowSizeMS must be an integer or a list of integers")
+
+    if windowSizeMS >= 504:
+        max_nb_spikes = 1300
+    elif windowSizeMS >= 252:
+        max_nb_spikes = 650
+    elif windowSizeMS >= 108:
+        max_nb_spikes = 400
+    elif windowSizeMS >= 36:
+        max_nb_spikes = 100
+    else:
+        max_nb_spikes = None
+
+    return max_nb_spikes
 
 
 class Project:
@@ -197,6 +222,19 @@ class Project:
             with open(os.path.join(path, "Project_108.pkl"), "rb") as f:
                 return pickle.load(f)
 
+    def get_config(self):
+        return {
+            "xmlPath": self.xml,
+            "datPath": self.dat,
+            "jsonPath": self.json,
+            "nameExp": os.path.basename(self.experimentPath),
+            "windowSize": self.windowSize,
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
 
 class DataHelper(Project):
     """
@@ -246,7 +284,7 @@ class DataHelper(Project):
             if xmlPath is not None and kwargs.get("nameExp", None) is not None:
                 load_path = os.path.join(
                     os.path.dirname(xmlPath),
-                    kwargs.get("nameExp", None),
+                    kwargs["nameExp"],
                     f"DataHelper{suffix}.pkl",
                 )
             else:
@@ -368,6 +406,8 @@ class DataHelper(Project):
         self.lower_x = 0.35
         self.upper_x = 0.65
         self.ylim = 0.75
+        self.fix_tracking()
+        self.get_maze_limits()
         self._define_maze_zones()
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
 
@@ -385,6 +425,43 @@ class DataHelper(Project):
             cls._skip_new = False
         setattr(obj, "_loaded_from_pickle", True)
         return obj
+
+    def fix_tracking(self, quantile_threshold=0.995):
+        """
+        Robustly scales positions to [0, 1] using percentiles to handle outliers
+        and ensures the 'bottom' starts at 0.
+        """
+        for sess_name, epoch in self.fullBehavior["Times"]["SessionEpochs"].items():
+            # Get the mask for this specific session
+            mask = ep.inEpochsMask(self.positionTime, epoch).flatten()
+
+            if np.any(mask):
+                session_pos = self.positions[mask, :2]
+
+                # 1. Identify the 'corners' using quantiles instead of absolute min/max
+                # This ignores 0.5% of extreme tracking jumps (artifacts)
+                min_pos = np.nanquantile(session_pos, 1 - quantile_threshold, axis=0)
+                max_pos = np.nanquantile(session_pos, quantile_threshold, axis=0)
+
+                # 2. Shift to 0,0
+                shifted_pos = session_pos - min_pos
+
+                # 3. Scale to 1.0 (using the new adjusted max)
+                new_range = max_pos - min_pos
+
+                # Avoid division by zero
+                new_range[new_range == 0] = 1.0
+
+                normalized_pos = shifted_pos / new_range
+
+                # 4. Hard-clip to [0, 1] to keep everything inside the box
+                normalized_pos = np.clip(normalized_pos, 0, 1)
+
+                self.positions[mask, :2] = normalized_pos
+                if hasattr(self, "old_positions"):
+                    self.old_positions[mask, :2] = normalized_pos
+
+        self.fullBehavior["Positions"] = self.positions
 
     def nGroups(self):
         """
@@ -432,6 +509,33 @@ class DataHelper(Project):
     def setThresholds(self, thresholds):
         assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
         self.thresholds = [i for d in thresholds for i in d]
+
+    def force_speed_mask(self, min_speed, max_speed):
+        from neuroencoders.importData.epochs_management import inEpochsMask
+
+        speed = self.fullBehavior["Speed"][:, 0]
+        pos_time = self.fullBehavior["positionTime"][:, 0]
+        freeze_epochs = self.get_freeze_epochs()
+
+        if speed.shape[0] == pos_time.shape[0] - 1:
+            speed = np.concatenate([[speed[0]], speed])
+
+        window_len = 6
+        s = np.r_[
+            speed[window_len - 1 : 0 : -1],
+            speed,
+            speed[-2 : -window_len - 1 : -1],
+        ]
+        w = np.hamming(window_len)
+        smoothed_speed = np.convolve(w / w.sum(), s, mode="valid")[
+            (window_len // 2 - 1) : -(window_len // 2)
+        ]
+
+        # Combine conditions to ensure we filter within [min_speed, max_speed] and exclude freeze epochs
+        speed_range_mask = (smoothed_speed > min_speed) & (smoothed_speed < max_speed)
+        freeze_excluded_mask = ~inEpochsMask(pos_time, freeze_epochs)
+        self.fullBehavior["Times"]["speedFilter"] = speed_range_mask & freeze_excluded_mask
+        print(f"forced speed filter with min {min_speed} and max {max_speed}")
 
     def get_true_target(
         self, windowSizeMS=108, l_function=None, in_place=False, show=False, **kwargs
@@ -651,16 +755,41 @@ class DataHelper(Project):
             positions = self.positions
 
         assert positions.shape[1] == 2, "positions must have 2 dimensions"
-        lower_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] < 0.5))
-        upper_mask = np.where((positions[:, 1] < 0.75) & (positions[:, 0] > 0.5))
-        self.lower_x = positions[lower_mask, 0].max()
-        self.upper_x = positions[upper_mask, 0].min()
+
+        # conduct the maze limits ONLY during train/test epochs
+        train_mask = ep.inEpochsMask(
+            self.positionTime, self.fullBehavior["Times"]["trainEpochs"]
+        ).flatten()
+        test_mask = ep.inEpochsMask(
+            self.positionTime, self.fullBehavior["Times"]["testEpochs"]
+        ).flatten()
+        train_test_mask = np.logical_or(train_mask, test_mask)
+        positions = positions[train_test_mask, :2]
+
+        lower_left_mask = (positions[:, 1] < 0.75) & (positions[:, 0] < 0.5)
+        lower_right_mask = (positions[:, 1] < 0.75) & (positions[:, 0] > 0.5)
+        lower_left_positions_x = positions[lower_left_mask, 0]
+        self.lower_x = (
+            lower_left_positions_x.max()
+            if lower_left_positions_x.size > 0
+            else MAZE_COORDS[4:8, 0].min()
+        )
+        lower_right_positions_x = positions[lower_right_mask, 0]
+        self.upper_x = (
+            lower_right_positions_x.min()
+            if lower_right_positions_x.size > 0
+            else MAZE_COORDS[4:8, 0].max()
+        )
         self.xlims = [self.lower_x, self.upper_x]
 
         y_mask = np.where(
             (positions[:, 0] > self.lower_x) & (positions[:, 0] < self.upper_x)
         )
-        self.ylim = positions[y_mask, 1].min()
+        self.ylim = (
+            positions[y_mask, 1].min()
+            if len(positions[y_mask, 1]) > 0
+            else MAZE_COORDS[4:8, 1].min()
+        )
         self._define_maze_zones()
         if show:
             plt.plot(positions[:, 0], positions[:, 1], "--.")
@@ -1526,6 +1655,75 @@ class DataHelper(Project):
 
         return np.sum(in_left_mask) / np.sum(in_right_mask)
 
+    def get_freeze_epochs(
+        self, th_immob_acc=1.7e7, smooth_fact_acc=30, min_drop_dur=2.0, merge_gap=0.3
+    ):
+        """
+        Get freeze epochs based on smoothed accelero.
+
+        Args:
+            th_immob_acc (float): Threshold for immobility based on acceleration (default: 1.7e7).
+            smooth_fact_acc (int): Smoothing factor for acceleration (default: 30).
+            min_drop_dur (float): Minimum duration to drop short immobility epochs in seconds (default: 2.0).
+            merge_gap (float): Maximum gap to merge close immobility epochs in seconds (default: 0.3).
+
+        """
+        import pandas as pd
+        import pynapple as nap
+
+        MovAccTsd = nap.Tsd(
+            t=self.fullBehavior["MovTimes"].flatten(),
+            d=self.fullBehavior["MovAcc"].flatten(),
+        )
+
+        # 2. Smoothing (Equivalent to runmean)
+        # We use pandas rolling mean on the tsd data
+        smoothed_data = (
+            pd.Series(MovAccTsd.values)
+            .rolling(window=smooth_fact_acc, center=True)
+            .mean()
+            .values
+        )
+        NewMovAccTsd = nap.Tsd(t=MovAccTsd.index, d=smoothed_data)
+
+        self.mov_acc = NewMovAccTsd
+
+        # 3. Thresholding (Direction 'Below')
+        # threshold(val, "below") returns a Tsd; .time_support returns the Intervals
+        FreezeAccEpoch = NewMovAccTsd.threshold(th_immob_acc, "below").time_support
+
+        # 4. Cleaning the Intervals
+        # merge_close_intervals -> merge_neighbors
+        # drop_short_intervals -> drop_short_intervals
+        FreezeAccEpoch = FreezeAccEpoch.merge_close_intervals(merge_gap)
+        FreezeAccEpoch = FreezeAccEpoch.drop_short_intervals(min_drop_dur)
+        self.freeze_epochs = FreezeAccEpoch
+
+        return self.freeze_epochs
+
+    def get_config(self):
+        """
+        Returns a dict containing the parameters of the DataHelper, useful for serialization and logging.
+        """
+        config = {
+            "mode": self.mode,
+            "target": self.target,
+            "force_ref": self.force_ref,
+            "isPredLoss": self.isPredLoss,
+            "phase": self.phase,
+            "windowSize": self.windowSize,
+            "nGroups": self.nGroups,
+            "folder": self.folder,
+        }
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        """
+        Update the parameters of the DataHelper from a config dict, useful for deserialization and logging.
+        """
+        return cls(**config)
+
 
 class Params:
     """
@@ -1557,7 +1755,6 @@ class Params:
 
         if helper is None:
             return super().__new__(cls)
-            raise ValueError("helper (DataHelper instance) is required")
 
         # By default, we try to load Params from pickle if available
         if kwargs.pop("load_at_init", True):
@@ -1610,7 +1807,7 @@ class Params:
             **kwargs: optional keyword arguments, can include:
                 - nEpochs (int, default 100)
                 - phase (str, optional)
-                - batchSize (int, default 256)
+                - batch_size (int, default 256)
                 - save_json (bool, default False)
                 - isTransformer (bool, optional, default True)
                 - transform_w_log (bool, optional, default False)
@@ -1640,7 +1837,7 @@ class Params:
         # Extract optional parameters
         nEpochs = kwargs.pop("nEpochs", 100)
         phase = kwargs.pop("phase", None)
-        batchSize = kwargs.pop("batchSize", 256)
+        batch_size = kwargs.pop("batch_size", 256)
         save_json = kwargs.pop("save_json", False)
 
         # Initialize attributes
@@ -1649,12 +1846,13 @@ class Params:
         # Store parameters
         self.nEpochs = nEpochs
         self.phase = phase
-        self.batchSize = batchSize
+        self.batch_size = batch_size
+        self.batchSize = batch_size
         if not hasattr(self, "windowSize"):
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 17)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1679,8 +1877,6 @@ class Params:
         This is where you want to modify or add any additional parameters.
         """
         self.all_args = kwargs.get("all_args", None)
-        print(self.all_args)
-
         self.mixed_loss = kwargs.get("mixed_loss", False)
         self.git_info = get_git_info()
         self.nGroups = helper.nGroups()  # number of anatomical spiking groups
@@ -1736,18 +1932,16 @@ class Params:
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.15
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
-        print(f"Using dropoutLSTM = {self.dropoutLSTM}")
-        self.ff_dim1 = kwargs.pop(
-            "ff_dim1",
-            self.nFeatures * 2 * self.dim_factor
-            if self.project_transformer
-            else self.nFeatures * self.nGroups * 2,
-        )  # first fully connected layer in Transformer arch dimension
-        self.ff_dim2 = (
+
+        self.sequence_output_dim = (
             self.nFeatures * self.dim_factor
             if self.project_transformer
-            else self.nFeatures * self.nGroups  # ie PositionalEncoding dimension!!!!
-        )  # second fully connected layer in Transformer arch dimension
+            else self.nFeatures * self.nGroups
+        )
+        # if we dont expand the feature dimension before feeding to the transformer, we need to account for the nGroups factor
+        self.ff_dim1 = kwargs.pop(
+            "ff_dim1", self.sequence_output_dim * 4
+        )  # first fully connected layer in Transformer arch dimension, the second must be the same as the input dim for the skip connection
 
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
@@ -1782,16 +1976,17 @@ class Params:
 
         # TODO: check if this is still relevant
         # we might want to introduce some Adam or stuff like that - update : RMSProp quite good
-        self.learningRates = kwargs.pop(
-            "learningRates", [0.01]
-        )  #  [0.00003, 0.00003, 0.00001]
+        self.learningRates = kwargs.pop("learningRates", [0.001])
 
         self.optimizer = kwargs.pop("optimizer", "adam")  # TODO: not implemented yet
 
         self.OversamplingResampling = kwargs.pop("OversamplingResampling", True)
 
         self.lossActivation = None  # activation function for the loss layer
-        self.featureActivation = kwargs.pop("featureActivation", None)
+        self.featureActivation = kwargs.pop(
+            "featureActivation",
+            None,
+        )  # activation function for the features (last dense layer before output)
 
         # TODO: put it in a function
         self.loss = kwargs.pop(
@@ -1849,16 +2044,34 @@ class Params:
 
         self.reduce_lr_on_plateau = kwargs.pop("reduce_lr_on_plateau", True)
 
-        self.usingMixedPrecision = False
-
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
         self.contrastive_loss = kwargs.pop("contrastive_loss", False)
         self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.7)
         self.use_conv2d = kwargs.pop("use_conv2d", False)
-        self.use_group_attention_fusion = kwargs.pop("use_group_attention_fusion", True)
-        # enforcing float16 computations whenever possible
-        # According to tf tutorials, we can allow that in most layer
+        self.use_group_attention_fusion = kwargs.pop(
+            "use_group_attention_fusion", False
+        )
+        self.high_rad = kwargs.pop(
+            "high_rad", 2 * np.pi
+        )  # for cyclic variables in the loss function
+
+        # whether to use mixed precision training (float16) for faster computations on compatible hardware
+        # Derive a safe default based on device capabilities (enable only when a GPU is available),
+        # while still allowing callers to override via kwargs.
+        default_using_mixed_precision = False
+        try:
+            gpus = tf.config.list_physical_devices("GPU")
+            if gpus:
+                default_using_mixed_precision = True
+        except Exception:
+            # If device query fails, keep the conservative default (False)
+            default_using_mixed_precision = False
+
+        self.usingMixedPrecision = kwargs.pop(
+            "usingMixedPrecision", default_using_mixed_precision
+        )
+        # According to tf tutorials, we can allow mixed precision in most layers
         # except the output for unclear reasons linked to gradient computations
 
     def save_params_to_json(self):
@@ -1912,7 +2125,7 @@ class Params:
             f"Params(\n"
             f"  nEpochs={self.nEpochs},\n"
             f"  phase={self.phase},\n"
-            f"  batchSize={self.batchSize},\n"
+            f"  batch_size={self.batch_size},\n"
             f"  windowSize={self.windowSize},\n"
             f"  nGroups={self.nGroups},\n"
             f"  dimOutput={self.dimOutput},\n"
@@ -1999,6 +2212,148 @@ class SpatialConstraintsMixin:
         self.maze_params_dict = self._extract_maze_boundaries(maze_params)
         self.forbid_mask_np, self.forbid_mask_tf = self._create_spatial_masks()
 
+        # Added for unified NN operations
+        self.common_eps = tf.constant(1e-8, dtype=tf.float32)
+        self.common_neg = tf.constant(-1e5, dtype=tf.float32)
+
+    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.03):
+        """
+        Generate Gaussian target heatmap for a batch of [x, y] positions.
+        """
+
+        pos_batch = tf.cast(pos_batch, tf.float32)
+        X = self.Xc_tf[None]  # [1, H, W]
+        Y = self.Yc_tf[None]
+
+        dx = pos_batch[:, 0][:, None, None] - X
+        dy = pos_batch[:, 1][:, None, None] - Y
+        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+
+        # Apply spatial mask
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        gauss *= allowed_mask
+
+        # Normalize across grid
+        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
+        gauss = tf.where(
+            gauss_sum > self.common_eps,
+            gauss / (gauss_sum + self.common_eps),
+            gauss / (tf.reduce_sum(allowed_mask) + self.common_eps + 1e-9),
+        )
+        return gauss
+
+    def windowed_soft_argmax(self, probs: tf.Tensor, window_size=11):
+        """
+        Refines position to sub-pixel precision in normalized [0, 1] space.
+        probs: (B, H, W) tensor
+        """
+        B = tf.shape(probs)[0]
+        H, W = self.GRID_H, self.GRID_W
+
+        # 1. Get the Hard Argmax Pixel Indices
+        flat_probs = tf.reshape(probs, [B, -1])
+        idx = tf.argmax(flat_probs, axis=-1)
+        py = tf.cast(idx // W, tf.int32)
+        px = tf.cast(idx % W, tf.int32)
+
+        # 2. Create relative pixel offsets (e.g., -5 to 5)
+        r = window_size // 2
+        offsets = tf.range(-r, r + 1, dtype=tf.int32)
+        yy_off, xx_off = tf.meshgrid(offsets, offsets, indexing="ij")  # (ws, ws)
+
+        # 3. Calculate absolute pixel coordinates for the window
+        yy_abs = py[:, None, None] + yy_off[None, :, :]
+        xx_abs = px[:, None, None] + xx_off[None, :, :]
+
+        # 4. Clip to stay within grid bounds [0, 44]
+        yy_clipped = tf.clip_by_value(yy_abs, 0, H - 1)
+        xx_clipped = tf.clip_by_value(xx_abs, 0, W - 1)
+
+        # 5. Gather indices for gather_nd
+        batch_indices = tf.tile(
+            tf.range(B)[:, None, None], [1, window_size, window_size]
+        )
+        indices = tf.stack([batch_indices, yy_clipped, xx_clipped], axis=-1)
+
+        # 6. Gather Probs AND Normalized Coordinates for the window
+        # This is the "Fix": we pull from your [0, 1] meshes (Xc, Yc)
+        w_probs = tf.gather_nd(probs, indices)
+        w_xc = tf.gather_nd(tf.tile(self.Xc_tf[None], [B, 1, 1]), indices)
+        w_yc = tf.gather_nd(tf.tile(self.Yc_tf[None], [B, 1, 1]), indices)
+
+        # 7. Local Re-normalization of probabilities within the window
+        w_probs_norm = w_probs / (
+            tf.reduce_sum(w_probs, axis=[1, 2], keepdims=True) + 1e-8
+        )
+
+        # 8. Compute refined Center of Mass in [0, 1] space
+        refined_x = tf.reduce_sum(w_probs_norm * w_xc, axis=[1, 2])
+        refined_y = tf.reduce_sum(w_probs_norm * w_yc, axis=[1, 2])
+
+        return refined_x, refined_y
+
+    def decode_and_uncertainty_tf(
+        self, logits_hw, mode="soft_argmax", return_probs=False
+    ):
+        """
+        Unified decoding logic for Gaussian heatmaps.
+        """
+        B = tf.shape(logits_hw)[0]
+        H, W = self.GRID_H, self.GRID_W
+
+        # Mask forbidden
+        masked_logits = tf.where(
+            self.forbid_mask_tf[None] > 0, self.common_neg, logits_hw
+        )
+
+        # Softmax over grid
+        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
+        probs = tf.reshape(probs_flat, [B, H, W])
+
+        # Renormalize (safety)
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        probs_allowed = probs * allowed_mask
+        sum_p = tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True)
+        probs_allowed /= sum_p + self.common_eps
+
+        if mode == "expectation":
+            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
+        elif mode == "argmax":  # argmax
+            idx = tf.argmax(tf.reshape(probs_allowed, [B, H * W]), axis=-1)
+            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
+            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
+        elif mode == "soft_argmax":
+            ex, ey = self.windowed_soft_argmax(probs_allowed)
+        else:
+            raise ValueError(
+                f"Invalid mode {mode}, choose 'expectation' or 'argmax' or 'soft_argmax'"
+            )
+
+        # Variance
+        varx = tf.reduce_sum(
+            probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
+        )
+        vary = tf.reduce_sum(
+            probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
+        )
+        var = varx + vary
+
+        # max probability (confidence)
+        maxp = tf.reduce_max(probs_flat, axis=1)
+
+        # Normalized Entropy
+        H_entropy = -tf.reduce_sum(
+            probs_flat * tf.math.log(probs_flat + self.common_eps), axis=1
+        )
+        n_allowed = tf.reduce_sum(allowed_mask)
+        Hn = H_entropy / tf.math.log(n_allowed + self.common_eps)
+
+        xy = tf.stack([ex, ey], axis=-1)
+        if return_probs:
+            return xy, maxp, Hn, var, probs_allowed
+        return xy, maxp, Hn, var
+
     def _setup_coordinate_grids(self):
         """Create coordinate grids for both numpy and tensorflow"""
         # Numpy version (for Bayesian decoder)
@@ -2015,19 +2370,26 @@ class SpatialConstraintsMixin:
         """Return spatial config for serialization"""
         return {
             "grid_size": self.grid_size,
-            "maze_params": self.maze_params,
+            "maze_params": self.maze_params_dict,
         }
 
     def get_config(self):
         """Return config for serialization"""
-        return self.get_spatial_config()
+        base_config = super().get_config() if hasattr(super(), "get_config") else {}
+        spatial_config = self.get_spatial_config()
+        return {**base_config, **spatial_config}
 
     @classmethod
-    def from_config(self, config):
+    def from_config(cls, config):
         """Create instance from config"""
         grid_size = config.get("grid_size", (45, 45))
         maze_params = config.get("maze_params", None)
-        return self.__class__(grid_size=grid_size, maze_params=maze_params)
+        if isinstance(maze_params, dict) and all(
+            k in maze_params for k in ("class_name", "config", "dtype")
+        ):
+            # means maze_params is actually a serialized tensor/array, we need to deserialize it
+            maze_params = np.array(maze_params["config"]["value"])
+        return cls(grid_size=grid_size, maze_params=maze_params)
 
     def _extract_maze_boundaries(self, maze_params=None) -> Dict[str, float]:
         """
@@ -2040,6 +2402,9 @@ class SpatialConstraintsMixin:
         Returns:
             dict: Extracted maze boundaries.
         """
+        if isinstance(maze_params, dict) and all(k in maze_params for k in ("class_name", "config")):
+            # means maze_params is actually a serialized tensor/array, we need to deserialize it
+            maze_params = np.array(maze_params["config"]["value"])
 
         if maze_params is None or not isinstance(maze_params, dict):
             if maze_params is not None:
@@ -2055,6 +2420,21 @@ class SpatialConstraintsMixin:
                 "gap_x_max": maze_coords[-4, 0],
                 "gap_y_min": maze_coords[-3, 1],
             }
+        elif isinstance(maze_params, dict):
+            required_keys = [
+                "x_min",
+                "x_max",
+                "y_min",
+                "y_max",
+                "gap_x_min",
+                "gap_x_max",
+                "gap_y_min",
+            ]
+            if not all(key in maze_params for key in required_keys):
+                print(
+                    f"Provided maze_params dict is missing required keys. Found keys: {maze_params.keys()}"
+                )
+                raise ValueError(f"maze_params dict must contain keys: {required_keys}")
         return maze_params
 
     def _create_spatial_masks(self) -> Tuple[np.ndarray, tf.Tensor]:

@@ -27,7 +27,7 @@ from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
-from neuroencoders.utils.global_classes import Params, Project
+from neuroencoders.utils.global_classes import Params, Project, get_max_nb_spikes
 
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
@@ -137,54 +137,37 @@ def Make_Epoch(struc, dic, key, time_unit="us", word="start"):
         Make_Epoch(struc.tolist(), dic, key)
 
 
-# %% BehavResources loading
-
-
-def Load_Behav(Behav_path: str, time_unit="us"):
-    import pandas as pd
-    from pynapple import IntervalSet, Ts, Tsd, TsdFrame
-    from scipy.io import loadmat
-
-    try:
-        Behav_data = loadmat(Behav_path, squeeze_me=True)
-    except FileNotFoundError:
-        from os.path import join
-
-        Behav_path = join(Behav_path, "behavResources.mat")
-        Behav_data = loadmat(Behav_path, squeeze_me=True)
-    keys = list(Behav_data.keys())
-    keys.remove("__header__")
-    keys.remove("__version__")
-    keys.remove("__globals__")
-    ################ Tracking information
-
-    BehavRessources = {}
+def _parse_tracking_data(Behav_data, keys, time_unit):
+    from pynapple import Tsd, TsdFrame
 
     Tracking = {}
 
     tsd_keys = [key for key in keys if "tsd" in key]
-
     for key in keys:
         if "LinearDist" in key:
             tsd_keys.append(key)
 
     for key in tsd_keys:
         tsd_temp = Behav_data[key]
-        dat = tsd_temp["data"].tolist()
-        t = tsd_temp["t"].tolist() * 100  # convert to us
+        # Robustly handle MATLAB nested structure
+        dat = np.atleast_1d(np.array(tsd_temp["data"]).squeeze())
+        t = np.atleast_1d(np.array(tsd_temp["t"]).squeeze())
+
+        # Correct temporal scaling (seconds to microseconds)
+        t = t * 10**6
+
         new_key = key.replace("tsd", "")
-        Tracking[new_key] = Tsd(t, np.transpose(dat), time_units=time_unit)
-        keys.remove(key)
+        # Tsd expects (t, d)
+        Tracking[new_key] = Tsd(t, dat.T, time_units=time_unit)
 
     Pos_keys = [key for key in keys if "Pos" in key]
-
     for key in Pos_keys:
-        keys.remove(key)
+        if key in keys:
+            keys.remove(key)
         Pos_temp = Behav_data[key]
         t = Pos_temp[:, 0] * 10**6
         d = Pos_temp[:, 1:4]
         Tsd_temp = TsdFrame(t, d, columns=["x", "y", "stim"], time_units=time_unit)
-        # Tsd_temp["stim"] = Tsd_temp["stim"].astype(bool)
         Tracking[key] = Tsd_temp
 
     Im = ["im_diff", "im_diffInit"]
@@ -203,71 +186,42 @@ def Load_Behav(Behav_path: str, time_unit="us"):
         d = Temp_temp[:, 1]
         Tracking["MouseTemp"] = Tsd(t, d, time_units=time_unit)
 
-    BehavRessources["Tracking"] = Tracking
-    ################     Epoch information
+    return Tracking
+
+
+def _parse_epoch_data(Behav_data, keys, time_unit):
+    import re
 
     Epoch = {}
-
     Epoch_keys = [key for key in keys if "Epoch" in key]
 
     for key in Epoch_keys:
-        keys.remove(key)
+        if key in keys:
+            keys.remove(key)
         Epoch_temp = Behav_data[key]
         new_key = key.replace("Epoch", "")
         Make_Epoch(struc=Epoch_temp, dic=Epoch, key=new_key, time_unit=time_unit)
 
     if Epoch:
-        import re
-
-        # create pre, hab, cond, post, sleep keys by merging Epochs
-        # first for 'pre'
         epoch_keys = list(Epoch["Session"].keys())
         print(f"Available epochs: {epoch_keys}")
 
-        # Group TestPre epochs (TestPre1, TestPre2, etc.)
-        testpre_keys = [k for k in epoch_keys if re.match(r".*[Tt]est[Pp]re\d*.*", k)]
-        if testpre_keys:
-            Epoch["Session"]["TestPre"] = Epoch["Session"][testpre_keys[0]]
-            for key in testpre_keys[1:]:
-                Epoch["Session"]["TestPre"] = Epoch["Session"]["TestPre"].union(
-                    Epoch["Session"][key]
-                )
+        patterns = {
+            "TestPre": r".*[Tt]est[Pp]re\d*.*",
+            "TestPost": r".*[Tt]est[Pp]ost\d*.*",
+            "Hab": r".*[Hh]ab\d*.*",
+            "Cond": r".*[Cc]ond\d*.*",
+            "Sleep": r".*[Ss]leep.*",
+        }
 
-        # Group TestPost epochs (TestPost1, TestPost2, etc.)
-        testpost_keys = [k for k in epoch_keys if re.match(r".*[Tt]est[Pp]ost\d*.*", k)]
-        if testpost_keys:
-            Epoch["Session"]["TestPost"] = Epoch["Session"][testpost_keys[0]]
-            for key in testpost_keys[1:]:
-                Epoch["Session"]["TestPost"] = Epoch["Session"]["TestPost"].union(
-                    Epoch["Session"][key]
-                )
-
-        # Group Hab epochs (Hab1, Hab2, etc.)
-        hab_keys = [k for k in epoch_keys if re.match(r".*[Hh]ab\d*.*", k)]
-        if hab_keys:
-            Epoch["Session"]["Hab"] = Epoch["Session"][hab_keys[0]]
-            for key in hab_keys[1:]:
-                Epoch["Session"]["Hab"] = Epoch["Session"]["Hab"].union(
-                    Epoch["Session"][key]
-                )
-
-        # Group Cond epochs (Cond1, Cond2, etc.)
-        cond_keys = [k for k in epoch_keys if re.match(r".*[Cc]ond\d*.*", k)]
-        if cond_keys:
-            Epoch["Session"]["Cond"] = Epoch["Session"][cond_keys[0]]
-            for key in cond_keys[1:]:
-                Epoch["Session"]["Cond"] = Epoch["Session"]["Cond"].union(
-                    Epoch["Session"][key]
-                )
-
-        # Group Sleep epochs (PreSleep, PostSleep, etc.)
-        sleep_keys = [k for k in epoch_keys if re.match(r".*[Ss]leep.*", k)]
-        if sleep_keys:
-            Epoch["Session"]["Sleep"] = Epoch["Session"][sleep_keys[0]]
-            for key in sleep_keys[1:]:
-                Epoch["Session"]["Sleep"] = Epoch["Session"]["Sleep"].union(
-                    Epoch["Session"][key]
-                )
+        for name, pattern in patterns.items():
+            matching_keys = [k for k in epoch_keys if re.match(pattern, k)]
+            if matching_keys:
+                Epoch["Session"][name] = Epoch["Session"][matching_keys[0]]
+                for key in matching_keys[1:]:
+                    Epoch["Session"][name] = Epoch["Session"][name].union(
+                        Epoch["Session"][key]
+                    )
 
         awake_keys = [k for k in epoch_keys if not re.match(r".*[Ss]leep.*", k)]
         if awake_keys:
@@ -277,13 +231,15 @@ def Load_Behav(Behav_path: str, time_unit="us"):
                     Epoch["Session"][key]
                 )
 
-    BehavRessources["Epoch"] = Epoch
+    return Epoch
 
-    ################    Other information
+
+def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
+    from pynapple import IntervalSet, Ts, Tsd
 
     Other = {}
 
-    if "tpsCatEvt" and "nameCatEvt" in keys:
+    if "tpsCatEvt" in keys and "nameCatEvt" in keys:
         keys.remove("tpsCatEvt")
         keys.remove("nameCatEvt")
         t = Behav_data["tpsCatEvt"]
@@ -293,8 +249,9 @@ def Load_Behav(Behav_path: str, time_unit="us"):
     if "TTLInfo" in keys:
         keys.remove("TTLInfo")
         TTL = Behav_data["TTLInfo"]
-        start = TTL["StartSession"].tolist() * 100  # convert to us
-        stop = TTL["StopSession"].tolist() * 100  # convert to us
+        # Correct temporal scaling for TTL Info (match epoch and ThousandFrames units)
+        start = np.atleast_1d(np.array(TTL["StartSession"]).squeeze()) * 100
+        stop = np.atleast_1d(np.array(TTL["StopSession"]).squeeze()) * 100
         Other["TTLInfo"] = IntervalSet(start, stop, time_units=time_unit)
 
     if "ThousandFrames" in keys:
@@ -312,26 +269,163 @@ def Load_Behav(Behav_path: str, time_unit="us"):
     if "GotFrame" in keys:
         keys.remove("GotFrame")
         GF = np.transpose(Behav_data["GotFrame"].astype(bool))
-        t = Tracking["X"].times()
-        Other["GotFrame"] = Tsd(t, GF, time_units=time_unit)
+        t = None
+        for k in ["X", "x", "Xpos", "pos"]:
+            if k in Tracking:
+                t = Tracking[k].times()
+                break
+        if t is not None:
+            Other["GotFrame"] = Tsd(t, GF, time_units=time_unit)
 
-    if ("CleanZoneIndices" or "ZoneIndices") in keys:
-        ZI_keys = [key for key in keys if "ZoneIndices" in key]
-        for key in ZI_keys:
-            keys.remove(key)
-            Z_temp = Behav_data[key]
-            Z = {}
-            names = list(Z_temp.dtype.fields.keys())
-            for n in names:
-                Z[n] = Z_temp[n].tolist()
-            Other[key] = Z
+    ZI_keys = [key for key in keys if "ZoneIndices" in key]
+    for key in ZI_keys:
+        keys.remove(key)
+        Z_temp = Behav_data[key]
+        Z = {}
+        names = list(Z_temp.dtype.fields.keys())
+        for n in names:
+            Z[n] = Z_temp[n].tolist()
+        Other[key] = Z
 
-    for key in keys:
+    for key in list(keys):
         Other[key] = Behav_data[key]
+        keys.remove(key)
 
-    BehavRessources["Other"] = Other
+    return Other
+
+
+# %% BehavResources loading
+
+
+def Load_Behav(Behav_path: str, time_unit="us"):
+    from scipy.io import loadmat
+
+    try:
+        Behav_data = loadmat(Behav_path, squeeze_me=True)
+    except FileNotFoundError:
+        from os.path import join
+
+        Behav_path = join(Behav_path, "behavResources.mat")
+        Behav_data = loadmat(Behav_path, squeeze_me=True)
+
+    # Initial keys cleanup
+    keys = list(Behav_data.keys())
+    for internal_key in ["__header__", "__version__", "__globals__"]:
+        if internal_key in keys:
+            keys.remove(internal_key)
+
+    BehavRessources = {}
+
+    # Sequential parsing of different data types
+    BehavRessources["Tracking"] = _parse_tracking_data(Behav_data, keys, time_unit)
+    BehavRessources["Epoch"] = _parse_epoch_data(Behav_data, keys, time_unit)
+    BehavRessources["Other"] = _parse_other_data(
+        Behav_data,
+        keys,
+        time_unit,
+        BehavRessources["Tracking"],
+        BehavRessources["Epoch"],
+    )
 
     return BehavRessources
+
+
+def _ensure_list(value):
+    """Ensure value is a list for consistent processing."""
+    if value is None:
+        return []
+    elif isinstance(value, (str, int, float)):
+        return [value]
+    elif isinstance(value, list):
+        return value
+    else:
+        return [value]
+
+
+def _restrict_by_group(df, filter_value):
+    """Filter DataFrame by group."""
+    filter_values = _ensure_list(filter_value)
+    group_str = " + ".join(map(str, filter_values))
+    print(f"Getting groups {group_str} from Dir")
+
+    if "group" in df.columns:
+        return df[df["group"].isin(filter_values)]
+
+    group_columns = [
+        col
+        for col in df.columns
+        if any(
+            g in str(col).lower()
+            for g in ["lfp", "neurons", "ecg", "ob_resp", "ob_gamma", "pfc"]
+        )
+    ]
+    if group_columns:
+        mask = pd.Series([False] * len(df))
+        for group_col in group_columns:
+            for filter_val in filter_values:
+                mask |= df[group_col] == filter_val
+        return df[mask]
+
+    print("No group columns found")
+    return pd.DataFrame()
+
+
+def _restrict_by_nmice(df, filter_value):
+    """Filter DataFrame by mouse numbers."""
+    filter_values = _ensure_list(filter_value)
+    mice_str = ", ".join(map(str, filter_values))
+    print(f"Getting Mice {mice_str} from Dir")
+
+    mouse_names = [f"Mouse{str(num).zfill(3)}" for num in filter_values]
+
+    if "name" in df.columns:
+        mask = df["name"].isin(mouse_names)
+        filtered_df = df[mask]
+        found_mice = filtered_df["name"].unique()
+        for name in mouse_names:
+            if name not in found_mice:
+                print(f"No {name} in Dir")
+        return filtered_df
+
+    print("No 'name' column found")
+    return pd.DataFrame()
+
+
+def _restrict_by_session(df, filter_value):
+    """Filter DataFrame by session name."""
+    filter_values = _ensure_list(filter_value)
+    session_str = " + ".join(filter_values)
+    print(f"Getting Session {session_str} from Dir")
+
+    if "Session" in df.columns:
+        mask = pd.Series([False] * len(df))
+        for session_name in filter_values:
+            mask |= df["Session"].astype(str).str.contains(session_name, na=False)
+        filtered_df = df[mask]
+        if filtered_df.empty:
+            for session_name in filter_values:
+                print(f"Session {session_name} is empty")
+        return filtered_df
+
+    print("No 'Session' column found")
+    return pd.DataFrame()
+
+
+def _restrict_by_treatment(df, filter_value):
+    """Filter DataFrame by treatment."""
+    filter_values = _ensure_list(filter_value)
+    treatment_str = " + ".join(filter_values)
+    print(f"Getting Treatments {treatment_str} from Dir")
+
+    if "Treatment" in df.columns:
+        filtered_df = df[df["Treatment"].isin(filter_values)]
+        found_treatments = filtered_df["Treatment"].unique()
+        for missing in [t for t in filter_values if t not in found_treatments]:
+            print(f"Treatment {missing} is empty")
+        return filtered_df
+
+    print("No 'Treatment' column found")
+    return pd.DataFrame()
 
 
 def restrict_path_for_experiment(
@@ -341,150 +435,30 @@ def restrict_path_for_experiment(
 ) -> pd.DataFrame:
     """
     Python equivalent of RestrictPathForExperiment MATLAB function.
-
-    Restricts/filters experiment directories based on various criteria.
-
-    Args:
-        Dir: Dictionary or DataFrame containing experiment information (from path_for_experiments_erc)
-        filter_type: Type of filter ('Group', 'nMice', 'Session', 'Treatment', 'all')
-        filter_value: Value(s) to filter by (string, list of strings, or list of numbers)
-
-    Returns:
-        pandas DataFrame containing filtered experiment information
-
-    Examples:
-        df = restrict_path_for_experiment(Dir, 'nMice', [245, 246])
-        df = restrict_path_for_experiment(Dir, 'Group', ['OBX', 'hemiOBX'])
-        df = restrict_path_for_experiment(Dir, 'Session', 'EXT-24h')
-        df = restrict_path_for_experiment(Dir, 'Treatment', 'CNO1')
-        df = restrict_path_for_experiment(Dir, 'all', None)
     """
-
     # Convert input to DataFrame if it's a dictionary
-    if isinstance(Dir, dict):
-        df = dict_to_dataframe(Dir)
-    else:
-        df = Dir.copy()
+    df = dict_to_dataframe(Dir) if isinstance(Dir, dict) else Dir.copy()
 
-    # Handle 'all' case - return original DataFrame
-    if filter_type == "all" or filter_value == "all":
+    # Handle 'all' cases
+    if filter_type == "all" or filter_value == "all" or filter_value is None:
         return df
 
-    # Validate inputs
-    valid_filters = ["Group", "nMice", "Session", "Treatment", "all"]
-    if filter_type not in valid_filters:
-        raise ValueError(f"filter_type must be one of {valid_filters}")
+    # Dispatch to appropriate filter helper
+    filter_map = {
+        "Group": _restrict_by_group,
+        "nMice": _restrict_by_nmice,
+        "Session": _restrict_by_session,
+        "Treatment": _restrict_by_treatment,
+    }
 
-    # Ensure filter_value is a list for consistent processing
-    def ensure_list(value):
-        if value is None:
-            return []
-        elif isinstance(value, (str, int, float)):
-            return [value]
-        elif isinstance(value, list):
-            return value
-        else:
-            return [value]
+    if filter_type not in filter_map:
+        raise ValueError(
+            f"filter_type must be one of {list(filter_map.keys())} or 'all'"
+        )
 
-    # Process filter parameters and filter DataFrame
-    if filter_type == "Group":
-        filter_values = ensure_list(filter_value)
-        group_str = " + ".join(map(str, filter_values))
-        print(f"Getting groups {group_str} from Dir")
+    filtered_df = filter_map[filter_type](df, filter_value)
 
-        # Handle different group column structures
-        if "group" in df.columns:
-            # Simple group column
-            mask = df["group"].isin(filter_values)
-            filtered_df = df[mask]
-        else:
-            # Check for group-specific columns (LFP, Neurons, etc.)
-            group_columns = [
-                col
-                for col in df.columns
-                if any(
-                    group in str(col).lower()
-                    for group in ["lfp", "neurons", "ecg", "ob_resp", "ob_gamma", "pfc"]
-                )
-            ]
-            if group_columns:
-                mask = pd.Series([False] * len(df))
-                for group_col in group_columns:
-                    for filter_val in filter_values:
-                        mask |= df[group_col] == filter_val
-                filtered_df = df[mask]
-            else:
-                print("No group columns found")
-                filtered_df = pd.DataFrame()
-
-    elif filter_type == "nMice":
-        filter_values = ensure_list(filter_value)
-        mice_str = ", ".join(map(str, filter_values))
-        print(f"Getting Mice {mice_str} from Dir")
-
-        # Format mouse names (pad with zeros to 3 digits)
-        mouse_names = [f"Mouse{str(num).zfill(3)}" for num in filter_values]
-
-        if "name" in df.columns:
-            mask = df["name"].isin(mouse_names)
-            filtered_df = df[mask]
-
-            # Check for missing mice
-            found_mice = df[mask]["name"].unique()
-            missing_mice = [name for name in mouse_names if name not in found_mice]
-            for missing in missing_mice:
-                print(f"No {missing} in Dir")
-        else:
-            print("No 'name' column found")
-            filtered_df = pd.DataFrame()
-
-    elif filter_type == "Session":
-        filter_values = ensure_list(filter_value)
-        session_str = " + ".join(filter_values)
-        print(f"Getting Session {session_str} from Dir")
-
-        if "Session" in df.columns:
-            mask = pd.Series([False] * len(df))
-            for session_name in filter_values:
-                # Use string containment for flexible matching
-                session_mask = (
-                    df["Session"].astype(str).str.contains(session_name, na=False)
-                )
-                mask |= session_mask
-
-            filtered_df = df[mask]
-
-            if filtered_df.empty:
-                for session_name in filter_values:
-                    print(f"Session {session_name} is empty")
-        else:
-            print("No 'Session' column found")
-            filtered_df = pd.DataFrame()
-
-    elif filter_type == "Treatment":
-        filter_values = ensure_list(filter_value)
-        treatment_str = " + ".join(filter_values)
-        print(f"Getting Treatments {treatment_str} from Dir")
-
-        if "Treatment" in df.columns:
-            mask = df["Treatment"].isin(filter_values)
-            filtered_df = df[mask]
-
-            # Check for missing treatments
-            found_treatments = df[mask]["Treatment"].unique()
-            missing_treatments = [
-                treat for treat in filter_values if treat not in found_treatments
-            ]
-            for missing in missing_treatments:
-                print(f"Treatment {missing} is empty")
-        else:
-            print("No 'Treatment' column found")
-            filtered_df = pd.DataFrame()
-
-    # Reset index for clean output
-    filtered_df = filtered_df.reset_index(drop=True)
-
-    return filtered_df
+    return filtered_df.reset_index(drop=True)
 
 
 def dict_to_dataframe(Dir: Dict[str, Any]) -> pd.DataFrame:
@@ -705,69 +679,63 @@ class Mouse_Results(Params, PaperFigures):
     def __init__(self, *args, **kwargs):
         """
         Initialize the Mouse_Results class.
-
-        Args:
-        ----------
-        *args: Positional arguments
-            - Dir: pd.DataFrame containing the directory structure of n_experiment
-            - mouse_name: str, name of the mouse (e.g., 'Mouse245')
-            - manipe: str, manipulation type (e.g., 'SubMFB', 'SubPAG')
-        **kwargs: Keyword arguments
-            - target: str, target type (e.g., 'LFP', 'Neurons')
-            - nameExp: str, name of the experiment (e.g., 'current', 'final_results', 'LossAndDirection...')
-            - phase: str, phase of the experiment (default is "pre")
-            - full_path: str, full path to the experiment directory (optional, if not provided it will be found automatically)
         """
-        # Extract Mouse_Results specific parameters
+        self._parse_init_args(args, kwargs)
 
-        # FOR DEV ONLY: update inner dict with kwargs
-        # skip args and kwargs that already exist in the class or are methods of the class
+        # find all window directories in the results path
+        self.find_window_size(**kwargs)
+        self.parameters = dict()
+        self.projects = dict()
+
+        for i, winMS in enumerate(self.windows):
+            self._initialize_window(winMS, i, **kwargs)
+
+        # Initialize PaperFigures and load trainers if requested
+        if kwargs.get("load_trainers_at_init", True):
+            self.load_trainers(**kwargs)
+
+        PaperFigures.__init__(
+            self,
+            projectPath=self.Project,
+            behaviorData=self.DataHelper.fullBehavior,
+            trainerBayes=self.bayes if hasattr(self, "bayes") else None,
+            bayesMatrices=self.bayesMatrices
+            if hasattr(self, "bayes_matrices")
+            else None,
+            l_function=self.l_function,
+            timeWindows=self.windows_values,
+            phase=self.phase,
+            verbose=self.verbose,
+        )
+        print(self)
+
+    def _parse_init_args(self, args, kwargs):
+        """Extracts and validates core attributes from args and kwargs."""
         for key, value in kwargs.items():
             if hasattr(self, key) or callable(getattr(self, key, None)):
                 continue
             setattr(self, key, value)
 
-        # Start parsing args
-        if len(args) >= 1:
-            Dir = args[0]
-            args = args[1:]
-        else:
-            Dir = kwargs.pop("Dir", None)
+        args_list = list(args)
+        Dir = args_list.pop(0) if args_list else kwargs.pop("Dir", None)
+        mouse_name = args_list.pop(0) if args_list else kwargs.get("mouse_name", None)
+        manipe = args_list.pop(0) if args_list else kwargs.get("manipe", None)
 
-        if len(args) >= 1:
-            mouse_name = args[0]
-            args = args[1:]
-        else:
-            mouse_name = kwargs.get("mouse_name", None)
-
-        if len(args) >= 1:
-            manipe = args[0]
-            args = args[1:]
-        else:
-            manipe = kwargs.get("manipe", None)
-
-        # Extract optional parameters
         exp_index = kwargs.get("exp_index", None)
         full_path = kwargs.get("full_path", "")
         phase = kwargs.get("phase", "pre")
         nameExp = kwargs.get("nameExp", "Network")
         target = kwargs.get("target", "pos")
-        if kwargs.get("deviceName", None) is not None:
+        self.verbose = kwargs.get("verbose", True)
+
+        if kwargs.get("deviceName") is not None:
             self.deviceName = kwargs["deviceName"]
 
-        # Validate required parameters
-        if (
-            Dir is None
-            or mouse_name is None
-            or manipe is None
-            or target is None
-            or nameExp is None
-        ):
+        if any(v is None for v in [Dir, mouse_name, manipe, target, nameExp]):
             raise ValueError(
                 "Dir, mouse_name, manipe, target, and nameExp are required"
             )
 
-        # Initialize parameters
         self.Dir = Dir
         self.mouse_name = mouse_name
         self.manipe = manipe
@@ -776,6 +744,7 @@ class Mouse_Results(Params, PaperFigures):
         self.phase = phase
         self.which = kwargs.get("which", "all")
         self.exp_index = exp_index
+
         if full_path == "":
             self.find_path()
         else:
@@ -783,139 +752,88 @@ class Mouse_Results(Params, PaperFigures):
 
         self.find_xml()
         self.folderResult = os.path.join(self.path, self.nameExp, "results")
-
-        # Initialize empty results DataFrame
         self.results = pd.DataFrame()
 
-        # find all window directories in the results path
-        self.find_window_size(**kwargs)
-        self.parameters = dict()
-        self.projects = dict()
-
-        for i, winMS in enumerate(self.windows):
-            try:
-                self.projects[winMS] = Project.load(
-                    os.path.join(self.path, self.nameExp, f"Project_{winMS}.pkl")
-                )
-                print(self.projects[winMS].folderResult)
-                self.parameters[winMS] = Params.load(
-                    os.path.join(self.folderResult, winMS)
-                )
-                # otherwise will be loaded by super init
-                try:
-                    self.data_helper = DataHelperClass.load(
-                        self.projects[winMS].experimentPath, phase=self.phase
-                    )
-                except FileNotFoundError as e:
-                    print("did not manage to load DataHelper:", e)
-                    self.data_helper = DataHelperClass(
-                        self.projects[winMS].xml,
-                        mode="compare",
-                        windowSize=int(winMS) / 1000,
-                        **kwargs,
-                    )
-                assert os.path.realpath(self.projects[winMS].xml) == os.path.realpath(
-                    self.xml
-                )
-            except (FileNotFoundError, AttributeError, ModuleNotFoundError) as e:
-                warn(
-                    f"Failed to load project for window {winMS} with error: {e}. "
-                    "Creating new Project and DataHelper."
-                )
-                # if something went wrong, create a new Project and DataHelper
-                self.projects[winMS] = Project(
-                    self.xml,
-                    windowSize=int(winMS) / 1000,
-                    **kwargs,
-                )
-                if i == 0:
-                    self.data_helper = DataHelperClass(
-                        self.xml,
-                        mode="compare",
-                        **kwargs,
-                    )
-                    # we need that before loading params to have the right target
-                    self.data_helper.get_true_target(
-                        windowSizeMS=int(winMS), in_place=True, **kwargs
-                    )
-                if os.path.exists(
-                    os.path.join(self.folderResult, winMS, "params.json")
-                ):
-                    import json
-
-                    print(
-                        f"Loading saved params from {os.path.join(self.folderResult, winMS, 'params.json')}"
-                    )
-                    # load the json dict and update kwargs
-                    with open(
-                        os.path.join(self.folderResult, winMS, "params.json"), "r"
-                    ) as f:
-                        saved_params = json.load(f)
-                    # update kwargs with saved params, but do not overwrite existing keys in kwargs
-                    params_dict = dict()
-                    for key, value in saved_params.items():
-                        if key not in kwargs:
-                            params_dict[key] = value
-                    del params_dict["windowSize"]
-                self.parameters[winMS] = Params(
-                    self.data_helper,
-                    windowSize=int(winMS) / 1000,
-                    save_json=True,
-                    **kwargs,
-                )
-
-            if i == 0:
-                self.linearizer = UMazeLinearizer(
-                    self.projects[winMS].folder,
-                    data_helper=self.data_helper,
-                    **kwargs,
-                )
-                self.linearizer.verify_linearization(
-                    self.data_helper.positions[:, :2] / self.data_helper.maxPos(),
-                    self.projects[winMS].folder,
-                )
-
-                if kwargs.get("keops_linearization", False):
-                    self.l_function = self.linearizer.pykeops_linearization
-                else:
-                    self.l_function = self.cpu_linearization
-
-                self.data_helper.get_true_target(
-                    l_function=self.l_function,
-                    in_place=True,
-                    show=kwargs.get("show", False),
-                )
-
-                # Initialize the first window as the main one
-                self.DataHelper = self.data_helper
-                self.Params = self.parameters[winMS]
-                self.Project = self.projects[winMS]
-                self.Linearizer = self.linearizer
-
-                # construct from Params
-                Params.__init__(
-                    self,
-                    helper=self.DataHelper,
-                    windowSize=self.Params.windowSize,
-                    **kwargs,
-                )
-                self.find_session_epochs()
-
-        # Initialize PaperFigures
-        if kwargs.get("load_trainers_at_init", True):
-            self.load_trainers(**kwargs)
-        PaperFigures.__init__(
-            self,
-            projectPath=self.Project,
-            behaviorData=self.DataHelper.fullBehavior,
-            trainerBayes=self.bayes if hasattr(self, "bayes") else None,
-            bayesMatrices=self.bayes_matrices
-            if hasattr(self, "bayes_matrices")
-            else None,
-            l_function=self.l_function,
-            timeWindows=self.windows_values,
-            phase=self.phase,
+    def _initialize_window(self, winMS, i, **kwargs):
+        """Loads or creates Project, Params and DataHelper for a given window."""
+        self.projects[winMS] = Project(
+            self.xml,
+            windowSize=int(winMS) / 1000,
+            **kwargs,
         )
+        if i == 0:
+            self.data_helper = DataHelperClass(
+                self.xml,
+                mode="compare",
+                **kwargs,
+            )
+            self._setup_main_window(winMS, **kwargs)
+        else:
+            self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
+
+    def _load_params_fallback(self, winMS, **kwargs):
+        """Fallback to load Params from json or create new one."""
+        params_path = os.path.join(self.folderResult, winMS, "params.json")
+        if os.path.exists(params_path):
+            import json
+
+            print(f"Loading saved params from {params_path}")
+            with open(params_path, "r") as f:
+                saved_params = json.load(f)
+            # Update kwargs with saved params if not already set
+            for k, v in saved_params.items():
+                if k not in kwargs and k != "windowSize":
+                    kwargs[k] = v
+
+        return Params(
+            helper=self.data_helper,
+            windowSize=int(winMS) / 1000,
+            save_json=True,
+            **kwargs,
+        )
+
+    def _setup_main_window(self, winMS, **kwargs):
+        """Initializes linearizer and sets main window references."""
+        self.linearizer = UMazeLinearizer(
+            self.projects[winMS].folder,
+            data_helper=self.data_helper,
+            **kwargs,
+        )
+        self.linearizer.verify_linearization(
+            self.data_helper.positions[:, :2] / self.data_helper.maxPos(),
+            self.projects[winMS].folder,
+        )
+
+        self.l_function = (
+            self.linearizer.pykeops_linearization
+            if kwargs.get("keops_linearization", False)
+            else self.cpu_linearization
+        )
+
+        self.data_helper.get_true_target(
+            windowSizeMS=int(winMS),
+            l_function=self.l_function,
+            in_place=True,
+            show=kwargs.get("show", False),
+        )
+
+        if winMS not in self.parameters:
+            self.parameters[winMS] = self._load_params_fallback(winMS, **kwargs)
+
+        # Set main references to the first processed window
+        self.DataHelper = self.data_helper
+        self.Params = self.parameters[winMS]
+        self.Project = self.projects[winMS]
+        self.Linearizer = self.linearizer
+
+        # Initialize base Params class
+        Params.__init__(
+            self,
+            helper=self.DataHelper,
+            windowSize=int(winMS) / 1000,
+            **kwargs,
+        )
+        self.find_session_epochs()
         print(self)
 
     def cpu_linearization(self, x):
@@ -1091,14 +1009,23 @@ class Mouse_Results(Params, PaperFigures):
             if not isinstance(self.windows, list):
                 self.windows = [str(self.windows)]
 
+        # to be in dir you need to have a folder named + at least one csv file inside
         in_dir = [
-            os.path.isdir(os.path.join(self.folderResult, d)) for d in self.windows
+            os.path.isdir(os.path.join(self.folderResult, d))
+            and os.path.isfile(
+                os.path.join(self.folderResult, d, "posIndex_training.csv")
+            )
+            for d in self.windows
         ]
-        if not all(in_dir):
+        if not all(in_dir) and not kwargs.get("force_windows", False):
             warn(
                 f"Some specified windows not found in {self.folderResult} for {self.mouse_name}:{[w for w, exists in zip(self.windows, in_dir) if not exists]}. Fixing..."
             )
             self.windows = [w for w, exists in zip(self.windows, in_dir) if exists]
+        else:
+            self.windows = [
+                w for w in self.windows if w in os.listdir(self.folderResult)
+            ]
 
         # order windows by their name (assuming they are named only with a number)
         self.windows.sort(key=lambda x: int(x))
@@ -1166,7 +1093,11 @@ class Mouse_Results(Params, PaperFigures):
 
         for i, winMS in enumerate(self.windows):
             if i == 0 and which.lower() in ["ann", "both"]:
-                if not hasattr(self, "ann"):
+                if not hasattr(self, "ann") or kwargs.get("redo", False):
+                    max_nb_spikes = kwargs.pop(
+                        "max_nb_spikes", get_max_nb_spikes(winMS)
+                    )
+                    max_spikes_per_group = kwargs.pop("max_spikes_per_group", None)
                     self.ann = NNTrainer(
                         self.projects[winMS],
                         self.parameters[winMS],
@@ -1179,6 +1110,8 @@ class Mouse_Results(Params, PaperFigures):
                         # we dont really care about the dynamic loss, but this way we load the training data in memory, with speedMask,
                         transform_w_log=transform_w_log,
                         denseweight=denseweight,
+                        max_nb_spikes=max_nb_spikes,
+                        max_spikes_per_group=max_spikes_per_group,
                         **kwargs,
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
@@ -1212,12 +1145,13 @@ class Mouse_Results(Params, PaperFigures):
                         project,
                         config=self.bayes_config,
                         phase=self.phase,
+                        maze_params=self.data_helper.maze_coords,
                         **kwargs,
                     )
                     if kwargs.get("load_bayesMatrices", False):
                         try:
                             # allows to initialize bayes matrices if the pickle exists
-                            self.bayes_matrices = self.bayes.train_order_by_pos(
+                            self.bayesMatrices = self.bayes.train_order_by_pos(
                                 self.data_helper.fullBehavior,
                                 l_function=self.l_function,
                                 **kwargs,
@@ -1269,7 +1203,7 @@ class Mouse_Results(Params, PaperFigures):
                         ),
                         "rb",
                     ) as f:
-                        self.bayes_matrices = pickle.load(f)
+                        self.bayesMatrices = pickle.load(f)
                 except (FileNotFoundError, AttributeError):
                     if not force:
                         raise ValueError(
@@ -1285,7 +1219,7 @@ class Mouse_Results(Params, PaperFigures):
                             ),
                             "rb",
                         ) as f:
-                            self.bayes_matrices = pickle.load(f)
+                            self.bayesMatrices = pickle.load(f)
 
         windows, winValues = self._select_window(winMS)
         # Load results for all windows
@@ -1376,7 +1310,7 @@ class Mouse_Results(Params, PaperFigures):
                         ]
                         outputs = self.bayes.test_as_NN(
                             self.data_helper.fullBehavior,
-                            self.bayes_matrices,
+                            self.bayesMatrices,
                             timeStepPred,
                             windowSizeMS=win_value,
                             l_function=self.l_function,
@@ -1392,10 +1326,12 @@ class Mouse_Results(Params, PaperFigures):
                         useTrain=phase != self.phase,
                         useTest=phase != "training",
                     )
-                    timeStepPred = self.data_helper.fullBehavior["positionTime"][epochMask]
+                    timeStepPred = self.data_helper.fullBehavior["positionTime"][
+                        epochMask
+                    ]
                     outputs = self.bayes.test_as_NN(
                         self.data_helper.fullBehavior,
-                        self.bayes_matrices,
+                        self.bayesMatrices,
                         timeStepPred,
                         windowSizeMS=win_value,
                         l_function=self.l_function,
@@ -1925,7 +1861,9 @@ class Mouse_Results(Params, PaperFigures):
         This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
         """
         try:
-            self.pre = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
+            self.pre = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
+            ).reshape(-1, 2)
             self.preMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.pre
             )
@@ -1934,32 +1872,48 @@ class Mouse_Results(Params, PaperFigures):
                 "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
             )
         try:
-            self.hab = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
+            self.hab = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
+            ).reshape(-1, 2)
             self.habMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.hab
             )
         except KeyError:
             pass
         try:
-            self.cond = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
+            self.cond = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
+            ).reshape(-1, 2)
             self.condMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.cond
             )
         except KeyError:
             pass
         try:
-            self.post = self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
+            self.post = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
+            ).reshape(-1, 2)
             self.postMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.post
             )
         except KeyError:
             pass
         try:
-            self.extinct = self.DataHelper.fullBehavior["Times"]["SessionEpochs"][
-                "extinct"
-            ]
+            self.extinct = np.array(
+                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["extinct"]
+            ).reshape(-1, 2)
             self.extinctMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.extinct
+            )
+        except KeyError:
+            pass
+
+        try:
+            self.sleep = np.array(
+                self.DataHelper.fullBehavior["Times"]["sleepEpochs"]
+            ).reshape(-1, 2)
+            self.sleepMask = inEpochsMask(
+                self.DataHelper.fullBehavior["positionTime"][:, 0], self.sleep
             )
         except KeyError:
             pass
@@ -2156,7 +2110,7 @@ class Results_Loader:
             deviceName (str): Device to use for training ('gpu' or 'cpu'). Default is 'gpu'.
             nEpochs (int): Number of epochs to consider for the ANN.
             isTransformer (bool): Whether to use a transformer model for the ANN. Default is False.
-            batchSize (int): Batch size for training the ANN. Default is 64.
+            batch_size (int): Batch size for training the ANN. Default is 64.
             transform_w_log (bool): Whether to apply a logarithmic transformation to the ann loss. Default is False.
 
 

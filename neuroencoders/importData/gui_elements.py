@@ -3458,10 +3458,11 @@ class ModelPerformanceVisualizer:
 class OversamplingVisualizer:
     """Visualize the effect of oversampling resampling on spatial distribution"""
 
-    def __init__(self, gaussian_heatmap_model):
+    def __init__(self, gaussian_heatmap_model, l_function):
         self.GaussianHeatmap = gaussian_heatmap_model
         self.GRID_H = gaussian_heatmap_model.GRID_H
         self.GRID_W = gaussian_heatmap_model.GRID_W
+        self.l_function = l_function
 
     def extract_positions_from_dataset(self, dataset, max_samples=None):
         """Extract positions from a tf.data.Dataset"""
@@ -3495,7 +3496,10 @@ class OversamplingVisualizer:
         x_coarse = x_fine // stride
         y_coarse = y_fine // stride
 
-        coarse_H, coarse_W = self.GRID_H // stride, self.GRID_W // stride
+        coarse_H = int(np.ceil(self.GRID_H / stride))
+        coarse_W = int(np.ceil(self.GRID_W / stride))
+        x_coarse = np.clip(x_coarse, 0, coarse_W - 1)
+        y_coarse = np.clip(y_coarse, 0, coarse_H - 1)
         coarse_bins = y_coarse * coarse_W + x_coarse
 
         return coarse_bins, coarse_H, coarse_W
@@ -3538,6 +3542,13 @@ class OversamplingVisualizer:
         pos_before = self.extract_positions_from_dataset(dataset_before, max_samples)
         pos_after = self.extract_positions_from_dataset(dataset_after, max_samples)
 
+        # save the pos_after as a numpy file for later analysis
+        if path is not None:
+            import os
+
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            np.save(os.path.join(os.path.dirname(path), "pos_after.npy"), pos_after)
+
         print(f"Before oversampling: {len(pos_before)} samples")
         print(f"After oversampling: {len(pos_after)} samples")
         print(f"Oversampling ratio: {len(pos_after) / len(pos_before):.2f}x")
@@ -3553,21 +3564,21 @@ class OversamplingVisualizer:
         dist_diff = dist_after_norm - dist_before_norm
 
         # Create forbidden mask for coarse grid
-        coarse_H, coarse_W = self.GRID_H // stride, self.GRID_W // stride
+        coarse_H = int(np.ceil(self.GRID_H / stride))
+        coarse_W = int(np.ceil(self.GRID_W / stride))
         FORBID_coarse = np.zeros((coarse_H, coarse_W), dtype=bool)
+        forbid_fine = self.GaussianHeatmap.forbid_mask_tf.numpy()
         for y in range(coarse_H):
             for x in range(coarse_W):
-                if np.any(
-                    self.GaussianHeatmap.forbid_mask_tf[
-                        y * stride : (y + 1) * stride,
-                        x * stride : (x + 1) * stride,
-                    ]
-                    > 0
-                ):
+                block = forbid_fine[
+                    y * stride : (y + 1) * stride,
+                    x * stride : (x + 1) * stride,
+                ]
+                if block.size > 0 and np.all(block > 0):
                     FORBID_coarse[y, x] = True
 
         # Create the visualization
-        fig, axes = plt.subplots(2, 3, figsize=figsize)
+        fig, axes = plt.subplots(3, 3, figsize=figsize)
 
         # Raw counts
         im1 = axes[0, 0].imshow(dist_before, cmap="Blues", origin="lower")
@@ -3606,8 +3617,67 @@ class OversamplingVisualizer:
         axes[1, 2].contour(FORBID_coarse, levels=[0.5], colors="black", linewidths=2)
         plt.colorbar(im6, ax=axes[1, 2])
 
+        # last row: histograms of before vs after for  x, y and linpos
+        linpos_before = self.l_function(pos_before[:, :2])[1]
+        linpos_after = self.l_function(pos_after[:, :2])[1]
+        axes[2, 0].hist(
+            linpos_before,
+            bins=30,
+            alpha=0.7,
+            label="Before",
+            color="blue",
+            density=True,
+        )
+        axes[2, 0].hist(
+            linpos_after,
+            bins=30,
+            alpha=0.7,
+            label="After",
+            color="red",
+            density=True,
+        )
+        axes[2, 0].set_title("Linearized Position Distribution")
+
+        axes[2, 1].hist(
+            pos_before[:, 0],
+            bins=40,
+            alpha=0.7,
+            label="Before",
+            color="blue",
+            density=True,
+        )
+        axes[2, 1].hist(
+            pos_after[:, 0],
+            bins=40,
+            alpha=0.7,
+            label="After",
+            color="red",
+            density=True,
+        )
+        axes[2, 1].set_title("X Position Distribution")
+
+        axes[2, 2].hist(
+            pos_before[:, 1],
+            bins=40,
+            alpha=0.7,
+            label="Before",
+            color="blue",
+            density=True,
+        )
+        axes[2, 2].hist(
+            pos_after[:, 1],
+            bins=40,
+            alpha=0.7,
+            label="After",
+            color="red",
+            density=True,
+        )
+        axes[2, 2].set_title("Y Position Distribution")
+        axes[2, 2].legend()
+
         plt.tight_layout()
         if path is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             fig.savefig(path)
             print(f"Saved figure to {path}")
         plt.close(fig)
