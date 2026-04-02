@@ -94,7 +94,7 @@ dev = [
     "tensorboard",
     "tensorboard-plugin-profile",
     "protobuf>=6.31.1",
-    "werkzeug<3.0.0",
+    "werkzeug<4.0.0",
     "torch>=2.3.1",
     "xlsxwriter>=3.2.5",
 ]
