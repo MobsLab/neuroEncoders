@@ -161,6 +161,16 @@ def get_behavior(
         else:
             tRipples = None
 
+        if "MovAcc" in f.root.optional:
+            MovAcc = f.root.optional.MovAcc[:].flatten().reshape(-1)
+            MovTimes = f.root.optional.MovTimes[:].flatten().reshape(-1)
+        else:
+            raise ValueError(
+                "this file does not contain MovAccTsd :"
+                + folder
+                + "optional_nnBehavior.mat"
+            )
+
     if phase is not None:
         filename = os.path.join(folder, "nnBehavior_" + phase + ".mat")
         if not os.path.exists(filename):
@@ -229,6 +239,12 @@ def get_behavior(
                         pattern = "(post|extinction|extinct|ext)"
                     elif phase == "extinction":
                         pattern = "(extinction|extinct|ext)"
+                    else:
+                        raise ValueError(
+                            "phase should be one of pre, hab, cond, post, extinction"
+                        )
+
+                    pattern = f"^(?!.*sleep).*{pattern}.*$"  # exclude sleep sessions
 
                     list_sessions = [
                         re.search(pattern, name, re.IGNORECASE) for name in sessionNames
@@ -297,6 +313,8 @@ def get_behavior(
             "positionTime": positionTime,
             "Speed": speed,
             "Bandwidth": bandwidth,
+            "MovAcc": MovAcc,
+            "MovTimes": MovTimes,
             "Times": {
                 "learning": learningTime,
                 "start_freeze": start_freeze,
@@ -357,6 +375,8 @@ def speed_filter(
     window_range=-1,  # -1 means no window range
     get_rid_of_sleep: bool = True,
     threshold: Optional[float] = None,
+    force_min=None,
+    force_max=None,
 ) -> None:
     """
     A simple tool to set up a threshold on the speed value
@@ -1070,6 +1090,11 @@ def select_epochs(
                 # we want to select only the idx that are in the speedMask
                 idx = np.arange(idx_testSet, idx_testSet + sizeTest)
                 idx_valid = np.where(speedMaskToShowPRE[idx])[0]
+                if idx_valid.shape[0] == 0:
+                    entropiesPositions += [0]
+                    entropiesSpeeds += [0]
+                    nb_points += [0]
+                    continue
                 # The environmental variable are discretized by equally space bins
                 # such that there is 45*...*45 bins per dimension
                 # we then fit over the test set a kernel estimation of the probability distribution

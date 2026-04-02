@@ -11,7 +11,7 @@ colorsForSNS = [cm(14), cm(2)]
 colorsForSNSF = [cm(12), cm(16)]
 
 
-def boxplot_linError(
+def barplot_linError(
     lErrorNN_mean,
     lErrorBayes_mean,
     timeWindows=[36, 108, 252, 504],
@@ -33,7 +33,7 @@ def boxplot_linError(
     )
     fig, ax = plt.subplots()
     myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
-    sns.boxplot(
+    sns.barplot(
         data=datToPlot,
         x="timeWindow (ms)",
         y="linearError",
@@ -44,11 +44,11 @@ def boxplot_linError(
     )
 
     if dirSave is not None:
-        fig.savefig(os.path.join(dirSave, f"linearErrorBoxPlot{suffix}.png"))
-        fig.savefig(os.path.join(dirSave, f"linearErrorBoxPlot{suffix}.svg"))
+        fig.savefig(os.path.join(dirSave, f"linearErrorBarPlot{suffix}.png"))
+        fig.savefig(os.path.join(dirSave, f"linearErrorBarPlot{suffix}.svg"))
 
 
-def boxplot_euclError(
+def barplot_euclError(
     errorNN_mean,
     errorBayes_mean,
     timeWindows=[36, 108, 252, 504],
@@ -70,7 +70,7 @@ def boxplot_euclError(
     )
     fig, ax = plt.subplots()
     myPalette = {"ANN": colorsForSNS[0], "Bayes": colorsForSNS[1]}
-    sns.boxplot(
+    sns.barplot(
         data=datToPlot,
         x="timeWindow (ms)",
         y="eucl. error (cm)",
@@ -81,8 +81,8 @@ def boxplot_euclError(
     )
 
     if dirSave is not None:
-        fig.savefig(os.path.join(dirSave, f"errorBoxPlot{suffix}.png"))
-        fig.savefig(os.path.join(dirSave, f"errorBoxPlot{suffix}.svg"))
+        fig.savefig(os.path.join(dirSave, f"errorBarPlot{suffix}.png"))
+        fig.savefig(os.path.join(dirSave, f"errorBarPlot{suffix}.svg"))
 
 
 def barplot_linError_mouse_by_mouse(
@@ -130,12 +130,12 @@ def barplot_linError_mouse_by_mouse(
         if dirSave is not None:
             fig.savefig(
                 os.path.join(
-                    dirSave, f"linearErrorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.png"
+                    dirSave, f"linearErrorBarPlotMBM{suffix}_{timeWindows[iWindow]}.png"
                 )
             )
             fig.savefig(
                 os.path.join(
-                    dirSave, f"linearErrorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.svg"
+                    dirSave, f"linearErrorBarPlotMBM{suffix}_{timeWindows[iWindow]}.svg"
                 )
             )
 
@@ -185,12 +185,12 @@ def barplot_euclError_mouse_by_mouse(
         if dirSave is not None:
             fig.savefig(
                 os.path.join(
-                    dirSave, f"errorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.png"
+                    dirSave, f"errorBarPlotMBM{suffix}_{timeWindows[iWindow]}.png"
                 )
             )
             fig.savefig(
                 os.path.join(
-                    dirSave, f"errorBoxPlotMBM{suffix}_{timeWindows[iWindow]}.svg"
+                    dirSave, f"errorBarPlotMBM{suffix}_{timeWindows[iWindow]}.svg"
                 )
             )
 

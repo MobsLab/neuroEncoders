@@ -548,6 +548,7 @@ def overview_fig(
     plot_kde: bool = True,
     speedMask=None,
     concat_epochs: bool = False,
+    show_legend: bool = True,
     **kwargs,
 ):
     """
@@ -628,7 +629,7 @@ def overview_fig(
     elif target.lower() == "direction":
         dim_names = ["Direction"]
     elif target.lower() == "posandheaddirectionandthigmo":
-        if dimOutput != 4:
+        if dimOutput == 2:
             dim_names = ["X", "Y", "Linear Position", "Distance to Wall"]
         else:
             dim_names = ["X", "Y", "Head Direction", "Distance to Wall"]
@@ -717,7 +718,7 @@ def overview_fig(
             alpha=0.7,
             label="True distance",
         )
-        ax_dist.set_xlabel("Time")
+        ax_dist.set_xlabel("Time (s)")
         ax_dist.set_ylabel("Distance to Wall")
         ax_dist.set_title("Distance to Wall Over Time")
         ax_dist.legend()
@@ -742,7 +743,7 @@ def overview_fig(
         ax_x_time.plot(
             timeStepsPred[selection], pos[selection, 0], "b-", alpha=0.7, label="True X"
         )
-        ax_x_time.set_xlabel("Time")
+        ax_x_time.set_xlabel("Time (s)")
         ax_x_time.set_ylabel("X Position")
         ax_x_time.set_title("X Position Over Time")
         ax_x_time.legend()
@@ -766,7 +767,7 @@ def overview_fig(
         ax_y_time.plot(
             timeStepsPred[selection], pos[selection, 1], "b-", alpha=0.7, label="True Y"
         )
-        ax_y_time.set_xlabel("Time")
+        ax_y_time.set_xlabel("Time (s)")
         ax_y_time.set_ylabel("Y Position")
         ax_y_time.set_title("Y Position Over Time")
         ax_y_time.legend()
@@ -932,6 +933,8 @@ def overview_fig(
                         show_boundaries=False,
                         s=8,
                         color="tab:blue",
+                        alpha=0.6,
+                        zorder=2,
                     )
                     if join_points:
                         # also plot the lines
@@ -939,23 +942,26 @@ def overview_fig(
                             x_stitched,
                             inferring[active_mask, dim],
                             color="tab:blue",
-                            alpha=0.7,
+                            alpha=0.6,
                             linewidth=0.7,
+                            zorder=2,
                         )
                 else:
                     ax1.scatter(
                         timeStepsPred[selection],
                         inferring[selection, dim],
-                        label=f"guessed {dim_names[dim]} selection",
                         s=8,
+                        alpha=0.6,
+                        zorder=2,
                     )
                     if join_points:
                         ax1.plot(
                             timeStepsPred[selection],
                             inferring[selection, dim],
                             color="tab:blue",
-                            alpha=0.7,
+                            alpha=0.6,
                             linewidth=0.7,
+                            zorder=2,
                         )
                 if useSpeedMask and concat_epochs:
                     _ = plot_concatenated_bouts(
@@ -968,6 +974,7 @@ def overview_fig(
                         color="xkcd:dark pink",
                         markersize=6,
                         alpha=0.6,
+                        zorder=1,
                     )
                 else:
                     ax1.plot(
@@ -977,6 +984,7 @@ def overview_fig(
                         markersize=6,
                         alpha=0.6,
                         color="xkcd:dark pink",
+                        zorder=1,
                     )
 
                 if useSpeedMask and concat_epochs:
@@ -989,15 +997,17 @@ def overview_fig(
                         show_boundaries=False,
                         color="xkcd:dark pink",
                         s=4,
-                        alpha=0.2,
+                        alpha=0.6,
+                        zorder=1,
                     )
                 else:
                     ax1.scatter(
                         timeStepsPred,
                         pos[:, dim],
                         s=4,
-                        alpha=0.2,
+                        alpha=0.6,
                         color="xkcd:dark pink",
+                        zorder=1,
                     )
                 if with_hist_distribution and selection.sum() > 0:
                     # Determine ax2 based on mode
@@ -1088,7 +1098,7 @@ def overview_fig(
                         fontsize="x-small",
                         bbox_to_anchor=(0.5, 0),
                     )
-                    ax1.set_xlabel("time")
+                    ax1.set_xlabel("Time (s)")
                 ax1.set_ylabel(f"{dim_names[dim]}")
         else:
             # Keep existing linanddirection logic
@@ -1115,9 +1125,9 @@ def overview_fig(
                 s=36,
                 c=inferring[selection, 1],
                 marker="o",
-                alpha=1,
+                alpha=0.6,
                 cmap=ListedColormap(["hotpink", "cornflowerblue"]),
-                zorder=3,
+                zorder=2,
             )
             ax1.plot(
                 timeStepsPred if not useSpeedMask else timeStepsPred[selection],
@@ -1125,7 +1135,6 @@ def overview_fig(
                 ".-" if not useSpeedMask else "-",
                 markersize=6,
                 alpha=0.6,
-                label=f"true {dim_names[0]}",
                 color="xkcd:dark pink",
                 zorder=1,
             )
@@ -1157,7 +1166,7 @@ def overview_fig(
                 ground_truth=pos[selection, 1],
                 timestamps=np.where(selection)[0],
             )
-            ax1.set_xlabel("time")
+            ax1.set_xlabel("Time (s)")
             ax1.set_ylabel("Distance to Shock (lin. pos)")
             if with_hist_distribution and selection.sum() > 0:
                 ax2 = plt.subplot2grid((1, 5), (0, 4), sharey=ax1)
@@ -1234,31 +1243,36 @@ def overview_fig(
                     style="scatter",
                     show_boundaries=False,
                     s=8,
-                    label=f"guessed {dim_names[2]} selection",
-                    alpha=1,
+                    color="tab:blue",
+                    alpha=0.6,
+                    zorder=2,
                 )
                 if join_points:
                     ax2.plot(
                         x_stitched,
                         inferring[active_mask],
                         color="tab:blue",
-                        alpha=0.7,
+                        alpha=0.6,
                         linewidth=0.7,
+                        zorder=2,
                     )
             else:
                 ax2.scatter(
                     timeStepsPred[selection],
                     inferring[selection],
                     s=8,
-                    label=f"guessed {dim_names[2]} selection",
+                    color="tab:blue",
+                    alpha=0.6,
+                    zorder=2,
                 )
                 if join_points:
                     ax2.plot(
                         timeStepsPred[selection],
                         inferring[selection],
                         color="tab:blue",
-                        alpha=0.7,
+                        alpha=0.6,
                         linewidth=0.7,
+                        zorder=2,
                     )
             # 1. Plot Line (Trajectory)
             if useSpeedMask and concat_epochs:
@@ -1272,6 +1286,7 @@ def overview_fig(
                     markersize=6,
                     alpha=0.6,
                     color="xkcd:dark pink",
+                    zorder=1,
                 )
             else:
                 ax2.plot(
@@ -1281,6 +1296,7 @@ def overview_fig(
                     markersize=6,
                     alpha=0.6,
                     color="xkcd:dark pink",
+                    zorder=1,
                 )
 
             # 2. Plot Scatter (True Points)
@@ -1293,21 +1309,23 @@ def overview_fig(
                     style="scatter",
                     show_boundaries=False,
                     s=4,
-                    alpha=0.2,
+                    alpha=0.6,
                     label=f"true {dim_names[2]} stitched",
                     color="xkcd:dark pink",
+                    zorder=1,
                 )
             else:
                 ax2.scatter(
                     timeStepsPred if not useSpeedMask else timeStepsPred[selection],
                     pos if not useSpeedMask else pos[selection],
                     s=4,
-                    alpha=0.2,
-                    label=f"true {dim_names[2]}",
+                    alpha=0.6,
                     color="xkcd:dark pink",
+                    zorder=1,
                 )
 
             ax2.set_title(f"{dim_names[2]}")
+            ax2.set_xlabel("Time (s)")
             ax2.set_ylabel(f"{dim_names[2]}")
 
             # --- [Plotting Distribution (KDE)] ---
@@ -1373,13 +1391,14 @@ def overview_fig(
             all_handles = handles_1 + handles_2
             all_labels = labels_1 + labels_2
 
-            fig.legend(
-                all_handles,
-                all_labels,
-                loc="lower center",
-                fontsize="x-small",
-                bbox_to_anchor=(0.5, 0),
-            )
+            if show_legend:
+                fig.legend(
+                    all_handles,
+                    all_labels,
+                    loc="lower center",
+                    fontsize="x-small",
+                    bbox_to_anchor=(0.1, 0),
+                )
         else:
             from neuroencoders.importData.gui_elements import ModelPerformanceVisualizer
 
@@ -1395,7 +1414,8 @@ def overview_fig(
                 ax2 = plt.subplot2grid((dimOutput, 2), (1, 1))
                 visualizer._plot_error_distribution(ax=ax2)
 
-    plt.subplots_adjust(bottom=0.15)
+    if fig.get_layout_engine() is None:
+        plt.subplots_adjust(bottom=0.15)
     if kwargs.get("save", True):
         plt.savefig(
             os.path.expanduser(

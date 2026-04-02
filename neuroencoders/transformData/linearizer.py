@@ -118,8 +118,10 @@ class UMazeLinearizer:
                 self.data_helper.shock_zone,
                 self.data_helper.safe_zone,
             ]
+            self.maze_params = self.data_helper.maze_coords
         else:
             self.custom_lines = None
+            self.maze_params = None
         self.custom_line_colors = ["black", "hotpink", "cornflowerblue"]
         self.custom_line_styles = ["-", "-", "-"]
         self.custom_line_widths = [4, 2, 2]
@@ -200,17 +202,46 @@ class UMazeLinearizer:
         """Create interpolation objects for the path."""
         # Create parameter values for spline interpolation
         self.n_points = len(self.nnPoints)
+        if self.n_points == 0:
+            self.tsProj = np.linspace(0, 1, self.nb_bins)
+            self.mazePoints = np.empty((0, 2), dtype=float)
+            self.linear_values = np.empty((0,), dtype=float)
+            self.path_spline = None
+            self.linear_spline = None
+            self.target_linear_values = np.array([], dtype=float)
+            return
+
+        # Sanitize target values to be monotonic and clipped to [0, 1].
+        target = np.asarray(self.target_linear_values, dtype=float)
+        if target.shape[0] != self.n_points:
+            target = np.linspace(0.0, 1.0, self.n_points)
+        target = np.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0)
+        target = np.clip(target, 0.0, 1.0)
+        target = np.maximum.accumulate(target)
+        target[0] = 0.0
+        target[-1] = 1.0
+        self.target_linear_values = target
+
+        if self.n_points == 1:
+            self.tsProj = np.linspace(0, 1, self.nb_bins)
+            self.mazePoints = np.repeat(self.nnPoints, self.nb_bins, axis=0)
+            self.linear_values = np.linspace(0.0, 1.0, self.nb_bins)
+            self.path_spline = None
+            self.linear_spline = None
+            return
+
         ts = np.linspace(0, 1, self.n_points)
         # equally spaced linear points. As many as the number of points
         # pu in the verify_linearization function (by default 25 anchor points)
 
         # Create spline interpolation for the 2D path
-        self.path_spline = itp.make_interp_spline(ts, self.nnPoints, k=2)
+        k = min(2, self.n_points - 1)
+        self.path_spline = itp.make_interp_spline(ts, self.nnPoints, k=k)
         # path_spline is the interpolating object that finds a fit between
         # the anchor points and the equally spaced 2D points
 
         # Create spline interpolation for the linearization values
-        self.linear_spline = itp.make_interp_spline(ts, self.target_linear_values, k=2)
+        self.linear_spline = itp.make_interp_spline(ts, self.target_linear_values, k=k)
         # linear_spline is the interpolating object that finds a fit between
         # the anchor points and the equally spaced linear values
 
@@ -223,6 +254,9 @@ class UMazeLinearizer:
         if clip:
             self.linear_values[0] = 0.0
             self.linear_values[-1] = 1.0
+            self.linear_values = np.maximum.accumulate(
+                np.clip(self.linear_values, 0.0, 1.0)
+            )
 
     def apply_linearization(self, euclideanData, keops=True):
         """
@@ -236,6 +270,10 @@ class UMazeLinearizer:
             projectedPos: np.array of shape (N, 2) with projected coordinates
             linearPos: np.array of shape (N,) with linearized positions
         """
+        if getattr(self, "mazePoints", None) is None or self.mazePoints.size == 0:
+            n = euclideanData.shape[0]
+            return np.full((n, 2), np.nan), np.full((n,), np.nan)
+
         if keops:
             return self.pykeops_linearization(euclideanData)
         else:

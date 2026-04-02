@@ -123,7 +123,6 @@ class Decoder:
         dataset = dataset.filter(
             lambda x: tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(x["pos"])))
         )
-        # dataset = dataset.batch(1, drop_remainder=True) #remove the last batch if it does not contain enough elements to form a batch.
         dataset = dataset.map(
             lambda *vals: nnUtils.parse_serialized_sequence(
                 self.params, *vals, batched=False
