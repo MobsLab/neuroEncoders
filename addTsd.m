@@ -41,7 +41,7 @@ try
 
     optional.tRipples = Range(SWR.tRipples, 's');
 catch
-    disp('No SWR data found, skipping tRipples extraction.'
+    disp('No SWR data found, skipping tRipples extraction.');
 end
 
 % Save the behavior data

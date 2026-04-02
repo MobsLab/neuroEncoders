@@ -1,7 +1,7 @@
 # Load libs
 import os
 
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -250,6 +250,16 @@ class WaveFormComparator:
             relative_indices = tf.cast(
                 tf.cumsum(tf.cast(is_in_group, tf.int32)), tf.int32
             )
+
+            # Ensure that relative indices do not exceed the available spike slots
+            # per group (to avoid out-of-bounds accesses when gathering).
+            max_spikes_per_group = getattr(self.params, "max_nb_spikes_per_group", None)
+            if max_spikes_per_group is not None:
+                relative_indices = tf.clip_by_value(
+                    relative_indices,
+                    clip_value_min=0,
+                    clip_value_max=max_spikes_per_group - 1,
+                )
 
             # 3. Apply the mask so only spikes in this group have a non-zero index
             # Example: [0, 1, 1, 2] -> [0, 1, 0, 2]

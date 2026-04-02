@@ -24,7 +24,7 @@ def mock_params():
     params = MagicMock()
     params.batch_size = 2
     params.nGroups = 1
-    params.nChannelsPerGroup = [32]
+    params.nChannelsPerGroup = [5]
     params.stride = 36
     params.windowSizeMS = 100
     params.dimOutput = 2
