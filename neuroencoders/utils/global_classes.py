@@ -531,12 +531,10 @@ class DataHelper(Project):
             (window_len // 2 - 1) : -(window_len // 2)
         ]
 
-        # Use logical_and to be conservative and ensure we filter within the [min, max] range
-        self.fullBehavior["Times"]["speedFilter"] = np.logical_and(
-            smoothed_speed > min_speed,
-            smoothed_speed < max_speed,
-            ~inEpochsMask(pos_time, freeze_epochs),
-        ).astype(bool)
+        # Combine conditions to ensure we filter within [min_speed, max_speed] and exclude freeze epochs
+        speed_range_mask = (smoothed_speed > min_speed) & (smoothed_speed < max_speed)
+        freeze_excluded_mask = ~inEpochsMask(pos_time, freeze_epochs)
+        self.fullBehavior["Times"]["speedFilter"] = speed_range_mask & freeze_excluded_mask
         print(f"forced speed filter with min {min_speed} and max {max_speed}")
 
     def get_true_target(
@@ -1901,7 +1899,7 @@ class Params:
         )  # path to save results
 
         # regarding data augmentation
-        self.dataAugmentation = kwargs.pop("dataAugmentation", True)
+        self.dataAugmentation = kwargs.pop("dataAugmentation", False)
 
         # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???
@@ -2058,9 +2056,22 @@ class Params:
             "high_rad", 2 * np.pi
         )  # for cyclic variables in the loss function
 
-        self.usingMixedPrecision = True  # whether to use mixed precision training (float16) for faster computations on compatible hardware
-        # enforcing float16 computations whenever possible
-        # According to tf tutorials, we can allow that in most layer
+        # whether to use mixed precision training (float16) for faster computations on compatible hardware
+        # Derive a safe default based on device capabilities (enable only when a GPU is available),
+        # while still allowing callers to override via kwargs.
+        default_using_mixed_precision = False
+        try:
+            gpus = tf.config.list_physical_devices("GPU")
+            if gpus:
+                default_using_mixed_precision = True
+        except Exception:
+            # If device query fails, keep the conservative default (False)
+            default_using_mixed_precision = False
+
+        self.usingMixedPrecision = kwargs.pop(
+            "usingMixedPrecision", default_using_mixed_precision
+        )
+        # According to tf tutorials, we can allow mixed precision in most layers
         # except the output for unclear reasons linked to gradient computations
 
     def save_params_to_json(self):

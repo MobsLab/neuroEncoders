@@ -189,7 +189,7 @@ class Trainer(SpatialConstraintsMixin):
         epochMask = inEpochsMask(
             behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
         )
-        totMask = speedMask * epochMask
+        totMask = speedMask & epochMask
         full_training_true_positions = behaviorData["Positions"][
             totMask, : self.feature_dim
         ]
