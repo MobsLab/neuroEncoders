@@ -174,8 +174,8 @@ class AnimatedPositionPlotter:
         else:
             self.predicted_heatmap = None
 
-        if kwargs.get("predicted_dim_please", None) is not None:
-            self.predicted_dim_please = kwargs.pop("predicted_dim_please")
+        if kwargs.get("optional_predicted_dim", None) is not None:
+            self.optional_predicted_dim = kwargs.pop("optional_predicted_dim")
 
         self.positions = self.positions_from_NN
         self.positionTime = (
@@ -248,9 +248,9 @@ class AnimatedPositionPlotter:
                 if self.linpredicted is not None
                 else None
             )
-            self.predicted_dim_please = (
-                self.predicted_dim_please[self.sort_idx]
-                if self.predicted_dim_please is not None
+            self.optional_predicted_dim = (
+                self.optional_predicted_dim[self.sort_idx]
+                if self.optional_predicted_dim is not None
                 else None
             )
         else:
@@ -973,7 +973,7 @@ class AnimatedPositionPlotter:
             print("Using speed for color coding!")
 
             try:
-                dim = self.predicted_dim_please
+                dim = self.optional_predicted_dim
                 dim = dim[self.totMask][self.true_valid_indices]
             except (IndexError, AttributeError):
                 dim = np.array(self.data_helper.fullBehavior["Times"]["speedFilter"])[
