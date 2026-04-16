@@ -187,17 +187,17 @@ class AnimatedPositionPlotter:
         # we setup a "true" positionTime to use for precise plotting such as stims...
         # same for "true" positions, which are the original positions for each and every timepoint
 
+        self.posIndex = kwargs.get("posIndex", None)
+
         # Get predicted positions if available
         if kwargs.get("predicted", None) is not None:
             self.predicted = np.array(kwargs["predicted"])
-            self.posIndex = kwargs.get("posIndex", None)
             if self.posIndex is None:
                 raise ValueError(
                     "You must provide a posIndex when using predicted positions."
                 )
         else:
             self.predicted = None
-            self.posIndex = None
 
         # Get linearized positions/predictions if available
         if kwargs.get("linearized_true", None) is not None:
@@ -975,9 +975,10 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.predicted_dim_please
                 dim = dim[self.totMask][self.true_valid_indices]
-            except IndexError:
-                print("Using speed mask from random.")
-                dim = self.speed_mask
+            except (IndexError, AttributeError):
+                dim = np.array(self.data_helper.fullBehavior["Times"]["speedFilter"])[
+                    self.totMask
+                ][self.true_valid_indices]
 
             if self.predicted is not None:
                 predicted_dim = np.ones_like(self.linpredicted)
@@ -1754,15 +1755,26 @@ class AnimatedPositionPlotter:
             handles_for_legend.append(current_point_handle)
             labels_for_legend.append(current_point_label)
         else:
-            # Add custom legend for binary colors
-            legend_elements = [
-                Patch(facecolor=shock_color, label="Shock Zone (0)"),
-                Patch(facecolor=safe_color, label="Safe Zone (1)"),
-            ]
-            label_elements = [
-                "Shock Zone (0)",
-                "Safe Zone (1)",
-            ]
+            if kwargs.get("colors_style", None) == "speed":
+                # Add custom legend for binary colors
+                legend_elements = [
+                    Patch(facecolor=shock_color, label="Immobility (0)"),
+                    Patch(facecolor=safe_color, label="MovEpochs (1)"),
+                ]
+                label_elements = [
+                    "Immobility (0)",
+                    "MovEpochs (1)",
+                ]
+            else:
+                # Add custom legend for binary colors
+                legend_elements = [
+                    Patch(facecolor=shock_color, label="Shock Zone (0)"),
+                    Patch(facecolor=safe_color, label="Safe Zone (1)"),
+                ]
+                label_elements = [
+                    "Shock Zone (0)",
+                    "Safe Zone (1)",
+                ]
             handles_for_legend.extend(legend_elements)
             labels_for_legend.extend(label_elements)
 

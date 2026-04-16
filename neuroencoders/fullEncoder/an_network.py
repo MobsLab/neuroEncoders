@@ -1340,7 +1340,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             n_total_aug = n_aug + 1 if kwargs.get("keep_original", True) else n_aug
             # In your main pipeline where you calculate steps_per_epoch:
 
-            if isinstance(windowSizeMS, list):
+            if isinstance(windowSizeMS, list) and len(windowSizeMS) > 1:
                 total_balanced_size = 0
                 for c in subcounts:
                     mc = c["train"].max()
@@ -1993,9 +1993,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.params,
                     vals,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
+                    # sorted_indices = #TODO: at some point
                     max_spikes=self.max_nb_spikes,
                     max_spikes_per_group=self.max_spikes_per_group,
-                    # sorted_indices = #TODO: at some point
                 )
 
             # Map create_indices BEFORE batching and data augmentation (per-example)

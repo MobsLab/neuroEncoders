@@ -21,18 +21,18 @@ win_values = [
 mice_nb = [
     "M1199_PAG",
     "M994_PAG",
-    "M1239_MFB",
-    "M1230_Novel",
-    "M1230_Known",
-    "M1162_MFB",
-    "M1117_MFB",
-    "M1162_PAG",
-    "M1168_MFB",
     "M1182_PAG",
     "M1239_PAG",
-    "M1199_reversal",
+    "M1162_PAG",
     "M905",
+    "M1239_MFB",
+    "M1162_MFB",
+    "M1117_MFB",
+    "M1168_MFB",
     "M1199_MFB",
+    "M1230_Known",
+    "M1230_Novel",
+    "M1199_reversal",
 ]
 ####
 nameExp = "consensus_v8_factor3_dim64_3Transformers_lr001_nHeads4_dropout015_cLambda07_speed_75_50"

@@ -2138,7 +2138,7 @@ class PaperFigures:
         for i, body in enumerate(vp["bodies"]):
             body.set_facecolor(colors_box[i])
             body.set_edgecolor("white")
-            body.set_alpha(0.3)
+            body.set_alpha(0.2)
             body.set_linewidth(1)
 
         for i, data in enumerate(data_box):
@@ -2147,8 +2147,8 @@ class PaperFigures:
             if med > 0:
                 ax.hlines(
                     med,
-                    x_pos - 0.3,
-                    x_pos + 0.3,
+                    x_pos - 0.35,
+                    x_pos + 0.35,
                     colors=colors_box[i],
                     linewidth=10,
                     zorder=10,
@@ -2159,7 +2159,7 @@ class PaperFigures:
                 x_pos + jitter,
                 data,
                 color=colors_box[i],
-                s=2,
+                s=3,
                 alpha=0.05,
                 zorder=5,
                 edgecolors="none",

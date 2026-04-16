@@ -704,6 +704,7 @@ class DataHelper(Project):
                 linear_position_mode=True,
                 positions_from_NN=positions[:, :2],
                 prediction_time=data_helper.fullBehavior["positionTime"],
+                posIndex=np.arange(positions.shape[0]),
                 **kwargs,
             )
             plotter.show(interval=1, repeat=True, block=True, blit=False)
