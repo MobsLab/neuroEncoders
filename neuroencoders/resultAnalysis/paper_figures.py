@@ -970,23 +970,45 @@ class PaperFigures:
             shock_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Shock")])
             safe_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Safe")])
 
+            shock_zone = DataHelper.create_zone_polygon_from_borders(
+                ZONEDEF[ZONELABELS.index("Shock")]
+            )
+            safe_zone = DataHelper.create_zone_polygon_from_borders(
+                ZONEDEF[ZONELABELS.index("Safe")]
+            )
+
             shock_count = np.sum(shock_mask)
             safe_count = np.sum(safe_mask)
 
             shock_occupancy = (
-                shock_count / total_time_points if total_time_points > 0 else 0
+                (DataHelper.polygon.area * shock_count)
+                / (total_time_points * shock_zone.area)
+                if total_time_points > 0
+                else 0
             )
             safe_occupancy = (
-                safe_count / total_time_points if total_time_points > 0 else 0
+                (DataHelper.polygon.area * safe_count)
+                / (total_time_points * safe_zone.area)
+                if total_time_points > 0
+                else 0
             )
 
             if extended_zone:
                 safe_mask_extended = safe_mask | is_in_zone(
                     pos, ZONEDEF[ZONELABELS.index("SafeCenter")]
                 )
+                safe_zone_extended = unary_union(
+                    [
+                        safe_zone,
+                        DataHelper.create_zone_polygon_from_borders(
+                            ZONEDEF[ZONELABELS.index("SafeCenter")]
+                        ),
+                    ]
+                )
                 safe_count_extended = np.sum(safe_mask_extended)
                 safe_occupancy_extended = (
-                    safe_count_extended / total_time_points
+                    (DataHelper.polygon.area * safe_count_extended)
+                    / (safe_zone_extended.area * total_time_points)
                     if total_time_points > 0
                     else 0
                 )
@@ -1014,7 +1036,8 @@ class PaperFigures:
                 ]
                 shock_convex_count = np.sum(shock_mask_convex_mask)
                 shock_occupancy_convex = (
-                    shock_convex_count / total_time_points
+                    (DataHelper.polygon.area * shock_convex_count)
+                    / (total_shock_zone.area * total_time_points)
                     if total_time_points > 0
                     else 0
                 )
@@ -1040,7 +1063,8 @@ class PaperFigures:
                 ]
                 safe_convex_count = np.sum(safe_mask_convex_mask)
                 safe_occupancy_convex = (
-                    safe_convex_count / total_time_points
+                    (DataHelper.polygon.area * safe_convex_count)
+                    / (total_safe_zone.area * total_time_points)
                     if total_time_points > 0
                     else 0
                 )
@@ -1230,7 +1254,7 @@ class PaperFigures:
             # Plot the bar chart
             bar_ax.bar(zones, occupancy_values, color=colors)
             bar_ax.axhline(
-                0.215,  # expected occupancy if exploration is uniform
+                1,  # expected occupancy if exploration is uniform
                 linestyle="--",
                 color="gray",
                 lw=1.6,
