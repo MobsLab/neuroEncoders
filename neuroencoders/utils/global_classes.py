@@ -867,6 +867,20 @@ class DataHelper(Project):
         """
         self.polygon = Polygon(self.maze_coords)
 
+    def create_zone_polygon_from_borders(self, zonedef):
+        """
+        Creates a polygon of a zone from its borders defined as [[x_min, x_max], [y_min, y_max]].
+        """
+        zone_polygon = Polygon(
+            [
+                [zonedef[0, 0], zonedef[1, 0]],
+                [zonedef[0, 1], zonedef[1, 0]],
+                [zonedef[0, 1], zonedef[1, 1]],
+                [zonedef[0, 0], zonedef[1, 1]],
+            ]
+        )
+        return zone_polygon
+
     def _get_ref_and_xy(
         self, phase=None, save=True, plot=False, force: bool = False, positions=None
     ):

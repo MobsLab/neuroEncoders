@@ -1981,6 +1981,15 @@ class Mouse_Results(Params, PaperFigures):
                 for id, win in enumerate(self.windows_values):
                     data_helper_win = self.data_helper
                     resultsNN_suffix = self.resultsNN_phase[suffix]
+                    if (
+                        resultsNN_suffix is None
+                        or resultsNN_suffix["posIndex"][id] is None
+                    ):
+                        print(
+                            f"Results for mouse {self.mouse_name} and suffix '{suffix}' not found in resultsNN_phase. Skipping this suffix."
+                        )
+                        pbar.update(1)
+                        continue
 
                     # Extract posIndex once
                     posIndex = resultsNN_suffix["posIndex"][id].flatten()
