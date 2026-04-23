@@ -2133,16 +2133,23 @@ def parse_serialized_sequence(
             dense_shape=tf.cast(tf.stack([limit]), tf.int64),
         )
 
+        # 3. Slice the indices and values to the limit
+        tensors["indexInDat"] = tf.sparse.SparseTensor(
+            indices=tensors["indexInDat"].indices[:limit],
+            values=tensors["indexInDat"].values[:limit],
+            dense_shape=tf.cast(tf.stack([limit]), tf.int64),
+        )
+
         # 4. Optional: Add your "Simple Warning" here
         tf.cond(
             actual_total > max_spikes,
             lambda: tf.print("⚠️ Truncating sample:", actual_total, "->", max_spikes),
             lambda: tf.no_op(),
         )
-    # 1. Handle Metadata (Vectorized to avoid CPU overhead)
-    # Padding contract: use -1 for index/metadata tensors
     lengths = []
     default = -1
+    # 1. Handle Metadata (Vectorized to avoid CPU overhead)
+    # Padding contract: use -1 for index/metadata tensors
     for key in ["pos", "groups", "indexInDat"]:
         if isinstance(tensors[key], tf.SparseTensor):
             padded_sparse = tf.sparse.reset_shape(tensors[key], new_shape=[max_spikes])
@@ -2641,6 +2648,39 @@ def apply_group_augmentation(
     return result_tensors
 
 
+@tf.function
+def apply_single_group_augmentation(
+    tensors: Dict[str, tf.Tensor],
+    params: Params,
+    augmentation_config: NeuralDataAugmentation,
+):
+    """Apply one augmentation pass to one already-parsed example.
+
+    Unlike ``apply_group_augmentation``, this does not create a new leading
+    augmentation dimension and does not replicate metadata. It is intended for
+    selective augmentation flows (e.g. augment only oversampled duplicates).
+    """
+    result_tensors = dict(tensors)
+
+    for g in range(params.nGroups):
+        g_key = f"group{g}"
+        if g_key not in result_tensors:
+            continue
+
+        group_data = result_tensors[g_key]  # Shape: [Spikes, Chan, Time]
+        if augmentation_config.normalize:
+            group_data = augmentation_config.normalize_group(group_data, g)
+
+        # Keep padded spikes exactly zero after augmentation.
+        is_real_spike = tf.reduce_any(tf.not_equal(group_data, 0.0), axis=[1, 2])
+        is_real_spike = is_real_spike[:, tf.newaxis, tf.newaxis]
+
+        augmented = augmentation_config.augment_spike_group(group_data)
+        result_tensors[g_key] = tf.where(is_real_spike, augmented, 0.0)
+
+    return result_tensors
+
+
 def parse_tfrecord_with_augmentation(
     example_proto: tf.Tensor,
     feature_description: Dict[str, tf.io.FixedLenFeature],
@@ -2694,8 +2734,21 @@ class LinearizationLayer(tf.keras.layers.Layer):
         # Convert to TensorFlow constants
         if maze_points is None or ts_proj is None:
             raise ValueError("maze_points and ts_proj cannot be None")
-        maze_points = np.array(maze_points).reshape(-1, 2)
-        ts_proj = np.array(ts_proj).reshape(-1)
+
+        if isinstance(maze_points, dict) and all(
+            k in maze_points for k in ("class_name", "config")
+        ):
+            maze_points = np.array(maze_points["config"]["value"])
+        else:
+            maze_points = np.array(maze_points).reshape(-1, 2)
+
+        if isinstance(ts_proj, dict) and all(
+            k in ts_proj for k in ("class_name", "config")
+        ):
+            ts_proj = np.array(ts_proj["config"]["value"])
+        else:
+            ts_proj = np.array(ts_proj).reshape(-1, 2)
+
         self.maze_points = tf.constant(maze_points, dtype=tf.float32)
         self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
 
@@ -4361,6 +4414,7 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
             return
 
         # 2. PCA Projection
+        n_dim = latents.shape[1] if len(latents.shape) > 1 else 1
         proj = PCA(n_components=2).fit_transform(latents)
 
         # 3. Plot PCA Scatter
@@ -4369,7 +4423,9 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
             proj[:, 0], proj[:, 1], c=self.viz_y, cmap="plasma", s=20, alpha=0.6
         )
         plt.colorbar(sc, label="Target Value (LinPos)")
-        plt.title(f"Latent Space - Epoch {epoch + 1}")
+        plt.title(
+            f"Latent Space - Epoch {epoch + 1} ({len(latents)} samples, {n_dim}D -> 2D PCA)"
+        )
         plt.xlabel("PC 1")
         plt.ylabel("PC 2")
         plt.grid(True, linestyle="--", alpha=0.3)
@@ -4486,7 +4542,9 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
 
             # Identify spike data
             target_data = example[f"group{idx_group}"]
-            spike_idx = int(example[f"indices{idx_group}"][i])
+            spike_idx = min(
+                int(example[f"indices{idx_group}"][i]), target_data.shape[0]
+            )
 
             if spike_idx == 0:
                 continue  # Padded spike
@@ -4578,7 +4636,10 @@ class ContrastiveVisualizer(tf.keras.callbacks.Callback):
 
             for i in range(plot_len):
                 g_idx = int(groups_for_trial[i])
-                spike_idx = int(example[f"indices{g_idx}"][i])
+                spike_idx = min(
+                    int(example[f"indices{g_idx}"][i]),
+                    example[f"group{g_idx}"].shape[0],
+                )
                 if spike_idx == 0:
                     continue
 
@@ -4799,14 +4860,14 @@ class CyclicMAE(tf.keras.losses.Loss):
 @tf.keras.utils.register_keras_serializable(package="neuroencoders")
 class ScaledSigmoid(tf.keras.layers.Layer):
     def __init__(self, high=2 * np.pi, **kwargs):
-        super(ScaledSigmoid, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.high = high
 
     def call(self, inputs):
         return tf.math.sigmoid(inputs) * self.high
 
     def get_config(self):
-        config = super(ScaledSigmoid, self).get_config()
+        config = super().get_config()
         config.update({"high": self.high})
         return config
 
@@ -4827,7 +4888,7 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
     def __init__(
         self,
         target_structure: Dict[str, Dict[str, Any]],
-        temperature: float = 0.4,
+        temperature: float = 0.1,
         sigma: float = 0.1,
         l_function_params: Optional[Dict] = None,
         name: str = "contrastive_loss",
@@ -4842,7 +4903,7 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
         self.temperature = float(temperature)
         self.sigma = float(sigma)
         self.l_function_params = l_function_params
-        self.eps = 1e-8
+        self.eps = kwargs.get("eps", 1e-8)
 
         self.l_function = None
         if l_function_params is not None:
@@ -4878,9 +4939,25 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
         N = kops.shape(z)[0]
         z = tf.math.l2_normalize(z, axis=1)
         # Similarity matrix
-        w = tf.ones((N, N), dtype=dtype)
+        w_accumulated = tf.zeros((N, N), dtype=dtype)
+
+        # prepare small gaussian noise for y_true
+        gaussian_noise = tf.random.normal(
+            shape=(tf.shape(y_true)[0], 1 if self.l_function is not None else 2),
+            mean=0.0,
+            stddev=0.005 if self.l_function is not None else 0.03,
+            dtype=self.storage_dtype,
+        )
 
         # Use target_structure to apply the correct distance logic for each component
+        if (
+            "pos_2d" not in self.target_structure
+            and "pos_lin" not in self.target_structure
+        ):
+            raise ValueError(
+                "ContrastiveRegressionLoss requires 'pos_2d' or 'pos_lin' in target_structure for position-based weighting."
+            )
+
         for name, info in self.target_structure.items():
             raw_slice = info.get("slice")
             if isinstance(raw_slice, (tuple, list)):
@@ -4889,12 +4966,14 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
                 start = int(raw_slice)
                 end = start + int(info.get("dim", 1))
             val = y_true[:, start:end]
+            if end - start == 1:
+                val = tf.reshape(val, [-1])
 
             if name in ["pos_2d", "pos_lin"]:
                 # Euclidean Kernel
 
                 # 1. Get positions for weighting (linearized or 2D)
-                if self.l_function is not None:
+                if self.l_function is not None and kops.shape(val)[1] == 2:
                     _, linearized_pos = self.l_function(val)
                     pos = tf.reshape(linearized_pos, [-1])
                 elif kops.shape(val)[1] == 1:
@@ -4904,6 +4983,8 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
                         "ContrastiveRegressionLoss requires l_function_params to compute position weights. "
                         "Please provide l_function_params for the LinearizationLayer."
                     )
+
+                pos = pos + gaussian_noise  # Add noise for stability
 
                 # 3. Compute pairwise Cosine Similarity Logits
                 logits = tf.matmul(z, z, transpose_b=True) / self.temperature
@@ -4921,38 +5002,61 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
 
                 # 5. Distance weighting (soft positives)
                 kernel = tf.exp(-0.5 * d2 / (self.sigma**2))
-                w *= kops.cast(kernel, dtype)
+                w_pos = kops.cast(kernel, dtype) * 1.0
 
             elif name == "hd":  # head direction in radians
                 # Circular Kernel (Cosine similarity)
                 # If val is 1D (radians), use cos(theta1 - theta2)
                 cos_sim = tf.cos(val[:, None] - val[None, :])
                 # Normalize to [0, 1] range
-                w *= kops.cast((cos_sim + 1.0) / 2.0, dtype)
+                w_hd = kops.cast((cos_sim + 1.0) / 2.0, dtype)
+                w_accumulated += w_hd * 0.5
             elif name == "direction":  # bool towards/away from shock
                 matches = tf.equal(val[:, 0][:, None], val[:, 0][None, :])
-                w *= kops.cast(matches, dtype)
+                w_dir = kops.cast(matches, dtype)
+                w_accumulated += w_dir * 0.5
 
             elif name in ["speed", "thigmo"]:
                 # Simple Linear Difference Kernel
                 d_lin = tf.abs(val[:, None] - val[None, :])
-                w *= kops.cast(kops.exp(-d_lin / self.sigma), dtype)
+                w_other = kops.cast(
+                    kops.exp(-d_lin / (8 if name == "speed" else 0.05)), dtype
+                )
+                w_accumulated += w_other * 0.3
 
         mask_diag = tf.eye(N, dtype=dtype)
-        w = w * (1.0 - mask_diag)  # Mask self-similarity
+        w_pos = w_pos * (1.0 - mask_diag)  # Mask self-similarity for position weights
+        w_final = w_pos * (1.0 + w_accumulated)
+        w_final = w_final * (1.0 - mask_diag)  # Mask self-similarity
 
-        w_sum = tf.reduce_sum(w, axis=1, keepdims=True) + self.eps
-        w_norm = w / w_sum
+        w_sum = tf.reduce_sum(w_final, axis=1, keepdims=True) + self.eps
+        w_norm = w_final / w_sum
 
         # 6. Compute Softmax Log-Probabilities masking diagonal
         logits = tf.matmul(z, z, transpose_b=True) / self.temperature
-        logits_masked = logits + -1e9 * mask_diag
+        logits_masked = logits - 1e4 * mask_diag
         log_prob = tf.nn.log_softmax(logits_masked, axis=1)
 
         # 7. Cross entropy with soft targets
         loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
 
         return tf.cast(kops.reshape(loss_per_anchor, (-1, 1)), tf.float32)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "temperature": self.temperature,
+                "sigma": self.sigma,
+                "l_function_params": self.l_function_params,
+                "target_structure": self.target_structure,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 def _get_loss_function(loss_name, alpha=1.0, delta=1.0, **kwargs):

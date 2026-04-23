@@ -249,7 +249,9 @@ def main(args):
 
         if min_speed is not None and max_speed is not None:
             # Mimic rawdata_parser logic: handle shape mismatch and apply Hamming convolution
-            helper.force_speed_mask(min_speed, max_speed)
+            helper.force_speed_mask(
+                min_speed, max_speed, l_function=Linearizer.pykeops_linearization
+            )
 
         speedMask = helper.fullBehavior["Times"]["speedFilter"]
         pos_time = helper.fullBehavior["positionTime"][:, 0]
@@ -291,7 +293,7 @@ def main(args):
         nFeatures=args.n_features,
         batch_size=batch_size,
         save_json=True,
-        load_at_init=False,  # we load a new params
+        load_at_init=True,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=not args.no_dense,
@@ -796,6 +798,12 @@ def main(args):
             or args.redo
         ):
             print("Testing training set")
+            # add experimental configs for tf, for data, device logging etc
+            import tensorflow as tf
+
+            tf.data.experimental.enable_debug_mode()
+            tf.config.run_functions_eagerly(True)
+            tf.debugging.set_log_device_placement(True)
             NNTrainer.test(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
