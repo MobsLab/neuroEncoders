@@ -228,7 +228,7 @@ class PaperFigures:
         Method to load the results of the neural network prediction.
         """
 
-        if not hasattr(self, "suffixes"):
+        if not hasattr(self, "suffixes") or kwargs.get("redo", False):
             self._prepare_suffixes(suffixes)
 
         base_results_path = os.path.join(self.projectPath.experimentPath, "results")
@@ -1293,7 +1293,7 @@ class PaperFigures:
 
             # Only label the Y-axis on the first bar plot for clarity
             if i == 0:
-                bar_ax.set_ylabel("Occupancy Fraction")
+                bar_ax.set_ylabel("Occupancy Fraction (Normalized)")
             else:
                 bar_ax.set_yticklabels([])  # Hide Y-labels on subsequent plots
 

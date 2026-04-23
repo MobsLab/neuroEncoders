@@ -512,10 +512,25 @@ class DataHelper(Project):
         assert [len(d) for d in thresholds] == [len(s) for s in self.list_channels]
         self.thresholds = [i for d in thresholds for i in d]
 
-    def force_speed_mask(self, min_speed, max_speed):
+    def force_speed_mask(self, min_speed, max_speed, fix_speed=False, l_function=None):
+        """
+            Force a speed mask on the positions by looking at the speed array and the position time array, and excluding freeze epochs.
+
+        Args:
+            - min_speed: the minimum speed to include in the mask
+            - max_speed: the maximum speed to include in the mask
+            - fix_speed: whether to fix speed array by recomputing it from positions and applying median filtering to remove tracking artifacts (default: False)
+
+        Returns:
+            - the speed mask that was applied to the positions, stored in self.fullBehavior["Times"]["speedFilter"]
+        """
         from neuroencoders.importData.epochs_management import inEpochsMask
 
-        speed = self.fullBehavior["Speed"][:, 0]
+        if not fix_speed:
+            speed = self.fullBehavior["Speed"][:, 0]
+        else:
+            speed = self.recompute_speed(l_function=l_function)
+
         pos_time = self.fullBehavior["positionTime"][:, 0]
         freeze_epochs = self.get_freeze_epochs()
 
@@ -535,11 +550,77 @@ class DataHelper(Project):
 
         # Combine conditions to ensure we filter within [min_speed, max_speed] and exclude freeze epochs
         speed_range_mask = (smoothed_speed > min_speed) & (smoothed_speed < max_speed)
+
+        if l_function is not None:
+            _, lin_pos = l_function(self.fullBehavior["Positions"][:, :2])
+            lin_pos = lin_pos.flatten()
+            lin_speed = np.diff(lin_pos) / np.diff(pos_time)
+            lin_speed = np.concatenate([[lin_speed[0]], lin_speed])
+            smoothed_lin_speed = np.convolve(
+                w / w.sum(),
+                np.r_[
+                    lin_speed[window_len - 1 : 0 : -1],
+                    lin_speed,
+                    lin_speed[-2 : -window_len - 1 : -1],
+                ],
+                mode="valid",
+            )[(window_len // 2 - 1) : -(window_len // 2)]
+            speed_mask_lin = (np.abs(smoothed_lin_speed) > 0.03) & (
+                np.abs(smoothed_lin_speed) < 0.45
+            )
+            speed_range_mask = speed_mask_lin
+            speed_range_mask = speed_range_mask & (smoothed_speed < max_speed)
         freeze_excluded_mask = ~inEpochsMask(pos_time, freeze_epochs)
         self.fullBehavior["Times"]["speedFilter"] = (
             speed_range_mask & freeze_excluded_mask
         )
         print(f"forced speed filter with min {min_speed} and max {max_speed}")
+
+    def recompute_speed(self, add_to_fullBehavior=False, l_function=None):
+        from scipy.signal import medfilt
+        from neuroencoders.resultAnalysis.print_results import EC
+
+        x_raw = self.fullBehavior["Positions"][:, 0] * EC[0]
+        y_raw = self.fullBehavior["Positions"][:, 1] * EC[1]
+        t = self.fullBehavior["positionTime"].flatten()
+
+        df = pd.DataFrame({"x": x_raw, "y": y_raw, "t": t})
+        df = df.interpolate(method="nearest", limit=2)
+        dist = np.sqrt(df["x"].diff() ** 2 + df["y"].diff() ** 2)
+        dt = df["t"].diff()
+        raw_speed = dist / dt
+
+        not_allowed = raw_speed > 75
+        too_fast = (df["x"].diff().abs().values > 0.25) | (
+            df["y"].diff().abs().values > 0.25
+        )
+        not_allowed = not_allowed | too_fast
+
+        if l_function is not None:
+            _, lin_pos = l_function(self.fullBehavior["Positions"][:, :2])
+            lin_pos = lin_pos.flatten()
+            df["lin_pos"] = lin_pos
+            lin_speed = df["lin_pos"].diff() / dt
+            not_allowed = not_allowed | (lin_speed > 0.15)
+
+        df.loc[not_allowed, ["x", "y"]] = np.nan
+        df["x_clean"] = df["x"].rolling(window=5, center=True, min_periods=1).median()
+        df["y_clean"] = df["y"].rolling(window=5, center=True, min_periods=1).median()
+
+        df["dx"] = df["x_clean"].diff()
+        df["dy"] = df["y_clean"].diff()
+        df["dt"] = df["t"].diff()
+
+        df["final_speed"] = np.sqrt(df["dx"] ** 2 + df["dy"] ** 2) / df["dt"]
+
+        inst_speed = df["final_speed"].values
+        if inst_speed.shape[0] == self.fullBehavior["Speed"].shape[0] - 1:
+            inst_speed = np.concatenate([[inst_speed[0]], inst_speed])
+
+        if add_to_fullBehavior:
+            self.fullBehavior["Speed"] = inst_speed.reshape(-1, 1)
+
+        return inst_speed
 
     def get_true_target(
         self, windowSizeMS=108, l_function=None, in_place=False, show=False, **kwargs
@@ -707,7 +788,7 @@ class DataHelper(Project):
                 posIndex=np.arange(positions.shape[0]),
                 **kwargs,
             )
-            plotter.show(interval=1, repeat=True, block=True, blit=False)
+            plotter.show(interval=kwargs.get("frame_interval", 1), **kwargs)
 
         if in_place:
             if not hasattr(self, "old_positions"):
@@ -1941,6 +2022,7 @@ class Params:
         # changed after CSI - better scaleability + transformer pretraining?
         self.project_transformer = kwargs.pop("project_transformer", True)
         self.dim_factor = kwargs.pop("dim_factor", 1)
+        self.sequence_output_dim = kwargs.pop("sequence_output_dim", None)
         self.loss_type = kwargs.pop("loss_type", "safe_kl")  # or "wasserstein"
 
         default_lstm_layers = (
@@ -1963,10 +2045,11 @@ class Params:
         )  # first fully connected layer in Transformer arch dimension, the second must be the same as the input dim for the skip connection
 
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
-        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (45, 45))
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (35, 35))
         self.GaussianSigma = kwargs.pop(
             "GaussianSigma", 0.05
-        )  # 1/44 ~= 0.023, so it should cover ~3 bins
+        )  # 1/44 ~= 0.023, so it should cover ~3 bins if gris size is 45*45
+        # if grid size is 30*30, then 0.05 should cover ~1.5 bins
         self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
         self.GaussianNeg = -50  # value for forbidden zones in the heatmap
 
@@ -2065,8 +2148,14 @@ class Params:
 
         self.reduce_dense = kwargs.pop("reduce_dense", None)
         self.no_cnn = kwargs.pop("no_cnn", False)
+
+        # contrastive loss parameters
         self.contrastive_loss = kwargs.pop("contrastive_loss", False)
-        self.lambda_contrastive = kwargs.pop("lambda_contrastive", 0.7)
+        self.contrastive_weight = kwargs.pop("contrastive_weight", 0.8)
+        self.contrastive_dim = kwargs.pop("contrastive_dim", 64)
+        self.temperature = kwargs.pop("temperature", 0.07)
+        self.sigma_contrastive = kwargs.pop("sigma_contrastive", 0.015)
+
         self.use_conv2d = kwargs.pop("use_conv2d", False)
         self.use_group_attention_fusion = kwargs.pop(
             "use_group_attention_fusion", False

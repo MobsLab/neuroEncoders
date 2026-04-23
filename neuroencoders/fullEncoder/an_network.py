@@ -24,6 +24,7 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -59,7 +60,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -423,12 +423,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             if all_slices:
                 start_idx = min(s[0] for s in all_slices)
                 end_idx = max(s[1] for s in all_slices)
+                dim = getattr(self.params, "contrastive_dim", 128)
 
                 # This slice covers everything: Pos, HD, Speed, Thigmo
                 structure["latent"] = {
-                    "dim": end_idx - start_idx,
+                    "dim": dim,
                     "slice": (start_idx, end_idx),
-                    "activation": "linear",  # Latents usually don't need the featureActivation
+                    "activation": "linear",
                 }
 
         self.target_structure = structure
@@ -505,12 +506,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 }  # remove latent from the behavioral structure, as we want to predict the full range of coordinates for the contrastive loss
                 loss_dict[name] = ContrastiveRegressionLoss(
                     target_structure=behav_structure,
-                    temperature=getattr(self.params, "temperature", 0.1),
-                    sigma=getattr(self.params, "sigma_contrastive", 0.1),
+                    temperature=getattr(self.params, "temperature", 0.07),
+                    sigma=getattr(self.params, "sigma_contrastive", 0.02),
                     l_function_params=self.lfunction_layer_params,
                     **loss_kwargs,
                 )
-                metrics_dict[name] = ["mse"]
                 loss_weights[name] = getattr(self.params, "contrastive_weight", 0.8)
 
         return loss_dict, loss_weights, metrics_dict
@@ -599,7 +599,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.isTransformer = kwargs.get(
                 "isTransformer", getattr(self.params, "isTransformer", False)
             )
-            if not hasattr(self.params, "sequence_output_dim"):
+            if (
+                not hasattr(self.params, "sequence_output_dim")
+                or self.params.sequence_output_dim is None
+            ):
                 # Backward-compat default used by transformer and output heads.
                 if self.isTransformer:
                     self.params.sequence_output_dim = getattr(
@@ -708,6 +711,29 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 if name == "pos_2d" and getattr(self.params, "GaussianHeatmap", False):
                     # GaussianHeatmap is already defined in setup_gaussian_heatmap
                     continue
+                elif name == "latent" and getattr(
+                    self.params, "contrastive_loss", False
+                ):
+                    # we just need to add a layer norm
+                    self.heads[name] = MaskedSequential(
+                        [
+                            tf.keras.layers.Dense(
+                                self.params.sequence_output_dim // 2,
+                                name=name + "_dense1",
+                                kernel_regularizer="l2",
+                            ),
+                            # simply add LayerNormalization before relu
+                            tf.keras.layers.LayerNormalization(name=name + "_ln"),
+                            tf.keras.layers.Activation("relu", name=name + "_relu"),
+                            tf.keras.layers.Dense(
+                                spec["dim"],
+                                activation=spec["activation"],
+                                name=name + "_dense2",
+                                kernel_regularizer="l2",
+                            ),
+                        ],
+                        name=name + "_head",
+                    )
                 else:
                     self.heads[name] = MaskedSequential(
                         [
@@ -1913,7 +1939,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         @tf.function
         def map_outputs(vals):
             # Move 'pos' to targets, rest stay in inputs
-            inputs_dict = {k: v for k, v in vals.items() if k != "pos"}
+            inputs_dict = {
+                k: v for k, v in vals.items() if k != "pos" and not k.startswith("__")
+            }
             # Structured targets matching model outputs
             targets_dict = {}
             for name, spec in self.target_structure.items():
@@ -2009,11 +2037,49 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             is_aug_active = (
                 self.params.dataAugmentation
                 and kwargs.get("enable_augmentation", True)
+                and augmentation_config is not None
                 and key != "test"
                 and not kwargs.get("inference_mode", False)
             )
 
-            if is_aug_active:
+            selective_oversampled_aug = (
+                is_aug_active
+                and self.params.OversamplingResampling
+                and kwargs.get("oversampling_resampling", True)
+                and kwargs.get("augment_only_oversampled", True)
+                and key == "train"
+            )
+
+            if selective_oversampled_aug:
+                print(
+                    "Applying data augmentation only to oversampled duplicate copies in train dataset"
+                )
+
+                @tf.function
+                def maybe_augment_oversampled(vals):
+                    was_oversampled = tf.cast(
+                        vals.get("__oversampled_copy", tf.constant(False)), tf.bool
+                    )
+
+                    clean_vals = {
+                        k: v for k, v in vals.items() if k != "__oversampled_copy"
+                    }
+
+                    def do_augment():
+                        return nnUtils.apply_single_group_augmentation(
+                            clean_vals,
+                            self.params,
+                            augmentation_config,
+                        )
+
+                    return tf.cond(was_oversampled, do_augment, lambda: clean_vals)
+
+                dataset = dataset.map(
+                    maybe_augment_oversampled,
+                    num_parallel_calls=tf.data.AUTOTUNE,
+                )
+
+            elif is_aug_active:
                 optimized_fn = self.create_optimized_parse_function(
                     augmentation=is_aug_active,
                     augmentation_config=augmentation_config if is_aug_active else None,
@@ -3321,7 +3387,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         rep_factors_tf = tf.constant(rep_factors, dtype=tf.int64)
         dataset_before_oversampling = dataset
 
-        # Map each example to repeated dataset
+        # Map each example to repeated dataset.
+        # The first copy remains the original sample. Additional copies are
+        # marked so augmentation can be applied selectively downstream.
         def map_repeat(ex):
             idx = map_bin_class(ex)
             num_repeats = tf.cond(
@@ -3329,7 +3397,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 lambda: tf.gather(rep_factors_tf, idx),
                 lambda: tf.constant(0 if drop_forbidden else 1, dtype=tf.int64),
             )
-            return tf.data.Dataset.from_tensors(ex).repeat(num_repeats)
+
+            def attach_repeat_flag(i):
+                ex_out = dict(ex)
+                ex_out["__oversampled_copy"] = tf.greater(i, 0)
+                return ex_out
+
+            return tf.data.Dataset.range(num_repeats).map(
+                attach_repeat_flag, num_parallel_calls=tf.data.AUTOTUNE
+            )
 
         dataset = dataset.flat_map(map_repeat)
 

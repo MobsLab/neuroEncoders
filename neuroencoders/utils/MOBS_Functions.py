@@ -1575,7 +1575,7 @@ class Mouse_Results(Params, PaperFigures):
             prediction_time=prediction_time,
             posIndex=posIndex,
             predicted_heatmap=predicted_heatmap,
-            predicted_dim_please=speedMaskArray_for_dim,
+            optional_predicted_dim=speedMaskArray_for_dim,
             blit=blit,
             l_function=kwargs.pop("l_function", self.l_function),
             **kwargs,

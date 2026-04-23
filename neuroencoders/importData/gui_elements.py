@@ -250,7 +250,8 @@ class AnimatedPositionPlotter:
             )
             self.optional_predicted_dim = (
                 self.optional_predicted_dim[self.sort_idx]
-                if self.optional_predicted_dim is not None
+                if hasattr(self, "optional_predicted_dim")
+                and self.optional_predicted_dim is not None
                 else None
             )
         else:
@@ -859,7 +860,17 @@ class AnimatedPositionPlotter:
             )
 
         # Setup linearized position movie (bottom)
-        self._setup_linpos_movie(gs, dark_theme=usedark, colors_style="speed", **kwargs)
+        try:
+            lin_dim = self.optional_predicted_dim
+            lin_dim = lin_dim[self.totMask][self.true_valid_indices]
+        except (IndexError, AttributeError):
+            lin_dim = np.array(self.data_helper.fullBehavior["Times"]["speedFilter"])[
+                self.totMask
+            ][self.true_valid_indices]
+
+        self._setup_linpos_movie(
+            gs, dark_theme=usedark, colors_style="speed", lin_dim=lin_dim, **kwargs
+        )
 
         plt.tight_layout()
 
@@ -975,10 +986,12 @@ class AnimatedPositionPlotter:
             try:
                 dim = self.optional_predicted_dim
                 dim = dim[self.totMask][self.true_valid_indices]
+                print("Using provided predicted dim for color coding.")
             except (IndexError, AttributeError):
                 dim = np.array(self.data_helper.fullBehavior["Times"]["speedFilter"])[
                     self.totMask
                 ][self.true_valid_indices]
+                print("Using speed mask as predicted dim for color coding.")
 
             if self.predicted is not None:
                 predicted_dim = np.ones_like(self.linpredicted)
@@ -1026,6 +1039,10 @@ class AnimatedPositionPlotter:
         true_line_color = kwargs.get("true_line_color", TRUE_LINE_COLOR)
         predicted_color = kwargs.get("predicted_color", PREDICTED_COLOR)
         predicted_line_color = kwargs.get("predicted_line_color", PREDICTED_LINE_COLOR)
+        binary_colors = kwargs.get("binary_colors", BINARY_COLORS)
+        shock_color = kwargs.get("shock_color", SHOCK_COLOR)
+        safe_color = kwargs.get("safe_color", SAFE_COLOR)
+        lin_dim = kwargs.get("lin_dim", None)
         kwargs.get("colors_style", None)
 
         self.axes["linpos_movie"] = self.fig.add_subplot(gs[1, :])
@@ -1053,6 +1070,19 @@ class AnimatedPositionPlotter:
             linewidth=2.5,
             zorder=10,
         )
+
+        if lin_dim is not None:
+            unique_values = np.unique(lin_dim[~np.isnan(lin_dim)])
+            binary_colors = len(unique_values) == 2 and set(unique_values) == {0, 1}
+            if binary_colors:
+                self.lin_dim = lin_dim
+                self.artists["linpos_points"] = ax.scatter(
+                    [],
+                    [],
+                    alpha=0.7,
+                    zorder=9,
+                )
+                self.lincolormap = {0: shock_color, 1: safe_color}
 
         if self.predicted is not None:
             # we'll do one scatter for the predicted positions
@@ -2179,21 +2209,24 @@ class AnimatedPositionPlotter:
                     current_lin_predicted = self.linpredicted[frame : frame + 1]
 
                     x, y = self.get_linearized_point(current_lin_predicted[0])
-                    if (
-                        x
-                        == self.artists[name_axis][
-                            "linearized_arrow_predicted"
-                        ].get_xdata()
-                        and y
-                        == self.artists[name_axis][
-                            "linearized_arrow_predicted"
-                        ].get_ydata()
-                    ):
-                        pass
-                    else:
-                        self.artists[name_axis]["linearized_arrow_predicted"].set_data(
-                            ([x], [y])
-                        )
+                    if self.artists[name_axis][
+                        "linearized_arrow_predicted"
+                    ].get_xdata():
+                        if (
+                            x
+                            == self.artists[name_axis][
+                                "linearized_arrow_predicted"
+                            ].get_xdata()
+                            and y
+                            == self.artists[name_axis][
+                                "linearized_arrow_predicted"
+                            ].get_ydata()
+                        ):
+                            pass
+                        else:
+                            self.artists[name_axis][
+                                "linearized_arrow_predicted"
+                            ].set_data(([x], [y]))
 
             n_trail_points = len(trail_positions)
             alphas = np.linspace(0.4, 1, n_trail_points)
@@ -2624,6 +2657,24 @@ class AnimatedPositionPlotter:
         self.artists["current_point"].set_offsets(
             np.array([self.positionTime[frame], self.linpositions[frame]])
         )
+        if "linpos_points" in self.artists:
+            self.artists["linpos_points"].set_offsets(
+                np.column_stack((time, linpositions))
+            )
+            if hasattr(self, "lin_dim"):
+                values = self.lin_dim[start_idx:end_idx]
+                colors = [self.lincolormap[int(v)] for v in values]
+                colors = [
+                    lighten_color(color, factor)
+                    for color, factor in zip(colors, np.linspace(0.2, 1, len(colors)))
+                ]
+                colors_rgba = []
+                alphas = np.linspace(0.4, 1, len(colors))
+                for i, d in enumerate(values):
+                    base_color = colors[i]
+                    rgba = (*mcolors.to_rgb(base_color), alphas[i])
+                    colors_rgba.append(rgba)
+                self.artists["linpos_points"].set_color(colors_rgba)
 
         if self.linpredicted is not None:
             linpredicted = self.linpredicted[start_idx:end_idx]
@@ -2750,6 +2801,7 @@ class AnimatedPositionPlotter:
         interval: int = 50,
         repeat: bool = True,
         save_path: Optional[str] = None,
+        every_n_frames: Optional[int] = None,
         **kwargs,
     ):
         """
@@ -2776,6 +2828,23 @@ class AnimatedPositionPlotter:
                 "cache_frame_data", False
             ),  # Reduce memory usage
         }
+
+        print(
+            f"Creating animation with params : interval={interval}ms, repeat={repeat}, save_path={save_path}"
+        )
+
+        if every_n_frames is not None:
+            print(f"Animating every {every_n_frames} frames...")
+            total_frames = self.total_frames
+            frame_indices = np.arange(0, total_frames, every_n_frames)
+            self.total_frames = len(frame_indices)
+
+            original_animate_frame = self.animate_frame
+
+            def animate_frame_wrapper(i):
+                return original_animate_frame(frame_indices[i])
+
+            self.animate_frame = animate_frame_wrapper
 
         self.animation = animation.FuncAnimation(
             fig=self.fig,
