@@ -415,7 +415,7 @@ def path_for_experiments(
     for i, path in enumerate(Dir["path"]):
         try:
             Dir["manipe"].append(Dir["expe_info"][i]["SessionType"].item(0)[0])
-        except KeyError:
+        except (KeyError, TypeError):
             Dir["manipe"].append(experiment_name)
 
         # Adjust manipe for sub experiments

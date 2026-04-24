@@ -221,11 +221,10 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             [
                 "-e",
                 nbEpochs,
-                "--gpu",
+                # "--gpu",
                 "--target",
                 target,
                 "--early_stop",
-                "--no_dense",
                 "--n_features",
                 "64",
                 "--dim_factor",

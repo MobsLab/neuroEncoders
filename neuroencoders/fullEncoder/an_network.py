@@ -1332,7 +1332,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if kwargs.get("return_datasets", False):
             return datasets, counts
 
-        if counts is not None:
+        if counts is not None and "train" in counts and counts["train"] is not None:
             # means we are augmenting the data on the fly, so we can visualize the distribution of the data and compute the balanced size after augmentation
             import termplotlib as tpl
 
