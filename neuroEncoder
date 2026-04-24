@@ -296,7 +296,7 @@ def main(args):
         load_at_init=True,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
-        denseweight=not args.no_dense,
+        denseweight=args.dense_weight,
         mixed_loss=args.mixed_loss,
         GaussianHeatmap=not args.no_gaussian,
         all_args=vars(args),
@@ -1017,7 +1017,7 @@ def main(args):
                 deviceName=deviceName,
                 windows=windowSizeMS,
                 isTransformer=not args.lstm,
-                denseweight=not args.no_dense,
+                denseweight=args.dense_weight,
                 transform_w_log=args.transform_w_log,
                 which="both",
                 load_last_bayes=True,
@@ -1362,8 +1362,8 @@ if __name__ == "__main__":
             help="defines whether the uncertainty loss is majored with a log function or stays euclidian",
         )
         p.add_argument(
-            "-nod",
-            "--no_dense",
+            "-dw",
+            "--dense_weight",
             action="store_true",
             help="defines whether the dense weight loss should be used or not",
         )
