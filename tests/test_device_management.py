@@ -32,15 +32,15 @@ class TestDeviceManagement(unittest.TestCase):
         self.assertEqual(device, "/device:GPU:0")
         mock_growth.assert_called_once()
 
-    @patch("tensorflow.distribute.MirroredStrategy")
+    @patch("neuroencoders.utils.management._create_mirrored_strategy")
     @patch("tensorflow.config.list_physical_devices")
     @patch("tensorflow.config.experimental.set_memory_growth")
     def test_manage_devices_multi_gpu(
-        self, mock_growth, mock_physical, mock_strategy_class
+        self, mock_growth, mock_physical, mock_create_strategy
     ):
         mock_physical.return_value = [MagicMock(), MagicMock()]
         mock_strategy = MagicMock(spec=tf.distribute.Strategy)
-        mock_strategy_class.return_value = mock_strategy
+        mock_create_strategy.return_value = mock_strategy
 
         strategy = manage_devices("MULTI-GPU")
         self.assertEqual(strategy, mock_strategy)
@@ -145,7 +145,7 @@ class TestGetDeviceContext(unittest.TestCase):
         get_device_context(strategy)
         strategy.scope.assert_called_once()
 
-    @patch("tensorflow.distribute.has_strategy")
+    @patch("neuroencoders.fullEncoder.nnUtils._has_active_strategy")
     def test_get_device_context_string_no_active_strategy(self, mock_has_strategy):
         """Test that a device string returns tf.device() when no strategy is active"""
         mock_has_strategy.return_value = False
@@ -155,7 +155,7 @@ class TestGetDeviceContext(unittest.TestCase):
             get_device_context("/GPU:0")
             mock_device.assert_called_once_with("/GPU:0")
 
-    @patch("tensorflow.distribute.has_strategy")
+    @patch("neuroencoders.fullEncoder.nnUtils._has_active_strategy")
     def test_get_device_context_string_with_active_strategy(self, mock_has_strategy):
         """Test that a device string is ignored when a strategy is active"""
         mock_has_strategy.return_value = True
@@ -173,7 +173,7 @@ class TestGetDeviceContext(unittest.TestCase):
                 str(logger_instance.warning.call_args),
             )
 
-    @patch("tensorflow.distribute.has_strategy")
+    @patch("neuroencoders.fullEncoder.nnUtils._has_active_strategy")
     def test_get_device_context_invalid_device_string(self, mock_has_strategy):
         """Test that invalid device string returns nullcontext with warning"""
         mock_has_strategy.return_value = False

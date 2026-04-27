@@ -18,9 +18,17 @@ import psutil
 import tensorflow as tf
 from denseweight import DenseWeight
 from keras import ops as kops
+from pykeops.numpy import LazyTensor as LazyTensor_np
 from scipy.ndimage import gaussian_filter
 
 from neuroencoders.utils.global_classes import Params, SpatialConstraintsMixin
+
+
+def _has_active_strategy():
+    has_strategy = getattr(tf.distribute, "has_strategy", None)
+    if callable(has_strategy):
+        return has_strategy()
+    return False
 
 
 def get_device_context(device):
@@ -112,7 +120,7 @@ def get_device_context(device):
         return contextlib.nullcontext()
     if isinstance(device, tf.distribute.Strategy):
         return device.scope()
-    if tf.distribute.has_strategy() and isinstance(device, str):
+    if _has_active_strategy() and isinstance(device, str):
         # If a distribution strategy is active, it's generally better to let it
         # handle device placement automatically.
         logger.warning(
@@ -390,11 +398,39 @@ class MaskingLayer(tf.keras.layers.Layer):
 
     def compute_mask(self, inputs, mask=None):
         # this layer already has a mask in the inputs, so we can just pass it through
+        if mask is not None:
+            tf.print(
+                "Warning: MaskingLayer received an external mask, but it will be ignored. The layer uses the mask provided in the inputs."
+            )
         return inputs[0]  # the mask is the first element of the inputs
 
     def compute_output_shape(self, input_shapes):
         # input_shapes = [(batch, seqLen), (batch, seqLen, feat)]
         return input_shapes[1]
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class UnMaskingLayer(tf.keras.layers.Layer):
+    """
+    Remove mask from features.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.supports_masking = False
+
+    def call(self, inputs, mask=None):
+        return inputs  # just pass through the features, ignore the mask
+
+    def compute_mask(self, inputs, mask=None):
+        if mask is not None:
+            tf.print(
+                "Warning: MaskingLayer received an external mask, but it will be ignored. The layer uses the mask provided in the inputs."
+            )
+        return None
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
 
 ########### CONVOLUTIONAL NETWORK CLASS #####################
@@ -1225,16 +1261,15 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             sum_features = kops.sum(masked_features, axis=1)
 
             # The layer returns the processed features sequence and the mask
-            # But standard Keras layers return one tensor usually, or tuple.
-            # We return (masked_features, mymask, sum_features)
-            # However, Keras functional model might prefer single tensor output or list.
-            # Let's return the main features, and maybe attached mask?
-            # Actually downstream logic expects (allFeatures, mymask, sumFeatures) roughly.
 
             return masked_features, mymask, sum_features, all_features
 
     def compute_mask(self, inputs, mask=None):
         # The mask is based on the inputGroups tensor, which is the last element in inputs
+        if mask is not None:
+            tf.print(
+                "Warning: Received an external mask in SpikeSequenceProcessor, but this layer computes its own mask based on inputGroups. The external mask will be ignored."
+            )
         input_groups = inputs[-1]
         return self.safe_mask_creation(input_groups)
 
@@ -1280,13 +1315,18 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
 ########### CONVOLUTIONAL NETWORK CLASS #####################
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class MaskedSequential(tf.keras.Sequential):
-    def __init__(self, layers=None, name=None):
-        super().__init__(layers=layers, name=name)
+    def __init__(self, layers=None, name=None, **kwargs):
+        self.no_mask = kwargs.pop("no_mask", False)
+        super().__init__(layers=layers, name=name, **kwargs)
         self.supports_masking = True
 
     def compute_mask(self, inputs, mask=None):
         # This tells the Sequential block to pass the mask
         # to the layers inside it instead of destroying it.
+        if self.no_mask:
+            return None
+        if mask is None:
+            return None
         return mask
 
 
@@ -1676,6 +1716,8 @@ class PositionalEncoding(tf.keras.layers.Layer):
         return input_shape
 
     def compute_mask(self, inputs, mask=None):
+        if mask is None:
+            return None
         return mask  # Pass through the mask unchanged
 
     def build(self, input_shape):
@@ -1747,6 +1789,8 @@ class ResidualWrapper(tf.keras.layers.Layer):
         return output + inputs
 
     def compute_mask(self, inputs, mask=None):
+        if mask is None:
+            return None
         return mask
 
     def compute_output_shape(self, input_shape):
@@ -1868,6 +1912,8 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         """
         Propagate the input mask to the output.
         """
+        if mask is None:
+            return None
         return mask
 
     def get_config(self):
@@ -2673,7 +2719,9 @@ def apply_single_group_augmentation(
 
         # Keep padded spikes exactly zero after augmentation.
         is_real_spike = tf.reduce_any(tf.not_equal(group_data, 0.0), axis=[1, 2])
-        is_real_spike = is_real_spike[:, tf.newaxis, tf.newaxis]
+        is_real_spike = is_real_spike[
+            :, tf.newaxis, tf.newaxis
+        ]  # Shape: [Spikes, 1, 1]
 
         augmented = augmentation_config.augment_spike_group(group_data)
         result_tensors[g_key] = tf.where(is_real_spike, augmented, 0.0)
@@ -2747,10 +2795,12 @@ class LinearizationLayer(tf.keras.layers.Layer):
         ):
             ts_proj = np.array(ts_proj["config"]["value"])
         else:
-            ts_proj = np.array(ts_proj).reshape(-1, 2)
+            ts_proj = np.array(ts_proj).reshape(-1)
 
         self.maze_points = tf.constant(maze_points, dtype=tf.float32)
         self.ts_proj = tf.constant(ts_proj, dtype=tf.float32)
+        self.np_maze_points = np.array(maze_points).astype(np.float32)
+        self.np_ts_proj = np.array(ts_proj).astype(np.float32)
 
     def call(self, euclidean_data):
         """
@@ -2790,6 +2840,37 @@ class LinearizationLayer(tf.keras.layers.Layer):
             )
 
         return [projected_pos, linear_pos]
+
+    def numpy_fn(self, euclideanData):
+        maze_points = self.np_maze_points
+        ts_proj = self.np_ts_proj
+        if hasattr(euclideanData, "numpy"):
+            euclideanData = euclideanData.numpy()
+        if euclideanData.dtype != maze_points.dtype:
+            euclideanData = euclideanData.astype(maze_points.dtype)
+
+        N = euclideanData.shape[0]
+
+        # prefill with nan
+        projectedPos = np.full([N, 2], np.nan, dtype=maze_points.dtype)
+        linearPos = np.full([N], np.nan, dtype=maze_points.dtype)
+        valid_mask = np.logical_not(np.any(np.isnan(euclideanData), axis=1))
+        valid_indices = np.where(valid_mask)[0]
+
+        if valid_indices.size > 0:
+            valid_points = euclideanData[valid_mask]
+            euclidData_lazy = LazyTensor_np(valid_points[None, :, :])
+            mazePoint_lazy = LazyTensor_np(maze_points[:, None, :])
+
+            distance_matrix_lazy = (
+                (mazePoint_lazy - euclidData_lazy).square().sum(axis=-1)
+            )
+            # find the argmin
+            bestPoints = distance_matrix_lazy.argmin_reduction(axis=0)
+            projectedPos[valid_indices, :] = maze_points[bestPoints[:, 0], :]
+            linearPos[valid_indices] = ts_proj[bestPoints[:, 0]]
+
+        return projectedPos, linearPos
 
     def get_config(self):
         base_config = super().get_config()
@@ -3218,6 +3299,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         # final dense layer to map features to logits
         self.feature_to_logits_map = tf.keras.layers.Dense(self.GRID_H * self.GRID_W)
+        self.supports_masking = False
 
     def _initialize_computed_attributes(self):
         self.EPS = self.common_eps
@@ -3506,6 +3588,19 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
 
         super().build(input_shape)
 
+    def compute_output_shape(self, input_shape):
+        """Compute output shape given input shape"""
+        batch_size = input_shape[0]
+        return (batch_size, self.GRID_H * self.GRID_W)
+
+    def compute_mask(self, inputs, mask=None):
+        """Compute mask for the output - in this case, we can return None since we handle masking in the loss."""
+        if mask is not None:
+            tf.print(
+                "Warning: Masking is not used in GaussianHeatmapLayer, ignoring input mask."
+            )
+        return None
+
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
@@ -3590,10 +3685,9 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
             mask_indices = kops.where(self.allowed_mask_flat > 0)[0]  # [N_allowed]
             mask_indices = kops.reshape(mask_indices, (-1,))  # ensure 1D
             # store to map [H,W] to allowed indices
-            self.allowed_indices = tf.constant(
+            self.allowed_indices = kops.cast(
                 mask_indices,
                 dtype=tf.int32,
-                name="allowed_indices",
             )
 
             self.N_valid = kops.shape(mask_indices)[0]
@@ -3851,49 +3945,50 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
 
     def _precompute_cost_matrix(self):
         """
-        Precompute cost matrix using only keras.ops so it works symbolically
-        across backends (TF, JAX, Torch).
+        Calculate the cost matrix using NumPy/Eager mode BEFORE the graph builds.
         """
-        with get_device_context(self.deviceName):
-            # Build coordinate grid [H, W, 2] in symbolic form
-            xs = kops.linspace(0.0, 1.0, self.GRID_W)  # [W]
-            ys = kops.linspace(0.0, 1.0, self.GRID_H)  # [H]
-            xs = kops.broadcast_to(xs[None, :], (self.GRID_H, self.GRID_W))
-            ys = kops.broadcast_to(ys[:, None], (self.GRID_H, self.GRID_W))
-            coords = kops.stack([xs, ys], axis=-1)  # [H, W, 2]
-            coords = kops.reshape(coords, (-1, 2))  # [N, 2] where N=H*W
+        # 1. Use pure NumPy for the grid if possible, or force Eager execution
+        # If self.GRID_W and self.GRID_H are integers, this is easy:
+        xs = np.linspace(0.0, 1.0, self.GRID_W)
+        ys = np.linspace(0.0, 1.0, self.GRID_H)
+        x_grid, y_grid = np.meshgrid(xs, ys)
+        coords = np.stack([x_grid, y_grid], axis=-1).reshape(-1, 2)  # [H*W, 2]
 
-            coords_allowed = kops.take(
-                coords, self.allowed_indices, axis=0
-            )  # [N_allowed, 2]
-            # Apply your linearization function (kept symbolic)
-            _, lin_coords = self.l_function_layer(coords_allowed)  # [N_valid, 1]
-            lin_coords = kops.reshape(lin_coords, (-1,))  # [N]
+        # 2. Get allowed indices as a concrete NumPy array
+        mask_np = self.get_allowed_mask(use_tensorflow=False).flatten()
+        allowed_idx_np = np.where(mask_np > 0)[0].astype(np.int32)
 
-            # Build cost matrix |li - lj|
-            li = kops.expand_dims(lin_coords, 0)  # [1, N_valid]
-            lj = kops.expand_dims(lin_coords, 1)  # [N_valid, 1]
-            diff = li - lj  # [N_valid, N_valid]
-            C = kops.abs(diff)
-            C_raw = C.numpy()  # Evaluate to numpy for rescaling
+        coords_allowed = coords[allowed_idx_np]  # [N_allowed, 2]
 
-            # --- Make sure cost_matrix and lin_coords are stored as eager tensors
+        # 3. Handle the linearization layer (Eagerly)
+        # Pass training=False and call the .call() method directly to
+        # encourage eager execution if possible.
+        # Try calling the layer directly
+        _, lin_coords_np = self.l_function_layer.numpy_fn(
+            coords_allowed.astype(np.float32)
+        )
 
-            C_rescaled, info = rescale_cost_matrix(C_raw)
-            C_fixed = tf.constant(C_rescaled, dtype=tf.float32)
-            # store as eager tf.constant so they won't be graph-captured later
-            self.cost_matrix = kops.cast(C_fixed, self.storage_dtype)
-            self.lin_coords = tf.constant(lin_coords.numpy(), self.storage_dtype)
+        # 4. Build Cost Matrix in NumPy
+        li = lin_coords_np[None, :]  # [1, N_valid]
+        lj = lin_coords_np[:, None]  # [N_valid, 1]
+        C_raw = np.abs(li - lj)
 
-            ####
-            # Sinkhorn kernel
-            ####
-            # # compute kernel once and store as CPU-side constant; don't keep gradient tracking
-            # eps_tf = tf.cast(self.sinkhorn_eps, self.storage_dtype)
-            # self.kernel = tf.constant(
-            #     kops.exp(-self.cost_matrix / eps_tf), self.storage_dtype
-            # )
-            # self.M = self.kernel * self.cost_matrix
+        # 5. Rescale and Store as Tensors
+        C_rescaled, info = rescale_cost_matrix(C_raw)
+
+        # These are now truly constants that Keras can bake into the graph
+        self.cost_matrix = tf.constant(C_rescaled, dtype=self.storage_dtype)
+        self.lin_coords = tf.constant(lin_coords_np, dtype=self.storage_dtype)
+        self.allowed_indices = tf.constant(allowed_idx_np, dtype=tf.int32)
+        ####
+        # Sinkhorn kernel
+        ####
+        # # compute kernel once and store as CPU-side constant; don't keep gradient tracking
+        # eps_tf = tf.cast(self.sinkhorn_eps, self.storage_dtype)
+        # self.kernel = tf.constant(
+        #     kops.exp(-self.cost_matrix / eps_tf), self.storage_dtype
+        # )
+        # self.M = self.kernel * self.cost_matrix
 
     def _precompute_linear_cost_matrix(self):
         """
@@ -4946,7 +5041,7 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
             shape=(tf.shape(y_true)[0], 1 if self.l_function is not None else 2),
             mean=0.0,
             stddev=0.005 if self.l_function is not None else 0.03,
-            dtype=self.storage_dtype,
+            dtype=dtype,
         )
 
         # Use target_structure to apply the correct distance logic for each component
@@ -4966,34 +5061,33 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
                 start = int(raw_slice)
                 end = start + int(info.get("dim", 1))
             val = y_true[:, start:end]
-            if end - start == 1:
-                val = tf.reshape(val, [-1])
+            if val.shape.rank == 1:
+                val = tf.expand_dims(val, axis=-1)
 
             if name in ["pos_2d", "pos_lin"]:
                 # Euclidean Kernel
 
                 # 1. Get positions for weighting (linearized or 2D)
-                if self.l_function is not None and kops.shape(val)[1] == 2:
+                val_dim = val.shape[-1]
+                if self.l_function is not None and val_dim == 2:
                     _, linearized_pos = self.l_function(val)
-                    pos = tf.reshape(linearized_pos, [-1])
-                elif kops.shape(val)[1] == 1:
-                    pos = tf.reshape(val, [-1])
+                    pos = tf.expand_dims(tf.reshape(linearized_pos, [-1]), axis=-1)
+                elif val_dim == 1:
+                    pos = tf.expand_dims(tf.reshape(val, [-1]), axis=-1)
                 else:
                     raise ValueError(
                         "ContrastiveRegressionLoss requires l_function_params to compute position weights. "
                         "Please provide l_function_params for the LinearizationLayer."
                     )
 
+                pos = tf.cast(pos, dtype)
                 pos = pos + gaussian_noise  # Add noise for stability
 
                 # 3. Compute pairwise Cosine Similarity Logits
                 logits = tf.matmul(z, z, transpose_b=True) / self.temperature
 
                 # 4. Compute Pairwise Spatial Distances
-                if len(pos.shape) == 1:
-                    pos = tf.reshape(pos, [-1, 1])
-
-                if pos.shape[-1] > 1:
+                if pos.shape[-1] is not None and pos.shape[-1] > 1:
                     r = tf.reduce_sum(tf.square(pos), axis=1, keepdims=True)
                     d2 = r - 2 * tf.matmul(pos, pos, transpose_b=True) + tf.transpose(r)
                     d2 = tf.maximum(d2, self.eps)
@@ -5040,7 +5134,7 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
         # 7. Cross entropy with soft targets
         loss_per_anchor = -tf.reduce_sum(w_norm * log_prob, axis=1)
 
-        return tf.cast(kops.reshape(loss_per_anchor, (-1, 1)), tf.float32)
+        return kops.reshape(loss_per_anchor, (-1, 1))
 
     def get_config(self):
         config = super().get_config()
@@ -5113,6 +5207,8 @@ keras_utils.get_custom_objects()["MaskedGlobalAveragePooling1D"] = (
 )
 keras_utils.get_custom_objects()["PositionalEncoding"] = PositionalEncoding
 keras_utils.get_custom_objects()["SafeMaskCreation"] = SafeMaskCreation
+keras_utils.get_custom_objects()["UnMaskingLayer"] = UnMaskingLayer
+keras_utils.get_custom_objects()["MaskingLayer"] = MaskingLayer
 keras_utils.get_custom_objects()["ResidualWrapper"] = ResidualWrapper
 keras_utils.get_custom_objects()["TransformerEncoderBlock"] = TransformerEncoderBlock
 keras_utils.get_custom_objects()["DynamicDenseWeightLayer"] = DynamicDenseWeightLayer
