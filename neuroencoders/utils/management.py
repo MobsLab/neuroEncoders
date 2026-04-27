@@ -2,6 +2,17 @@
 from pathlib import Path
 
 
+def _create_mirrored_strategy(tf):
+    strategy_cls = getattr(tf.distribute, "MirroredStrategy", None)
+    if strategy_cls is None:
+        strategy_cls = getattr(tf.distribute.experimental, "MirroredStrategy", None)
+    if strategy_cls is None:
+        raise AttributeError(
+            "TensorFlow does not expose a MirroredStrategy implementation."
+        )
+    return strategy_cls()
+
+
 def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     """
     Manage the devices used by TensorFlow.
@@ -21,10 +32,37 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
 
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
     import tensorflow as tf
-    from tensorflow import config
+
+    config = tf.config
+
+    usedDevice_upper = usedDevice.upper()
+
+    if ":" in usedDevice_upper:
+        # specific device like GPU:0 or CPU:0
+        if usedDevice_upper.count(":") != 1:
+            raise ValueError(
+                f"Invalid device format '{usedDevice}'. Expected formats like 'GPU:0' or 'CPU:0'."
+            )
+        dev_type, dev_idx_str = usedDevice_upper.split(":")
+        logical_devices = config.list_logical_devices(dev_type)
+        try:
+            dev_idx = int(dev_idx_str)
+        except ValueError:
+            raise ValueError(
+                f"Invalid device index in '{usedDevice}'. Expected a non-negative integer after ':'."
+            )
+        if dev_idx < 0:
+            raise ValueError(
+                f"Invalid device index in '{usedDevice}'. Device index must be non-negative."
+            )
+        if dev_idx < len(logical_devices):
+            return logical_devices[dev_idx].name
+        raise ValueError(
+            f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found."
+        )
 
     # if gpu set memory growth
-    if "GPU" in usedDevice.upper():
+    if "GPU" in usedDevice_upper:
         device_phys = config.list_physical_devices("GPU")
         if set_memory_growth:
             if not device_phys:
@@ -38,13 +76,13 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
                     # Memory growth must be set before GPUs have been initialized
                     print(f"Warning: Could not set memory growth for {device}: {e}")
 
-    if usedDevice.upper() == "MULTI-GPU":
+    if usedDevice_upper == "MULTI-GPU":
         device_phys = config.list_physical_devices("GPU")
         if len(device_phys) > 1:
             print(
                 f"Initializing Multi-GPU strategy (MirroredStrategy) with {len(device_phys)} GPUs"
             )
-            strategy = tf.distribute.MirroredStrategy()
+            strategy = _create_mirrored_strategy(tf)
             return strategy
         elif len(device_phys) == 1:
             import warnings
@@ -56,33 +94,8 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
         else:
             raise ValueError("MULTI-GPU requested but no GPU devices found.")
 
-    if ":" in usedDevice:
-        # specific device like GPU:0 or CPU:0
-        if usedDevice.count(":") != 1:
-            raise ValueError(
-                f"Invalid device format '{usedDevice}'. Expected formats like 'GPU:0' or 'CPU:0'."
-            )
-        dev_type, dev_idx_str = usedDevice.split(":")
-        logical_devices = config.list_logical_devices(dev_type.upper())
-        try:
-            dev_idx = int(dev_idx_str)
-        except ValueError:
-            raise ValueError(
-                f"Invalid device index in '{usedDevice}'. Expected a non-negative integer after ':'."
-            )
-        if dev_idx < 0:
-            raise ValueError(
-                f"Invalid device index in '{usedDevice}'. Device index must be non-negative."
-            )
-        if dev_idx < len(logical_devices):
-            return logical_devices[dev_idx].name
-        else:
-            raise ValueError(
-                f"Requested device {usedDevice} but only {len(logical_devices)} {dev_type} devices found."
-            )
-
     # get the name of the device
-    device = config.list_logical_devices(usedDevice.upper())
+    device = config.list_logical_devices(usedDevice_upper)
     if device:
         devicename = device[0].name
     else:

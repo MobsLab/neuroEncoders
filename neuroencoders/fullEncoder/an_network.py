@@ -22,11 +22,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import wandb
 from keras import ops as kops
 from tqdm import tqdm
 from wandb.integration.keras import WandbMetricsLogger
-
-import wandb
 
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
@@ -700,6 +699,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         ),
                     ],
                     name="transformer_decoder",
+                    no_mask=True,  # the transformer decoder should not be masked, as it operates on the full latent representation after pooling
                 )
 
             # Used as inputs to already compute the loss in the forward pass and feed it to the loss network.
@@ -733,6 +733,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             ),
                         ],
                         name=name + "_head",
+                        no_mask=True,  # the contrastive head should not be masked, as it operates on the full latent representation
                     )
                 else:
                     self.heads[name] = MaskedSequential(
@@ -751,6 +752,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             ),
                         ],
                         name=name + "_head",
+                        no_mask=True,  # the heads should not be masked, as they operate on the full latent representation after pooling
                     )
 
             # Outputs
@@ -933,9 +935,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 x, latent_output, sumFeatures = self.apply_transformer_architecture(
                     allFeatures, allFeatures_raw, mymask, **kwargs
                 )
-            # now we should not need any masking anymore, as the output is already full
 
-            # 5. Create final heads branching from x
+            # 5. Create final heads branching from x, removing all masks
+            def strip_mask(tensor):
+                return tf.identity(tensor)
+
             outputs = {}
             for name, head_layer in self.heads.items():
                 out = head_layer(latent_output)
@@ -944,9 +948,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     if not getattr(self.params, "GaussianHeatmap", False):
                         out = self.ProjectionInMazeLayer(out)
 
-                outputs[name] = tf.keras.layers.Identity(name=name, dtype="float32")(
-                    out
-                )
+                outputs[name] = tf.keras.layers.Lambda(
+                    strip_mask, mask=None, name=name, dtype="float32"
+                )(out)
 
             # Special case for GaussianHeatmap if enabled for pos_2d
             if (
@@ -957,12 +961,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 # simply a kernel convolution with a fixed gaussian kernel, applied to the output of the dense layer for pos_2d
                 # before it also had a dense layer
                 out_heatmap = self.GaussianHeatmap(x)
-                outputs["pos_2d"] = tf.keras.layers.Identity(
-                    name="pos_2d", dtype="float32"
+                outputs["pos_2d"] = tf.keras.layers.Lambda(
+                    strip_mask, mask=None, name="pos_2d", dtype="float32"
                 )(out_heatmap)
 
-            outputs["latent_output"] = tf.keras.layers.Identity(
-                name="latent_output", dtype="float32"
+            outputs["latent_output"] = tf.keras.layers.Lambda(
+                strip_mask, mask=None, name="latent_output", dtype="float32"
             )(latent_output)
 
         return outputs
@@ -1069,7 +1073,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
     def train(
         self,
-        behaviorData,
+        behaviorData: Dict[str, np.ndarray],
         **kwargs,
     ):
         """
@@ -2079,7 +2083,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     num_parallel_calls=tf.data.AUTOTUNE,
                 )
 
-            elif is_aug_active:
+            if is_aug_active:
                 optimized_fn = self.create_optimized_parse_function(
                     augmentation=is_aug_active,
                     augmentation_config=augmentation_config if is_aug_active else None,
