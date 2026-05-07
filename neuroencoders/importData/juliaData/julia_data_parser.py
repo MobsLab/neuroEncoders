@@ -13,7 +13,7 @@ def julia_spike_filter(
     folderCode,
     windowSize=0.036,
     windowStride=0.036,
-    strideFactor=1,
+    strideFactor=4,
     singleSpike=False,
     BUFFERSIZE=72000,
     redo=False,

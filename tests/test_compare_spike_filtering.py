@@ -145,7 +145,7 @@ def test_get_nndataset_spikepos(mock_env):
         )
 
         # Test getting spike positions
-        indices = comparator.get_NNdataset_spikepos()
+        indices, posIndex = comparator.get_NNdataset_spikepos()
         assert len(indices) > 0
         # Check that we don't have -1 (padding)
         for idx_array in indices:

@@ -1,7 +1,11 @@
 # Load libs
 import os
 
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
+from tables import Callable
+
+os.environ.setdefault(
+    "TF_CPP_MIN_LOG_LEVEL", "2"
+)  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -12,6 +16,7 @@ from tqdm import tqdm
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.simpleBayes.decode_bayes import Trainer
 from neuroencoders.utils.global_classes import Params, Project
 
 ## Different strategies are used for spike filtering in the case of the NN and of spike sorting.
@@ -108,7 +113,7 @@ class WaveFormComparator:
         for g in range(self.params.nGroups):
             self.feat_desc.update({"group" + str(g): tf.io.VarLenFeature(tf.float32)})
 
-        strideFactor = kwargs.get("strideFactor", 1)
+        strideFactor = kwargs.get("strideFactor", 4)
         useAll_suffix = "_all" if useAll else ""
         strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
         # Manage folder
@@ -120,27 +125,29 @@ class WaveFormComparator:
         if not os.path.isdir(self.alignedDataPath):
             os.makedirs(self.alignedDataPath)
 
-        # Manage epochs
-        if self.useTrain or self.useTest:
-            epochMask = get_epochs_mask(
-                behaviorData=behavior_data,
-                useTrain=self.useTrain,
-                useTest=self.useTest,
-            )
+        # Manage epochs and determine mask based on dataset split
+        if bool(self.sleepName):
+            # Sleep dataset path
+            idsleep = behavior_data["Times"]["sleepNames"].index(self.sleepName)
+            timeSleepStart = behavior_data["Times"]["sleepEpochs"][2 * idsleep][0]
+            timeSleepStop = behavior_data["Times"]["sleepEpochs"][2 * idsleep + 1][0]
+            use_sleep_filter = True
+            totMask = None
         else:
-            if bool(self.sleepName):
-                idsleep = behavior_data["Times"]["sleepNames"].index(self.sleepName)
-                timeSleepStart = behavior_data["Times"]["sleepEpochs"][2 * idsleep][0]
-                timeSleepStop = behavior_data["Times"]["sleepEpochs"][2 * idsleep + 1][
-                    0
-                ]
+            use_sleep_filter = False
+            if self.useTrain or self.useTest:
+                totMask = get_epochs_mask(
+                    behaviorData=behavior_data,
+                    useTrain=self.useTrain,
+                    useTest=self.useTest,
+                )
             else:
-                epochMask = inEpochsMask(
+                totMask = inEpochsMask(
                     behavior_data["positionTime"][:, 0],
                     behavior_data["Times"]["testEpochs"],
                 )
 
-        # Load dataset
+        # Determine filename
         if bool(self.sleepName):
             if strideFactor > 1:
                 filename = (
@@ -156,76 +163,106 @@ class WaveFormComparator:
                 filename = f"dataset_stride{windowSizeMS}.tfrec"
             dataset_name = os.path.join(self.projectPath.dataPath, filename)
 
-        # Verify that the dataset is not empty
+        # Verify that the dataset exists
         if not tf.io.gfile.exists(dataset_name) or not tf.io.gfile.glob(dataset_name):
             raise FileNotFoundError(
                 f"The dataset file does not exist: {dataset_name}. "
             )
 
-        dataset = tf.data.TFRecordDataset(dataset_name)
-        # Parse dataset
-        self.dataset = dataset.map(
-            lambda *vals: nnUtils.parse_serialized_spike(self.feat_desc, *vals),
-            num_parallel_calls=tf.data.AUTOTUNE,
+        # Pipeline configuration: defaults for "true test dataset"
+        # No shuffling, no augmentation, no oversampling
+        shuffle = kwargs.get("shuffle", False)
+
+        # Define parse function with @tf.function
+        @tf.function
+        def _parse_function(*vals):
+            return nnUtils.parse_serialized_spike(self.feat_desc, *vals)
+
+        # Define filter functions
+        def get_mask_filter(mask):
+            mask_tensor = tf.constant(mask, dtype=tf.float32)
+
+            @tf.function
+            def filter_by_pos_index(x):
+                pos_index = x["pos_index"]
+                mask_size = tf.size(mask_tensor, out_type=pos_index.dtype)
+                is_non_negative = tf.math.greater_equal(pos_index, 0)
+                is_in_range = tf.math.less(pos_index, mask_size)
+                valid = tf.math.logical_and(is_non_negative, is_in_range)
+                safe_index = tf.where(valid, pos_index, tf.zeros_like(pos_index))
+                gathered = tf.gather(mask_tensor, safe_index)
+                return tf.math.logical_and(valid, tf.equal(gathered, 1.0))
+
+            return filter_by_pos_index
+
+        @tf.function
+        def filter_nan_pos(x):
+            pos_data = x["pos"]
+            return tf.math.logical_not(tf.math.is_nan(tf.math.reduce_sum(pos_data)))
+
+        # Load dataset with buffer
+        ndataset = tf.data.TFRecordDataset(
+            dataset_name,
+            buffer_size=100 * 1024 * 1024,  # 100MB read buffer
         )
-        if bool(self.sleepName):
-            self.dataset = self.dataset.filter(
+
+        # Optional shuffling before parsing (at raw record level)
+        if shuffle:
+            print("Shuffling the dataset (pre-parsing)")
+            ndataset = ndataset.shuffle(10000)
+
+        # Parse the records
+        ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
+        ndataset = ndataset.prefetch(tf.data.AUTOTUNE)
+
+        # Apply filtering based on dataset type (sleep or epoch-based)
+        if use_sleep_filter:
+            self.dataset = ndataset.filter(
                 lambda x: tf.math.logical_and(
                     tf.math.less_equal(x["time"], timeSleepStop),
                     tf.math.greater_equal(x["time"], timeSleepStart),
                 )
             )
         else:
+            filter_op = get_mask_filter(totMask)
+            self.dataset = ndataset.filter(filter_op)
 
-            def get_mask_filter(mask):
-                mask_tensor = tf.constant(mask, dtype=tf.float32)
+        # Import true positions
+        self.dataset = self.dataset.map(
+            nnUtils.import_true_pos(behavior_data["Positions"]),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
 
-                @tf.function
-                def filter_by_pos_index(x):
-                    pos_index = x["pos_index"]
-                    mask_size = tf.size(mask_tensor, out_type=pos_index.dtype)
-                    is_non_negative = tf.math.greater_equal(pos_index, 0)
-                    is_in_range = tf.math.less(pos_index, mask_size)
-                    valid = tf.math.logical_and(is_non_negative, is_in_range)
-                    safe_index = tf.where(valid, pos_index, tf.zeros_like(pos_index))
-                    gathered = tf.gather(mask_tensor, safe_index)
-                    return tf.math.logical_and(valid, tf.equal(gathered, 1.0))
+        # Filter out NaN positions
+        self.dataset = self.dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
 
-                return filter_by_pos_index
-
-            filter_op = get_mask_filter(epochMask)
-            self.dataset = self.dataset.filter(filter_op)
-
-            self.dataset = self.dataset.map(
-                nnUtils.import_true_pos(behavior_data["Positions"])
-            )
-            self.dataset = self.dataset.filter(
-                lambda x: tf.math.logical_not(
-                    tf.math.is_nan(tf.math.reduce_sum(x["pos"]))
-                )
-            )
-
+        # Parse spike sequences
         def parse_serialized_sequence(vals):
             return nnUtils.parse_serialized_sequence(
                 self.params,
                 vals,
                 max_spikes=self.max_nb_spikes,
                 max_spikes_per_group=self.max_spikes_per_group,
-                # sorted_indices = #TODO: at some point
             )
 
         self.dataset = self.dataset.map(
-            parse_serialized_sequence,
-            num_parallel_calls=tf.data.AUTOTUNE,
+            parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
         )
 
+        # Create indices for spike gathering
         def create_indices_callable(vals, shuffle=False):
             return self.create_indices(vals, shuffle=shuffle)
 
         self.dataset = self.dataset.map(
             create_indices_callable, num_parallel_calls=tf.data.AUTOTUNE
         )
-        print(f"Dataset {dataset_name} loaded: {self}")
+
+        # Final prefetch and options
+        options = tf.data.Options()
+        options.threading.private_threadpool_size = 4
+        self.dataset = self.dataset.with_options(options).prefetch(tf.data.AUTOTUNE)
+
+        print(f"Dataset {dataset_name} loaded.")
 
     def create_indices(self, vals, shuffle=False):
         """
@@ -273,7 +310,11 @@ class WaveFormComparator:
         return f"WaveFormComparator(projectPath={self.projectPath}, params={self.params}, behavior_data=Dict with keys {list(self.behavior_data.keys())}, windowSizeMS={self.windowSizeMS}, useTrain={self.useTrain}, useTest={self.useTest}, useAll={self.useAll}, sleepName={self.sleepName}, phase={self.phase})"
 
     def save_alignment_tools(
-        self, trainerBayes, linearizationFunction, windowSizeMS=36, redo=False
+        self,
+        trainerBayes: Trainer,
+        linearizationFunction: Callable,
+        windowSizeMS: int = 36,
+        redo: bool = False,
     ):
         # Manage folder
         if self.useTrain:
@@ -304,7 +345,7 @@ class WaveFormComparator:
                 self.behavior_data, l_function=linearizationFunction
             )
         # gather all windows in the tensorflow dataset
-        inputNN = self.get_NNdataset_spikepos()
+        inputNN, posIndexNN = self.get_NNdataset_spikepos()
 
         ### Mapping spikes from automatic ANN pipeline to windows
         lenInputNN = []  # Number of spikes per window
@@ -368,6 +409,9 @@ class WaveFormComparator:
 
         ### Saving
         df = pd.DataFrame(spikeMat_window_popVector)
+        print(
+            f"Saving spikeMat_window_popVector with shape {spikeMat_window_popVector.shape} to {os.path.join(foldertosave, f'spikeMat_window_popVector{self.suffix}.csv')}"
+        )
         df.to_csv(
             os.path.join(foldertosave, f"spikeMat_window_popVector{self.suffix}.csv")
         )
@@ -379,14 +423,30 @@ class WaveFormComparator:
         df.to_csv(os.path.join(foldertosave, f"startTimeWindow{self.suffix}.csv"))
         df = pd.DataFrame(lenInputNN)
         df.to_csv(os.path.join(foldertosave, f"lenInputNN{self.suffix}.csv"))
+        df = pd.DataFrame(posIndexNN)
+        df.to_csv(os.path.join(foldertosave, f"posIndexNN{self.suffix}.csv"))
 
     def get_NNdataset_spikepos(self):
         resData = self.dataset.map(lambda vals: vals["indexInDat"])
+        posIndexData = self.dataset.map(lambda vals: vals["pos_index"])
         # Filter out padding (-1) introduced by parse_serialized_sequence
-        return [
-            x[x != -1]
-            for x in tqdm(resData.as_numpy_iterator(), desc="Collecting spike indices")
-        ]
+        return (
+            [
+                x[x != -1]
+                for x in tqdm(
+                    resData.as_numpy_iterator(), desc="Collecting spike indices"
+                )
+            ],
+            np.array(
+                [
+                    x
+                    for x in tqdm(
+                        posIndexData.as_numpy_iterator(),
+                        desc="Collecting position indices",
+                    )
+                ]
+            ),
+        )
 
     def get_data(self):
         # Get names

@@ -5088,14 +5088,20 @@ class PaperFigures:
         block=False,
         show=False,
         useTrain=False,
-        useTest=False,
-        useAll=True,
-        strideFactor=1,
+        useTest=True,
+        useAll=False,
+        strideFactor=4,
     ):
+        if self.trainerBayes is None:
+            raise ValueError(
+                "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
+            )
+
         if phase is not None:
             suffix = f"_{phase}"
         if suffix is None:
             suffix = self.suffix
+        phase = suffix.strip("_") if suffix.startswith("_") else suffix
         if ws is None:
             ws = self.timeWindows[0]  # default to the first time window
 
@@ -5144,6 +5150,12 @@ class PaperFigures:
             spikePopAligned = np.array(
                 pd.read_csv(loadName).values[:, 1:], dtype=np.float32
             )
+            posIndex = np.array(
+                pd.read_csv(
+                    os.path.join(os.path.dirname(loadName), f"posIndexNN{suffix}.csv")
+                ).values[:, 1],
+                dtype=int,
+            )
         except FileNotFoundError:
             raise FileNotFoundError(
                 f"""File {loadName} not found. Please run the spike alignment first in the WaveFormComparator class.
@@ -5153,27 +5165,34 @@ class PaperFigures:
 
                 """
             )
-        spikePopAligned = spikePopAligned[
-            : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow]), :
-        ]
+        allowed_idx = np.isin(
+            posIndex, self.resultsNN_phase[suffix]["posIndex"][iwindow]
+        )
+        spikePopAligned = spikePopAligned[allowed_idx]
         predLoss = self.resultsNN_phase[suffix]["predLoss"][iwindow]
 
         def normalize(x):
             return (x - np.min(x)) / (np.max(x) - np.min(x))
 
-        for icell, tuningCurve in enumerate(linearTuningCurves):
-            pcId = np.where(np.equal(placeFieldSort, icell))[0][0]
-            spikeHist = spikePopAligned[:, pcId + 1][
-                : len(self.resultsNN_phase[suffix]["linTruePos"][iwindow])
+        linearTuningCurves_sorted = np.array(linearTuningCurves)[placeFieldSort]
+        spikePop_neurons_only = spikePopAligned[:, 1:]  # exclude "noise" neuron
+        spikePopAligned_sorted = spikePop_neurons_only[
+            :, placeFieldSort
+        ]  # sort neurons by place field position
+
+        for i_spatial, tuningCurve in enumerate(linearTuningCurves_sorted):
+            spikeHist = spikePopAligned_sorted[:, i_spatial][
+                : len(self.resultsNN_phase[suffix]["linearTrue"][iwindow])
             ]
             spikeMask = np.greater(spikeHist, 0)
 
             if spikeMask.any():  # some neurons do not spike here
                 cm = plt.get_cmap("gray")
                 fig, ax = plt.subplots()
+                original_neuron_id = placeFieldSort[i_spatial]
                 ax.scatter(
-                    self.resultsNN_phase[suffix]["linPred"][iwindow][spikeMask],
-                    (spikeHist / np.sum(spikePopAligned, axis=1))[spikeMask],
+                    self.resultsNN_phase[suffix]["linearPred"][iwindow][spikeMask],
+                    (spikeHist / np.sum(spikePopAligned_sorted, axis=1))[spikeMask],
                     s=12,
                     c=cm(normalize(predLoss[spikeMask])),
                     edgecolors="black",
@@ -5184,24 +5203,32 @@ class PaperFigures:
                 for i, linbin in enumerate(binEdges[:-1]):
                     errors[i] = np.mean(
                         np.abs(
-                            self.resultsNN_phase[suffix]["linTruePos"][iwindow][
+                            self.resultsNN_phase[suffix]["linearTrue"][iwindow][
                                 np.logical_and(
                                     spikeMask,
                                     np.logical_and(
-                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
+                                        self.resultsNN_phase[suffix]["linearPred"][
+                                            iwindow
+                                        ]
                                         >= linbin,
-                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
+                                        self.resultsNN_phase[suffix]["linearPred"][
+                                            iwindow
+                                        ]
                                         < binEdges[i + 1],
                                     ),
                                 )
                             ]
-                            - self.resultsNN_phase[suffix]["linPred"][iwindow][
+                            - self.resultsNN_phase[suffix]["linearPred"][iwindow][
                                 np.logical_and(
                                     spikeMask,
                                     np.logical_and(
-                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
+                                        self.resultsNN_phase[suffix]["linearPred"][
+                                            iwindow
+                                        ]
                                         >= linbin,
-                                        self.resultsNN_phase[suffix]["linPred"][iwindow]
+                                        self.resultsNN_phase[suffix]["linearPred"][
+                                            iwindow
+                                        ]
                                         < binEdges[i + 1],
                                     ),
                                 )
@@ -5254,10 +5281,293 @@ class PaperFigures:
                 if show:
                     plt.show(block=block)
 
+                fig.suptitle(
+                    f"Place cell {original_neuron_id} tuning curve (={i_spatial} sorted) and predictions for window size {ws} ms and phase {suffix.strip('_')}",
+                    fontsize="xx-large",
+                )
+
                 fig.savefig(
-                    os.path.join(dirSave, (f"{ws}_tc_pred_cluster{pcId}{suffix}.png"))
+                    os.path.join(
+                        dirSave,
+                        (f"{ws}_tc_pred_cluster{original_neuron_id}{suffix}.png"),
+                    )
                 )
                 plt.close()
+
+    def plot_prediction_given_spikes(
+        self, i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+    ):
+        """
+        Shows the distribution of decoded positions specifically when this cell is active.
+        """
+        # Only look at time windows where this specific cell fired
+        spike_mask = spikeHist > 0
+        predictions_at_spike = linearPred[spike_mask]
+
+        bin_centers = (binEdges[:-1] + binEdges[1:]) / 2
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        counts, _ = np.histogram(predictions_at_spike, bins=binEdges)
+        # 2. Normalize both to have a maximum height of 1.0
+        # This makes the "peak" of the distribution visually comparable to the "peak" of the field.
+        norm_tuning_curve = (
+            tuningCurve / np.max(tuningCurve)
+            if np.max(tuningCurve) > 0
+            else tuningCurve
+        )
+        norm_hist = counts / np.max(counts) if np.max(counts) > 0 else counts
+
+        # Plot the tuning curve as a reference (normalized to fit the plot)
+        ax.fill_between(
+            bin_centers,
+            norm_tuning_curve,
+            alpha=0.2,
+            color="gray",
+            label="Place Field (True)",
+        )
+
+        # Plot Prediction Distribution as a bar chart (normalized height)
+        ax.bar(
+            bin_centers,
+            norm_hist,
+            width=np.diff(binEdges)[0],
+            color="teal",
+            alpha=0.6,
+            label="Decoder Prediction (Norm Height)",
+        )
+
+        ax.set_title(
+            f"Cell {i_spatial}: Where does the Decoder place the animal when this cell spikes?"
+        )
+        ax.set_xlabel("Linear Position")
+        ax.set_ylabel("Normalized Density")
+        ax.set_ylim(0, 1.1)
+        ax.legend()
+        plt.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"prediction_given_spikes_cell{i_spatial}{self.suffix}.png",
+            )
+        )
+        plt.show()
+
+    def plot_activity_given_prediction(
+        self, i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+    ):
+        """
+        Shows the average firing rate of the cell relative to the predicted position.
+        """
+        # Calculate Mean Activity vs Predicted Position
+        # (Similar to a tuning curve, but using Predicted Pos instead of True Pos)
+        pred_occupancy, _ = np.histogram(linearPred, bins=binEdges)
+        pred_spikes, _ = np.histogram(linearPred, bins=binEdges, weights=spikeHist)
+
+        # Avoid division by zero
+        activity_at_pred = np.divide(
+            pred_spikes,
+            pred_occupancy,
+            out=np.zeros_like(pred_spikes, dtype=float),
+            where=pred_occupancy > 0,
+        )
+
+        bin_centers = (binEdges[:-1] + binEdges[1:]) / 2
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+
+        # True Tuning Curve
+        ax.plot(
+            bin_centers,
+            tuningCurve,
+            color="blue",
+            label="True Tuning Curve (vs True Pos)",
+        )
+
+        # 'Predicted' Tuning Curve
+        ax.plot(
+            bin_centers,
+            activity_at_pred,
+            color="red",
+            linestyle="--",
+            label="Manifested Activity (vs Predicted Pos)",
+        )
+
+        ax.set_title(
+            f"Cell {i_spatial}: Cell activity relative to the Decoder's prediction"
+        )
+        ax.set_xlabel("Linear Position")
+        ax.set_ylabel("Firing Rate")
+        ax.legend()
+        plt.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"activity_given_prediction_cell{i_spatial}{self.suffix}.png",
+            )
+        )
+        plt.show()
+
+    def plot_single_cell_remapping(self, suffix1, suffix2, i_spatial, iwindow=0):
+        """
+        Compares the tuning curve and decoding alignment for one cell across two suffixes.
+        """
+        if self.trainerBayes is None:
+            raise ValueError(
+                "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
+            )
+
+        # 1. Fetch data for Suffix 1
+        loadName1 = self._get_aligned_path(suffix1, iwindow)
+        spikePop1 = pd.read_csv(loadName1).values[:, 1:]  # Drop index column
+        pred1 = self.resultsNN_phase[suffix1]["linearPred"][iwindow]
+        true1 = self.resultsNN_phase[suffix1]["linearTrue"][iwindow]
+
+        # 2. Fetch data for Suffix 2
+        loadName2 = self._get_aligned_path(suffix2, iwindow)
+        spikePop2 = pd.read_csv(loadName2).values[:, 1:]
+        pred2 = self.resultsNN_phase[suffix2]["linearPred"][iwindow]
+        true2 = self.resultsNN_phase[suffix2]["linearTrue"][iwindow]
+
+        # 3. Identify the Neuron
+        # Assuming the spatial sort was done on suffix1
+        original_neuron_idx = self.trainerBayes.linearPosArgSort[i_spatial]
+
+        # Tuning Curves (calculated previously or re-calculated)
+        tc1 = self.trainerBayes.calculate_linear_tuning_curve(
+            self.l_function, self.behaviorData, suffix=suffix1
+        )[0][original_neuron_idx]
+
+        tc2 = self.trainerBayes.calculate_linear_tuning_curve(
+            self.l_function, self.behaviorData, suffix=suffix2
+        )[0][original_neuron_idx]
+
+        # 4. Extract Spiking (remembering the +1 noise offset in spikePop)
+        spikes1 = spikePop1[:, original_neuron_idx + 1][: len(true1)]
+        spikes2 = spikePop2[:, original_neuron_idx + 1][: len(true2)]
+
+        # Plotting
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        bin_centers = (self.binEdges[:-1] + self.binEdges[1:]) / 2
+
+        # Top Plot: Condition 1 (Suffix 1)
+        axes[0].fill_between(
+            bin_centers,
+            tc1 / np.max(tc1),
+            alpha=0.3,
+            color="blue",
+            label=f"TC {suffix1}",
+        )
+        mask1 = spikes1 > 0
+        axes[0].scatter(
+            pred1[mask1],
+            (spikes1[mask1] / np.max(spikes1)),
+            s=10,
+            color="blue",
+            alpha=0.5,
+        )
+        axes[0].set_title(f"Neuron {original_neuron_idx} - {suffix1}")
+        axes[0].legend()
+
+        # Bottom Plot: Condition 2 (Suffix 2)
+        axes[1].fill_between(
+            bin_centers,
+            tc2 / np.max(tc2) if np.max(tc2) > 0 else tc2,
+            alpha=0.3,
+            color="red",
+            label=f"TC {suffix2}",
+        )
+        mask2 = spikes2 > 0
+        if mask2.any():
+            axes[1].scatter(
+                pred2[mask2],
+                (spikes2[mask2] / np.max(spikes2)),
+                s=10,
+                color="red",
+                alpha=0.5,
+            )
+        axes[1].set_title(f"Neuron {original_neuron_idx} - {suffix2}")
+        axes[1].set_xlabel("Linear Position")
+        axes[1].legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    def _get_aligned_path(self, suffix, iwindow):
+        # Helper to reconstruct your specific file path logic
+        ws = self.timeWindows[iwindow]
+        return os.path.join(
+            self.projectPath.dataPath,
+            f"aligned_{suffix}",  # Adjust based on your naming convention
+            str(ws),
+            "test",  # or train
+            f"spikeMat_window_popVector{suffix}.csv",
+        )
+
+    def plot_pv_correlation(self, suffix1, suffix2, **kwargs):
+        """
+        Calculates the Correlation Matrix between Mean Population Vectors of two conditions.
+        """
+        if self.trainerBayes is None:
+            raise ValueError(
+                "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
+            )
+
+        use_speed_filter = kwargs.get("use_speed_filter", True)
+        use_predicted = kwargs.get("use_predicted", False)
+        idWindow = kwargs.get("idWindow", 0)
+        if use_predicted:
+            predicted_array = []
+            time_step_array = []
+            mask_array = []
+            for suff in [suffix1, suffix2]:
+                predicted = self.resultsNN_phase[suff]["featurePred"][idWindow]
+                time_step_pred = self.resultsNN_phase[suff]["times"][idWindow].reshape(
+                    -1, 1
+                )
+                speed_mask = self.resultsNN_phase[suff]["speedMask"][idWindow].flatten()
+                predicted_array.append(predicted)
+                time_step_array.append(time_step_pred)
+                mask_array.append(speed_mask)
+
+            predicted = np.concatenate(predicted_array, axis=0)
+            time_step_pred = np.concatenate(time_step_array, axis=0)
+            behav_data = self.behaviorData.copy()
+            behav_data.update({"positionTime": time_step_pred, "Positions": predicted})
+
+        else:
+            behav_data = self.behaviorData
+        # Get Tuning Curves for both (ordered the same way)
+        tc1, _ = self.trainerBayes.calculate_linear_tuning_curve(
+            self.l_function,
+            behav_data,
+            suffix=suffix1,
+            use_speed_filter=use_speed_filter,
+        )
+        tc2, _ = self.trainerBayes.calculate_linear_tuning_curve(
+            self.l_function,
+            behav_data,
+            suffix=suffix2,
+            use_speed_filter=use_speed_filter,
+        )
+
+        # Convert lists to matrices (Neurons x Positions)
+        mat1 = np.array(tc1)
+        mat2 = np.array(tc2)
+
+        # Calculate Correlation Matrix
+        # Each cell (i, j) is the correlation between pop vector at bin i and bin j
+        correlation_matrix = np.zeros((mat1.shape[1], mat1.shape[1]))
+        for i in range(mat1.shape[1]):
+            for j in range(mat2.shape[1]):
+                # Correlation between Column i (Suffix 1) and Column j (Suffix 2)
+                correlation_matrix[i, j] = np.corrcoef(mat1[:, i], mat2[:, j])[0, 1]
+
+        plt.figure(figsize=(7, 6))
+        plt.imshow(correlation_matrix, origin="lower", cmap="jet", aspect="auto")
+        plt.title("Population Vector Correlation (Global Remapping Check)")
+        plt.xlabel(f"Position Bin ({suffix1})")
+        plt.ylabel(f"Position Bin ({suffix2})")
+        plt.colorbar(label="Pearson r")
+        plt.show()
 
     def barplot_linError(
         self, timeWindows, dirSave=None, suffix=None, phase=None, block=False
