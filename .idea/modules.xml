@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/encoders.iml" filepath="$PROJECT_DIR$/.idea/encoders.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/neuroencoders.iml" filepath="$PROJECT_DIR$/.idea/neuroencoders.iml" />
     </modules>
   </component>
 </project>
