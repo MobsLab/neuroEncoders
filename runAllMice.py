@@ -41,7 +41,7 @@ mice_nb = [
     "M1199_reversal",
 ]
 ####
-nameExp = "consensus_linspeed_bigLatent"
+nameExp = "consensus_linspeed_bigLatent_groupConcatenation"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirectionAndThigmo"
@@ -221,14 +221,14 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
             [
                 "-e",
                 nbEpochs,
-                # "--gpu",
+                "--gpu",
                 "--target",
                 target,
                 "--early_stop",
                 "--n_features",
                 "64",
                 "--dim_factor",
-                "3",
+                "4",
                 "--n_transformers",
                 "3",
                 "--loss_type",
