@@ -172,13 +172,13 @@ class PaperFiguresSleep:
 
         # Output
         self.resultsNN = {
-            "time": time,
+            "times": time,
             "linPred": lpredpos,
             "fullPred": fpredpos,
             "predLoss": losspred,
         }
         self.ripples = {
-            "time": ripples[:, self.ripCol],
+            "times": ripples[:, self.ripCol],
             "idCloseRipples": idCloseRipples,
             "idCloseRipplesInSleep": idCloseRipplesInSleep,
             "timeDistToRipples": timeDistToRipples,
@@ -195,7 +195,7 @@ class PaperFiguresSleep:
         for isleep, sleepName in enumerate(self.sleepNames):
             for i in range(len(self.timeWindows)):
                 ax[i, isleep].scatter(
-                    self.resultsNN["time"][sleepName][i],
+                    self.resultsNN["times"][sleepName][i],
                     self.resultsNN["linPred"][sleepName][i],
                     c=self.cm(12 + 0),
                     alpha=0.9,
@@ -484,7 +484,7 @@ class PaperFiguresSleep:
             for i in range(len(self.timeWindows)):
                 mask = self.ripples["idCloseRipplesInSleep"][sleepName][i]
                 ax[i, isleep].scatter(
-                    self.resultsNN["time"][sleepName][i][mask],
+                    self.resultsNN["times"][sleepName][i][mask],
                     self.resultsNN["predLoss"][sleepName][i][mask],
                     s=1,
                 )
@@ -957,7 +957,7 @@ class PaperFiguresSleep:
 #     #     ax[id,0].scatter(outputDic[k][2][1:-1:delta],outputDic[k][0][1:-1:delta,0],s=1,c=cm((outputDic[k][1][1:-1:delta,0]-minLossPred)/(maxLossPred-minLossPred)))
 #     #     ax[id,1].scatter(outputDic[k][2][1:-1:delta],outputDic[k][0][1:-1:delta,1],s=1,c=cm((outputDic[k][1][1:-1:delta,0]-minLossPred)/(maxLossPred-minLossPred)))
 #     #     ax[id,2].scatter(outputDic[k][2][1:-1:delta],outputDic[k][1][1:-1:delta,0],s=1,c=cm((outputDic[k][1][1:-1:delta,0]-minLossPred)/(maxLossPred-minLossPred)))
-#     #     ax[id,1].set_xlabel("time")
+#     #     ax[id,1].set_xlabel("times")
 #     #     ax[id,1].set_ylabel("predicted Y")
 #     #     ax[id,0].set_ylabel("predicted X")
 #     #     ax[id,2].set_ylabel("predicted loss")

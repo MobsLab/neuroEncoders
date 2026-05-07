@@ -12,6 +12,7 @@ import numpy.polynomial.polynomial as poly
 import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 from neuroencoders.importData.gui_elements import (
@@ -20,6 +21,7 @@ from neuroencoders.importData.gui_elements import (
     plot_circular_comparison,
     plot_concatenated_bouts,
     plot_horizontal_kde,
+    time_formatter_vec,
 )
 
 EC = np.array([45, 39])  # range of x and y in cm
@@ -963,6 +965,10 @@ def overview_fig(
                             linewidth=0.7,
                             zorder=2,
                         )
+                    ax1.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+                    ax1.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+                    plt.setp(ax1.get_xticklabels(), rotation=45, ha="right")
+
                 if useSpeedMask and concat_epochs:
                     _ = plot_concatenated_bouts(
                         ax1,
@@ -986,6 +992,9 @@ def overview_fig(
                         color="xkcd:dark pink",
                         zorder=1,
                     )
+                    ax1.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+                    ax1.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+                    plt.setp(ax1.get_xticklabels(), rotation=45, ha="right")
 
                 if useSpeedMask and concat_epochs:
                     _ = plot_concatenated_bouts(
@@ -1009,6 +1018,9 @@ def overview_fig(
                         color="xkcd:dark pink",
                         zorder=1,
                     )
+                    ax1.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+                    ax1.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+                    plt.setp(ax1.get_xticklabels(), rotation=45, ha="right")
                 if with_hist_distribution and selection.sum() > 0:
                     # Determine ax2 based on mode
                     if axs is None:
@@ -1274,6 +1286,9 @@ def overview_fig(
                         linewidth=0.7,
                         zorder=2,
                     )
+                ax2.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+                ax2.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+                plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
             # 1. Plot Line (Trajectory)
             if useSpeedMask and concat_epochs:
                 _ = plot_concatenated_bouts(
@@ -1298,7 +1313,9 @@ def overview_fig(
                     color="xkcd:dark pink",
                     zorder=1,
                 )
-
+                ax2.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+                ax2.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+                plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
             # 2. Plot Scatter (True Points)
             if useSpeedMask and concat_epochs:
                 plot_concatenated_bouts(

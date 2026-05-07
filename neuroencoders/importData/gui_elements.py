@@ -59,7 +59,7 @@ from neuroencoders.utils.viz_params import (
 )
 
 
-def _time_format_logic(x):
+def _time_format_logic(x, full=False):
     """Internal logic for a single scalar value"""
     # Split whole seconds and fractional part
     whole_seconds = int(x)
@@ -74,10 +74,16 @@ def _time_format_logic(x):
     h, rem = divmod(whole_seconds, 3600)
     m, s = divmod(rem, 60)
 
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    if full:
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # This makes the function work on single values OR arrays automatically
+time_formatter_vec_full = np.vectorize(
+    lambda x, pos=None: _time_format_logic(x, full=True)
+)
 time_formatter_vec = np.vectorize(lambda x, pos=None: _time_format_logic(x))
 
 
@@ -112,7 +118,7 @@ class AnimatedPositionPlotter:
                 speedMask : Boolean, use speed mask for the trajectory (default: False)
                 speedMaskArray: Pre-computed speed mask array instead of simple boolean (optional)
                 predicted : Pre-computed predicted positions (optional)
-                /!\ when using predicted positions, you must provide a posIndex and a prediction time to match the positions with the predictions.
+                CAUTION! when using predicted positions, you must provide a posIndex and a prediction time to match the positions with the predictions.
         """
         self.data_helper = data_helper
         start_stim = self.data_helper.fullBehavior["Times"].get("start_stim", None)
@@ -1207,7 +1213,7 @@ class AnimatedPositionPlotter:
         )
         ax.legend(ax_handles, ax_labels, loc="lower left", fontsize=10, framealpha=0.5)
         ax.xaxis.set_major_formatter(
-            FuncFormatter(time_formatter_vec)
+            FuncFormatter(time_formatter_vec_full)
         )  # Format x-axis as time
         ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
 
