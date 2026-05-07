@@ -62,7 +62,7 @@ def test_contrastive_loss_layer_mp():
 
 
 def test_cyclical_mae_rad_mp():
-    loss_fn = nnUtils._get_loss_function("cyclic_mae", alpha=1.0, delta=1.0)
+    loss_fn = nnUtils.CyclicMAE()
 
     y_true = tf.constant([0.1, 6.2], dtype=tf.bfloat16)
     y_pred = tf.constant([0.2, 0.1], dtype=tf.bfloat16)

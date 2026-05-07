@@ -1,5 +1,6 @@
 import os
 import sys
+from typing import Tuple
 
 import mat73
 import numpy as np
@@ -13,7 +14,9 @@ Wrappers should be able to distinguish between raw data or matlab processed data
 """
 
 
-def loadSpikeData(path, index=None, fs=20000):
+def loadSpikeData(
+    path: str, index=None, fs: int = 20000
+) -> Tuple[nts.TsGroup | dict, np.ndarray, dict]:
     """
     if the path contains a folder named /Analysis,
     the script will look into it to load either
@@ -29,7 +32,9 @@ def loadSpikeData(path, index=None, fs=20000):
             index : int, optional, the shank index to load
 
     Returns:
-            dict, array
+            spikes : TsGroup containing the spike times for each neuron, indexed by the shank and neuron number
+            shank : array of shank index for each neuron
+            spikedata : dict containing the spikedata.mat file if it exists, None otherwise
     """
     if not os.path.exists(path):
         print("The path " + path + " doesn't exist; Exiting ...")
@@ -56,7 +61,8 @@ def loadSpikeData(path, index=None, fs=20000):
             spikes = {}
             for i in shankIndex:
                 # go from 1e-4 seconds to us
-                spikes[i] = nts.Ts(spikedata["S"]["C"][0]["t"] * 100, time_units="us")
+                spikes[i] = nts.Ts(spikedata["S"]["C"][i]["t"] * 100, time_units="us")
+
             a = spikes[0].as_units("s").index.values
             if ((a[-1] - a[0]) / 60.0) / 60.0 > 20.0:  # VERY BAD
                 raise ValueError(

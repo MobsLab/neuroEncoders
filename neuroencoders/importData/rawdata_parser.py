@@ -157,7 +157,7 @@ def get_behavior(
         else:
             PosMat = None
         if "tRipples" in f.root.optional:
-            tRipples = f.root.optional.tRipples[:].flatten().reshape(-1, 1)
+            tRipples = f.root.optional.tRipples[:].flatten().reshape(-1)
         else:
             tRipples = None
 
