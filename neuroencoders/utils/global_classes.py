@@ -16,7 +16,7 @@ os.environ.setdefault(
 )  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 from warnings import warn
 
 import dill as pickle
@@ -29,6 +29,7 @@ import pandas as pd
 import tables
 import tensorflow as tf
 from matplotlib.patches import Rectangle
+from pynapple import TsGroup, TsdFrame
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
@@ -60,6 +61,8 @@ ZONEDEF = np.array(
 ZONELABELS = ["Shock", "ShockCenter", "Center", "SafeCenter", "Safe"]
 
 ZONE_COLORS = ["r", "m", "k", "c", "b"]
+
+DEFAULT_GRIDSIZE = (35, 35)
 
 
 # Helper function to check if a position is in a zone
@@ -566,10 +569,14 @@ class DataHelper(Project):
                 mode="valid",
             )[(window_len // 2 - 1) : -(window_len // 2)]
             speed_mask_lin = (np.abs(smoothed_lin_speed) > 0.03) & (
-                np.abs(smoothed_lin_speed) < 0.45
+                np.abs(smoothed_lin_speed) < 0.35
             )
             speed_range_mask = speed_mask_lin
             speed_range_mask = speed_range_mask & (smoothed_speed < max_speed)
+            print(
+                "using linear speed mask with min 0.03 and max 0.35 for the linear speed, and max "
+            )
+
         freeze_excluded_mask = ~inEpochsMask(pos_time, freeze_epochs)
         self.fullBehavior["Times"]["speedFilter"] = (
             speed_range_mask & freeze_excluded_mask
@@ -577,7 +584,6 @@ class DataHelper(Project):
         print(f"forced speed filter with min {min_speed} and max {max_speed}")
 
     def recompute_speed(self, add_to_fullBehavior=False, l_function=None):
-        from scipy.signal import medfilt
         from neuroencoders.resultAnalysis.print_results import EC
 
         x_raw = self.fullBehavior["Positions"][:, 0] * EC[0]
@@ -1801,6 +1807,54 @@ class DataHelper(Project):
 
         return self.freeze_epochs
 
+    def get_ripples_epochs(self, before=0.1, after=0.1):
+        self.tRipples = self.fullBehavior["Times"].get("tRipples", None).flatten()
+        ripples_epochs = np.array([[t - before, t + after] for t in self.tRipples])
+        self.ripples_epochs = ripples_epochs
+        return self.ripples_epochs
+
+    def get_spike_data(self, add_to_attr=True) -> TsGroup:
+        """
+        Get spike data from the DataHelper and store it in the fullBehavior dict for later use.
+        """
+        if not os.path.exists(os.path.join(self.folder, "SpikeData.mat")):
+            warn(
+                "SpikeData.mat not found. Please run some spike sorting algorithm and save the spike data in SpikeData.mat before calling get_spike_data()."
+            )
+            return None
+
+        from neuroencoders.utils.wrappers import loadSpikeData
+
+        spikes, shanks, spikedata = loadSpikeData(self.folder)
+        spike_group = TsGroup(spikes, time_units="s")
+        if add_to_attr:
+            self.spikeData = spike_group
+
+        return spike_group
+
+    def compute_firing_rate(
+        self, spike_group: Optional[TsGroup] = None, bin_size=0.01
+    ) -> TsdFrame:
+        """
+        Compute firing rate from spike data using a Gaussian kernel.
+
+        Args:
+            spike_group: A nap.TsGroup containing spike times. If None, uses self.spikeData.
+            bin_size: Size of the bins for counting spikes (in seconds).
+        """
+        from scipy.ndimage import gaussian_filter1d
+
+        if spike_group is None:
+            if not hasattr(self, "spikeData"):
+                warn("loading spike data from scratch")
+                self.spikeData = self.get_spike_data()
+            spike_group = self.spikeData
+
+        firing_rates = spike_group.count(bin_size) / bin_size
+        firing_rates_smoothed = gaussian_filter1d(firing_rates, sigma=1)
+
+        return firing_rates_smoothed
+
     def get_config(self):
         """
         Returns a dict containing the parameters of the DataHelper, useful for serialization and logging.
@@ -1952,7 +2006,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 20)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 16)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -1999,7 +2053,7 @@ class Params:
         )  # path to save results
 
         # regarding data augmentation
-        self.dataAugmentation = kwargs.pop("dataAugmentation", False)
+        self.dataAugmentation = kwargs.pop("dataAugmentation", True)
 
         # TODO: check if this is still relevant
         # WARNING: maybe striding is actually 0.036 ms based ???
@@ -2023,7 +2077,7 @@ class Params:
         self.project_transformer = kwargs.pop("project_transformer", True)
         self.dim_factor = kwargs.pop("dim_factor", 1)
         self.sequence_output_dim = kwargs.pop("sequence_output_dim", None)
-        self.loss_type = kwargs.pop("loss_type", "safe_kl")  # or "wasserstein"
+        self.loss_type = kwargs.pop("loss_type", "wasserstein")  # or "wasserstein"
 
         default_lstm_layers = (
             2 if not self.isTransformer else 4
@@ -2045,7 +2099,7 @@ class Params:
         )  # first fully connected layer in Transformer arch dimension, the second must be the same as the input dim for the skip connection
 
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
-        self.GaussianGridSize = kwargs.pop("GaussianGridSize", (35, 35))
+        self.GaussianGridSize = kwargs.pop("GaussianGridSize", DEFAULT_GRIDSIZE)
         self.GaussianSigma = kwargs.pop(
             "GaussianSigma", 0.05
         )  # 1/44 ~= 0.023, so it should cover ~3 bins if gris size is 45*45
@@ -2154,7 +2208,7 @@ class Params:
         self.contrastive_weight = kwargs.pop("contrastive_weight", 0.8)
         self.contrastive_dim = kwargs.pop("contrastive_dim", 64)
         self.temperature = kwargs.pop("temperature", 0.07)
-        self.sigma_contrastive = kwargs.pop("sigma_contrastive", 0.015)
+        self.sigma_contrastive = kwargs.pop("sigma_contrastive", 0.03)
 
         self.use_conv2d = kwargs.pop("use_conv2d", False)
         self.use_group_attention_fusion = kwargs.pop(
@@ -2164,23 +2218,41 @@ class Params:
             "high_rad", 2 * np.pi
         )  # for cyclic variables in the loss function
 
-        # whether to use mixed precision training (float16) for faster computations on compatible hardware
-        # Derive a safe default based on device capabilities (enable only when a GPU is available),
-        # while still allowing callers to override via kwargs.
-        default_using_mixed_precision = False
-        try:
-            gpus = tf.config.list_physical_devices("GPU")
-            if gpus:
-                default_using_mixed_precision = True
-        except Exception:
-            # If device query fails, keep the conservative default (False)
-            default_using_mixed_precision = False
-
-        self.usingMixedPrecision = kwargs.pop(
-            "usingMixedPrecision", default_using_mixed_precision
-        )
+        self.usingMixedPrecision = kwargs.pop("usingMixedPrecision", True)
         # According to tf tutorials, we can allow mixed precision in most layers
         # except the output for unclear reasons linked to gradient computations
+        self.normalize_in_pipeline = kwargs.pop("normalize_in_pipeline", True)
+        # whether to normalize spike groups during the data pipeline (set to true) or during the spikeNet layer norm (false)
+
+        self.learnable_contrastive_temperature = kwargs.pop(
+            "learnable_contrastive_temperature", True
+        )
+
+        ## Oversampling/dataAugmentation parameters
+        self.oversampling_stride = kwargs.pop(
+            "oversampling_stride", 3
+        )  # the finesse of the grid to check maze uniformity
+        self.oversampling_target_percentile = kwargs.pop(
+            "oversampling_target_percentile", 0.95
+        )  # target percentile for repeats
+        self.oversampling_max_repeat = kwargs.pop(
+            "oversampling_max_repeat", 10
+        )  # maximum number of repeats for a given sample
+        self.oversampling_use_undersampling = kwargs.pop(
+            "oversampling_use_undersampling", True
+        )  # whether to use undersampling in addition to oversampling for the most represented samples : defaults to True
+        self.oversampling_undersampling_target_percentile = kwargs.pop(
+            "oversampling_undersampling_target_percentile", 50
+        )  # undersample bins above 50th percentile to flatten the distribution a bit more
+        self.oversampling_drop_forbidden = kwargs.pop(
+            "oversampling_drop_forbidden", False
+        )  # whether to drop samples in the forbidden zones during oversampling : defaults to False, as we might have some tracking issues that we still want to learn-ish
+        self.oversampling_use_adaptive_augmentation = kwargs.pop(
+            "oversampling_use_adaptive_augmentation", True
+        )  # whether to use adaptive augmentation based on the training imbalance, or to just apply a fixed number of repeats based on the target percentile
+        self.oversampling_augmentation_scale = kwargs.pop(
+            "oversampling_augmentation_scale", 0.8
+        )
 
     def save_params_to_json(self):
         """
@@ -2309,7 +2381,7 @@ class SpatialConstraintsMixin:
     Mixin class to provide unified spatial constraints for both Bayesian and ANN decoders
     """
 
-    def __init__(self, grid_size=(45, 45), maze_params=None, **kwargs):
+    def __init__(self, grid_size=DEFAULT_GRIDSIZE, maze_params=None, **kwargs):
         self.grid_size = grid_size
         self.GRID_H, self.GRID_W = grid_size
 
@@ -2490,7 +2562,7 @@ class SpatialConstraintsMixin:
     @classmethod
     def from_config(cls, config):
         """Create instance from config"""
-        grid_size = config.get("grid_size", (45, 45))
+        grid_size = config.get("grid_size", DEFAULT_GRIDSIZE)
         maze_params = config.get("maze_params", None)
         if isinstance(maze_params, dict) and all(
             k in maze_params for k in ("class_name", "config", "dtype")
@@ -2565,6 +2637,75 @@ class SpatialConstraintsMixin:
             & (self.Xc_tf < self.maze_params_dict["gap_x_max"])
             & (self.Yc_tf <= self.maze_params_dict["gap_y_min"]),
             tf.float32,
+        )
+
+        self.MAZE_COORDS = np.array(
+            [
+                [self.maze_params_dict["x_min"], self.maze_params_dict["y_min"]],
+                [self.maze_params_dict["x_min"], self.maze_params_dict["y_max"]],
+                [self.maze_params_dict["x_max"], self.maze_params_dict["y_max"]],
+                [self.maze_params_dict["x_max"], self.maze_params_dict["y_min"]],
+                [
+                    self.maze_params_dict["gap_x_max"],
+                    self.maze_params_dict["y_min"],
+                ],
+                [
+                    self.maze_params_dict["gap_x_max"],
+                    self.maze_params_dict["gap_y_min"],
+                ],
+                [
+                    self.maze_params_dict["gap_x_min"],
+                    self.maze_params_dict["gap_y_min"],
+                ],
+                [
+                    self.maze_params_dict["gap_x_min"],
+                    self.maze_params_dict["y_min"],
+                ],
+                [self.maze_params_dict["x_min"], self.maze_params_dict["y_min"]],
+            ]
+        )
+        # give only corner points in [[x_min, x_max], [y_min, y_max]] format for compatibility with bayes decoder
+        self.ZONEDEF = np.array(
+            [
+                [
+                    [
+                        self.maze_params_dict["x_min"],
+                        self.maze_params_dict["gap_x_min"],
+                    ],
+                    [self.maze_params_dict["y_min"], 0.43],
+                ],  # zone shock
+                [
+                    [
+                        self.maze_params_dict["x_min"],
+                        self.maze_params_dict["gap_x_min"],
+                    ],
+                    [0.43, self.maze_params_dict["y_max"]],
+                ],  # zone shock center
+                [
+                    [
+                        self.maze_params_dict["gap_x_min"],
+                        self.maze_params_dict["gap_x_max"],
+                    ],
+                    [
+                        self.maze_params_dict["gap_y_min"],
+                        self.maze_params_dict["y_max"],
+                    ],
+                ],  # zone center
+                [
+                    [
+                        self.maze_params_dict["gap_x_max"],
+                        self.maze_params_dict["x_max"],
+                    ],
+                    [0.43, self.maze_params_dict["y_max"]],
+                ],  # zone safe center
+                [
+                    [
+                        self.maze_params_dict["gap_x_max"],
+                        self.maze_params_dict["x_max"],
+                    ],
+                    [self.maze_params_dict["y_min"], 0.43],
+                ],  # zone safe
+            ]
         )
 
         return forbid_np, forbid_tf

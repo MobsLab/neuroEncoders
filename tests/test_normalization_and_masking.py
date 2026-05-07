@@ -4,9 +4,9 @@ import tensorflow as tf
 
 from neuroencoders.fullEncoder.nnUtils import (
     MaskedBatchNormalization,
-    NeuralDataAugmentation,
     SpikeNet1D,
     SpikeNet2D,
+    standardize_group_tensors,
 )
 
 
@@ -115,54 +115,45 @@ def test_spikenet2d_masking():
     assert output.shape == (batch_size, 10)
 
 
-def test_normalization_augmentation():
-    """Test NeuralDataAugmentation applies normalization stats"""
-    means = [np.array([10.0, 20.0]), np.array([5.0])]
-    stds = [np.array([2.0, 5.0]), np.array([1.0])]
+def test_groupwise_preprocessing_normalization_preserves_padding():
+    """Each group's preprocessing stats should be applied independently."""
 
-    aug = NeuralDataAugmentation(
-        normalize=True,
-        normalization_stats=(means, stds),
-        white_noise_std=2.0,  # Should be scaled down
+    params = Params()
+    tensors = {
+        "group0": tf.constant(
+            [
+                [[12.0, 12.0], [28.0, 28.0]],
+                [[0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=tf.float32,
+        ),
+        "group1": tf.constant(
+            [
+                [[9.0, 9.0], [18.0, 18.0], [27.0, 27.0]],
+                [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=tf.float32,
+        ),
+    }
+    means = [np.array([10.0, 20.0]), np.array([3.0, 6.0, 9.0])]
+    stds = [np.array([2.0, 4.0]), np.array([3.0, 6.0, 9.0])]
+
+    normalized = standardize_group_tensors(tensors, (means, stds), params)
+
+    # Group0, Spike0: [[12.0, 12.0], [28.0, 28.0]]
+    # Standardized: [[(12-10)/2, (12-10)/2], [(28-20)/4, (28-20)/4]] = [[1.0, 1.0], [2.0, 2.0]]
+    assert np.allclose(normalized["group0"][0].numpy(), [[1.0, 1.0], [2.0, 2.0]])
+
+    # Group1, Spike0: [[9.0, 9.0], [18.0, 18.0], [27.0, 27.0]]
+    # Standardized: [[(9-3)/3, (9-3)/3], [(18-6)/6, (18-6)/6], [(27-9)/9, (27-9)/9]]
+    #             = [[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]]
+    assert np.allclose(
+        normalized["group1"][0].numpy(), [[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]]
     )
 
-    # Verify noise scaling happened
-    # 2.0 / 50.0 = 0.04
-    assert np.isclose(aug.white_noise_std, 0.04)
-
-    # Create fake group data: (Batch, Channels, Time)
-    # Group 0 has 2 channels
-    group0_data = tf.constant(
-        [
-            [[12.0, 12.0], [25.0, 25.0]],  # Sample 0
-        ],
-        dtype=tf.float32,
-    )
-    # Shape: (1, 2, 2)
-    # Mean input: Ch0=12, Ch1=25.
-    # Expected norm: Ch0=(12-10)/2 = 1.0, Ch1=(25-20)/5 = 1.0
-
-    normalized = aug.normalize_group(group0_data, 0)
-
-    assert np.allclose(normalized.numpy(), 1.0)
-
-    # Test augmentation runs (returns matching shape + num_augs)
-    # apply_group_augmentation logic is what normally calls normalize_group,
-    # but let's test augment_spike_group directly on normalized data
-
-    augmented = aug.augment_spike_group(normalized)
-
-    # Check output shape: (1, 2, 2) + Augmentations?
-    # Actually augment_sample is single sample logic generally but augment_spike_group uses augment_sample
-    # Wait, augment_sample returns ONE tensor with same shape as input?
-    # The new vectorized augmentation returns (num_augs, ...)
-    # But NeuralDataAugmentation.augment_spike_group calls augment_sample which calls add_white_noise etc.
-    # It returns ONE augmented version.
-
-    assert augmented.shape == normalized.shape
-
-    # Check values changed (noise added)
-    assert not np.allclose(augmented.numpy(), normalized.numpy())
+    # Padding must stay exactly zero so the rest of the pipeline still detects it.
+    assert np.allclose(normalized["group0"][1].numpy(), 0.0)
+    assert np.allclose(normalized["group1"][1].numpy(), 0.0)
 
 
 def test_normalization_stats_computation_logic():

@@ -130,10 +130,25 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
             # For heatmap, shape should be (B, H*W)
             assert output[target_name].shape == (mock_params.batch_size, H * W)
         else:
-            assert output[target_name].shape == (mock_params.batch_size, spec["dim"])
+            if (
+                target_name == "latent"
+                and model_obj.contrastive_temperature_layer is not None
+            ):
+                # For contrastive loss, latent output shape should match latent dim
+                latent_dim = spec["dim"]
+                temp_dim = 1
+                final_dim = latent_dim + temp_dim
+                assert output[target_name].shape == (mock_params.batch_size, final_dim)
+            else:
+                assert output[target_name].shape == (
+                    mock_params.batch_size,
+                    spec["dim"],
+                )
 
     if "latent" in output:
         latent_dim = model_obj.target_structure["latent"]["dim"]
+        if model_obj.contrastive_temperature_layer is not None:
+            latent_dim += 1  # Account for temperature dimension
         assert output["latent"].shape == (mock_params.batch_size, latent_dim)
 
 

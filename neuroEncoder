@@ -283,7 +283,7 @@ def main(args):
     elif windowSizeMS >= 108:
         batch_size = 128
     else:
-        batch_size = 256
+        batch_size = 512
 
     Parameters = Params(
         helper=DataHelper,
@@ -739,7 +739,7 @@ def main(args):
                 windowSizeMS=windowSizeMSlist,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=True,
+                load_model=False,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=num_augmentations,
@@ -798,12 +798,6 @@ def main(args):
             or args.redo
         ):
             print("Testing training set")
-            # add experimental configs for tf, for data, device logging etc
-            import tensorflow as tf
-
-            tf.data.experimental.enable_debug_mode()
-            tf.config.run_functions_eagerly(True)
-            tf.debugging.set_log_device_placement(True)
             NNTrainer.test(
                 DataHelper.fullBehavior,
                 windowSizeMS=windowSizeMS,
@@ -970,7 +964,7 @@ def main(args):
                 # TODO: add window Size Decoder --> decode small windows with big window trained model
             )
 
-        if args.plot_id and (
+        if args.plot_id or (
             not os.path.exists(
                 os.path.join(
                     ProjectPath.experimentPath,
@@ -1411,7 +1405,7 @@ if __name__ == "__main__":
             "--loss_type",
             type=str,
             help="type of loss to be used for Gaussian Heatmap. Defaults to safe_kl",
-            choices=["safe_kl", "wasserstein"],
+            choices=["safe_kl", "wasserstein", "kl", "weighted"],
             default="safe_kl",
         )
         p.add_argument(
