@@ -63,7 +63,7 @@ class WaveFormComparator:
             sleepName: Name of the sleep epoch to filter on (default=[])
             **kwargs: Additional arguments, including:
                 - phase: 'train' or 'test' to specify dataset phase
-                - strideFactor: Factor for striding the dataset (default=1)
+                - strideFactor: Factor for striding the dataset (default=4)
 
         """
         self.projectPath = projectPath

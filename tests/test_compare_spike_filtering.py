@@ -100,11 +100,13 @@ def test_waveform_comparator_init(mock_env):
         "neuroencoders.importData.compareSpikeFiltering.get_params",
         return_value=(None, 20000, 4),
     ):
+        windowSizeMS = 36
         comparator = WaveFormComparator(
             projectPath=project,
             params=params,
             behavior_data=behavior_data,
-            windowSizeMS=36,
+            windowSizeMS=windowSizeMS,
+            strideFactor=1 if windowSizeMS == 36 else 4,
             useTrain=True,
             useTest=True,
             useAll=True,
@@ -134,6 +136,7 @@ def test_get_nndataset_spikepos(mock_env):
             return_value=np.ones(100, dtype=bool),
         ),
     ):
+        windowSizeMS = 36
         comparator = WaveFormComparator(
             projectPath=project,
             params=params,
@@ -142,6 +145,7 @@ def test_get_nndataset_spikepos(mock_env):
             useTrain=True,
             useTest=False,
             phase="train",
+            strideFactor=1 if windowSizeMS == 36 else 4,
         )
 
         # Test getting spike positions
@@ -165,6 +169,7 @@ def test_save_alignment_tools(mock_env):
             return_value=np.ones(100, dtype=bool),
         ),
     ):
+        windowSizeMS = 36
         comparator = WaveFormComparator(
             projectPath=project,
             params=params,
@@ -173,6 +178,7 @@ def test_save_alignment_tools(mock_env):
             useTrain=True,
             useTest=False,
             phase="train",
+            strideFactor=1 if windowSizeMS == 36 else 4,
         )
 
         # Mock trainerBayes
