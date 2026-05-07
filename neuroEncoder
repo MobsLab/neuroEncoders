@@ -615,7 +615,7 @@ def main(args):
             strideFactor=strideFactor,
         )
         WFCTrain.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
         ### Compare and align trainset waveforms
         WFCTrainTest = WaveFormComparator(
@@ -630,7 +630,7 @@ def main(args):
             strideFactor=strideFactor,
         )
         WFCTrainTest.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
         WFCTest = WaveFormComparator(
             ProjectPath,
@@ -643,7 +643,7 @@ def main(args):
             strideFactor=strideFactor,
         )
         WFCTest.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
 
         ### Compare and align conditioning waveforms
@@ -659,7 +659,7 @@ def main(args):
             strideFactor=strideFactor,
         )
         WFCCond.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
 
         ### Compare and align PostTests waveforms
@@ -675,7 +675,7 @@ def main(args):
             strideFactor=strideFactor,
         )
         WFCPost.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS
+            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
     elif mode == "ann":
         # Create data
@@ -1028,6 +1028,7 @@ def main(args):
                 suffixes=["_pre", "_cond", "_post", "_training"],
                 load_pickle=True,
                 target="pos",
+                redo=windowSizeMS == 36,
             )
             curr.fig_summary_id_card(
                 timeWindow=windowSizeMS,

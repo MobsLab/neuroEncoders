@@ -404,6 +404,7 @@ class Trainer(SpatialConstraintsMixin):
         is_predicted = kwargs.get("is_predicted", False)
         winMS = kwargs.get("winMS")
         redo = kwargs.get("redo", False)
+        print(f"will redo bayes mat : {redo}")
         load_last_bayes = kwargs.get("load_last_bayes", False)
 
         filepath = self._get_training_filepath(is_predicted, winMS)
@@ -2851,33 +2852,90 @@ class Trainer(SpatialConstraintsMixin):
             else "matching_pos_indices_all.pkl"
         )
         linearPlaceFields = []
-        # Create one large epoch that comprises both train and test dataset
-        minTime = np.min(
-            np.concatenate(
-                (
-                    behaviorData["Times"]["trainEpochs"],
-                    behaviorData["Times"]["testEpochs"],
+        if suffix is not None and "_" not in suffix:
+            suffix = (
+                "_" + suffix
+            )  # ensure suffix starts with underscore for consistency
+
+        if suffix is None:
+            # Create one large epoch that comprises both train and test dataset
+            minTime = np.min(
+                np.concatenate(
+                    (
+                        behaviorData["Times"]["trainEpochs"],
+                        behaviorData["Times"]["testEpochs"],
+                    )
                 )
             )
-        )
-        maxTime = np.max(
-            np.concatenate(
-                (
-                    behaviorData["Times"]["trainEpochs"],
-                    behaviorData["Times"]["testEpochs"],
+            maxTime = np.max(
+                np.concatenate(
+                    (
+                        behaviorData["Times"]["trainEpochs"],
+                        behaviorData["Times"]["testEpochs"],
+                    )
                 )
             )
-        )
-        epochForField = np.array([minTime, maxTime])
-        _, linearTraj = l_function(behaviorData["Positions"][:, :2])
-        timesMask = inEpochsMask(
-            np.squeeze(behaviorData["positionTime"]), epochForField
-        ).flatten()
+            epochForField = np.array([minTime, maxTime])
+            timesMask = inEpochsMask(
+                np.squeeze(behaviorData["positionTime"]), epochForField
+            ).flatten()
+        else:
+            if suffix == "_training":
+                self.training = np.array(behaviorData["Times"]["trainEpochs"]).reshape(
+                    -1, 2
+                )
+                self.trainingMask = inEpochsMask(
+                    behaviorData["positionTime"][:, 0], self.training
+                )
+                epochForField = self.training
+                timesMask = self.trainingMask
+            elif suffix == "_pre":
+                self.pre = np.array(
+                    behaviorData["Times"]["SessionEpochs"]["pre"]
+                ).reshape(-1, 2)
+                self.preMask = inEpochsMask(
+                    behaviorData["positionTime"][:, 0], self.pre
+                )
+                epochForField = self.pre
+                timesMask = self.preMask
+            elif suffix == "_cond":
+                self.cond = np.array(
+                    behaviorData["Times"]["SessionEpochs"]["cond"]
+                ).reshape(-1, 2)
+                self.condMask = inEpochsMask(
+                    behaviorData["positionTime"][:, 0], self.cond
+                )
+                epochForField = self.cond
+                timesMask = self.condMask
+
+            elif suffix == "_post":
+                self.post = np.array(
+                    behaviorData["Times"]["SessionEpochs"]["post"]
+                ).reshape(-1, 2)
+                self.postMask = inEpochsMask(
+                    behaviorData["positionTime"][:, 0], self.post
+                )
+                epochForField = self.post
+                timesMask = self.postMask
+            elif suffix == "_extinct":
+                self.extinct = np.array(
+                    behaviorData["Times"]["SessionEpochs"]["extinct"]
+                ).reshape(-1, 2)
+                self.extinctMask = inEpochsMask(
+                    behaviorData["positionTime"][:, 0], self.extinct
+                )
+                epochForField = self.extinct
+                timesMask = self.extinctMask
+            else:
+                raise ValueError(f"Invalid suffix: {suffix}")
+
         if use_speed_filter:
             speedMask = behaviorData["Times"]["speedFilter"].flatten()
             totMask = np.logical_and(timesMask, speedMask)
         else:
             totMask = timesMask
+
+        _, linearTraj = l_function(behaviorData["Positions"][:, :2])
         timeLinear = np.squeeze(behaviorData["positionTime"][totMask, :])
         linearTraj = linearTraj[totMask]
         linSpace = np.arange(

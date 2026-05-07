@@ -1437,9 +1437,11 @@ class Mouse_Results(Params, PaperFigures):
         positions_from_NN = kwargs.pop("positions_from_NN", None)
         if positions_from_NN is None:
             if which.lower() == "bayes":
-                positions_from_NN = self.resultsBayes_phase[phase]["truePos"][idWindow]
+                positions_from_NN = self.resultsBayes_phase[phase]["featureTrue"][
+                    idWindow
+                ]
             else:
-                positions_from_NN = self.resultsNN_phase[phase]["truePos"][idWindow]
+                positions_from_NN = self.resultsNN_phase[phase]["featureTrue"][idWindow]
             if positions_from_NN is None:
                 raise ValueError(
                     f"True positions not found in resultsNN_phase[{phase}]. Please run load_results first."
@@ -1448,9 +1450,9 @@ class Mouse_Results(Params, PaperFigures):
         predicted = kwargs.pop("predicted", None)
         if predicted is None:
             if which.lower() == "bayes":
-                predicted = self.resultsBayes_phase[phase]["fullPred"][idWindow]
+                predicted = self.resultsBayes_phase[phase]["featurePred"][idWindow]
             else:
-                predicted = self.resultsNN_phase[phase]["fullPred"][idWindow]
+                predicted = self.resultsNN_phase[phase]["featurePred"][idWindow]
 
         speedMaskArray = kwargs.pop("speedMaskArray", None)
         if speedMaskArray is None and kwargs.get("useSpeedMask", False):
@@ -1460,9 +1462,9 @@ class Mouse_Results(Params, PaperFigures):
         prediction_time = kwargs.pop("prediction_time", None)
         if prediction_time is None:
             if which.lower() == "bayes":
-                prediction_time = self.resultsBayes_phase[phase]["time"][idWindow]
+                prediction_time = self.resultsBayes_phase[phase]["times"][idWindow]
             else:
-                prediction_time = self.resultsNN_phase[phase]["time"][idWindow]
+                prediction_time = self.resultsNN_phase[phase]["times"][idWindow]
 
         posIndex = kwargs.pop("posIndex", None)
         if posIndex is None:
@@ -1479,14 +1481,12 @@ class Mouse_Results(Params, PaperFigures):
                     and kwargs.get("plot_heatmap", False)
                 ):
                     try:
-                        predicted_logits = self.resultsNN_phase_pkl[phase][idWindow][
-                            "logits_hw"
+                        predicted_logits = self.resultsNN_phase_pkl[phase]["logits_hw"][
+                            idWindow
                         ]
                     except (AttributeError, KeyError, TypeError):
-                        # create an empty list of size windows_values
-                        self.resultsNN_phase_pkl[phase] = [None] * len(
-                            self.windows_values
-                        )
+                        if phase not in self.resultsNN_phase_pkl:
+                            self.resultsNN_phase_pkl[phase] = {}
                         try:
                             with open(
                                 os.path.join(
@@ -1498,10 +1498,31 @@ class Mouse_Results(Params, PaperFigures):
                                 "rb",
                             ) as f:
                                 results = pickle.load(f)
-                            self.resultsNN_phase_pkl[phase][idWindow] = results
+                                for key in results.keys():
+                                    if (
+                                        not isinstance(
+                                            self.resultsNN_phase_pkl[phase][key], list
+                                        )
+                                        or key not in self.resultsNN_phase_pkl[phase]
+                                    ):
+                                        self.resultsNN_phase_pkl[phase][key] = []
+                                    if idWindow == len(
+                                        self.resultsNN_phase_pkl[phase][key]
+                                    ):
+                                        self.resultsNN_phase_pkl[phase][key].append(
+                                            results[key]
+                                        )
+                                    if (
+                                        self.resultsNN_phase_pkl[phase][key][idWindow]
+                                        is None
+                                    ):
+                                        self.resultsNN_phase_pkl[phase][key][
+                                            idWindow
+                                        ] = results[key]
+
                             predicted_logits = self.resultsNN_phase_pkl[phase][
-                                idWindow
-                            ]["logits_hw"]
+                                "logits_hw"
+                            ][idWindow]
                         except FileNotFoundError:
                             print(
                                 f"No decoding_results{phase}.pkl found for window {winMS}."
@@ -1526,16 +1547,14 @@ class Mouse_Results(Params, PaperFigures):
                             )
             else:
                 try:
-                    predicted_map = self.resultsBayes_phase_pkl[phase][idWindow][
-                        "probaMaps"
+                    predicted_map = self.resultsBayes_phase_pkl[phase]["probaMaps"][
+                        idWindow
                     ]
                     predicted_heatmap = np.array(predicted_map)
                     kwargs["predicted_heatmap"] = predicted_heatmap
                 except (AttributeError, KeyError, TypeError):
-                    # create an empty list of size windows_values
-                    self.resultsBayes_phase_pkl[phase] = [None] * len(
-                        self.windows_values
-                    )
+                    if phase not in self.resultsBayes_phase_pkl:
+                        self.resultsBayes_phase_pkl[phase] = {}
                     try:
                         with open(
                             os.path.join(
@@ -1547,9 +1566,30 @@ class Mouse_Results(Params, PaperFigures):
                             "rb",
                         ) as f:
                             results = pickle.load(f)
-                        self.resultsBayes_phase_pkl[phase][idWindow] = results
-                        predicted_map = self.resultsBayes_phase_pkl[phase][idWindow][
-                            "probaMaps"
+
+                            for key in results.keys():
+                                if (
+                                    not isinstance(
+                                        self.resultsBayes_phase_pkl[phase][key], list
+                                    )
+                                    or key not in self.resultsBayes_phase_pkl[phase]
+                                ):
+                                    self.resultsBayes_phase_pkl[phase][key] = []
+                                if idWindow == len(
+                                    self.resultsBayes_phase_pkl[phase][key]
+                                ):
+                                    self.resultsBayes_phase_pkl[phase][key].append(
+                                        results[key]
+                                    )
+                                if (
+                                    self.resultsBayes_phase_pkl[phase][key][idWindow]
+                                    is None
+                                ):
+                                    self.resultsBayes_phase_pkl[phase][key][
+                                        idWindow
+                                    ] = results[key]
+                        predicted_map = self.resultsBayes_phase_pkl[phase]["probaMaps"][
+                            idWindow
                         ]
                         predicted_heatmap = np.array(predicted_map)
                     except FileNotFoundError:
@@ -1971,7 +2011,7 @@ class Mouse_Results(Params, PaperFigures):
         # Pre-check to avoid repeated hasattr calls
         has_resultsNN = hasattr(self, "resultsNN_phase")
         has_resultsNN_obj = hasattr(self, "resultsNN")
-        has_bayes = hasattr(self, "resultsBayes") and "fullPred" in self.resultsBayes
+        has_bayes = hasattr(self, "resultsBayes") and "featurePred" in self.resultsBayes
 
         if not has_resultsNN:
             raise ValueError("resultsNN_phase not found in results")
@@ -2015,7 +2055,7 @@ class Mouse_Results(Params, PaperFigures):
                         full_trueLinPos_from_behavior
                     )[posIndex]
 
-                    linTruePos = resultsNN_suffix["linTruePos"][id].flatten()
+                    linTruePos = resultsNN_suffix["linearTrue"][id].flatten()
                     direction_fromNN = data_helper_win._get_traveling_direction(
                         linTruePos
                     )
@@ -2038,15 +2078,15 @@ class Mouse_Results(Params, PaperFigures):
                         ],
                         "fullTimeBehavior": fullBehavior["positionTime"].flatten(),
                         "alignedTimeBehavior": fullBehavior["positionTime"][posIndex],
-                        "timeNN": resultsNN_suffix["time"][id].flatten(),
+                        "timeNN": resultsNN_suffix["times"][id].flatten(),
                         "fullSpeed": speed,
                         "alignedSpeed": speed[posIndex - 1],  # -1 for shift
                         "posIndex_NN": posIndex,
                         "speedMask": resultsNN_suffix["speedMask"][id].flatten(),
-                        "linPred": resultsNN_suffix["linPred"][id].flatten(),
-                        "fullPred": resultsNN_suffix["fullPred"][id],
-                        "truePos": resultsNN_suffix["truePos"][id],
-                        "linTruePos": linTruePos,
+                        "linearPred": resultsNN_suffix["linearPred"][id].flatten(),
+                        "featurePred": resultsNN_suffix["featurePred"][id],
+                        "featureTrue": resultsNN_suffix["featureTrue"][id],
+                        "linearTrue": linTruePos,
                         "predLoss": resultsNN_suffix["predLoss"][id].flatten(),
                         "resultsNN": self.resultsNN if has_resultsNN_obj else None,
                         "direction_fromBehavior": direction_from_behavior,
@@ -2056,8 +2096,8 @@ class Mouse_Results(Params, PaperFigures):
                     # Add Bayesian results if available
                     if has_bayes:
                         resultsBayes_suffix = self.resultsBayes_phase[suffix]
-                        row["bayesPred"] = resultsBayes_suffix["fullPred"][id]
-                        row["bayesLinPred"] = resultsBayes_suffix["linPred"][
+                        row["bayesPred"] = resultsBayes_suffix["featurePred"][id]
+                        row["bayesLinPred"] = resultsBayes_suffix["linearPred"][
                             id
                         ].flatten()
                         row["bayesProba"] = resultsBayes_suffix["predLoss"][
@@ -2566,17 +2606,17 @@ class Results_Loader:
                 else np.nan
             )
 
-            has_pred = row["fullPred"] is not None and row["truePos"] is not None
-            has_lin = row["linPred"] is not None and row["linTruePos"] is not None
+            has_pred = row["featurePred"] is not None and row["featureTrue"] is not None
+            has_lin = row["linearPred"] is not None and row["linearTrue"] is not None
             has_loss = row["predLoss"] is not None
 
             if has_pred:
-                errors = np.linalg.norm(row["fullPred"] - row["truePos"], axis=1)
+                errors = np.linalg.norm(row["featurePred"] - row["featureTrue"], axis=1)
                 res["error"] = errors
                 res["mean_error"] = np.nanmean(errors)
 
             if has_lin:
-                lin_errors = np.abs(row["linPred"] - row["linTruePos"])
+                lin_errors = np.abs(row["linearPred"] - row["linearTrue"])
                 res["lin_error"] = lin_errors
                 res["mean_lin_error"] = np.nanmean(lin_errors)
 
@@ -2590,7 +2630,7 @@ class Results_Loader:
                     res["mean_error_selected"] = np.nanmean(errors[mask])
                     res["asymmetry_index_on_selected_predicted"] = row[
                         "results"
-                    ].get_training_imbalance(positions=row["fullPred"][mask])
+                    ].get_training_imbalance(positions=row["featurePred"][mask])
                 if has_lin:
                     res["lin_error_selected"] = lin_errors[mask]
                     res["mean_lin_error_selected"] = np.nanmean(lin_errors[mask])
@@ -2599,15 +2639,15 @@ class Results_Loader:
             if has_pred:
                 res["asymmetry_index_on_predicted"] = row[
                     "results"
-                ].get_training_imbalance(positions=row["fullPred"])
+                ].get_training_imbalance(positions=row["featurePred"])
 
             if has_lin:
                 res["true_binary_direction"] = row[
                     "results"
-                ].data_helper._get_traveling_direction(row["linTruePos"])
+                ].data_helper._get_traveling_direction(row["linearTrue"])
                 res["predicted_binary_direction"] = row[
                     "results"
-                ].data_helper._get_traveling_direction(row["linPred"])
+                ].data_helper._get_traveling_direction(row["linearPred"])
 
             return pd.Series(res)
 
@@ -2771,8 +2811,8 @@ class Results_Loader:
 
                 mask = speed_mask & epochMask
 
-                linPred_fast.append(row["linPred"][mask])
-                linTrue_fast.append(row["linTruePos"][mask])
+                linPred_fast.append(row["linearPred"][mask])
+                linTrue_fast.append(row["linearTrue"][mask])
 
             if linPred_fast:  # check non-empty
                 H, xedges, yedges = np.histogram2d(
@@ -2831,8 +2871,8 @@ class Results_Loader:
 
                 mask = ~speed_mask & epochMask
 
-                linPred.append(row["linPred"][mask])
-                linTrue.append(row["linTruePos"][mask])
+                linPred.append(row["linearPred"][mask])
+                linTrue.append(row["linearTrue"][mask])
 
             H, xedges, yedges = np.histogram2d(
                 np.concatenate(linPred).reshape(-1),
@@ -3004,7 +3044,7 @@ class Results_Loader:
         self,
         suffixes=None,
         against="entropy",
-        z_var_cmap="time",
+        z_var_cmap="times",
         save=True,
         folder=None,
         show=False,
@@ -4440,7 +4480,7 @@ class Results_Loader:
                 ann_vals = decoding_results["Hn"].flatten()
             elif ann_var == "maxp":
                 ann_vals = decoding_results["maxp"].flatten()
-            elif ann_var in ["lin_error", "predLoss", "linPred"]:
+            elif ann_var in ["lin_error", "predLoss", "linearPred"]:
                 col = ann_var
 
                 if isinstance(row[col], np.ndarray):
@@ -4561,7 +4601,7 @@ class Results_Loader:
 
     def hist2d_linpred_vs_bayes(
         self,
-        ann_var="linPred",  # "maxp", "entropy", "lin_error", etc.
+        ann_var="linearPred",  # "maxp", "entropy", "lin_error", etc.
         bayes_var="bayesLinPred",  # "bayesPred" or "bayesProba"
         mode="full",  # "selected" or "full"
         speed="fast",  # "fast", "slow", "all"
@@ -4769,8 +4809,8 @@ class Results_Loader:
                 train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
                 mask = mask & np.array(train_mask.tolist(), dtype=bool)
 
-            lin_true = np.array(group["linTruePos"].tolist())[mask]
-            lin_pred = np.array(group["linPred"].tolist())[mask]
+            lin_true = np.array(group["linearTrue"].tolist())[mask]
+            lin_pred = np.array(group["linearPred"].tolist())[mask]
 
             if len(lin_true) > 0:
                 if reduce_fn == "mean":
@@ -5064,8 +5104,8 @@ class Results_Loader:
                 train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
                 mask = mask & np.array(train_mask.tolist(), dtype=bool)
 
-            lin_true = np.array(group["linTruePos"].tolist())[mask]
-            lin_pred = np.array(group["linPred"].tolist())[mask]
+            lin_true = np.array(group["linearTrue"].tolist())[mask]
+            lin_pred = np.array(group["linearPred"].tolist())[mask]
 
             if len(lin_true) > 0:
                 if reduce_fn == "mean":
@@ -5468,8 +5508,8 @@ class Results_Loader:
                 train_mask = group.apply(lambda r: get_true_train_mask(r, df), axis=1)
                 mask = mask & np.array(train_mask.tolist(), dtype=bool)
 
-            lin_true = np.array(group["linTruePos"].tolist())[mask]
-            lin_pred = np.array(group["linPred"].tolist())[mask]
+            lin_true = np.array(group["linearTrue"].tolist())[mask]
+            lin_pred = np.array(group["linearPred"].tolist())[mask]
 
             if len(lin_true) > 0:
                 if reduce_fn == "mean":
@@ -5483,8 +5523,8 @@ class Results_Loader:
                     lambda r: get_entropy_mask(r, df, entropy_thresh_pct), axis=1
                 )
                 mask = mask & np.array(entropy_mask.tolist(), dtype=bool)
-                lin_true_filtered = np.array(group["linTruePos"].tolist())[mask]
-                lin_pred_filtered = np.array(group["linPred"].tolist())[mask]
+                lin_true_filtered = np.array(group["linearTrue"].tolist())[mask]
+                lin_pred_filtered = np.array(group["linearPred"].tolist())[mask]
 
                 if len(lin_true_filtered) > 0:
                     if reduce_fn == "mean":
@@ -5517,14 +5557,14 @@ class Results_Loader:
                         (bayes_df["mouse_manipe"] == mouse)
                         & (bayes_df["phase"] == phase)
                         & (bayes_df["winMS"] == winMS)
-                    ]["linPred"].tolist()
+                    ]["linearPred"].tolist()
                 )[mask]
                 bayes_true = np.array(
                     bayes_df[
                         (bayes_df["mouse_manipe"] == mouse)
                         & (bayes_df["phase"] == phase)
                         & (bayes_df["winMS"] == winMS)
-                    ]["linTruePos"].tolist()
+                    ]["linearTrue"].tolist()
                 )[mask]
                 if len(lin_true) > 0:
                     if reduce_fn == "mean":
