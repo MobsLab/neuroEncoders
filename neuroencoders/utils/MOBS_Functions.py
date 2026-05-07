@@ -176,7 +176,7 @@ def _parse_tracking_data(Behav_data, keys, time_unit):
             keys.remove(key)
             Im_temp = Behav_data[key]
             Tracking[key] = pd.DataFrame(
-                Im_temp, columns=["time", "average change", "pixel range"]
+                Im_temp, columns=["times", "average change", "pixel range"]
             )
 
     if "MouseTemp" in keys:
@@ -1101,7 +1101,7 @@ class Mouse_Results(Params, PaperFigures):
                     self.ann = NNTrainer(
                         self.projects[winMS],
                         self.parameters[winMS],
-                        deviceName=deviceName,
+                        deviceName=self.deviceName,
                         phase=phase,
                         isTransformer=isTransformer,
                         linearizer=self.linearizer,
@@ -1935,6 +1935,11 @@ class Mouse_Results(Params, PaperFigures):
         force = kwargs.get("force", False)
         useTrain = kwargs.pop("useTrain", False)
         useTest = kwargs.pop("useTest", not useTrain)
+        redo = kwargs.pop("redo", False)
+        if kwargs.get("phase", self.phase) != self.phase:
+            warn(
+                "Phase specified in kwargs is different from the current phase. This may lead to unexpected results."
+            )
 
         if not hasattr(self, "waveform_comparators") or force:
             self.waveform_comparators = dict()
@@ -1944,13 +1949,14 @@ class Mouse_Results(Params, PaperFigures):
                     self.parameters[win],
                     self.data_helper.fullBehavior,
                     winValue,
-                    phase=self.phase,
+                    phase=kwargs.pop("phase", self.phase),
                     useTrain=useTrain,
                     useTest=useTest,
+                    useAll=useTrain and useTest,
                     **kwargs,
                 )
                 self.waveform_comparators[win].save_alignment_tools(
-                    self.bayes, self.l_function, winValue
+                    self.bayes, self.l_function, winValue, redo=redo
                 )
 
     def convert_to_df(self, redo=False):
@@ -2439,7 +2445,7 @@ class Results_Loader:
         """
         return str(self.results_df.head())
 
-    def save(self, path: str = None):
+    def save(self, path: Optional[str] = None):
         """
         Save the Results_Loader object to a pickle file.
 

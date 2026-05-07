@@ -552,8 +552,8 @@ def _run_place_field_analysis(
 
     # Initialize outputs
     results = {
-        "map": {"rate": None, "time": None, "count": None},
-        "map_ns": {"rate": None, "time": None, "count": None},
+        "map": {"rate": None, "times": None, "count": None},
+        "map_ns": {"rate": None, "times": None, "count": None},
         "stats": {},
         "spike_coords": {"x": None, "y": None},
         "firing_rate": None,
@@ -685,7 +685,7 @@ def _run_place_field_analysis(
 
     # Store non-smoothed maps
     results["map_ns"]["rate"] = rate_map.T  # Transpose for consistency with MATLAB
-    results["map_ns"]["time"] = occ_hist.T / freq_video
+    results["map_ns"]["times"] = occ_hist.T / freq_video
     results["map_ns"]["count"] = spike_hist.T
 
     # Apply smoothing
@@ -700,7 +700,7 @@ def _run_place_field_analysis(
 
     # Store smoothed maps (transposed for consistency)
     results["map"]["rate"] = rate_map_smooth.T
-    results["map"]["time"] = occ_hist_smooth.T / freq_video
+    results["map"]["times"] = occ_hist_smooth.T / freq_video
     results["map"]["count"] = spike_hist_smooth.T
 
     # Calculate statistics
@@ -760,7 +760,7 @@ def calculate_place_field_stats(maps: Dict, threshold: float) -> Dict:
     }
 
     rate_map = maps["rate"]
-    time_map = maps["time"]
+    time_map = maps["times"]
     count_map = maps["count"]
 
     if np.max(rate_map) == 0:
@@ -912,7 +912,7 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
     fig.suptitle(title, fontsize=16)
 
     # Occupancy map
-    im1 = axes[0, 0].imshow(results["map"]["time"], origin="lower", aspect="auto")
+    im1 = axes[0, 0].imshow(results["map"]["times"], origin="lower", aspect="auto")
     axes[0, 0].set_title("Occupancy Map (s)")
     plt.colorbar(im1, ax=axes[0, 0])
 

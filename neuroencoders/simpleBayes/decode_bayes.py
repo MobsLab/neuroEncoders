@@ -2823,6 +2823,7 @@ class Trainer(SpatialConstraintsMixin):
         behaviorData,
         min_occ=5,
         sampling_rate=None,
+        suffix=None,
         **kwargs,
     ):
         """
