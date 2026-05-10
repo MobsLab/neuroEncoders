@@ -95,16 +95,17 @@ def get_behavior(
     bandwidth: Optional[int] = None,
     getfilterSpeed: bool = True,
     decode: bool = False,
-    phase: Literal[
-        "all",
-        "pre",
-        "preNoHab",
-        "hab",
-        "cond",
-        "post",
-        "postNoExtinction",
-        "extinction",
-        None,
+    phase: Optional[
+        Literal[
+            "all",
+            "pre",
+            "preNoHab",
+            "hab",
+            "cond",
+            "post",
+            "postNoExtinction",
+            "extinction",
+        ]
     ] = None,
 ) -> dict[str, np.ndarray]:
     """

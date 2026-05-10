@@ -7,7 +7,7 @@ Created on Wed May 27 21:28:52 2020
 """
 
 import os
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from warnings import warn
 
 import dill as pickle
@@ -21,6 +21,7 @@ from statannotations.Annotator import Annotator
 from tqdm import tqdm
 
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
+from neuroencoders.importData.rawdata_parser import get_behavior
 from neuroencoders.resultAnalysis import print_results
 from neuroencoders.resultAnalysis.paper_figures import PaperFigures
 from neuroencoders.transformData.linearizer import UMazeLinearizer
@@ -1969,17 +1970,30 @@ class Mouse_Results(Params, PaperFigures):
                 useTrain (bool): Whether to use training data for alignment.
                 useTest (bool): Whether to use testing data for alignment.
                 sleepName (List[str]): List of sleep names to consider for alignment.
+                phase (str): phase to use to compute the tuning curves and spike alignment.
         """
         from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 
         force = kwargs.get("force", False)
         useTrain = kwargs.pop("useTrain", False)
         useTest = kwargs.pop("useTest", not useTrain)
+        useAll = kwargs.pop("useAll", useTrain and useTest)
+        if useAll:
+            useTrain = True
+            useTest = True
         redo = kwargs.pop("redo", False)
-        if kwargs.get("phase", self.phase) != self.phase:
+        phase = kwargs.pop("phase", self.phase)
+        if phase != self.phase:
             warn(
                 "Phase specified in kwargs is different from the current phase. This may lead to unexpected results."
             )
+        fullBehavior = self.get_fullBehavior_from_phase(phase)
+        positions = self.DataHelper.get_true_target(
+            windowSizeMS=self.windows_values[-1],
+            l_function=self.l_function,
+            in_place=False,
+        )
+        fullBehavior["Positions"] = positions
 
         if not hasattr(self, "waveform_comparators") or force:
             self.waveform_comparators = dict()
@@ -1987,9 +2001,9 @@ class Mouse_Results(Params, PaperFigures):
                 self.waveform_comparators[win] = WaveFormComparator(
                     self.projects[win],
                     self.parameters[win],
-                    self.data_helper.fullBehavior,
+                    fullBehavior,
                     winValue,
-                    phase=kwargs.pop("phase", self.phase),
+                    phase=phase,
                     useTrain=useTrain,
                     useTest=useTest,
                     useAll=useTrain and useTest,
@@ -1998,6 +2012,32 @@ class Mouse_Results(Params, PaperFigures):
                 self.waveform_comparators[win].save_alignment_tools(
                     self.bayes, self.l_function, winValue, redo=redo
                 )
+
+    def get_fullBehavior_from_phase(
+        self,
+        phase: Literal[
+            "all",
+            "pre",
+            "preNoHab",
+            "hab",
+            "cond",
+            "post",
+            "postNoExtinction",
+            "extinction",
+        ],
+    ):
+        """
+        Starting from base fullBehavior, simply return a fullBehavior with adapted train/test Epochs.
+        """
+        if phase == self.phase:
+            return self.data_helper.fullBehavior
+
+        if "_" in phase:
+            phase = phase.strip("_")[1]
+
+        fullbehav_phase = get_behavior(self.data_helper.folder, phase=phase)
+
+        return fullbehav_phase
 
     def convert_to_df(self, redo=False):
         if (

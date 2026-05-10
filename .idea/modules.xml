@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/neuroencoders.iml" filepath="$PROJECT_DIR$/.idea/neuroencoders.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/neuroencoders@1.iml" filepath="$PROJECT_DIR$/.idea/neuroencoders@1.iml" />
     </modules>
   </component>
 </project>

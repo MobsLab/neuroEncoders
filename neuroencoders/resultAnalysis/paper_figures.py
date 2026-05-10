@@ -5456,8 +5456,6 @@ class PaperFigures:
         suffix=None,
         phase=None,
         ws=None,
-        block=False,
-        show=False,
         useTrain=False,
         useTest=True,
         useAll=False,
@@ -5834,7 +5832,7 @@ class PaperFigures:
         ax.set_ylabel("Normalized Density")
         ax.set_ylim(0, 1.1)
         ax.legend()
-        plt.savefig(
+        fig.savefig(
             os.path.join(
                 self.folderFigures,
                 f"prediction_given_spikes_cell{i_spatial}{self.suffix}.png",
@@ -5907,13 +5905,35 @@ class PaperFigures:
 
         # 1. Fetch data for Suffix 1
         loadName1 = self._get_aligned_path(suffix1, iwindow)
-        spikePop1 = pd.read_csv(loadName1).values[:, 1:]  # Drop index column
+        try:
+            spikePop1 = pd.read_csv(loadName1).values[:, 1:]  # Drop index column
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"""File {loadName1} not found. Please run the spike alignment first in the WaveFormComparator class.
+                If you're using Mouse_Results, you can run the following command:
+
+                Mouse_Results.run_spike_alignment()
+
+                """
+            )
+
         pred1 = self.resultsNN_phase[suffix1]["linearPred"][iwindow]
         true1 = self.resultsNN_phase[suffix1]["linearTrue"][iwindow]
 
         # 2. Fetch data for Suffix 2
         loadName2 = self._get_aligned_path(suffix2, iwindow)
-        spikePop2 = pd.read_csv(loadName2).values[:, 1:]
+        try:
+            spikePop2 = pd.read_csv(loadName2).values[:, 1:]
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"""File {loadName2} not found. Please run the spike alignment first in the WaveFormComparator class.
+                If you're using Mouse_Results, you can run the following command:
+
+                Mouse_Results.run_spike_alignment()
+
+                """
+            )
+
         pred2 = self.resultsNN_phase[suffix2]["linearPred"][iwindow]
         true2 = self.resultsNN_phase[suffix2]["linearTrue"][iwindow]
 
