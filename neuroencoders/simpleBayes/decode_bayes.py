@@ -416,7 +416,7 @@ class Trainer(SpatialConstraintsMixin):
         self._init_spike_matrices()
 
         # Try loading existing matrices
-        bayesMatrices = kwargs.get("bayesMatrices")
+        bayesMatrices = kwargs.pop("bayesMatrices", None)
         if bayesMatrices is None:
             bayesMatrices = self._try_load_bayes_matrices(
                 filepath, filename, redo, load_last_bayes
