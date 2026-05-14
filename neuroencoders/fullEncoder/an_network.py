@@ -24,6 +24,7 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -65,7 +66,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -286,13 +286,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             structure["pos_lin"] = {
                 "dim": 1,
                 "slice": (0, 1),
-                "activation": "sigmoid",
+                "activation": "relu",
             }
         elif target == "linandthigmo":
             structure["pos_lin"] = {
                 "dim": 1,
                 "slice": (0, 1),
-                "activation": "sigmoid",
+                "activation": "relu",
             }
             structure["thigmo"] = {
                 "dim": 1,
@@ -303,7 +303,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             structure["pos_lin"] = {
                 "dim": 1,
                 "slice": (0, 1),
-                "activation": "sigmoid",
+                "activation": "relu",
             }
             structure["direction"] = {
                 "dim": 1,
@@ -320,7 +320,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             structure["pos_lin"] = {
                 "dim": 1,
                 "slice": (0, 1),
-                "activation": "sigmoid",
+                "activation": "relu",
             }
             structure["hd"] = {
                 "dim": 1,
@@ -331,7 +331,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             structure["pos_lin"] = {
                 "dim": 1,
                 "slice": (0, 1),
-                "activation": "sigmoid",
+                "activation": "relu",
             }
             structure["speed"] = {
                 "dim": 1,
@@ -1459,7 +1459,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         l_function = self.Linearizer.pykeops_linearization
         for x, y in viz_batch.as_numpy_iterator():
             viz_inputs.append(x)
-            viz_linpos.append(l_function(y["latent"][:, :2])[1])
+            if "lin" in self.params.target.lower():
+                viz_linpos.append(y["latent"][:, 0])
+            else:
+                viz_linpos.append(l_function(y["latent"][:, :2])[1])
 
         viz_inputs = {
             k: np.concatenate([batch[k] for batch in viz_inputs], axis=0)
@@ -2127,11 +2130,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 and key == "train"
                 and kwargs.get("oversampling_resampling", True)
             ):
+                two_d_pos = behaviorData["old_positions"]
+
+                if "lin" in self.target.lower():
+                    dataset = dataset.map(nnUtils.import_true_pos(two_d_pos))
                 dataset, count_before, count_after = (
                     self._apply_oversampling_resampling(
                         dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                     )
                 )
+                if "lin" in self.target.lower():
+                    dataset = dataset.map(nnUtils.import_true_pos(posFeature))
 
             def parse_serialized_sequence(vals):
                 return nnUtils.parse_serialized_sequence(
@@ -2723,6 +2732,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     if hasattr(preds[name], "numpy")
                     else preds[name]
                 )
+                if (
+                    "classification" in name.lower()
+                    or "int" in name.lower()
+                    or name.lower() == "direction"
+                ):
+                    pred_val = np.round(pred_val).astype(int)
                 reconstructed_parts.append(pred_val)
 
         if reconstructed_parts:
@@ -2741,18 +2756,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 latent_pred = latent_pred[:, :-1]
             results["latent"] = latent_pred
 
-        # Classification handling
-        if results.get("featurePred") is not None:
-            target_str = str(self.target).lower()
-            if (
-                "classification" in target_str
-                or "int" in target_str
-                or target_str == "direction"
-            ):
-                results["featurePred"] = np.round(results["featurePred"]).astype(int)
-
         # Linear projections / ID score
-        if l_function and results.get("featurePred") is not None:
+        if (
+            l_function
+            and results.get("featurePred") is not None
+            and "lin" not in self.target.lower()
+        ):
             projPredPos, linearPred = l_function(results["featurePred"][:, :2])
             results["projPred"] = projPredPos
             results["linearPred"] = linearPred
@@ -2760,6 +2769,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 projTruePos, linearTrue = l_function(y_true[:, :2])
                 results["projTruePos"] = projTruePos
                 results["linearTrue"] = linearTrue
+        elif "lin" in self.target.lower() and reconstructed_parts:
+            # If the target is linearized, we assume the first dim of featurePred is already the projected position.
+            results["projPred"] = None
+            results["linearPred"] = results["featurePred"][:, 0]
+            if y_true is not None:
+                results["projTruePos"] = None
+                results["linearTrue"] = y_true[:, 0]
 
         return results
 
@@ -2955,8 +2971,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         for inputs, targets in tqdm(dataset, desc="Gathering metadata"):
             # Reconstruct full Y ground truth from individual target heads
             max_idx = 0
-            for spec in self.target_structure.values():
-                if spec == "latent":
+            for name, spec in self.target_structure.items():
+                if name == "latent":
                     continue  # Skip latent for ground truth reconstruction
                 max_idx = max(max_idx, spec["slice"][1])
 
@@ -2964,6 +2980,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
 
             for name, spec in self.target_structure.items():
+                if name == "latent":
+                    continue  # Skip latent for ground truth reconstruction
                 if name in targets:
                     start, end = spec["slice"]
                     batch_y_true[:, start:end] = targets[name].numpy()
@@ -3092,17 +3110,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 df.to_csv(csv_path, index=False)
 
         # -------------------------------------------------------------------------
-        # LINEAR FUNCTION METRICS
-        # -------------------------------------------------------------------------
-        if l_function:
-            projPredPos, linearPred = l_function(decoded_results["featurePred"][:, :2])
-            projTruePos, linearTrue = l_function(featureTrue[:, :2])
-            testOutput["projPred"] = projPredPos
-            testOutput["projTruePos"] = projTruePos
-            testOutput["linearPred"] = linearPred
-            testOutput["linearTrue"] = linearTrue
-
-        # -------------------------------------------------------------------------
         # ADDITIONAL METRICS & VISUALIZATIONS
         # -------------------------------------------------------------------------
         self._compute_metrics_and_plots(
@@ -3130,7 +3137,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         metrics = {}
         # 2D Position Metrics
-        if "pos" in target or "lin" in target:
+        if "pos" in target:
             # MSE on 2D positions
             dist_sq = np.sum((featurePred[:, :2] - featureTrue[:, :2]) ** 2, axis=1)
             metrics["mse_2d"] = np.mean(dist_sq)
@@ -3163,7 +3170,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         print(f"Metrics: {metrics}")
 
         # VISUALIZATIONS
-        if ("pos" in target or "lin" in target) and featurePred.shape[1] >= 2:
+        if "pos" in target and featurePred.shape[1] >= 2:
             print("Generating quiver plot...")
             plt.figure(figsize=(10, 10))
             # Sample for clarity if too many points

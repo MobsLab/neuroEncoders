@@ -5288,7 +5288,14 @@ class WandBErrorMapCallback(tf.keras.callbacks.Callback):
             os.makedirs(self.save_dir)
 
     def on_epoch_end(self, epoch, logs=None):
-        easy_metric = next((m for m in self.model.metrics if "dist_2d" in m.name), None)
+        easy_metric = next(
+            (
+                m
+                for m in self.model.metrics
+                if hasattr(m, "name") and "dist_2d" in m.name
+            ),
+            self.model.metrics[0] if self.model.metrics else None,
+        )
 
         metric = next(
             (
@@ -5300,11 +5307,16 @@ class WandBErrorMapCallback(tf.keras.callbacks.Callback):
                     else []
                 )
                 for k in v
-                if "dist_2d" in k.name
+                if hasattr(k, "name") and "dist_2d" in k.name
             ),
             easy_metric,
         )
         if metric is not None:
+            if not hasattr(metric, "error_heatmap") or metric.error_heatmap is None:
+                print(
+                    f"\n[WandBErrorMapCallback] Metric '{metric.name}' does not have 'error_heatmap' attribute. Skipping visualization."
+                )
+                return
             error_data = metric.error_heatmap.numpy()
 
             fig, ax = plt.subplots(figsize=(6, 5))
@@ -5687,9 +5699,11 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
                 # 1. Get positions for weighting (linearized or 2D)
                 val_dim = val_full.shape[-1]
                 if self.l_function is not None and val_dim == 2:
+                    # we linearize xy to a single position value for kernel computation
                     _, linearized_pos = self.l_function(val_full)
                     pos = tf.expand_dims(tf.reshape(linearized_pos, [-1]), axis=-1)
                 elif val_dim == 1:
+                    # we already have a linear position value (e.g., distance along track), just reshape for kernel computation
                     pos = tf.expand_dims(tf.reshape(val_full, [-1]), axis=-1)
                 else:
                     raise ValueError(
@@ -5720,7 +5734,7 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
                 w_hd = kops.cast((cos_sim + 1.0) / 2.0, dtype)
                 w_accumulated += w_hd * 0.5
             elif name == "direction":  # bool towards/away from shock
-                matches = tf.equal(val[:, 0][:, None], val[:, 0][None, :])
+                matches = tf.equal(val[:, None], val[None, :])
                 w_dir = kops.cast(matches, dtype)
                 w_accumulated += w_dir * 0.5
 
@@ -5829,7 +5843,12 @@ class PlotContrastiveWeightsCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         # Find the monitor metric in the model
         easy_monitor = next(
-            (m for m in self.model.metrics if "weight_monitor" in m.name), None
+            (
+                m
+                for m in self.model.metrics
+                if hasattr(m, "name") and "weight_monitor" in m.name
+            ),
+            self.model.metrics[0] if self.model.metrics else None,
         )
 
         monitor = next(
@@ -5842,12 +5861,17 @@ class PlotContrastiveWeightsCallback(tf.keras.callbacks.Callback):
                     else []
                 )
                 for k in v
-                if "weight_monitor" in k.name
+                if hasattr(k, "name") and "weight_monitor" in k.name
             ),
             easy_monitor,
         )
 
-        if monitor and monitor.has_run == 1.0 and epoch == 1:
+        if (
+            monitor
+            and hasattr(monitor, "has_run")
+            and monitor.has_run == 1.0
+            and epoch == 1
+        ):
             w_p = monitor.w_p.numpy()
             w_a = monitor.w_a.numpy()
             w_n = monitor.w_n.numpy()

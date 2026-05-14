@@ -1036,6 +1036,7 @@ def main(args):
                 open=True,
                 block=False,
                 mouse_name=curr.mouse_name + curr.manipe,
+                dimOutput=2 if "lin" in args.target.lower() else 1,
             )
 
         NNTrainer.clear_session()
