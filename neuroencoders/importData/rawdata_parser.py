@@ -187,6 +187,7 @@ def get_behavior(
             )
     # Extract basic behavior
     # First verify that we do indeed have trainEpochs - otherwise default callback to "_pre" phase
+    print(f"Loading behavior data from {filename}")
     with tables.open_file(filename) as f:
         children = [c.name for c in f.list_nodes("/behavior")]
         if "trainEpochs" not in children and not decode:

@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
+from pynapple import IntervalSet, Tsd, TsdFrame
 from scipy.stats import pearsonr, spearmanr
 from statannotations.Annotator import Annotator
 from tqdm import tqdm
@@ -78,7 +79,6 @@ def Info_LFP(LFP_directory, Info_name="InfoLFP"):
 
 
 def Load_LFP(LFP_path, time_unit="us", frequency=1250.0):
-    from pynapple import Tsd, TsdFrame
     from scipy.io import loadmat
 
     if isinstance(LFP_path, str):
@@ -139,7 +139,6 @@ def Make_Epoch(struc, dic, key, time_unit="us", word="start"):
 
 
 def _parse_tracking_data(Behav_data, keys, time_unit):
-    from pynapple import Tsd, TsdFrame
 
     Tracking = {}
 
@@ -236,7 +235,7 @@ def _parse_epoch_data(Behav_data, keys, time_unit):
 
 
 def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
-    from pynapple import IntervalSet, Ts, Tsd
+    from pynapple import IntervalSet, Ts
 
     Other = {}
 
@@ -695,6 +694,7 @@ class Mouse_Results(Params, PaperFigures):
         if kwargs.get("load_trainers_at_init", True):
             self.load_trainers(**kwargs)
 
+        add_training = kwargs.get("add_training", True)
         PaperFigures.__init__(
             self,
             projectPath=self.Project,
@@ -707,8 +707,8 @@ class Mouse_Results(Params, PaperFigures):
             timeWindows=self.windows_values,
             phase=self.phase,
             verbose=self.verbose,
+            add_training=add_training,
         )
-        print(self)
 
     def _parse_init_args(self, args, kwargs):
         """Extracts and validates core attributes from args and kwargs."""
@@ -1902,9 +1902,11 @@ class Mouse_Results(Params, PaperFigures):
         This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
         """
         try:
-            self.pre = np.array(
-                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
-            ).reshape(-1, 2)
+            self.pre = IntervalSet(
+                np.array(
+                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
+                ).reshape(-1, 2)
+            )
             self.preMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.pre
             )
@@ -1913,36 +1915,44 @@ class Mouse_Results(Params, PaperFigures):
                 "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
             )
         try:
-            self.hab = np.array(
-                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
-            ).reshape(-1, 2)
+            self.hab = IntervalSet(
+                np.array(
+                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
+                ).reshape(-1, 2)
+            )
             self.habMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.hab
             )
         except KeyError:
             pass
         try:
-            self.cond = np.array(
-                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
-            ).reshape(-1, 2)
+            self.cond = IntervalSet(
+                np.array(
+                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
+                ).reshape(-1, 2)
+            )
             self.condMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.cond
             )
         except KeyError:
             pass
         try:
-            self.post = np.array(
-                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
-            ).reshape(-1, 2)
+            self.post = IntervalSet(
+                np.array(
+                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
+                ).reshape(-1, 2)
+            )
             self.postMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.post
             )
         except KeyError:
             pass
         try:
-            self.extinct = np.array(
-                self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["extinct"]
-            ).reshape(-1, 2)
+            self.extinct = IntervalSet(
+                np.array(
+                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["extinct"]
+                ).reshape(-1, 2)
+            )
             self.extinctMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.extinct
             )
@@ -1950,9 +1960,11 @@ class Mouse_Results(Params, PaperFigures):
             pass
 
         try:
-            self.sleep = np.array(
-                self.DataHelper.fullBehavior["Times"]["sleepEpochs"]
-            ).reshape(-1, 2)
+            self.sleep = IntervalSet(
+                np.array(self.DataHelper.fullBehavior["Times"]["sleepEpochs"]).reshape(
+                    -1, 2
+                )
+            )
             self.sleepMask = inEpochsMask(
                 self.DataHelper.fullBehavior["positionTime"][:, 0], self.sleep
             )
@@ -2016,6 +2028,7 @@ class Mouse_Results(Params, PaperFigures):
     def get_fullBehavior_from_phase(
         self,
         phase: Literal[
+            "training",
             "all",
             "pre",
             "preNoHab",
@@ -2033,7 +2046,7 @@ class Mouse_Results(Params, PaperFigures):
             return self.data_helper.fullBehavior
 
         if "_" in phase:
-            phase = phase.strip("_")[1]
+            phase = phase.strip("_")
 
         fullbehav_phase = get_behavior(self.data_helper.folder, phase=phase)
 
@@ -2149,6 +2162,25 @@ class Mouse_Results(Params, PaperFigures):
 
         self.results_df = pd.DataFrame(data)
         return self.results_df
+
+    def get_1d_tuning_curve(self, positions, mask_indices, bins=50, sigma=1.5):
+        """
+        Generates a smoothed 1D density curve.
+        Returns: (density_values, bin_centers)
+        """
+        # Filter data by mask (e.g., is_freeze)
+        masked_data = positions[mask_indices]
+
+        # Calculate histogram
+        counts, bin_edges = np.histogram(masked_data, bins=bins, range=(0, 1))
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        # Smooth the curve
+        density = gaussian_filter1d(counts.astype(float), sigma=sigma)
+
+        # Optional: Normalize to unit area or max (unit area is better for probability)
+        if np.sum(density) > 0:
+            density /= np.sum(density)
 
 
 class Results_Loader:
@@ -2344,6 +2376,7 @@ class Results_Loader:
                     )
 
                 for suffix, phase in zip(self.suffixes, self.phases):
+                    add_training = phase == kwargs.get("template", "pre")
                     self.results_dict[nameExp][mouse_full_name][phase] = Mouse_Results(
                         dir,
                         mouse_name=mouse_nb,
@@ -2359,14 +2392,15 @@ class Results_Loader:
                         if transform_w_log is not None
                         else "log" in nameExp.lower(),
                         denseweight=denseweight,
+                        add_training=add_training,
                         **kwargs,
                     )
 
                     try:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
-                            suffixes=["_training", suffix]
-                            if phase == kwargs.get("template", "pre")
-                            else [suffix]
+                            suffixes=[suffix],
+                            add_training=phase == kwargs.get("template", "pre"),
+                            load_pickle=kwargs.get("load_pickle", False),
                         )
                         found_training = True
                         if kwargs.get("load_bayes", False) or kwargs.get(
@@ -2375,23 +2409,26 @@ class Results_Loader:
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
                             ].load_bayes(
-                                suffixes=["_training", suffix]
-                                if phase == kwargs.get("template", "pre")
-                                else [suffix],
+                                suffixes=[suffix],
+                                add_training=phase == kwargs.get("template", "pre"),
                                 **kwargs,
                             )
                     except FileNotFoundError:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
-                            suffixes=[suffix]
+                            suffixes=[suffix],
+                            add_training=False,
+                            load_pickle=kwargs.get("load_pickle", False),
                         )
                         if kwargs.get("load_bayes", False) or kwargs.get(
                             "which", "ann"
                         ) in ["both", "bayes"]:
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
-                            ].load_bayes(suffixes=[suffix], **kwargs)
+                            ].load_bayes(
+                                suffixes=[suffix], add_training=False, **kwargs
+                            )
 
-        if found_training:
+        if found_training and "training" not in self.phases:
             self.phases.append("training")
             self.suffixes.append("_training")
 

@@ -16,7 +16,7 @@ os.environ.setdefault(
 )  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
 from datetime import date
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 from warnings import warn
 
 import dill as pickle
@@ -29,7 +29,7 @@ import pandas as pd
 import tables
 import tensorflow as tf
 from matplotlib.patches import Rectangle
-from pynapple import TsGroup, TsdFrame
+from pynapple import TsGroup, TsdFrame, IntervalSet
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
@@ -415,6 +415,8 @@ class DataHelper(Project):
         self.get_maze_limits()
         self._define_maze_zones()
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
+        self.get_freeze_epochs()
+        self.get_ripples_epochs()
 
     @classmethod
     def load(cls, path, phase=None):
@@ -629,8 +631,13 @@ class DataHelper(Project):
         return inst_speed
 
     def get_true_target(
-        self, windowSizeMS=108, l_function=None, in_place=False, show=False, **kwargs
-    ):
+        self,
+        windowSizeMS: int = 108,
+        l_function: Optional[Callable] = None,
+        in_place: bool = False,
+        show: bool = False,
+        **kwargs,
+    ) -> np.ndarray:
         """
         Returns the true target of interest by looking and modifying the positions array.
 
@@ -655,8 +662,11 @@ class DataHelper(Project):
 
         if not hasattr(self, "l_function") and l_function is None:
             self.l_function = l_function
-        if hasattr(self, "l_function") and l_function is None:
+        elif hasattr(self, "l_function") and l_function is None:
             l_function = self.l_function
+
+        if l_function is None:
+            raise ValueError("l_function must be provided for linearization")
 
         self.get_maze_limits(show=False)
 
@@ -678,6 +688,7 @@ class DataHelper(Project):
             )
             assert self.positions.shape[1] == 2, "positions must have 2 dimensions"
             _, positions = l_function(self.positions)
+            self.linearized = positions.reshape(-1)
             thigmo = self.dist2wall(self.positions, show=show)
             positions = np.concatenate(
                 (positions.reshape(-1, 1), thigmo.reshape(-1, 1)), axis=1
@@ -689,6 +700,7 @@ class DataHelper(Project):
             assert self.positions.shape[1] == 2, "positions must have 2 dimensions"
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
+            self.linearized = positions
             self.direction = self._get_traveling_direction(positions)
             positions = np.concatenate(
                 (positions.reshape(-1, 1), self.direction.reshape(-1, 1)), axis=1
@@ -697,11 +709,13 @@ class DataHelper(Project):
         elif self.target.lower() == "direction":
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
+            self.linearized = positions.reshape(-1)
             self.direction = self._get_traveling_direction(positions)
             positions = self.direction.reshape(-1, 1)
         elif self.target.lower() == "linandheaddirection":
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
+            self.linearized = positions.reshape(-1)
             self.head_direction = self._get_head_direction(self.positions)
             positions = np.concatenate(
                 (positions.reshape(-1, 1), self.head_direction.reshape(-1, 1)),
@@ -710,6 +724,7 @@ class DataHelper(Project):
         elif self.target.lower() == "linandspeed":
             _, positions = l_function(self.positions)
             positions = positions.reshape(-1)
+            self.linearized = positions.reshape(-1)
             self.speed = self._get_speed(
                 self.positions, interval=1 / (15 // windowSizeMS)
             )
@@ -772,7 +787,7 @@ class DataHelper(Project):
             )
         else:
             raise ValueError(
-                f"target {self.target} not recognized. Please use 'pos', 'lin', 'linear', 'LinAndThigmo' or 'linAndThigmo'"
+                f"target {self.target} not recognized. Please use 'pos', 'lin', 'linear', 'LinAndThigmo', 'linAndThigmo', 'direction', 'Direction', 'linAndDirection', 'linAndHeadDirection', 'linAndSpeed', 'posAndDirection', 'posAndHeadDirection', 'posAndDirectionAndThigmo', 'posAndHeadDirectionAndThigmo', 'posAndSpeed', or 'posAndHeadDirectionAndSpeed'"
             )
 
         if show:
@@ -789,9 +804,12 @@ class DataHelper(Project):
                 trail_length=40,
                 l_function=l_function,
                 linear_position_mode=True,
-                positions_from_NN=positions[:, :2],
+                positions_from_NN=data_helper.old_positions[:, :2],
                 prediction_time=data_helper.fullBehavior["positionTime"],
                 posIndex=np.arange(positions.shape[0]),
+                linearized_true=data_helper.positions[:, 0]
+                if "lin" in self.target.lower()
+                else None,
                 **kwargs,
             )
             plotter.show(interval=kwargs.get("frame_interval", 1), **kwargs)
@@ -1809,9 +1827,19 @@ class DataHelper(Project):
 
     def get_ripples_epochs(self, before=0.1, after=0.1):
         self.tRipples = self.fullBehavior["Times"].get("tRipples", None).flatten()
-        ripples_epochs = np.array([[t - before, t + after] for t in self.tRipples])
+        ripples_epochs = IntervalSet(
+            np.array([[t - before, t + after] for t in self.tRipples])
+        )
         self.ripples_epochs = ripples_epochs
         return self.ripples_epochs
+
+    def get_stim_epochs(self):
+        stim_epochs = self.fullBehavior["Times"].get("StimEpoch", None)
+        if stim_epochs is None:
+            warn("No StimEpoch found in Times. Please check your data.")
+        else:
+            self.stim_epochs = IntervalSet(stim_epochs)
+        return self.stim_epochs
 
     def get_spike_data(self, add_to_attr=True) -> TsGroup:
         """
