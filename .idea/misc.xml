@@ -3,4 +3,7 @@
   <component name="Black">
     <option name="sdkName" value="uv (neuroEncoders)" />
   </component>
+  <component name="PyCharmDSProjectLayout">
+    <option name="id" value="JupyterRightHiddenStructureLayout" />
+  </component>
 </project>
