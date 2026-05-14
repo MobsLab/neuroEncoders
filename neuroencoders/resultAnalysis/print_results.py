@@ -828,7 +828,7 @@ def overview_fig(
         )
 
         plt.tight_layout()
-        if kwargs.get("save", True):
+        if kwargs.get("save", True) and outfolder is not None:
             fig.savefig(
                 os.path.join(
                     outfolder, f"4d_overviewFig_{dimOutput}d_{typeDec}{suffix}.png"
@@ -868,7 +868,7 @@ def overview_fig(
                     *plt.get_current_fig_manager().window.maxsize()
                 )
             plt.show(block=kwargs.get("block", False))
-        if kwargs.get("save", True):
+        if kwargs.get("save", True) and outfolder is not None:
             fig.savefig(
                 os.path.join(
                     outfolder,
@@ -1116,40 +1116,122 @@ def overview_fig(
             # Keep existing linanddirection logic
             from neuroencoders.importData.gui_elements import ModelPerformanceVisualizer
 
-            ax1 = plt.subplot2grid(
-                (1, 4 if not with_hist_distribution else 5), (0, 0), colspan=4
-            )
+            if fig is None:
+                if axs is None:
+                    fig = plt.figure()
+                else:
+                    fig = axs.flatten()[0].figure
+
+            # --- [Setup Axes] ---
+            # If axs are provided, use them. Otherwise, create a grid.
+            if axs is None:
+                cols = 4 if not with_hist_distribution else 5
+                # Create Main Axis (ax2 in your original code)
+                ax2 = plt.subplot2grid((1, cols), (0, 0), colspan=4)
+                ax3_handle = None
+            else:
+                if with_hist_distribution:
+                    ax2 = axs[0]
+                    ax3_handle = axs[1]
+                else:
+                    ax2 = axs[0]
+                    ax3_handle = None
 
             from matplotlib.colors import ListedColormap
 
-            if join_points:
-                ax1.plot(
+            active_mask = selection if useSpeedMask else np.ones(len(pos), dtype=bool)
+            # 3. Plot Scatter (Inferred Points)
+            if useSpeedMask and concat_epochs:
+                x_stitched = plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    inferring[:, 0],
+                    active_mask,
+                    style="scatter",
+                    show_boundaries=False,
+                    s=8,
+                    color="tab:blue",
+                    alpha=0.6,
+                    zorder=2,
+                )
+                if join_points:
+                    ax2.plot(
+                        x_stitched,
+                        inferring[active_mask, 0],
+                        color="tab:blue",
+                        alpha=0.6,
+                        linewidth=0.7,
+                        zorder=2,
+                    )
+            else:
+                ax2.scatter(
                     timeStepsPred[selection],
                     inferring[selection, 0],
-                    "--.",
+                    c=inferring[selection, 1],
+                    s=8,
+                    cmap=ListedColormap(["hotpink", "cornflowerblue"]),
+                    alpha=0.6,
                     zorder=2,
-                    linewidth=0.7,
-                    alpha=0.5,
                 )
-            ax1.scatter(
-                timeStepsPred[selection],
-                inferring[selection, 0],
-                s=36,
-                c=inferring[selection, 1],
-                marker="o",
-                alpha=0.6,
-                cmap=ListedColormap(["hotpink", "cornflowerblue"]),
-                zorder=2,
-            )
-            ax1.plot(
-                timeStepsPred if not useSpeedMask else timeStepsPred[selection],
-                pos[:, 0] if not useSpeedMask else pos[selection, 0],
-                ".-" if not useSpeedMask else "-",
-                markersize=6,
-                alpha=0.6,
-                color="xkcd:dark pink",
-                zorder=1,
-            )
+                if join_points:
+                    ax2.plot(
+                        timeStepsPred[selection],
+                        inferring[selection, 0],
+                        color="tab:blue",
+                        alpha=0.6,
+                        linewidth=0.7,
+                        zorder=2,
+                    )
+            # 1. Plot Line (Trajectory)
+            if useSpeedMask and concat_epochs:
+                _ = plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    pos[:, 0],
+                    active_mask,
+                    style="line",
+                    show_boundaries=False,
+                    markersize=6,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                    zorder=1,
+                )
+            else:
+                ax2.plot(
+                    timeStepsPred,
+                    pos[:, 0],
+                    ".-",
+                    markersize=6,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                    zorder=1,
+                )
+
+            # 2. Plot Scatter (True Points)
+            if useSpeedMask and concat_epochs:
+                plot_concatenated_bouts(
+                    ax2,
+                    timeStepsPred,
+                    pos[:, 0],
+                    active_mask,
+                    style="scatter",
+                    show_boundaries=False,
+                    s=4,
+                    alpha=0.6,
+                    label=f"true {dim_names[2]} stitched",
+                    color="xkcd:dark pink",
+                    zorder=1,
+                )
+            else:
+                ax2.scatter(
+                    timeStepsPred if not useSpeedMask else timeStepsPred[selection],
+                    pos[:, 0] if not useSpeedMask else pos[selection, 0],
+                    s=4,
+                    alpha=0.6,
+                    color="xkcd:dark pink",
+                    zorder=1,
+                )
+
             handles, labels = plt.gca().get_legend_handles_labels()
             shock_patch = Line2D(
                 [0],
@@ -1165,57 +1247,135 @@ def overview_fig(
                 color="cornflowerblue",
                 label="Guessed LinearPos Away from Shock",
             )
-            all_handles = handles + [shock_patch, safe_patch]
-            all_labels = labels + [
-                "Guessed Linear Position Towards Shock",
-                "Guessed LinearPos Away from Shock",
-            ]
-            plt.legend(handles=all_handles, labels=all_labels, loc="upper left")
 
-            ax1.set_title(f"{dim_names[0]} + {dim_names[1]}")
+            ax2.set_title(f"{dim_names[0]} + {dim_names[1]}")
             visualizer = ModelPerformanceVisualizer(
                 predictions=inferring[selection, 1],
                 ground_truth=pos[selection, 1],
                 timestamps=np.where(selection)[0],
             )
-            ax1.set_xlabel("Time (s)")
-            ax1.set_ylabel("Distance to Shock (lin. pos)")
+            ax2.set_xlabel("Time (s)")
+            ax2.set_ylabel("Distance to Shock (lin. pos)")
+            ax2.xaxis.set_major_formatter(FuncFormatter(time_formatter_vec))
+            ax2.xaxis.set_major_locator(MaxNLocator(nbins=7, prune="both"))
+            plt.setp(ax2.get_xticklabels(), rotation=45, ha="right")
+
             if with_hist_distribution and selection.sum() > 0:
-                ax2 = plt.subplot2grid((1, 5), (0, 4), sharey=ax1)
+                if axs is None:
+                    ax3 = plt.subplot2grid((1, 5), (0, 4), sharey=ax2)
+                else:
+                    ax3 = ax3_handle
+
+                if ax3 is None:
+                    raise ValueError("ax3 (histogram axis) should not be None here.")
                 isfinit = np.isfinite(inferring[:, 0])
-                ax2.hist(
-                    inferring[isfinit & selection, 0],
-                    bins=50,
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"guessed {dim_names[0]} distribution",
-                    density=True,
-                )
-                ax2.hist(
-                    pos[selection, 0],
-                    bins=50,
-                    color="xkcd:pink",
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"true {dim_names[0]} distribution on selection (test set)",
-                    density=True,
-                )
-                ax2.hist(
-                    pos_to_show_on_histograms[speedMask_on_histograms, 0],
-                    bins=50,
-                    color="xkcd:neon purple",
-                    alpha=0.5,
-                    orientation="horizontal",
-                    label=f"true {dim_names[0]} distribution ({shown})",
-                    density=True,
-                )
-                plt.setp(ax2.get_yticklabels(), visible=False)
-                ax2.set_xlabel(f"{dim_names[0]} distribution")
-                ax2.legend(fontsize="xx-small")
+                if plot_kde:
+                    # 3. True (Overall)
+                    plot_horizontal_kde(
+                        ax3,
+                        pos_to_show_on_histograms[speedMask_on_histograms, 0],
+                        color="xkcd:pale purple",
+                        label=f"true {dim_names[2]} ({shown})",
+                        alpha=0.1,
+                        fill=False,
+                    )
+                    # 1. Guessed
+                    plot_horizontal_kde(
+                        ax3,
+                        inferring[isfinit & selection, 0],
+                        color="tab:blue",
+                        label=f"guessed {dim_names[2]}",
+                        fill=True,
+                        alpha=0.5,
+                    )
+
+                    # 2. True (Selection)
+                    plot_horizontal_kde(
+                        ax3,
+                        pos[selection, 0],
+                        color="#B45C1F",
+                        label=f"true {dim_names[2]} (selection)",
+                        fill=False,
+                        alpha=0.5,
+                    )
+                else:
+                    ax2.hist(
+                        inferring[isfinit & selection, 0],
+                        bins=50,
+                        alpha=0.5,
+                        orientation="horizontal",
+                        label=f"guessed {dim_names[0]} distribution",
+                        density=True,
+                    )
+                    ax2.hist(
+                        pos[selection, 0],
+                        bins=50,
+                        color="xkcd:pink",
+                        alpha=0.5,
+                        orientation="horizontal",
+                        label=f"true {dim_names[0]} distribution on selection (test set)",
+                        density=True,
+                    )
+                    ax2.hist(
+                        pos_to_show_on_histograms[speedMask_on_histograms, 0],
+                        bins=50,
+                        color="xkcd:neon purple",
+                        alpha=0.5,
+                        orientation="horizontal",
+                        label=f"true {dim_names[0]} distribution ({shown})",
+                        density=True,
+                    )
+
+                ax3.tick_params(axis="y", which="both", left=False, labelleft=False)
+                ax3.set_xlabel(f"{dim_names[2]} density")
+                if axs is not None:
+                    ax3.set_ylim(ax2.get_ylim())
+
+                plt.setp(ax3.get_yticklabels(), visible=False)
             else:
                 if selection.sum() > 0:
-                    ax3 = plt.subplot2grid((1, 5), (0, 4))
+                    if axs is None:
+                        ax3 = plt.subplot2grid((1, 5), (0, 4), sharey=ax2)
+                    else:
+                        ax3 = ax3_handle
+
+                    if ax3 is None:
+                        raise ValueError(
+                            "ax3 (histogram axis) should not be None here."
+                        )
                     visualizer._plot_error_distribution(ax=ax3)
+
+            # --- [Legends] ---
+            handles_1, labels_1 = ax2.get_legend_handles_labels()
+
+            handles_1 = handles + [shock_patch, safe_patch]
+            labels_1 = labels + [
+                "Guessed Linear Position Towards Shock",
+                "Guessed LinearPos Away from Shock",
+            ]
+
+            curr_ax3_ref = (
+                ax3
+                if (
+                    with_hist_distribution and selection.sum() > 0 and "ax3" in locals()
+                )
+                else ax3_handle
+            )
+
+            if curr_ax3_ref is not None:
+                handles_2, labels_2 = curr_ax3_ref.get_legend_handles_labels()
+
+            all_handles = handles_1 + handles_2
+            all_labels = labels_1 + labels_2
+
+            if show_legend:
+                fig.legend(
+                    all_handles,
+                    all_labels,
+                    loc="lower center",
+                    fontsize="x-small",
+                    bbox_to_anchor=(0.1, 0),
+                )
 
     elif dimOutput == 1:
         if target.lower() != "direction":
@@ -1433,7 +1593,7 @@ def overview_fig(
 
     if fig.get_layout_engine() is None:
         plt.subplots_adjust(bottom=0.15)
-    if kwargs.get("save", True):
+    if kwargs.get("save", True) and outfolder is not None:
         plt.savefig(
             os.path.expanduser(
                 os.path.join(
@@ -1836,7 +1996,7 @@ def fig_interror(
     ax_error.set_ylabel("decoding error")  # Swapped labels
     ax_error.set_title(f"evaluated loss vs. decoding error, {phase=}")  # Updated title
 
-    if kwargs.get("save", True):
+    if kwargs.get("save", True) and outfolder is not None:
         plt.savefig(
             os.path.expanduser(
                 os.path.join(outfolder, f"errorFig_{dimOutput}d_{typeDec}{suffix}.png")

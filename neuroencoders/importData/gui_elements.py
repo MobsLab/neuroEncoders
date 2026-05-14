@@ -547,6 +547,9 @@ class AnimatedPositionPlotter:
             elif self.data_helper.target.lower() == "direction":
                 dim = "direction"
                 self.dim_name = "Direction"
+            elif self.data_helper.target.lower() == "linanddirection":
+                dim = "direction"
+                self.dim_name = "Direction"
             else:
                 dim = np.ones_like(self.true_valid_indices)
 
@@ -831,7 +834,9 @@ class AnimatedPositionPlotter:
             gs,
             dark_theme=usedark,
             loc_in_gs="top",
-            colors_style="speed",
+            colors_style="speed"
+            if "lin" not in self.data_helper.target.lower()
+            else "Shock/Safe",
             **kwargs,
         )
 
@@ -875,7 +880,13 @@ class AnimatedPositionPlotter:
             ][self.true_valid_indices]
 
         self._setup_linpos_movie(
-            gs, dark_theme=usedark, colors_style="speed", lin_dim=lin_dim, **kwargs
+            gs,
+            dark_theme=usedark,
+            colors_style="speed"
+            if "lin" not in self.data_helper.target.lower()
+            else "Shock/Safe",
+            lin_dim=lin_dim,
+            **kwargs,
         )
 
         plt.tight_layout()
