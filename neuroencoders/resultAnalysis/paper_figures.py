@@ -19,6 +19,7 @@ import seaborn as sns
 import tqdm
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 from scipy.ndimage import gaussian_filter
@@ -139,7 +140,9 @@ class PaperFigures:
             self.logger.warning(f"Error loading {filepath}: {e}")
             return None
 
-    def _prepare_suffixes(self, suffixes: Optional[Union[str, List[str]]]) -> List[str]:
+    def _prepare_suffixes(
+        self, suffixes: Optional[Union[str, List[str]]], add_training: bool = True
+    ) -> List[str]:
         """Unified suffix list preparation."""
         if suffixes is None:
             suffixes = [self.suffix] if not hasattr(self, "suffixes") else self.suffixes
@@ -147,9 +150,10 @@ class PaperFigures:
         if isinstance(suffixes, str):
             suffixes = [suffixes]
 
-        if "_training" in suffixes:
-            suffixes.remove("_training")
-        suffixes.insert(0, "_training")
+        if add_training:
+            if "_training" in suffixes:
+                suffixes.remove("_training")
+            suffixes.insert(0, "_training")
 
         self.suffixes = suffixes
         return suffixes
@@ -256,7 +260,9 @@ class PaperFigures:
         """
 
         if not hasattr(self, "suffixes") or kwargs.get("redo", False):
-            self._prepare_suffixes(suffixes)
+            self._prepare_suffixes(
+                suffixes, add_training=kwargs.get("add_training", True)
+            )
 
         base_results_path = os.path.join(self.projectPath.experimentPath, "results")
 
@@ -430,7 +436,9 @@ class PaperFigures:
                 self._create_decoding_bayes_matrices(**kwargs)
 
         if not hasattr(self, "suffixes"):
-            self._prepare_suffixes(suffixes)
+            self._prepare_suffixes(
+                suffixes, add_training=kwargs.get("add_training", True)
+            )
 
         base_results_path = self.trainerBayes.folderResult
 
@@ -672,6 +680,7 @@ class PaperFigures:
         use_speed_filter: bool = True,
         ax: Optional[matplotlib.axes.Axes] = None,
         sort_map: Optional[List[int]] = None,
+        list_neurons: Optional[List[int]] = None,
         **kwargs,
     ):
         if self.trainerBayes is None:
@@ -715,6 +724,10 @@ class PaperFigures:
             linear_pos_argsort = np.argsort(preferred_linear_positions)
         else:
             linear_pos_argsort = sort_map
+
+        if list_neurons is not None:
+            linear_pos_argsort = [i for i in linear_pos_argsort if i in list_neurons]
+            lin_place_fields = [lin_place_fields[i] for i in linear_pos_argsort]
 
         ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
 
@@ -1008,7 +1021,11 @@ class PaperFigures:
             mask = inEpochsMask(
                 DataHelper.fullBehavior["positionTime"], sess_time
             ).flatten()
-            pos = DataHelper.fullBehavior["Positions"][mask, :2]
+            try:
+                pos = DataHelper.fullBehavior["old_positions"][mask, :2]
+            except KeyError:
+                pos = DataHelper.fullBehavior["Positions"][mask, :2]
+
             nan_mask = ~np.any(np.isnan(pos), axis=1)
             pos = pos[nan_mask]
             total_time_points = len(pos)
@@ -1061,11 +1078,19 @@ class PaperFigures:
                 )
 
             if convex_hull and stim_mask.sum() > 0:
-                stim_pos_array = DataHelper.fullBehavior["Positions"][stim_mask, :2]
-                # clustering
-                clustering = DBSCAN(eps=0.15, min_samples=1).fit(
-                    DataHelper.fullBehavior["Positions"][stim_mask, :2]
-                )
+                try:
+                    stim_pos_array = DataHelper.fullBehavior["old_positions"][
+                        stim_mask, :2
+                    ]
+                    clustering = DBSCAN(eps=0.15, min_samples=1).fit(
+                        DataHelper.fullBehavior["old_positions"][stim_mask, :2]
+                    )
+                except KeyError:
+                    # clustering
+                    stim_pos_array = DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                    clustering = DBSCAN(eps=0.15, min_samples=1).fit(
+                        DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                    )
                 labels = clustering.labels_
                 hulls = []
                 unique_labels = set(labels)
@@ -1195,7 +1220,10 @@ class PaperFigures:
             )
 
             if after_cond:
-                pos_stim = DataHelper.fullBehavior["Positions"][stim_mask, :2]
+                try:
+                    pos_stim = DataHelper.fullBehavior["old_positions"][stim_mask, :2]
+                except KeyError:
+                    pos_stim = DataHelper.fullBehavior["Positions"][stim_mask, :2]
                 map_ax.scatter(
                     pos_stim[:, 0],
                     pos_stim[:, 1],
@@ -1512,7 +1540,7 @@ class PaperFigures:
         self,
         timeWindow: int,
         DataHelper: DataHelper,
-        suffix: str = None,
+        suffix: Optional[str] = None,
         open: bool = True,
         dimOutput: int = 1,
         **kwargs,
@@ -1566,6 +1594,7 @@ class PaperFigures:
                 kwargs,
                 pdf=pdf,
                 DataHelper=DataHelper,
+                target=DataHelper.target,
             )
 
             # =========================================================
@@ -2536,7 +2565,13 @@ class PaperFigures:
         kwargs,
         pdf=None,
         DataHelper=None,
+        target=None,
     ):
+        if target is None and DataHelper is not None:
+            target = DataHelper.target
+        else:
+            target = "pos"
+
         with_hist_distribution = kwargs.get("with_hist_distribution", True)
         window_seconds = kwargs.get("max_speed_window_seconds", 30)
 
@@ -2575,6 +2610,11 @@ class PaperFigures:
             else:
                 raise ValueError("dimOutput must be 1 or 2.")
 
+            if "lin" in target.lower():
+                # clip between 0 and 1 for linearized position
+                pos = np.clip(pos, 0, 1)
+                inferring = np.clip(inferring, 0, 1)
+
             # Pre-fetch linear position data once
             linpos = self.resultsNN_phase[suffix]["linearTrue"][idWindow]
             linpred = self.resultsNN_phase[suffix]["linearPred"][idWindow]
@@ -2591,6 +2631,7 @@ class PaperFigures:
             chunked_conditions = [
                 all_conditions[i : i + 2] for i in range(0, len(all_conditions), 2)
             ]
+            tmp_dimOutput = dimOutput if target.lower() != "linanddirection" else 1
 
             for page_idx, conditions_chunk in enumerate(chunked_conditions):
                 fig_page = plt.figure(
@@ -2599,18 +2640,18 @@ class PaperFigures:
                 fig_page.set_size_inches(*self.PDF_FIGSIZE, forward=True)
                 fig_page.set_rasterized(True)
 
-                nrows_per_cond = dimOutput
+                nrows_per_cond = tmp_dimOutput
                 total_rows = 3 * nrows_per_cond
                 gs_page = gridspec.GridSpec(total_rows, 1, figure=fig_page, hspace=0.45)
                 current_row = 0
 
                 # Process max speed window first
                 selection = max_speed_mask.copy()
-                gs_cond = gs_page[current_row : current_row + dimOutput, 0].subgridspec(
-                    dimOutput, ncols
-                )
+                gs_cond = gs_page[
+                    current_row : current_row + tmp_dimOutput, 0
+                ].subgridspec(tmp_dimOutput, ncols)
                 axs_list = self._build_axes_list(
-                    fig_page, gs_cond, dimOutput, with_hist_distribution
+                    fig_page, gs_cond, tmp_dimOutput, with_hist_distribution
                 )
 
                 is_speed_condition = any(
@@ -2627,7 +2668,7 @@ class PaperFigures:
                 overview_fig(
                     pos=pos[selection],
                     inferring=inferring[selection],
-                    selection=np.ones_like(pos[selection], dtype=bool),
+                    selection=np.ones(len(pos[selection]), dtype=bool),
                     timeStepsPred=timeStepsPred[selection]
                     if timeStepsPred is not None
                     else None,
@@ -2644,6 +2685,7 @@ class PaperFigures:
                     axs=np.array(axs_list),
                     fig=fig_page,
                     show_legend=False,
+                    target=target,
                 )
 
                 axs_list[0].set_title(
@@ -2651,7 +2693,7 @@ class PaperFigures:
                 )
                 self._annotate_trajectory_error(
                     axs_list[0],
-                    dimOutput,
+                    tmp_dimOutput,
                     inferring,
                     pos,
                     selection,
@@ -2679,7 +2721,7 @@ class PaperFigures:
                         last_col_ax,
                     )
 
-                current_row += dimOutput
+                current_row += tmp_dimOutput
 
                 # Remaining 2 conditions
                 for cond_name, use_speed, thresh in conditions_chunk:
@@ -2690,10 +2732,10 @@ class PaperFigures:
                         selection = selection & (entropy <= thresh)
 
                     gs_cond = gs_page[
-                        current_row : current_row + dimOutput, 0
-                    ].subgridspec(dimOutput, ncols)
+                        current_row : current_row + tmp_dimOutput, 0
+                    ].subgridspec(tmp_dimOutput, ncols)
                     axs_list = self._build_axes_list(
-                        fig_page, gs_cond, dimOutput, with_hist_distribution
+                        fig_page, gs_cond, tmp_dimOutput, with_hist_distribution
                     )
 
                     overview_fig(
@@ -2713,13 +2755,14 @@ class PaperFigures:
                         join_points=False,
                         axs=np.array(axs_list),
                         fig=fig_page,
-                        show_legend=current_row == total_rows - dimOutput,
+                        show_legend=current_row == total_rows - tmp_dimOutput,
+                        target=target,
                     )
 
                     axs_list[0].set_title(f"Phase: {suffix.strip('_')} - {cond_name}")
                     self._annotate_trajectory_error(
                         axs_list[0],
-                        dimOutput,
+                        tmp_dimOutput,
                         inferring,
                         pos,
                         selection,
@@ -2737,7 +2780,7 @@ class PaperFigures:
                             last_col_ax,
                         )
 
-                    current_row += dimOutput
+                    current_row += tmp_dimOutput
 
                 fig_page.subplots_adjust(
                     left=0.05,
@@ -5460,7 +5503,23 @@ class PaperFigures:
         useTest=True,
         useAll=False,
         strideFactor=4,
+        use_speed_filter=True,
     ):
+        """
+                For each place cell, we want to ask two questions:
+        1) When the cell fires, what is the mean prediction of the decoder? (i.e, when the cell is active, where does the decoder think the animal is?)
+        2) When we predict this field, what is the cell activity? (i.e, when the decoder thinks the animal is in the place field of this cell, how active is the cell?)
+
+        Args:
+        suffix (str, optional): Suffix for the phase. Defaults to None.
+        phase (str, optional): Phase of the experiment (e.g., 'training', 'pre', 'cond', 'post'). Defaults to None.
+        ws (int, optional): Time window size in ms. Defaults to None.
+        useTrain (bool, optional): Whether to use training data. Defaults to False.
+        useTest (bool, optional): Whether to use test data. Defaults to True.
+        useAll (bool, optional): Whether to use all data (both train and test). Defaults to False.
+        strideFactor (int, optional): Factor for stride when loading aligned spike data. Defaults to 4.
+        use_speed_filter (bool, optional): Whether to apply a speed filter to the data. Defaults to True.
+        """
         if self.trainerBayes is None:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
@@ -5474,17 +5533,24 @@ class PaperFigures:
         if ws is None:
             ws = self.timeWindows[0]  # default to the first time window
 
-        if useTrain and useTest:
-            useAll = True
+        if useAll:
+            useTrain = True
+            useTest = False
+        else:
+            if useTrain and useTest:
+                useAll = True
 
         dirSave = os.path.join(self.folderFigures, "tuningCurves")
         if not os.path.isdir(dirSave):
             os.mkdir(dirSave)
 
         iwindow = self.timeWindows.index(ws)
-        # Calculate the tuning curve of all place cells
+        # WARNING: Calculate the tuning curve of all place cells - for TRAINING/PRE phase
         linearTuningCurves, binEdges = self.trainerBayes.calculate_linear_tuning_curve(
-            l_function=self.l_function, behaviorData=self.behaviorData
+            l_function=self.l_function,
+            behaviorData=self.behaviorData,
+            suffix=suffix,
+            use_speed_filter=use_speed_filter,
         )
         try:
             placeFieldSort = self.trainerBayes.linearPosArgSort
@@ -5540,9 +5606,6 @@ class PaperFigures:
         spikePopAligned = spikePopAligned[allowed_idx]
         linearPred = self.resultsNN_phase[suffix]["linearPred"][iwindow]
 
-        def normalize(x):
-            return (x - np.min(x)) / (np.max(x) - np.min(x))
-
         linearTuningCurves_sorted = np.array(linearTuningCurves)[placeFieldSort]
         spikePop_neurons_only = spikePopAligned[:, 1:]  # exclude "noise" neuron
         spikePopAligned_sorted = spikePop_neurons_only[
@@ -5556,16 +5619,29 @@ class PaperFigures:
             spikeHist = spikePopAligned_sorted[:, i_spatial][: len(linearPred)]
 
             if np.sum(spikeHist) < 5:  # Skip silent cells
+                print(f"Skipping cell {i_spatial} due to low activity.")
                 continue
 
             # Question 1: When cell fires, what is the mean prediction?
             self.plot_prediction_given_spikes(
-                i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+                i_spatial,
+                tuningCurve,
+                spikeHist,
+                linearPred,
+                binEdges,
+                suffix=suffix,
+                speed_filter=use_speed_filter,
             )
 
             # Question 2: When we predict this field, what is the cell activity?
             self.plot_activity_given_prediction(
-                i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+                i_spatial,
+                tuningCurve,
+                spikeHist,
+                linearPred,
+                binEdges,
+                suffix=suffix,
+                speed_filter=use_speed_filter,
             )
 
     def plot_pc_tuning_curve_and_predictions(
@@ -5783,11 +5859,20 @@ class PaperFigures:
                 plt.close()
 
     def plot_prediction_given_spikes(
-        self, i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+        self,
+        i_spatial,
+        tuningCurve,
+        spikeHist,
+        linearPred,
+        binEdges,
+        suffix=None,
+        speed_filter=True,
     ):
         """
         Shows the distribution of decoded positions specifically when this cell is active.
         """
+        if suffix is None:
+            suffix = self.suffix
         # Only look at time windows where this specific cell fired
         spike_mask = spikeHist > 0
         predictions_at_spike = linearPred[spike_mask]
@@ -5826,7 +5911,7 @@ class PaperFigures:
         )
 
         ax.set_title(
-            f"Cell {i_spatial}: Where does the Decoder place the animal when this cell spikes?"
+            f"Cell {i_spatial}: Where does the Decoder place the animal when this cell spikes? (phase {suffix.strip('_')} & {speed_filter=})"
         )
         ax.set_xlabel("Linear Position")
         ax.set_ylabel("Normalized Density")
@@ -5835,17 +5920,27 @@ class PaperFigures:
         fig.savefig(
             os.path.join(
                 self.folderFigures,
-                f"prediction_given_spikes_cell{i_spatial}{self.suffix}.png",
+                f"prediction_given_spikes_cell{i_spatial}{suffix}_speed_{speed_filter}.png",
             )
         )
         plt.show()
 
     def plot_activity_given_prediction(
-        self, i_spatial, tuningCurve, spikeHist, linearPred, binEdges
+        self,
+        i_spatial,
+        tuningCurve,
+        spikeHist,
+        linearPred,
+        binEdges,
+        suffix=None,
+        speed_filter=True,
     ):
         """
         Shows the average firing rate of the cell relative to the predicted position.
         """
+        if suffix is None:
+            suffix = self.suffix
+
         # Calculate Mean Activity vs Predicted Position
         # (Similar to a tuning curve, but using Predicted Pos instead of True Pos)
         pred_occupancy, _ = np.histogram(linearPred, bins=binEdges)
@@ -5881,7 +5976,7 @@ class PaperFigures:
         )
 
         ax.set_title(
-            f"Cell {i_spatial}: Cell activity relative to the Decoder's prediction"
+            f"Cell {i_spatial}: Cell activity relative to the Decoder's prediction (phase {suffix.strip('_')} & {speed_filter=})"
         )
         ax.set_xlabel("Linear Position")
         ax.set_ylabel("Firing Rate")
@@ -5889,7 +5984,7 @@ class PaperFigures:
         plt.savefig(
             os.path.join(
                 self.folderFigures,
-                f"activity_given_prediction_cell{i_spatial}{self.suffix}.png",
+                f"activity_given_prediction_cell{i_spatial}{suffix}_speed_{speed_filter}.png",
             )
         )
         plt.show()
@@ -6020,6 +6115,8 @@ class PaperFigures:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
             )
+        remove_neurons = kwargs.get("remove_neurons", None)
+        keep_only_neurons = kwargs.get("keep_only_neurons", None)
 
         use_speed_filter = kwargs.get("use_speed_filter", True)
         use_predicted = kwargs.get("use_predicted", False)
@@ -6046,18 +6143,33 @@ class PaperFigures:
         else:
             behav_data = self.behaviorData
         # Get Tuning Curves for both (ordered the same way)
-        tc1, _ = self.trainerBayes.calculate_linear_tuning_curve(
+        tc1, binEdges1 = self.trainerBayes.calculate_linear_tuning_curve(
             self.l_function,
             behav_data,
             suffix=suffix1,
             use_speed_filter=use_speed_filter,
         )
-        tc2, _ = self.trainerBayes.calculate_linear_tuning_curve(
+        tc2, binEdges2 = self.trainerBayes.calculate_linear_tuning_curve(
             self.l_function,
             behav_data,
             suffix=suffix2,
             use_speed_filter=use_speed_filter,
         )
+
+        if remove_neurons is not None:
+            if keep_only_neurons is not None:
+                raise ValueError(
+                    "Cannot specify both remove_neurons and keep_only_neurons."
+                )
+            tc1 = np.delete(np.array(tc1), remove_neurons, axis=0)
+            tc2 = np.delete(np.array(tc2), remove_neurons, axis=0)
+        elif keep_only_neurons is not None:
+            if remove_neurons is not None:
+                raise ValueError(
+                    "Cannot specify both remove_neurons and keep_only_neurons."
+                )
+            tc1 = np.array(tc1)[keep_only_neurons, :]
+            tc2 = np.array(tc2)[keep_only_neurons, :]
 
         # Convert lists to matrices (Neurons x Positions)
         mat1 = np.array(tc1)
@@ -6071,13 +6183,41 @@ class PaperFigures:
                 # Correlation between Column i (Suffix 1) and Column j (Suffix 2)
                 correlation_matrix[i, j] = np.corrcoef(mat1[:, i], mat2[:, j])[0, 1]
 
-        plt.figure(figsize=(7, 6))
-        plt.imshow(correlation_matrix, origin="lower", cmap="jet", aspect="auto")
-        plt.title("Population Vector Correlation (Global Remapping Check)")
-        plt.xlabel(f"Position Bin ({suffix1})")
-        plt.ylabel(f"Position Bin ({suffix2})")
-        plt.colorbar(label="Pearson r")
-        plt.show()
+        fig, ax = plt.subplots(figsize=(7, 6))
+        im = ax.imshow(correlation_matrix, origin="lower", cmap="jet", aspect="auto")
+        # change bins into 0-1
+        ax.set_xticks(
+            ticks=np.arange(len(tc2[0])),
+            labels=[
+                f"{(bin_edge + binEdges1[i + 1]) / 2:.2f}"
+                for i, bin_edge in enumerate(binEdges1[:-1])
+            ],
+            rotation=45,
+        )
+        ax.set_yticks(
+            ticks=np.arange(len(tc1[0])),
+            labels=[
+                f"{(bin_edge + binEdges2[i + 1]) / 2:.2f}"
+                for i, bin_edge in enumerate(binEdges2[:-1])
+            ],
+        )
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=11, prune="both"))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=11, prune="both"))
+        fig.suptitle(
+            f"Population Vector Correlation (Global Remapping Check), Speed={'all' if not use_speed_filter else 'high'}"
+        )
+        ax.set_xlabel(f"LinPosition ({suffix1})")
+        ax.set_ylabel(f"LinPosition Bin ({suffix2})")
+        fig.colorbar(im, label="Pearson r")
+        fig.savefig(
+            os.path.join(
+                self.folderFigures,
+                f"population_vector_correlation_{suffix1}_vs_{suffix2}_speed_{use_speed_filter}.png",
+            )
+        )
+        if kwargs.get("show", True):
+            plt.show()
+        return fig
 
     def barplot_linError(
         self, timeWindows, dirSave=None, suffix=None, phase=None, block=False
@@ -6895,6 +7035,9 @@ class PaperFigures:
         winMS = kwargs.get("winMS", self.timeWindows[0] if self.timeWindows else 100)
         cax_train = kwargs.pop("cax_train", None)
         cax_pred = kwargs.pop("cax_pred", None)
+        position_key = (
+            "old_positions" if "old_positions" in self.behaviorData else "Positions"
+        )
 
         # --- 1. Train/Load Data ---
         if kwargs.get("bayesMatrices", None) is not None:
@@ -6955,11 +7098,11 @@ class PaperFigures:
 
         # --- Data Prep for Place Fields (Do once) ---
         pos_x = nap.Tsd(
-            d=self.behaviorData["Positions"][:, 0],
+            d=self.behaviorData[position_key][:, 0],
             t=self.behaviorData["positionTime"].flatten(),
         )
         pos_y = nap.Tsd(
-            d=self.behaviorData["Positions"][:, 1],
+            d=self.behaviorData[position_key][:, 1],
             t=self.behaviorData["positionTime"].flatten(),
         )
         epoch = np.concatenate(
