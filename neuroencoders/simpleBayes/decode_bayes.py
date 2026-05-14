@@ -190,9 +190,14 @@ class Trainer(SpatialConstraintsMixin):
             behaviorData["positionTime"][:, 0], behaviorData["Times"]["trainEpochs"]
         )
         totMask = speedMask & epochMask
-        full_training_true_positions = behaviorData["Positions"][
-            totMask, : self.feature_dim
-        ]
+        try:
+            full_training_true_positions = behaviorData["old_positions"][
+                totMask, : self.feature_dim
+            ]
+        except KeyError:
+            full_training_true_positions = behaviorData["Positions"][
+                totMask, : self.feature_dim
+            ]
         self.training_data = full_training_true_positions
         self.logger.info(
             f"Training data saved with {full_training_true_positions.shape} valid positions."
@@ -227,13 +232,25 @@ class Trainer(SpatialConstraintsMixin):
                 ),
             ),
         )
-        speed_filtered_positions = behaviorData["Positions"][speed_filtered_indices]
-
-        maxPos = np.max(
-            behaviorData["Positions"][
-                ~np.isnan(np.sum(behaviorData["Positions"], axis=1))
+        try:
+            speed_filtered_positions = behaviorData["old_positions"][
+                speed_filtered_indices
             ]
-        )
+        except KeyError:
+            speed_filtered_positions = behaviorData["Positions"][speed_filtered_indices]
+
+        try:
+            maxPos = np.max(
+                behaviorData["old_positions"][
+                    ~np.isnan(np.sum(behaviorData["old_positions"], axis=1))
+                ]
+            )
+        except KeyError:
+            maxPos = np.max(
+                behaviorData["Positions"][
+                    ~np.isnan(np.sum(behaviorData["Positions"], axis=1))
+                ]
+            )
 
         if onTheFlyCorrection:
             speed_filtered_positions = speed_filtered_positions / maxPos
@@ -410,7 +427,10 @@ class Trainer(SpatialConstraintsMixin):
         filepath = self._get_training_filepath(is_predicted, winMS)
         filename = os.path.basename(filepath)
 
-        behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
+        try:
+            behaviorData["Positions"] = behaviorData["Positions"][:, : self.feature_dim]
+        except KeyError:
+            behaviorData["Positions"] = behaviorData["old_positions"]
 
         self._save_training_data(behaviorData)
         self._init_spike_matrices()
@@ -2197,7 +2217,10 @@ class Trainer(SpatialConstraintsMixin):
             useTest=useTest,
         )
 
-        real_positions = behaviorData["Positions"][epochMask]
+        try:
+            real_positions = behaviorData["old_positions"][epochMask]
+        except KeyError:
+            real_positions = behaviorData["Positions"][epochMask]
         real_times = behaviorData["positionTime"][epochMask]
 
         # Find nearest position for each prediction time
@@ -2859,6 +2882,9 @@ class Trainer(SpatialConstraintsMixin):
 
         if suffix is None:
             # Create one large epoch that comprises both train and test dataset
+            print(
+                "No suffix provided, using combined train and test epochs for linear tuning curve calculation."
+            )
             minTime = np.min(
                 np.concatenate(
                     (
@@ -2880,6 +2906,9 @@ class Trainer(SpatialConstraintsMixin):
                 np.squeeze(behaviorData["positionTime"]), epochForField
             ).flatten()
         else:
+            print(
+                f"Using {suffix.strip('_')} epochs for linear tuning curve calculation."
+            )
             if suffix == "_training":
                 self.training = np.array(behaviorData["Times"]["trainEpochs"]).reshape(
                     -1, 2
@@ -2935,7 +2964,10 @@ class Trainer(SpatialConstraintsMixin):
         else:
             totMask = timesMask
 
-        _, linearTraj = l_function(behaviorData["Positions"][:, :2])
+        try:
+            _, linearTraj = l_function(behaviorData["old_positions"][:, :2])
+        except KeyError:
+            _, linearTraj = l_function(behaviorData["Positions"][:, :2])
         timeLinear = np.squeeze(behaviorData["positionTime"][totMask, :])
         linearTraj = linearTraj[totMask]
         linSpace = np.arange(

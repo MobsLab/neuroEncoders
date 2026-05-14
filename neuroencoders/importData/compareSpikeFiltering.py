@@ -427,6 +427,11 @@ class WaveFormComparator:
         df.to_csv(os.path.join(foldertosave, f"posIndexNN{self.suffix}.csv"))
 
     def get_NNdataset_spikepos(self):
+        """
+        From the dataset, get the spike indices in the datfile and their corresponding position indices.
+        This way we get a precise mapping between prediction time and spike times, which allows us to compare the spike waveforms from the NN pipeline to the ones from spike sorting.
+
+        """
         resData = self.dataset.map(lambda vals: vals["indexInDat"])
         posIndexData = self.dataset.map(lambda vals: vals["pos_index"])
         # Filter out padding (-1) introduced by parse_serialized_sequence
