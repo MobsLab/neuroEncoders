@@ -17,6 +17,7 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
 from pynapple import IntervalSet, Tsd, TsdFrame
+from scipy.ndimage import gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from statannotations.Annotator import Annotator
 from tqdm import tqdm
@@ -139,7 +140,6 @@ def Make_Epoch(struc, dic, key, time_unit="us", word="start"):
 
 
 def _parse_tracking_data(Behav_data, keys, time_unit):
-
     Tracking = {}
 
     tsd_keys = [key for key in keys if "tsd" in key]
@@ -2173,7 +2173,6 @@ class Mouse_Results(Params, PaperFigures):
 
         # Calculate histogram
         counts, bin_edges = np.histogram(masked_data, bins=bins, range=(0, 1))
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
         # Smooth the curve
         density = gaussian_filter1d(counts.astype(float), sigma=sigma)

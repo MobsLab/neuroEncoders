@@ -41,10 +41,10 @@ mice_nb = [
     "M1199_reversal",
 ]
 ####
-nameExp = "consensus_linspeed_bigLatent_groupConcatenation"
+nameExp = "consensus_linspeed_bigLatent_LinAndDirection"
 nbEpochs = str(30)
 run_ann = True
-target = "PosAndHeadDirectionAndThigmo"
+target = "LinAndDirection"
 target_bayes = "pos"
 phase = "pre"
 useStridingFactor = True

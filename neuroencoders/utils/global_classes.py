@@ -29,7 +29,7 @@ import pandas as pd
 import tables
 import tensorflow as tf
 from matplotlib.patches import Rectangle
-from pynapple import TsGroup, TsdFrame, IntervalSet
+from pynapple import IntervalSet, TsGroup, TsdFrame
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
