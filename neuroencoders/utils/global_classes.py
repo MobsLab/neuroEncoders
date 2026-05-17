@@ -1845,12 +1845,6 @@ class DataHelper(Project):
         """
         Get spike data from the DataHelper and store it in the fullBehavior dict for later use.
         """
-        if not os.path.exists(os.path.join(self.folder, "SpikeData.mat")):
-            warn(
-                "SpikeData.mat not found. Please run some spike sorting algorithm and save the spike data in SpikeData.mat before calling get_spike_data()."
-            )
-            return None
-
         from neuroencoders.utils.wrappers import loadSpikeData
 
         spikes, shanks, spikedata = loadSpikeData(self.folder)

@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Tuple
+from typing import Optional, Tuple
 
 import mat73
 import numpy as np
@@ -15,7 +15,7 @@ Wrappers should be able to distinguish between raw data or matlab processed data
 
 
 def loadSpikeData(
-    path: str, index=None, fs: int = 20000
+    path: str, index: Optional = None, fs: int = 20000, force: bool = False
 ) -> Tuple[nts.TsGroup | dict, np.ndarray, dict]:
     """
     if the path contains a folder named /Analysis,
@@ -45,9 +45,13 @@ def loadSpikeData(
         if "SpikeData.mat" in files:
             # using mat73 to load the SpikeData.mat file
 
-            spikedata = mat73.loadmat(
-                os.path.join(path, "SpikeData.mat"), use_attrdict=True
-            )
+            try:
+                spikedata = mat73.loadmat(
+                    os.path.join(path, "SpikeData.mat"), use_attrdict=True
+                )
+            except TypeError:
+                return loadSpikeData_falllback(path, index, fs)
+
             shanksPairs = spikedata["TT"]
             shank = 0 * np.ones(len(shanksPairs), dtype=int)
             for i, shank_idx in enumerate(shanksPairs):
@@ -65,15 +69,15 @@ def loadSpikeData(
 
             a = spikes[0].as_units("s").index.values
             if ((a[-1] - a[0]) / 60.0) / 60.0 > 20.0:  # VERY BAD
-                raise ValueError(
-                    "The SpikeData.mat file seems to be in microseconds, you need to convert to seconds."
-                )
                 spikes = {}
                 for i in shankIndex:
                     spikes[i] = nts.Ts(
                         spikedata["S"][0][0][0][i][0][0][0][1][0][0][2] * 0.0001,
                         time_units="s",
                     )
+                raise ValueError(
+                    "The SpikeData.mat file seems to be in microseconds, you need to convert to seconds."
+                )
             return spikes, shank, spikedata
         elif "SpikeData.h5" in files:
             final_path = os.path.join(path, "SpikeData.h5")
@@ -100,6 +104,10 @@ def loadSpikeData(
                 return toreturn, shank
 
         else:
+            if not force:
+                raise FileNotFoundError(
+                    "Couldn't find any SpikeData file in " + path + "; Exiting ..."
+                )
             print("Couldn't find any SpikeData file in " + path)
             print(
                 "If clu and res files are present in "
@@ -188,6 +196,46 @@ def loadSpikeData(
     # shank = spikes.columns.get_level_values(0).values[:,np.newaxis].flatten()
 
     return toreturn, shank
+
+
+def loadSpikeData_falllback(path: str, index: Optional = None, fs: int = 20000):
+    spikedata = scipy.io.loadmat(path + "SpikeData.mat")
+    shanksPairs = spikedata["TT"].flatten()
+    shanksPairs = np.array([s.flatten() for s in shanksPairs])
+    shank = 0 * np.ones(len(shanksPairs), dtype=int)
+    for i, shank_idx in enumerate(shanksPairs):
+        shank[i] = shank_idx[0]
+
+    if index is None:
+        shankIndex = 0 * np.ones(len(shanksPairs), dtype=int)
+        for i, shank_idx in enumerate(shanksPairs):
+            shankIndex[i] = i
+    else:
+        shankIndex = np.where(shank == index)[0]
+
+    spikes = {}
+    for i in shankIndex:
+        to_add = spikedata["S"]["C"][0][0][0][i][0][0][2].flatten()
+        if len(to_add) == 1:
+            to_add = spikedata["S"]["C"][0][0][0][i][0][0][0][1][0][0][2].flatten()
+
+        spikes[i] = nts.Ts(to_add * 100, time_units="us")
+    a = spikes[0].as_units("s").index.values
+    if ((a[-1] - a[0]) / 60.0) / 60.0 > 20.0:  # VERY BAD
+        spikes = {}
+        for i in shankIndex:
+            to_add = spikedata["S"]["C"][0][0][0][i][0][0][2].flatten()
+            if len(to_add) == 1:
+                to_add = spikedata["S"]["C"][0][0][0][i][0][0][0][1][0][0][2].flatten()
+
+            spikes[i] = nts.Ts(
+                to_add * 0.0001,
+                time_units="s",
+            )
+            raise ValueError(
+                "The SpikeData.mat file seems to be in microseconds, you need to convert to seconds."
+            )
+    return spikes, shank, spikedata
 
 
 def loadXML(path):
