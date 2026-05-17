@@ -5,28 +5,13 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.idea/dictionaries/project.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/pyLspTools.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/neuroencoders@1.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/neuroencoders@1.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.pre-commit-config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/.pre-commit-config.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/spectro_viewer.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/spectro_viewer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader.ipynb" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -36,7 +21,7 @@
   <component name="CopilotChats">
     <option name="panelChat">
       <chat>
-        <option name="activeSessionId" value="75a14cf0-e82b-43b9-a494-13a96a74656c" />
+        <option name="activeSessionId" value="0bc2a9b7-6bab-4167-b770-4184640c0c2c" />
         <option name="sessions">
           <session>
             <option name="chatType" value="PANEL" />
@@ -82,6 +67,22 @@
           <session>
             <option name="chatType" value="PANEL" />
             <option name="id" value="75a14cf0-e82b-43b9-a494-13a96a74656c" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="cb2e54db-c256-41dd-aa72-362c382fb47b" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="0bc2a9b7-6bab-4167-b770-4184640c0c2c" />
             <option name="modeId" value="Ask" />
             <option name="modelType" value="builtin_family" />
             <option name="modelValue" value="auto" />
@@ -155,6 +156,10 @@
     "codeWithMe.voiceChat.enabledByDefault": "false",
     "git-widget-placeholder": "dev/working__on",
     "last_opened_file_path": "/home/mickey/Documents/Theotime/neuroEncoders/notebooks",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
     "settings.editor.selected.configurable": "preferences.keymap",
     "vue.rearranger.settings.migration": "true"
@@ -172,7 +177,6 @@
     <option name="mySaveCallSignatures" value="true" />
     <option name="mySupportGeventDebugging" value="true" />
     <option name="myDropIntoDebuggerOnFailedTests" value="true" />
-    <option name="myDebuggerBackend" value="DEBUGPY" />
   </component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
@@ -182,7 +186,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-024ed6589d45-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.23567.174" />
+        <option value="bundled-js-predefined-d6986cc7102b-f4ee427fc208-JavaScript-PY-262.5752.27" />
+        <option value="bundled-python-sdk-ccb261ca2fb8-7b465b3c1629-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.5752.27" />
       </set>
     </attachedChunks>
   </component>
@@ -212,6 +217,11 @@
       <workItem from="1778684677272" duration="5594000" />
       <workItem from="1778690317179" duration="2970000" />
       <workItem from="1778748710010" duration="6336000" />
+      <workItem from="1779021559832" duration="301000" />
+      <workItem from="1779021892300" duration="1584000" />
+      <workItem from="1779031363070" duration="200000" />
+      <workItem from="1779031675443" duration="20000" />
+      <workItem from="1779031712185" duration="8869000" />
     </task>
     <servers />
   </component>
@@ -267,6 +277,11 @@
           <line>99</line>
           <option name="timeStamp" value="9" />
         </line-breakpoint>
+        <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
+          <url>file://$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb</url>
+          <line>720</line>
+          <option name="timeStamp" value="11" />
+        </line-breakpoint>
       </breakpoints>
       <default-breakpoints>
         <breakpoint enabled="true" type="python-exception">
@@ -274,9 +289,6 @@
             <option name="notifyOnTerminate" value="true" />
             <option name="notifyOnlyOnFirst" value="true" />
           </properties>
-        </breakpoint>
-        <breakpoint enabled="true" type="jupyter-exception">
-          <properties exception="BaseException" />
         </breakpoint>
       </default-breakpoints>
     </breakpoint-manager>
