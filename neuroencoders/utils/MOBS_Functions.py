@@ -2862,6 +2862,8 @@ class Results_Loader:
             linTrue_fast = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
+                mouse_val = row["mouse"]  # noqa F8641
+                mouse_manipe = row["manipe"]  # noqa F8641
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
@@ -2922,6 +2924,8 @@ class Results_Loader:
             linTrue = []
             for _, row in df.iterrows():
                 # get speed_mask from training Mouse_Results object
+                mouse_val = row["mouse"]  # noqa F8641
+                mouse_manipe = row["manipe"]  # noqa F8641
                 speed_mask = (
                     self.results_df.query(
                         "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
@@ -3005,14 +3009,20 @@ class Results_Loader:
         folder = folder or getattr(self, "folderFigures", None)
         suffixes = suffixes or getattr(self, "suffixes", [""])
         # Try to get ANN loss layer
+        from neuroencoders.fullEncoder.nnUtils import GaussianHeatmapLosses
+
         try:
-            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            loss_layer = GaussianHeatmapLosses(
+                **self.results_df["results"][0].ann.gaussian_layer_loss_config
+            )
             logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
         except Exception:
             print("Trying to load ANN trainers...")
             try:
                 self.results_df["results"][0].load_trainers(which="ann")
-                loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+                loss_layer = GaussianHeatmapLosses(
+                    **self.results_df["results"][0].ann.gaussian_layer_loss_config
+                )
                 logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
             except Exception as e2:
                 print(f"Could not get ANN loss layer: {e2}")
@@ -3050,7 +3060,9 @@ class Results_Loader:
                 target_hw = decoding_results["featureTrue"][:, :2]
                 target_hw = logits_layer.gaussian_heatmap_targets(target_hw).numpy()
                 inputs = {"logits": logits_hw, "targets": target_hw}
-                kl_loss = loss_layer(inputs, return_batch=True).numpy().flatten()
+                kl_loss = (
+                    loss_layer(inputs["targets"], inputs["logits"]).numpy().flatten()
+                )
 
                 entropy = decoding_results["Hn"].flatten()
                 max_proba = decoding_results["maxp"].flatten()
@@ -3138,13 +3150,19 @@ class Results_Loader:
         suffixes = suffixes or getattr(self, "suffixes", [""])
 
         # --- Try to get ANN loss layer once ---
+        from neuroencoders.fullEncoder.nnUtils import GaussianHeatmapLosses
+
         try:
-            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            loss_layer = GaussianHeatmapLosses(
+                **self.results_df["results"][0].ann.gaussian_layer_loss_config
+            )
             logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
         except Exception:
             print("Trying to load ANN trainers...")
             self.results_df["results"][0].load_trainers(which="ann")
-            loss_layer = self.results_df["results"][0].ann.GaussianLoss_layer
+            loss_layer = GaussianHeatmapLosses(
+                **self.results_df["results"][0].ann.gaussian_layer_loss_config
+            )
             logits_layer = self.results_df["results"][0].ann.GaussianHeatmap
 
         # --- loop over suffixes ---
@@ -3186,7 +3204,11 @@ class Results_Loader:
                     target_hw = decoding_results["featureTrue"][:, :2]
                     target_hw = logits_layer.gaussian_heatmap_targets(target_hw).numpy()
                     inputs = {"logits": logits_hw, "targets": target_hw}
-                    kl_loss = loss_layer(inputs, return_batch=True).numpy().flatten()
+                    kl_loss = (
+                        loss_layer(inputs["targets"], inputs["logits"])
+                        .numpy()
+                        .flatten()
+                    )
 
                     entropy = decoding_results["Hn"].flatten()
                     max_proba = decoding_results["maxp"].flatten()
@@ -3610,147 +3632,6 @@ class Results_Loader:
                     plt.show()
                 plt.close(fig)
 
-    def around_ripples(
-        self,
-        suffixes=None,
-        against="entropy",
-        around=0.5,  # seconds before and after ripple
-        dt=0.01,  # time bin resolution in seconds
-        save=True,
-        folder=None,
-        show=False,
-        zscore=True,  # z-score per mouse relative to full session
-    ):
-        """
-        Compute and plot METAverage around ripples.
-
-        For each suffix:
-            - Select rows with phase == f"_{suffix}"
-            - Group by (nameExp, phase, winMS)
-            - Load decoding_results.pkl for each row
-            - Load ripple times from Mouse_Results
-            - Compute z-score evolution of entropy/maxp around ripples
-            - Aggregate across mice: mean ± std
-        """
-
-        folder = folder or getattr(self, "folderFigures", None)
-        suffixes = suffixes or getattr(self, "suffixes", [""])
-
-        for suffix in suffixes:
-            suffix_tag = suffix.strip("_")
-            print(f"\nProcessing suffix: {suffix} (tag: {suffix_tag})")
-            grouped = self.results_df.query("phase == @suffix_tag").groupby(
-                ["nameExp", "phase", "winMS"]
-            )
-
-            for (nameExp, phase, winMS), df in grouped:
-                if df.empty:
-                    continue
-
-                # Define common time vector around ripple
-                time_vec = np.arange(-around, around + dt, dt)
-                values_matrix = []  # rows: mice × columns: time bins
-
-                for _, row in df.iterrows():
-                    mouse_results = row["results"]
-
-                    ws = str(winMS)
-                    pkl_path = os.path.join(
-                        mouse_results.projectPath.experimentPath,
-                        "results",
-                        ws,
-                        f"decoding_results{suffix}.pkl",
-                    )
-                    if not os.path.exists(pkl_path):
-                        continue
-
-                    try:
-                        with open(pkl_path, "rb") as f:
-                            decoding_results = pickle.load(f)
-                    except Exception as e:
-                        print(f"Failed to load {pkl_path}: {e}")
-                        continue
-
-                    # --- extract values ---
-                    if against == "entropy":
-                        values = decoding_results["Hn"].flatten()
-                    elif against == "maxp":
-                        values = decoding_results["maxp"].flatten()
-                    else:
-                        raise ValueError("against must be 'entropy' or 'maxp'")
-
-                    times = decoding_results["times"].flatten()
-
-                    tRipples = mouse_results.data_helper.fullBehavior["Times"].get(
-                        "tRipples", None
-                    )
-                    if tRipples is None or len(tRipples) == 0:
-                        print(
-                            f"No ripple times for mouse {mouse_results.mouse_name}, winMS {winMS}"
-                        )
-                        continue
-
-                    # --- extract peri-ripple windows ---
-                    peri_values_all_ripples = []
-                    for tr in tRipples:
-                        mask = (times >= tr - around) & (times <= tr + around)
-                        if mask.any():
-                            peri_times = times[mask] - tr
-                            # interpolate values onto common time vector
-                            interp_values = np.interp(
-                                time_vec, peri_times, values[mask]
-                            )
-                            peri_values_all_ripples.append(interp_values)
-
-                    if len(peri_values_all_ripples) == 0:
-                        continue
-
-                    # average across ripples for this mouse
-                    mouse_mean = np.mean(peri_values_all_ripples, axis=0)
-                    if zscore:
-                        # z-score relative to full session
-                        mouse_mean = (mouse_mean - np.mean(values)) / np.std(values)
-                        values_matrix.append(mouse_mean)
-
-                    del decoding_results
-
-                if len(values_matrix) == 0:
-                    print(
-                        f"No valid ripple data for {nameExp}, phase {phase}, winMS {winMS}"
-                    )
-                    continue
-
-                # --- METAverage across mice ---
-                values_matrix = np.vstack(values_matrix)
-                mean_trace = np.mean(values_matrix, axis=0)
-                std_trace = np.std(values_matrix, axis=0)
-
-                # --- plot ---
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(time_vec, mean_trace, color="blue", lw=2)
-                ax.fill_between(
-                    time_vec,
-                    mean_trace - std_trace,
-                    mean_trace + std_trace,
-                    color="blue",
-                    alpha=0.3,
-                )
-                ax.axvline(0, color="black", linestyle="--", lw=1)
-                ax.set_xlabel("Time around ripple (s)")
-                ax.set_ylabel(f"Z-scored {against}")
-                ax.set_title(f"{nameExp} | phase: {phase} | winMS: {winMS}")
-                fig.tight_layout()
-
-                if save and folder is not None:
-                    fname = (
-                        f"bof_METAverage_{suffix_tag}_{nameExp}_win{winMS}_{against}"
-                    )
-                    fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
-                    fig.savefig(os.path.join(folder, fname + ".svg"))
-                if show:
-                    plt.show()
-                plt.close(fig)
-
     def around_ripples_METAverage(
         self,
         suffixes=None,
@@ -3878,180 +3759,165 @@ class Results_Loader:
                 fig.tight_layout()
 
                 if save and folder is not None:
-                    fname = f"METAverage_{suffix_tag}_{nameExp}_win{winMS}_{against}_zscored"
+                    fname = f"real_METAverage_{suffix_tag}_{nameExp}_win{winMS}_{against}_zscored"
                     fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
                     fig.savefig(os.path.join(folder, fname + ".svg"))
                 if show:
                     plt.show()
                 plt.close(fig)
 
-    def correlation_per_mouse(
+    def correlation_global_predictions(
         self,
-        against="entropy",  # "entropy" or "maxp"
-        error_type="lin",  # "lin" for linear error
-        mode="full",  # "selected" or "full"
-        speed="all",  # "fast", "slow", "all"
-        suffixes=None,  # list of suffixes to select (phase)
-        nameExps=None,  # list of nameExp to include
-        winMS_list=None,  # list of winMS to include
+        against="entropy",
+        error_type="lin",
+        mode="full",
+        speed="all",
+        suffixes=None,
+        nameExps=None,
+        winMS_list=None,
         save=True,
         folder=None,
         show=False,
-        zscore=False,  # whether to z-score values before correlation
+        zscore=False,
+        max_points=50000,
     ):
         """
-        Plot correlation of averaged per-mouse values between decoder confidence (entropy/maxp)
-        and linear error, optionally filtered by suffix, nameExp, and winMS.
-
-        Each mouse contributes one point per (phase/suffix) averaged across selected winMS.
-
-        Args:
-            against (str): "entropy" or "maxp".
-            error_type (str): "lin" or other error type.
-            mode (str): "selected" or "full".
-            speed (str): "fast", "slow", "all".
-            suffixes (list[str]): Which suffixes/phases to include.
-            nameExps (list[str]): Which nameExps to include.
-            winMS_list (list[float]): Which winMS to include.
-            save (bool): Save figure.
-            folder (str): Folder to save figures.
-            show (bool): Show figure interactively.
-            zscore (bool): Whether to z-score values before correlation.
+        Global point-by-point correlation.
+        If data exceeds max_points, it subsamples to keep plotting fast and meaningful.
         """
+        import os
+        import pickle
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        import seaborn as sns
         from scipy.stats import linregress
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
 
         # --- apply filters ---
-        if suffixes is not None:
-            suffix_tags = [s.strip("_") for s in suffixes]
-            df = df[df["phase"].isin(suffix_tags)]
-        if nameExps is not None:
+        if suffixes:
+            df = df[df["phase"].isin([s.strip("_") for s in suffixes])]
+        if nameExps:
             df = df[df["nameExp"].isin(nameExps)]
-        if winMS_list is not None:
+        if winMS_list:
             df = df[df["winMS"].isin(winMS_list)]
 
-        if error_type == "lin":
-            col_error = "lin_error"
-        else:
-            col_error = "error"
+        col_error = "lin_error" if error_type == "lin" else "error"
+        all_data: List[pd.DataFrame] = []
 
-        # --- collect per-mouse averages ---
-        mouse_data = []
         for _, row in df.iterrows():
-            mask = np.ones_like(row[col_error], dtype=bool)  # default
-
-            # --- apply speed mask if needed ---
-            if speed in ["fast", "slow"] and "speedMask" in row:
-                mask = row["speedMask"] if speed == "fast" else ~row["speedMask"]
-            if mode == "selected" and "predLoss" in row and "predLossThreshold" in row:
-                thresh_mask = row["predLoss"] <= row["predLossThreshold"]
-                mask = mask & thresh_mask
-
-            # select error values
-            if isinstance(row[col_error], np.ndarray):
-                print("applying mask to error array")
-                error_vals = row[col_error][mask]
-            else:
-                error_vals = np.array([row[col_error]])
-
-            # select against variable from decoding results
-            mouse_results = row["results"]
+            # 1. Load Decoding Data
             ws = str(row["winMS"])
-            suffix = f"_{row['phase']}"
             pkl_path = os.path.join(
-                mouse_results.projectPath.experimentPath,
+                row["results"].projectPath.experimentPath,
                 "results",
                 ws,
-                f"decoding_results{suffix}.pkl",
+                f"decoding_results_{row['phase']}.pkl",
             )
             if not os.path.exists(pkl_path):
                 continue
-
             try:
                 with open(pkl_path, "rb") as f:
-                    decoding_results = pickle.load(f)
-            except Exception as e:
-                print(f"Failed to load {pkl_path}: {e}")
+                    res = pickle.load(f)
+            except:
                 continue
 
-            if against == "entropy":
-                val_array = decoding_results["Hn"].flatten()
-            elif against == "maxp":
-                val_array = decoding_results["maxp"].flatten()
-            else:
-                raise ValueError("against must be 'entropy' or 'maxp'")
-
-            # apply same mask
-            if zscore:
-                val_array = (val_array - np.mean(val_array)) / np.std(val_array)
-            val_array = val_array[mask]
-            if len(val_array) == 0 or len(error_vals) == 0:
-                continue
-
-            mouse_data.append(
-                {
-                    "mouse": row["mouse_name"],
-                    "nameExp": row["nameExp"],
-                    "phase": row["phase"],
-                    "winMS": row["winMS"],
-                    "x": np.nanmean(val_array),
-                    "y": np.nanmean(error_vals),
-                }
+            # 2. Extract arrays
+            x_full = (
+                res["Hn"].flatten() if against == "entropy" else res["maxp"].flatten()
             )
+            y_full = row[col_error]
 
-            del decoding_results
+            # 3. Apply Masking
+            mask = np.ones_like(y_full, dtype=bool)
+            if speed in ["fast", "slow"] and "speedMask" in row:
+                mask &= row["speedMask"] if speed == "fast" else ~row["speedMask"]
+            if mode == "selected" and "predLoss" in row:
+                mask &= row["predLoss"] <= row["predLossThreshold"]
 
-        if len(mouse_data) == 0:
-            print("No data available for this selection.")
+            x_masked, y_masked = x_full[mask], y_full[mask]
+
+            if zscore and len(x_masked) > 0:
+                x_masked = (x_masked - np.nanmean(x_masked)) / (
+                    np.nanstd(x_masked) + 1e-9
+                )
+
+            if len(x_masked) > 0:
+                all_data.append(
+                    pd.DataFrame(
+                        {
+                            "x": x_masked,
+                            "y": y_masked,
+                            "phase": row["phase"],
+                            "mouse": row["mouse_name"],
+                        }
+                    )
+                )
+
+        if not all_data:
+            print("No data found.")
             return
 
-        plot_df = pd.DataFrame(mouse_data)
+        full_df = pd.concat(all_data, ignore_index=True).dropna(subset=["x", "y"])
 
-        # --- plot correlations ---
-        fig, ax = plt.subplots(figsize=(8, 6))
+        total_count = full_df.shape[0]
 
+        # --- Smart Subsampling ---
+        if total_count > max_points:
+            print(
+                f"Downsampling for visualization: {total_count} -> {max_points} points."
+            )
+            plot_df = full_df.sample(n=max_points, random_state=42)
+        else:
+            plot_df = full_df
+
+        # --- Plotting ---
+        fig, ax = plt.subplots(figsize=(9, 7))
         sns.scatterplot(
             data=plot_df,
             x="x",
             y="y",
             hue="phase",
-            style="nameExp",
-            s=80,
+            alpha=0.2,
+            s=5,
+            edgecolor=None,
             ax=ax,
-            palette="tab10",
+            rasterized=True,
         )
 
-        # --- regression line ---
-        slope, intercept, r_value, p_value, std_err = linregress(
-            plot_df["x"], plot_df["y"]
-        )
-        x_vals = np.linspace(plot_df["x"].min(), plot_df["x"].max(), 100)
-        y_vals = intercept + slope * x_vals
+        # --- Global Stats (always on the FULL dataset, not just the subset) ---
+        slope, intercept, r_val, p_val, _ = linregress(full_df["x"], full_df["y"])
+        line_x = np.array([full_df["x"].min(), full_df["x"].max()])
         ax.plot(
-            x_vals,
-            y_vals,
+            line_x,
+            intercept + slope * line_x,
             color="black",
-            lw=2,
-            label=f"R={r_value:.2f}, p={p_value:.3f}",
+            lw=2.5,
+            ls="--",
+            label=f"Global R={r_val:.3f}\np={p_val:.2e}\nN={total_count}",
         )
 
+        ax.set_title(
+            f"Global Correlation: {against} vs {error_type}\n({mode} mode, {speed} speed)"
+        )
         ax.set_xlabel(against)
-        ax.set_ylabel(f"{error_type}_error_{mode} ({speed})")
-        ax.set_title(f"Correlation per mouse ({against} vs error)")
-        ax.legend()
-        fig.tight_layout()
+        ax.set_ylabel(f"Error ({error_type})")
+        ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
-        if save and folder is not None:
-            fname = f"correlation_{against}_vs_{error_type}_{mode}_{speed}{'_zscored' if zscore else ''}"
-            fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
-            fig.savefig(os.path.join(folder, fname + ".svg"))
+        plt.tight_layout()
+        if save and folder:
+            fig.savefig(
+                os.path.join(folder, f"global_pointwise_{against}.png"), dpi=200
+            )
         if show:
             plt.show()
+
         plt.close(fig)
 
-    def correlation_per_mouse_spikes(
+    def correlation_global_spikes(
         self,
         against="entropy",  # "entropy", "maxp", or "error"
         error_type="lin",  # "lin" for linear error
@@ -4064,12 +3930,12 @@ class Results_Loader:
         folder=None,
         show=False,
         zscore=False,
+        max_points=50000,  # Max points to plot (meaningful subsampling)
     ):
         """
-        Correlate decoder values (entropy/maxp/error) with spike counts per mouse.
-        Each point is per mouse, averaged across winMS/phase as specified.
+        Correlate decoder values (entropy/maxp/error) with spike counts globally.
+        Every point is one single prediction time-bin across all sessions.
         """
-
         import os
         import pickle
 
@@ -4091,12 +3957,8 @@ class Results_Loader:
         if winMS_list is not None:
             df = df[df["winMS"].isin(winMS_list)]
 
-        if error_type == "lin":
-            col_error = "lin_error"
-        else:
-            col_error = "error"
-
-        mouse_data = []
+        col_error = "lin_error" if error_type == "lin" else "error"
+        all_sessions_data: List[pd.DataFrame] = []
 
         for _, row in df.iterrows():
             mouse_results = row["results"]
@@ -4121,38 +3983,16 @@ class Results_Loader:
             # --- apply masks ---
             mask = np.ones_like(row[col_error], dtype=bool)
             if speed in ["fast", "slow"] and "speedMask" in row:
-                mask = row["speedMask"] if speed == "fast" else ~row["speedMask"]
+                mask &= row["speedMask"] if speed == "fast" else ~row["speedMask"]
             if mode == "selected" and "predLoss" in row and "predLossThreshold" in row:
                 mask &= row["predLoss"] <= row["predLossThreshold"]
 
-            if isinstance(row[col_error], np.ndarray):
-                print("applying mask to error array")
-                error_vals = row[col_error][mask]
-            else:
-                error_vals = np.array([row[col_error]])
-
-            # --- extract against variable ---
-            if against in ["entropy", "maxp"]:
-                val_array = (
-                    decoding_results["Hn"].flatten()
-                    if against == "entropy"
-                    else decoding_results["maxp"].flatten()
-                )
-                val_array = val_array[mask]
-            elif against == "error":
-                val_array = error_vals
-            else:
-                raise ValueError("against must be 'entropy', 'maxp' or 'error'")
-
-            # --- load spikes ---
-            os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
+            # 1. Extract Spikes
             clusters_time_file = os.path.join(
                 mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
             )
             try:
                 try:
-                    # with open(clusters_file, "rb") as f:
-                    #     clusters = pickle.load(f)
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
                 except FileNotFoundError:
@@ -4166,15 +4006,12 @@ class Results_Loader:
                             f"clusters_time_pre_wTrain_{'True' if row['phase'] == 'training' else 'False'}.pkl",
                         )
                     )
-                    # with open(clusters_file, "rb") as f:
-                    #     clusters = pickle.load(f)
                     with open(clusters_time_file, "rb") as f:
                         clusters_time = pickle.load(f)
             except Exception as e:
-                print(f"Failed to load spike clusters for {row['mouse_name']}: {e}")
+                print(f"Failed to load spikes for {row['mouse_name']}: {e}")
                 continue
 
-            # --- count spikes per decoding time bin ---
             times = decoding_results["times"].flatten()
             spikes_count = np.zeros_like(times, dtype=float)
             for cl_time in clusters_time:
@@ -4182,75 +4019,91 @@ class Results_Loader:
                     cl_time,
                     bins=np.append(times, times[-1] + np.median(np.diff(times))),
                 )[0]
-            spikes_count = spikes_count[mask]
 
-            # --- average per mouse ---
-            if len(val_array) == 0 or len(spikes_count) == 0:
-                continue
+            # 2. Extract 'Against' variable
+            if against in ["entropy", "maxp"]:
+                val_array = (
+                    decoding_results["Hn"].flatten()
+                    if against == "entropy"
+                    else decoding_results["maxp"].flatten()
+                )
+            elif against == "error":
+                val_array = row[col_error]
 
-            x_val = np.nanmean(val_array)
-            y_val = np.nanmean(spikes_count)
+            # 3. Apply mask and collect raw points
+            x_raw = val_array[mask]
+            y_raw = spikes_count[mask]
 
-            if zscore:
-                x_val = (x_val - np.nanmean(val_array)) / np.nanstd(val_array)
-                y_val = (y_val - np.nanmean(spikes_count)) / np.nanstd(spikes_count)
+            if zscore and len(x_raw) > 0:
+                x_raw = (x_raw - np.nanmean(x_raw)) / (np.nanstd(x_raw) + 1e-9)
+                y_raw = (y_raw - np.nanmean(y_raw)) / (np.nanstd(y_raw) + 1e-9)
 
-            mouse_data.append(
-                {
-                    "mouse": row["mouse_name"],
-                    "phase": row["phase"],
-                    "winMS": row["winMS"],
-                    "nameExp": row["nameExp"],
-                    "x": x_val,
-                    "y": y_val,
-                }
-            )
+            if len(x_raw) > 0:
+                all_sessions_data.append(
+                    pd.DataFrame(
+                        {
+                            "x": x_raw,
+                            "y": y_raw,
+                            "phase": row["phase"],
+                            "nameExp": row["nameExp"],
+                        }
+                    )
+                )
 
             del decoding_results
 
-        if len(mouse_data) == 0:
+        if not all_sessions_data:
             print("No data available for this selection.")
             return
 
-        plot_df = pd.DataFrame(mouse_data)
+        full_df = pd.concat(all_sessions_data, ignore_index=True).dropna()
 
-        # --- plot ---
-        fig, ax = plt.subplots(figsize=(8, 6))
+        total_points = len(full_df)
+
+        # --- Smart Subsampling for Visualization ---
+        if total_points > max_points:
+            print(f"Plotting {max_points} / {total_points} points for clarity.")
+            plot_df = full_df.sample(n=max_points, random_state=42)
+        else:
+            plot_df = full_df
+
+        # --- Plot ---
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        # rasterized=True keeps the SVG file size small by rendering points as a bitmap
         sns.scatterplot(
             data=plot_df,
             x="x",
             y="y",
             hue="phase",
             style="nameExp",
-            s=80,
+            s=10,
+            alpha=0.3,
             ax=ax,
             palette="tab10",
+            rasterized=True,
+            edgecolor=None,
         )
 
-        # --- regression ---
-        slope, intercept, r_value, p_value, std_err = linregress(
-            plot_df["x"], plot_df["y"]
-        )
-        x_vals = np.linspace(plot_df["x"].min(), plot_df["x"].max(), 100)
-        y_vals = intercept + slope * x_vals
-        ax.plot(
-            x_vals,
-            y_vals,
-            color="black",
-            lw=2,
-            label=f"R={r_value:.2f}, p={p_value:.3f}",
+        # --- Global Regression (computed on ALL data, not just sampled) ---
+        slope, intercept, r_val, p_val, _ = linregress(full_df["x"], full_df["y"])
+        x_range = np.array([full_df["x"].min(), full_df["x"].max()])
+        ax.plot(x_range, intercept + slope * x_range, color="black", lw=2, ls="--")
+
+        ax.set_xlabel(f"{against}{' (z-scored)' if zscore else ''}")
+        ax.set_ylabel("Spike Count (per bin)")
+        ax.set_title(
+            f"Global Correlation: {against} vs Spikes\n(N={total_points} bins, R={r_val:.3f}, p={p_val:.2e})"
         )
 
-        ax.set_xlabel(against)
-        ax.set_ylabel("Spikes count")
-        ax.set_title(f"Correlation per mouse ({against} vs spikes)")
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
         fig.tight_layout()
 
         if save and folder is not None:
-            fname = f"correlation_{against}_vs_spikes"
+            fname = f"global_corr_{against}_vs_spikes_{mode}_{speed}"
             fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
             fig.savefig(os.path.join(folder, fname + ".svg"))
+
         if show:
             plt.show()
         plt.close(fig)
@@ -4271,10 +4124,10 @@ class Results_Loader:
         zscore=False,
     ):
         """
-        Compute correlation between decoder variable (entropy/maxp/error) and spike counts
-        for each (mouse, nameExp, winMS, phase) and plot a barplot of the mean correlations.
+        Compute a global correlation between decoder variables and spikes.
+        Instead of averaging R-values per mouse, it pools all time-bins for each
+        category (Phase/WinMS) to get a true point-by-point global correlation.
         """
-
         import os
         import pickle
 
@@ -4296,12 +4149,10 @@ class Results_Loader:
         if winMS_list is not None:
             df = df[df["winMS"].isin(winMS_list)]
 
-        if error_type == "lin":
-            col_error = "lin_error"
-        else:
-            col_error = "error"
+        col_error = "lin_error" if error_type == "lin" else "error"
 
-        correlations = []
+        # Dictionary to pool raw data points: key is (phase, hue_val)
+        pooled_data = {}
 
         for _, row in df.iterrows():
             mouse_results = row["results"]
@@ -4319,63 +4170,49 @@ class Results_Loader:
             try:
                 with open(pkl_path, "rb") as f:
                     decoding_results = pickle.load(f)
-            except Exception as e:
-                print(f"Failed to load {pkl_path}: {e}")
+            except Exception:
                 continue
 
             # --- apply masks ---
             mask = np.ones_like(row[col_error], dtype=bool)
             if speed in ["fast", "slow"] and "speedMask" in row:
-                mask = row["speedMask"] if speed == "fast" else ~row["speedMask"]
-            if mode == "selected" and "predLoss" in row and "predLossThreshold" in row:
+                mask &= row["speedMask"] if speed == "fast" else ~row["speedMask"]
+            if mode == "selected" and "predLoss" in row:
                 mask &= row["predLoss"] <= row["predLossThreshold"]
 
-            if isinstance(row[col_error], np.ndarray):
-                error_vals = row[col_error][mask]
-            else:
-                error_vals = np.array([row[col_error]])
-
-            # --- extract against variable ---
+            # --- extract variables ---
             if against in ["entropy", "maxp"]:
                 val_array = (
                     decoding_results["Hn"].flatten()
                     if against == "entropy"
                     else decoding_results["maxp"].flatten()
                 )
-                val_array = val_array[mask]
             elif against == "error":
-                val_array = error_vals
-            else:
-                raise ValueError("against must be 'entropy', 'maxp' or 'error'")
+                val_array = row[col_error]
+
+            val_array = val_array[mask]
 
             # --- load spikes ---
-            os.path.join(mouse_results.folderResult, "clusters_pre_wTrain_False.pkl")
             clusters_time_file = os.path.join(
                 mouse_results.folderResult, "clusters_time_pre_wTrain_False.pkl"
             )
-            try:
-                try:
-                    # with open(clusters_file, "rb") as f:
-                    #     clusters = pickle.load(f)
-                    with open(clusters_time_file, "rb") as f:
-                        clusters_time = pickle.load(f)
-                except FileNotFoundError:
-                    clusters_time_file = os.path.abspath(
-                        os.path.join(
-                            mouse_results.folderResult,
-                            "..",
-                            "..",
-                            "last_bayes",
-                            "results",
-                            f"clusters_time_pre_wTrain_{'True' if row['phase'] == 'training' else 'False'}.pkl",
-                        )
+            if not os.path.exists(clusters_time_file):
+                # Fallback path logic
+                clusters_time_file = os.path.abspath(
+                    os.path.join(
+                        mouse_results.folderResult,
+                        "..",
+                        "..",
+                        "last_bayes",
+                        "results",
+                        f"clusters_time_pre_wTrain_{'True' if row['phase'] == 'training' else 'False'}.pkl",
                     )
-                    # with open(clusters_file, "rb") as f:
-                    #     clusters = pickle.load(f)
-                    with open(clusters_time_file, "rb") as f:
-                        clusters_time = pickle.load(f)
-            except Exception as e:
-                print(f"Failed to load spike clusters for {row['mouse_name']}: {e}")
+                )
+
+            try:
+                with open(clusters_time_file, "rb") as f:
+                    clusters_time = pickle.load(f)
+            except Exception:
                 continue
 
             times = decoding_results["times"].flatten()
@@ -4390,69 +4227,79 @@ class Results_Loader:
             if len(val_array) == 0 or len(spikes_count) == 0:
                 continue
 
-            # optional z-score
             if zscore:
-                val_array = (val_array - np.nanmean(val_array)) / np.nanstd(val_array)
-                spikes_count = (spikes_count - np.nanmean(spikes_count)) / np.nanstd(
-                    spikes_count
+                val_array = (val_array - np.nanmean(val_array)) / (
+                    np.nanstd(val_array) + 1e-9
+                )
+                spikes_count = (spikes_count - np.nanmean(spikes_count)) / (
+                    np.nanstd(spikes_count) + 1e-9
                 )
 
-            # --- compute correlation per mouse × winMS × phase × nameExp ---
-            r, _ = spearmanr(val_array, spikes_count)
-            correlations.append(
+            # --- Pooling ---
+            group_key = (row["phase"], row[hue])
+            if group_key not in pooled_data:
+                pooled_data[group_key] = {"x": [], "y": []}
+
+            pooled_data[group_key]["x"].extend(val_array)
+            pooled_data[group_key]["y"].extend(spikes_count)
+
+        # --- Compute Correlation on Pooled Data ---
+        final_corrs = []
+        for (phase, h_val), data in pooled_data.items():
+            r, p = spearmanr(data["x"], data["y"])
+            final_corrs.append(
                 {
-                    "mouse": row["mouse_name"],
-                    "phase": row["phase"],
-                    "winMS": row["winMS"],
-                    "nameExp": row["nameExp"],
+                    "phase": phase,
+                    hue: h_val,
                     "correlation": r,
+                    "p_value": p,
+                    "n_points": len(data["x"]),
                 }
             )
 
-            del decoding_results
-
-        if len(correlations) == 0:
+        if not final_corrs:
             print("No correlations computed.")
             return
 
-        corr_df = pd.DataFrame(correlations)
+        corr_df = pd.DataFrame(final_corrs)
 
-        # --- barplot ---
-        fig, ax = plt.subplots(figsize=(8, 6))
+        # --- Plotting ---
+        fig, ax = plt.subplots(figsize=(10, 6))
         sns.barplot(
             data=corr_df,
             x="phase",
             y="correlation",
             hue=hue,
-            errorbar="sd",
             ax=ax,
             palette="tab10",
             order=sorted(corr_df["phase"].unique()),
         )
-        # overlay points
-        sns.stripplot(
-            data=corr_df,
-            x="phase",
-            y="correlation",
-            hue=hue,
-            dodge=True,
-            ax=ax,
-            palette="tab10",
-            size=7,
-            edgecolor="black",
-            linewidth=0.5,
-            alpha=0.8,
-        )
-        ax.set_ylabel(f"Spearman correlation ({against} vs spikes)")
+
+        ax.set_ylabel(f"Global Spearman R ({against} vs Spikes)")
         ax.set_xlabel("Phase")
-        ax.set_title("Correlation per mouse/phase/winMS/nameExp")
-        ax.legend(loc="best")
+        ax.set_title(
+            f"Global Point-by-Point Correlation\n(Total bins pooled per {hue})"
+        )
+
+        # Add N labels on top of bars
+        for i, p in enumerate(ax.patches):
+            if p.get_height() != 0:
+                ax.annotate(
+                    f"n={corr_df.iloc[i]['n_points']:.0e}",
+                    (p.get_x() + p.get_width() / 2.0, p.get_height()),
+                    ha="center",
+                    va="baseline",
+                    fontsize=8,
+                    color="black",
+                    xytext=(0, 5),
+                    textcoords="offset points",
+                )
+
         fig.tight_layout()
 
-        if save and folder is not None:
-            fname = f"barplot_correlation_{against}_vs_spikes"
+        if save and folder:
+            fname = f"global_barplot_{against}_vs_spikes"
             fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
-            fig.savefig(os.path.join(folder, fname + ".svg"))
         if show:
             plt.show()
         plt.close(fig)
