@@ -5,12 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.pre-commit-config.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/.pre-commit-config.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader.ipynb" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/CSI.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/CSI.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -145,26 +143,26 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "dev/working__on",
-    "last_opened_file_path": "/home/mickey/Documents/Theotime/neuroEncoders/notebooks",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "preferences.keymap",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;dev/working__on&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/mickey/Documents/Theotime/neuroEncoders/notebooks&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.keymap&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="PyConsoleOptionsProvider">
     <option name="myPythonConsoleState">
       <console-settings module-name="neuroencoders" is-module-sdk="true">
@@ -221,7 +219,7 @@
       <workItem from="1779021892300" duration="1584000" />
       <workItem from="1779031363070" duration="200000" />
       <workItem from="1779031675443" duration="20000" />
-      <workItem from="1779031712185" duration="8869000" />
+      <workItem from="1779031712185" duration="9607000" />
     </task>
     <servers />
   </component>
@@ -276,11 +274,6 @@
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
           <line>99</line>
           <option name="timeStamp" value="9" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
-          <url>file://$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb</url>
-          <line>720</line>
-          <option name="timeStamp" value="11" />
         </line-breakpoint>
       </breakpoints>
       <default-breakpoints>
