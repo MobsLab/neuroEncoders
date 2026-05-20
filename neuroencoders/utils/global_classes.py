@@ -64,6 +64,9 @@ ZONE_COLORS = ["r", "m", "k", "c", "b"]
 
 DEFAULT_GRIDSIZE = (35, 35)
 
+MIN_LIN_SPEED = 0.05
+MAX_LIN_SPEED = 0.35
+
 
 # Helper function to check if a position is in a zone
 def is_in_zone(pos, zone_def):
@@ -570,8 +573,8 @@ class DataHelper(Project):
                 ],
                 mode="valid",
             )[(window_len // 2 - 1) : -(window_len // 2)]
-            speed_mask_lin = (np.abs(smoothed_lin_speed) > 0.03) & (
-                np.abs(smoothed_lin_speed) < 0.35
+            speed_mask_lin = (np.abs(smoothed_lin_speed) > MIN_LIN_SPEED) & (
+                np.abs(smoothed_lin_speed) < MAX_LIN_SPEED
             )
             speed_range_mask = speed_mask_lin
             speed_range_mask = speed_range_mask & (smoothed_speed < max_speed)

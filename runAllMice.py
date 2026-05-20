@@ -41,10 +41,10 @@ mice_nb = [
     "M1199_reversal",
 ]
 ####
-nameExp = "consensus_linspeed_bigLatent_LinAndDirection"
+nameExp = "consensus_high_speed_mask_posandheaddirection"
 nbEpochs = str(30)
 run_ann = True
-target = "LinAndDirection"
+target = "PosAndHeadDirection"
 target_bayes = "pos"
 phase = "pre"
 useStridingFactor = True
