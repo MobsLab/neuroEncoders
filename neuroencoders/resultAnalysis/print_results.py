@@ -24,6 +24,7 @@ from neuroencoders.importData.gui_elements import (
     time_formatter_vec,
 )
 
+plt.style.use("neuroencoders.mobs")
 EC = np.array([45, 39])  # range of x and y in cm
 EC2 = np.array([44, 38])  # range of x and y in cm
 EC3 = np.array([45, 35])  # range of x and y in cm
@@ -280,6 +281,12 @@ def print_results(
                 linear = False
     else:
         raise ValueError('typeDec should be either "NN" or bayes"')
+
+    if target.lower() == "posandheaddirection":
+        # FIX: temporary for this target, keep only x & y for the error calculation and plotting
+        # TODO: fix this properly later by adding a dimOutput = 4 for this target, and adapt the plotting functions to be able to plot the head direction and thigmo in this case.
+        pos = pos[:, :2]
+        inferring = inferring[:, :2]
     dimOutput = pos.shape[1]
     assert pos.shape[1] == inferring.shape[1]
     if euclidean:
@@ -466,6 +473,7 @@ def print_results(
             training_data=training_data,
             posIndex=posIndex,
             timeStepsPred=timeStepsPred,
+            fig=kwargs.pop("fig", None),
             **kwargs,
         )
 
@@ -521,6 +529,7 @@ def print_results(
             training_data=training_data,
             posIndex=posIndex,
             timeStepsPred=timeStepsPred,
+            fig=kwargs.pop("fig", None),
             **kwargs,
         )
 
@@ -1591,7 +1600,7 @@ def overview_fig(
                 ax2 = plt.subplot2grid((dimOutput, 2), (1, 1))
                 visualizer._plot_error_distribution(ax=ax2)
 
-    if fig.get_layout_engine() is None:
+    if hasattr(fig, "get_layout_engine") and fig.get_layout_engine() is None:
         plt.subplots_adjust(bottom=0.15)
     if kwargs.get("save", True) and outfolder is not None:
         plt.savefig(

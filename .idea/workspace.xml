@@ -19,9 +19,6 @@
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/PlaceField_dB.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/PlaceField_dB.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/Spike.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/Spike.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
@@ -34,7 +31,7 @@
   <component name="CopilotChats">
     <option name="panelChat">
       <chat>
-        <option name="activeSessionId" value="05b6ad42-1a00-4955-83a5-50eb26de0539" />
+        <option name="activeSessionId" value="af3b7f62-9ee5-4076-99c4-a093dd67b1af" />
         <option name="sessions">
           <session>
             <option name="chatType" value="PANEL" />
@@ -104,38 +101,6 @@
           <session>
             <option name="chatType" value="PANEL" />
             <option name="id" value="af3b7f62-9ee5-4076-99c4-a093dd67b1af" />
-            <option name="modeId" value="Ask" />
-            <option name="modelType" value="builtin_family" />
-            <option name="modelValue" value="auto" />
-            <option name="targetType" value="LOCAL" />
-          </session>
-          <session>
-            <option name="chatType" value="PANEL" />
-            <option name="id" value="097d0a3c-c36e-414b-885e-589cee87d000" />
-            <option name="modeId" value="Ask" />
-            <option name="modelType" value="builtin_family" />
-            <option name="modelValue" value="auto" />
-            <option name="targetType" value="LOCAL" />
-          </session>
-          <session>
-            <option name="chatType" value="PANEL" />
-            <option name="id" value="e182d979-2c07-4351-bb5a-9601d9fcca13" />
-            <option name="modeId" value="Ask" />
-            <option name="modelType" value="builtin_family" />
-            <option name="modelValue" value="auto" />
-            <option name="targetType" value="LOCAL" />
-          </session>
-          <session>
-            <option name="chatType" value="PANEL" />
-            <option name="id" value="cd2e22a8-6732-4176-82e0-23bbd8e09b83" />
-            <option name="modeId" value="Ask" />
-            <option name="modelType" value="builtin_family" />
-            <option name="modelValue" value="auto" />
-            <option name="targetType" value="LOCAL" />
-          </session>
-          <session>
-            <option name="chatType" value="PANEL" />
-            <option name="id" value="b22ad6c7-20f9-40cb-94dd-033a47eb86e7" />
             <option name="modeId" value="Ask" />
             <option name="modelType" value="builtin_family" />
             <option name="modelValue" value="auto" />
@@ -268,18 +233,6 @@
       <recent name="$PROJECT_DIR$/notebooks" />
     </key>
   </component>
-  <component name="SharedIndexes">
-    <attachedChunks>
-      <set>
-        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
-        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
-      </set>
-    </attachedChunks>
-  </component>
-  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="project-level" UseSingleDictionary="true" transferred="true" />
-  <component name="SvnConfiguration">
-    <configuration>$USER_HOME$/.subversion</configuration>
-  </component>
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
       <changelist id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="" />
@@ -313,25 +266,6 @@
       <workItem from="1779031712185" duration="9607000" />
       <workItem from="1779109164733" duration="23000" />
       <workItem from="1779109289832" duration="1000" />
-      <workItem from="1779110132138" duration="8000" />
-      <workItem from="1779110155360" duration="4565000" />
-      <workItem from="1779115389005" duration="839000" />
-      <workItem from="1779116275894" duration="502000" />
-      <workItem from="1779116845781" duration="1086000" />
-      <workItem from="1779118015164" duration="627000" />
-      <workItem from="1779118731531" duration="225000" />
-      <workItem from="1779119474011" duration="321000" />
-      <workItem from="1779119837342" duration="121000" />
-      <workItem from="1779119994832" duration="65000" />
-      <workItem from="1779120152065" duration="2000" />
-      <workItem from="1779120207541" duration="1386000" />
-      <workItem from="1779121648054" duration="1731000" />
-      <workItem from="1779123439463" duration="39089000" />
-      <workItem from="1779218713284" duration="76000" />
-      <workItem from="1779218867552" duration="1286000" />
-      <workItem from="1779222140498" duration="25000" />
-      <workItem from="1779222179198" duration="7282000" />
-      <workItem from="1779277581176" duration="541000" />
     </task>
     <servers />
   </component>

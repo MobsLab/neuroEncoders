@@ -32,6 +32,8 @@ from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import Params, Project, get_max_nb_spikes
 
+plt.style.use("neuroencoders.mobs")
+
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
 

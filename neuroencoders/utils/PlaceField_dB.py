@@ -15,6 +15,8 @@ import pynapple as nap
 from scipy import signal
 from scipy.ndimage import label
 
+plt.style.use("neuroencoders.mobs")
+
 
 def smooth_dec(data: np.ndarray, smooth: Union[List, Tuple, np.ndarray]) -> np.ndarray:
     """

@@ -62,6 +62,8 @@ from neuroencoders.utils.viz_params import (
     white_viridis,
 )
 
+plt.style.use("neuroencoders.mobs")
+
 
 class PaperFigures:
     def __init__(

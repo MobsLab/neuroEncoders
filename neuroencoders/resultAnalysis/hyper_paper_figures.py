@@ -6,6 +6,8 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import sem
 
+plt.style.use("neuroencoders.mobs")
+
 cm = plt.get_cmap("tab20b")
 colorsForSNS = [cm(14), cm(2)]
 colorsForSNSF = [cm(12), cm(16)]
