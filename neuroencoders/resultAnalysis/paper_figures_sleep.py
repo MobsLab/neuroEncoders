@@ -14,6 +14,7 @@ from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
 from neuroencoders.utils.global_classes import Project
 from neuroencoders.utils.viz_params import white_viridis
 
+plt.style.use("neuroencoders.mobs")
 pykeops.set_verbose(False)
 
 

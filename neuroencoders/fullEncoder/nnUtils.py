@@ -28,6 +28,8 @@ from neuroencoders.utils.global_classes import (
     SpatialConstraintsMixin,
 )
 
+plt.style.use("neuroencoders.mobs")
+
 
 def _has_active_strategy():
     has_strategy = getattr(tf.distribute, "has_strategy", None)
