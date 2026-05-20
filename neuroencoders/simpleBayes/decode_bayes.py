@@ -2879,6 +2879,13 @@ class Trainer(SpatialConstraintsMixin):
             suffix = (
                 "_" + suffix
             )  # ensure suffix starts with underscore for consistency
+        if kwargs.get("phase", None) is not None:
+            if suffix is not None:
+                assert suffix == f"_{kwargs['phase']}", (
+                    "Suffix must match the specified phase in kwargs"
+                )
+            else:
+                suffix = f"_{kwargs['phase']}"
 
         if suffix is None:
             # Create one large epoch that comprises both train and test dataset
