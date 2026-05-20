@@ -24,7 +24,6 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
-from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -66,6 +65,7 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
+from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -840,8 +840,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.model = self.compile_model(
                 outputs, modelName="FullModel.pdf", **kwargs
             )
-            self.extract_transformer_model()
+            self.extract_transformer_and_output_model()
             self.extract_cnn_model()
+            self.extract_transformer_only_model()
             # TODO: add option to add independent losses to the model ?
 
             # In theory, the predicted loss could be not learning enough in the first network (optional)
@@ -850,24 +851,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.predLossModel = self.compile_model(
                     outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
                 )
-
-    def rebuild_model(self, **kwargs):
-        """
-        Regenerate the model with the current parameters.
-
-        Returns
-        -------
-        None
-        """
-        self.clear_session()
-        outputs = self.generate_model(**kwargs)
-        self.model = self.compile_model(outputs, modelName="FullModel.pdf", **kwargs)
-        self.extract_transformer_model()
-        self.extract_cnn_model()
-        if kwargs.get("isPredLoss", False):
-            self.predLossModel = self.compile_model(
-                outputs, predLossOnly=True, modelName="predLossModel.pdf", **kwargs
-            )
 
     def apply_transformer_architecture(
         self, allFeatures, allFeatures_raw, mymask, **kwargs
@@ -1030,6 +1013,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         model : tf.keras.Model
         """
 
+        self.jit_compile = jit_compile
         self.inputs = self.inputsToSpikeNets + self.indices + [self.inputGroups]
         self.tmp_outputs = outputs.copy()
         if "latent" in outputs:
@@ -1067,8 +1051,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         known_loss_args = ["name", "reduction", "batch_size"]
         loss_kwargs = {k: v for k, v in kwargs.items() if k in known_loss_args}
 
-        loss_dict, loss_weights, metrics_dict = self._parse_loss_and_metrics_dict(
-            **loss_kwargs
+        self.loss_dict, self.loss_weights, self.metrics_dict = (
+            self._parse_loss_and_metrics_dict(**loss_kwargs)
         )
 
         if predLossOnly:
@@ -1076,17 +1060,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # For now, we reuse the same logic but filters could be applied if needed
             model.compile(
                 optimizer=self.optimizer,
-                loss=loss_dict,
-                loss_weights=loss_weights,
-                metrics=metrics_dict,
+                loss=self.loss_dict,
+                loss_weights=self.loss_weights,
+                metrics=self.metrics_dict,
                 jit_compile=jit_compile,
             )
         else:
             model.compile(
                 optimizer=self.optimizer,
-                loss=loss_dict,
-                loss_weights=loss_weights,
-                metrics=metrics_dict,
+                loss=self.loss_dict,
+                loss_weights=self.loss_weights,
+                metrics=self.metrics_dict,
                 jit_compile=jit_compile,
             )
             # Get internal names of losses
@@ -1481,7 +1465,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Train
         for key in checkpointPath.keys():
             print("Training the", key, "model")
-            nb_epochs_already_trained = 0
             loaded = False
 
             if load_model and os.path.exists(os.path.dirname(checkpointPath[key])):
@@ -1508,21 +1491,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             )
                             self.model.load_weights(checkpointPath[key])
                         loaded = True
-                        if fine_tune:
-                            csv_hist = pd.read_csv(
-                                os.path.join(
-                                    self.folderModels,
-                                    str(winMS_max),
-                                    "full",
-                                    "fullmodel.log",
-                                )
-                            )
-                            nb_epochs_already_trained = csv_hist["epoch"].max() + 1
-                            print(
-                                "nb_epochs_already_trained =", nb_epochs_already_trained
-                            )
-                        else:
-                            nb_epochs_already_trained = 0
                     except Exception as e:
                         print(
                             "Error loading weights for",
@@ -1563,6 +1531,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 if not fine_tune:
                     print(f"Model loaded for {key}, skipping directly to next.")
                     continue
+
+            found_foundation_transformer = False
             if os.path.exists(
                 os.path.join(
                     self.projectPath.folder,
@@ -1579,18 +1549,35 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "..",
                             "foundation_transformer",
                             str(winMS_max),
-                            "transformer.keras",
+                            f"{self.target.lower()}_transformer.keras",
                         )
                     )
                     weights = loaded_transformer.get_weights()
                     self.full_transformer.set_weights(weights)
+                    transformer_found = "full"
                     print(
-                        f"loaded foundation transformer weights for window size {winMS_max} ms"
+                        f"loaded full foundation transformer weights for window size {winMS_max} ms"
                     )
-                except Exception as e:
-                    print(
-                        f"Could not load the foundation transformer for window size {winMS_max} ms, error: {e}"
-                    )
+                    found_foundation_transformer = True
+                except Exception:
+                    try:
+                        loaded_transformer = tf.keras.models.load_model(
+                            os.path.join(
+                                self.projectPath.folder,
+                                "..",
+                                "foundation_transformer",
+                                str(winMS_max),
+                                "transformer.keras",
+                            )
+                        )
+                        weights = loaded_transformer.get_weights()
+                        self.transformer_only.set_weights(weights)
+                        found_foundation_transformer = True
+                        transformer_found = "transformer_only"
+                    except Exception as e:
+                        print(
+                            f"Could not load the foundation transformer for window size {winMS_max} ms, error: {e}"
+                        )
 
             # Create a callback that saves the model's weights
             cp_callback = tf.keras.callbacks.ModelCheckpoint(
@@ -1605,6 +1592,30 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
+
+            if found_foundation_transformer:
+                if transformer_found == "full":
+                    print(
+                        "Loaded the full foundation transformer, setting it to non-trainable for fine-tuning."
+                    )
+                    self.full_transformer.trainable = False
+                elif transformer_found == "transformer_only":
+                    print(
+                        "Loaded the transformer-only foundation transformer, setting it to non-trainable for fine-tuning."
+                    )
+                    self.transformer_only.trainable = False
+                else:
+                    print(
+                        "Loaded foundation transformer, but could not determine which one. Keeping it trainable."
+                    )
+                self.model.compile(
+                    optimizer=self.optimizer,
+                    loss=self.loss_dict,
+                    loss_weights=self.loss_weights,
+                    metrics=self.metrics_dict,
+                    jit_compile=self.jit_compile,
+                )
+
             LRScheduler = self.LRScheduler(
                 lrs=self.params.learningRates,
                 total_epochs=self.params.nEpochs,
@@ -1684,9 +1695,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     wandb_callback = WandbMetricsLogger()
             if key != "predLoss":
                 if earlyStop:
-                    start_from_epoch = (
-                        max(self.params.earlyStop_start - nb_epochs_already_trained, 2),
-                    )
+                    start_from_epoch = max(self.params.earlyStop_start, 2)
                     print(
                         f"will use early stopping starting from epoch {start_from_epoch}"
                     )
@@ -1696,15 +1705,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         min_delta=0.05,
                         verbose=1,
                         restore_best_weights=True,
-                        start_from_epoch=max(
-                            self.params.earlyStop_start - nb_epochs_already_trained, 2
-                        ),
+                        start_from_epoch=start_from_epoch,
                     )
                     callbacks = [
                         csvLogger[key],
                         cp_callback,
                         schedule,
-                        es_callback,
                         MemoryUsageCallbackExtended(),
                         ContrastiveMonitor(),
                         ContrastiveVisualizer(
@@ -1753,7 +1759,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         factor=0.8,
                         patience=10,
                         verbose=1,
-                        start_from_epoch=40 - nb_epochs_already_trained,
+                        start_from_epoch=20,
                     )
                     callbacks.append(reduce_lr_callback)
 
@@ -1763,13 +1769,83 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     # we need to keep wandb callbacks at the very end to get back previous manual logs
                     callbacks.append(wandb_callback)
 
-                hist = self.model.fit(
-                    datasets["train"],
-                    epochs=self.params.nEpochs - nb_epochs_already_trained,
-                    callbacks=callbacks,  # , tb_callback,cp_callback
-                    validation_data=datasets["test"],
-                    steps_per_epoch=int(steps_per_epoch),
-                )
+                if found_foundation_transformer:  # 3. Train for a few "Warmup" epochs
+                    alignment_epochs = kwargs.get("alignment_epochs", 10)
+                    print("Starting Phase 1: Training mouse-dependent CNN only...")
+                    self.model.fit(
+                        datasets["train"],
+                        epochs=alignment_epochs,
+                        validation_data=datasets["test"],
+                        steps_per_epoch=int(steps_per_epoch / 2),
+                        callbacks=[csvLogger[key], schedule],
+                    )
+
+                    if transformer_found == "full":
+                        print(
+                            "Unfreezing the full foundation transformer for further training."
+                        )
+                        self.full_transformer.trainable = True
+                    elif transformer_found == "transformer_only":
+                        print(
+                            "Unfreezing the transformer-only foundation transformer for further training."
+                        )
+                        self.transformer_only.trainable = True
+
+                    fine_tune_lr = self.params.learningRates[0] / 100
+                    self.model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=fine_tune_lr),
+                        loss=self.loss_dict,
+                        loss_weights=self.loss_weights,
+                        metrics=self.metrics_dict,
+                        jit_compile=self.jit_compile,
+                    )
+                    phase2_scheduler = tf.keras.callbacks.LearningRateScheduler(
+                        lambda epoch, lr: self.LRScheduler(
+                            lrs=[self.params.learningRates[0] / 10],  # Start lower
+                            total_epochs=self.params.nEpochs - alignment_epochs,
+                            warmup_epochs=2,  # Short warmup for the new unfrozen weights
+                        ).schedule_cosine_warmup(epoch, lr)
+                    )
+                    if earlyStop:
+                        es_callback = tf.keras.callbacks.EarlyStopping(
+                            monitor="val_loss",
+                            patience=5,
+                            min_delta=0.001,
+                            restore_best_weights=True,
+                            start_from_epoch=6,
+                        )
+                        callbacks.append(es_callback)
+
+                    callbacks = [
+                        c
+                        for c in callbacks
+                        if not isinstance(c, tf.keras.callbacks.LearningRateScheduler)
+                    ]
+                    callbacks.append(phase2_scheduler)
+                    print(
+                        f"Starting Phase 2: Fine-tuning foundation weights at LR={fine_tune_lr}"
+                    )
+                    remaining_epochs = self.params.nEpochs - alignment_epochs
+                    hist = self.model.fit(
+                        datasets["train"],
+                        epochs=remaining_epochs,
+                        callbacks=callbacks,  # Use your existing schedule and ES here
+                        validation_data=datasets["test"],
+                        steps_per_epoch=int(steps_per_epoch / 2),
+                    )
+
+                else:
+                    if earlyStop:
+                        callbacks.append(
+                            es_callback
+                        )  # if not using foundation transformer, we can start early stopping from the beginning
+                    hist = self.model.fit(
+                        datasets["train"],
+                        epochs=self.params.nEpochs,
+                        callbacks=callbacks,  # , tb_callback,cp_callback
+                        validation_data=datasets["test"],
+                        steps_per_epoch=int(steps_per_epoch),
+                    )
                 self.trainLosses[key] = np.transpose(
                     np.stack(
                         [
@@ -1810,7 +1886,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     print("Could not save the full model:", e)
 
                 try:
-                    self.full_transformer.save(
+                    self.transformer_only.save(
                         os.path.join(
                             self.projectPath.folder,
                             "..",
@@ -1819,13 +1895,31 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "transformer.keras",
                         )
                     )
-                    self.full_transformer.save_weights(
+                    self.transformer_only.save_weights(
                         os.path.join(
                             self.projectPath.folder,
                             "..",
                             "foundation_transformer",
                             str(winMS_max),
                             "transformer.weights.h5",
+                        )
+                    )
+                    self.full_transformer.save(
+                        os.path.join(
+                            self.projectPath.folder,
+                            "..",
+                            "foundation_transformer",
+                            str(winMS_max),
+                            f"{self.target.lower()}_transformer.keras",
+                        )
+                    )
+                    self.full_transformer.save_weights(
+                        os.path.join(
+                            self.projectPath.folder,
+                            "..",
+                            "foundation_transformer",
+                            str(winMS_max),
+                            f"{self.target.lower()}_transformer.weights.h5",
                         )
                     )
                 except Exception as e:
@@ -3935,7 +4029,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
     ########### START OF HELPING LSTMandSpikeNetwork FUNCTIONS#####################
     class LRScheduler:
-        def __init__(self, lrs, total_epochs=100, warmup_epochs=10, min_lr=1e-6):
+        def __init__(self, lrs, total_epochs=30, warmup_epochs=6, min_lr=1e-6):
             """
             Args:
                 lrs: list of learning rates (lrs[0] is used as initial base LR)
@@ -4508,13 +4602,59 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         return self.cnn_feature_extractor
 
-    def extract_transformer_model(self):
+    def extract_transformer_only_model(self):
         """
         Extract transformer part using the shared transformer logic.
-        Creates new model that takes CNN features as input.
+        Creates new model that takes CNN features as input and returns the transformer output latent representation only.
 
         Returns:
             transformer_model: Model that processes CNN features through transformer
+        """
+
+        with nnUtils.get_device_context(self.deviceName):
+            # we assume the input will already be masked and corresponds to allFeatures in the full model
+
+            input_to_posEncoding = tf.keras.layers.Input(
+                shape=(self.max_nb_spikes, self.params.sequence_output_dim),
+                name="allFeatures",
+                dtype="float32",
+            )
+            mask_input = tf.keras.layers.Input(
+                shape=(self.max_nb_spikes,), name="mask_input", dtype="bool"
+            )
+
+            policy = tf.keras.mixed_precision.global_policy()
+            input_to_posEncoding = kops.cast(
+                input_to_posEncoding, dtype=policy.compute_dtype
+            )
+            mask_input = kops.cast(mask_input, dtype="bool")
+
+            masked_features_layer = MaskingLayer(name="masking_layer_transformer")
+            allFeatures = masked_features_layer([mask_input, input_to_posEncoding])
+
+            latent_output = self.transformer_encoder(allFeatures)
+            x = self.transformer_decoder(latent_output)
+
+            outputs = {}
+            outputs["transformer_decoder_output"] = UnMaskingLayer(
+                name="transformer_decoder_output", dtype="float32"
+            )(x)
+
+            self.transformer_only = tf.keras.Model(
+                inputs=[input_to_posEncoding, mask_input],
+                outputs=outputs,
+                name="TransformerModelOnly",
+            )
+
+        return self.transformer_only
+
+    def extract_transformer_and_output_model(self):
+        """
+        Extract transformer part using the shared transformer logic.
+        Creates new model that takes CNN features as input and returns both transformer output and final predictions.
+
+        Returns:
+            transformer_model: Model that processes CNN features through transformer and outputs predictions
         """
 
         with nnUtils.get_device_context(self.deviceName):
@@ -4607,7 +4747,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         print("\n" + "=" * 60)
         print("EXTRACTING TRANSFORMER MODEL")
         print("=" * 60)
-        transformer_model = self.extract_transformer_model()
+        transformer_model = self.extract_transformer_and_output_model()
 
         print("\n" + "=" * 60)
         print("MODELS CREATED SUCCESSFULLY")
