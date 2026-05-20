@@ -134,7 +134,7 @@ axes.titlesize: 16.0
 axes.titleweight: normal
 axes.titlecolor: auto
 axes.titlepad: 6.0
-axes.labelsize: 14.0
+axes.labelsize: 10.0
 axes.labelpad: 4.0
 axes.labelweight: normal
 axes.labelcolor: black
@@ -264,7 +264,7 @@ image.aspect: equal
 image.interpolation: auto
 image.cmap: viridis
 image.lut: 256
-image.origin: upper
+image.origin: lower
 image.resample: True
 
 ## ***************************************************************************

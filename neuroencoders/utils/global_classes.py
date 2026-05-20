@@ -1841,13 +1841,17 @@ class DataHelper(Project):
             self.stim_epochs = IntervalSet(stim_epochs)
         return self.stim_epochs
 
-    def get_spike_data(self, add_to_attr=True) -> TsGroup:
+    def get_spike_data(self, add_to_attr=True, force=False) -> TsGroup:
         """
         Get spike data from the DataHelper and store it in the fullBehavior dict for later use.
         """
         from neuroencoders.utils.wrappers import loadSpikeData
 
-        if hasattr(self, "spikeData") and isinstance(self.spikeData, TsGroup):
+        if (
+            hasattr(self, "spikeData")
+            and isinstance(self.spikeData, TsGroup)
+            and not force
+        ):
             return self.spikeData
 
         spikes, shanks, spikedata = loadSpikeData(self.folder)
@@ -2802,3 +2806,11 @@ def smooth_signal(signal, N):
     signal = signal[N:-N]
 
     return signal
+
+
+def gaussian_filter_nan(a, sigma):
+    from scipy.ndimage import gaussian_filter
+
+    v = np.where(np.isnan(a), 0, a)
+    w = gaussian_filter((~np.isnan(a)).astype(float), sigma)
+    return gaussian_filter(v, sigma) / w

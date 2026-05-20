@@ -65,7 +65,144 @@ from neuroencoders.utils.viz_params import (
 plt.style.use("neuroencoders.mobs")
 
 
-class PaperFigures:
+class TuningCurvesPlotter:
+    """
+    A simple shared module to compute and plot tuning curves, that can be used across different figure classes. The main idea is to have a consistent way to compute and plot tuning curves, and to be able to reuse the same code across different figures. This is especially useful for the linear tuning curves, which are used in several figures and need to be ordered in a consistent way.
+    """
+
+    def compute_linear_tuning_curves_order(
+        self,
+        lin_place_fields: List[np.ndarray] | np.ndarray,
+        bin_edges: np.ndarray,
+        sort_map: Optional[np.ndarray] = None,
+        list_neurons: Optional[List[int] | np.ndarray] = None,
+    ) -> Tuple[np.ndarray, List[int]]:
+        """
+        Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
+
+        Args:
+            lin_place_fields (list of np.ndarray): List of linear tuning curves for each neuron.
+            bin_edges (np.ndarray): Edges of the bins used for the linear tuning curves.
+            sort_map (list of int, optional): Predefined order of neuron indices. If None, the order will be computed based on preferred linear positions.
+            list_neurons (list of int, optional): List of neuron indices to include in the final order. If None, all neurons will be included.
+
+        Returns:
+            ordered_lin_place_fields (np.ndarray): Linear tuning curves ordered according to the computed or provided sort_map.
+            linear_pos_argsort (list of int): The order of neuron indices used for sorting.
+        """
+
+        if sort_map is None:
+            preferred_linear_positions = []
+            for tuning_curve in lin_place_fields:
+                if np.any(tuning_curve > 0):
+                    peak_idx = np.argmax(tuning_curve)
+                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+                    preferred_linear_positions.append(preferred_pos)
+                else:
+                    preferred_linear_positions.append(bin_edges[0])
+
+            preferred_linear_positions = np.array(preferred_linear_positions)
+            linear_pos_argsort = np.argsort(preferred_linear_positions)
+        else:
+            linear_pos_argsort = sort_map
+
+        if list_neurons is not None:
+            lin_place_fields = np.array(lin_place_fields)[list_neurons]
+
+        ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
+
+        return ordered_lin_place_fields, linear_pos_argsort
+
+    def plot_linear_tuning_curves(
+        self,
+        ordered_lin_place_fields,
+        ax=None,
+        **kwargs,
+    ):
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
+        else:
+            fig = ax.get_figure()
+
+        calc_kwargs = dict(kwargs)
+        cax = calc_kwargs.pop("cax", None)
+        add_colorbar = calc_kwargs.pop("add_colorbar", True)
+        normalize = calc_kwargs.pop("normalize", True)
+        scaling_method = calc_kwargs.pop("scaling", "minmax")
+        mask = calc_kwargs.pop("mask", None)
+        title = calc_kwargs.pop("title", "Linear Tuning Curves")
+
+        if normalize:
+            if scaling_method == "z-score":
+                # Safe Z-score normalization per neuron (row-wise)
+                mean_vals = np.nanmean(ordered_lin_place_fields, axis=1, keepdims=True)
+                std_val = np.nanstd(ordered_lin_place_fields, axis=1, keepdims=True)
+                fields = (ordered_lin_place_fields - mean_vals) / (std_val + 1e-8)
+
+                # Plotting Setup for Z-Score
+                cmap = "RdBu_r"
+                v_lim = min(np.percentile(np.abs(fields), 99), 4)
+                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+                cb_label = "Z-Scored FR"
+            elif scaling_method == "minmax":
+                # Min-Max normalization per neuron (row-wise)
+                min_vals = np.nanmin(ordered_lin_place_fields, axis=1, keepdims=True)
+                max_vals = np.nanmax(ordered_lin_place_fields, axis=1, keepdims=True)
+                fields = (ordered_lin_place_fields - min_vals) / (
+                    max_vals - min_vals + 1e-8
+                )
+
+                # Plotting Setup for Min-Max
+                cmap = "viridis"
+                norm = mcolors.Normalize(vmin=0, vmax=1)
+                cb_label = "Normalized Firing Rate (0-1)"
+            else:
+                raise ValueError(
+                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
+                )
+        else:
+            fields = ordered_lin_place_fields
+            cmap = "viridis"
+            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
+            cb_label = "Firing Rate"
+
+        fields = fields[mask] if mask is not None else fields
+        im = ax.imshow(
+            fields,
+            cmap,
+            norm,
+            origin="lower",
+            extent=(0, 1, 0, fields.shape[0]),
+            aspect="auto",
+        )
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+        ax.set_xlabel("Linear Position")
+        ax.set_ylabel(f"Neuron Index ({len(ordered_lin_place_fields)} neurons)")
+        ax.set_title(title)
+        if add_colorbar:
+            if cax is not None:
+                cbar = fig.colorbar(
+                    im,
+                    cax=cax,
+                    label=cb_label,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                cbar = fig.colorbar(
+                    im,
+                    ax=ax,
+                    label=cb_label,
+                    location="bottom",
+                    orientation="horizontal",
+                )
+
+            cbar.outline.set_visible(False)
+
+        return im, cb_label
+
+
+class PaperFigures(TuningCurvesPlotter):
     def __init__(
         self,
         projectPath: Project,
@@ -79,6 +216,7 @@ class PaperFigures:
         verbose=True,
         **kwargs,
     ):
+        super().__init__()
         self.phase = phase
         suffix = f"_{phase}" if phase is not None else ""
         self.suffix = suffix
@@ -712,135 +850,6 @@ class PaperFigures:
         im, cb_label = self.plot_linear_tuning_curves(
             ordered_lin_place_fields, **kwargs
         )
-        return im, cb_label
-
-    def compute_linear_tuning_curves_order(
-        self,
-        lin_place_fields: List[np.ndarray],
-        bin_edges: np.ndarray,
-        sort_map: Optional[np.ndarray] = None,
-        list_neurons: Optional[List[int]] = None,
-    ) -> Tuple[np.ndarray, List[int]]:
-        """
-        Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
-
-        Args:
-            lin_place_fields (list of np.ndarray): List of linear tuning curves for each neuron.
-            bin_edges (np.ndarray): Edges of the bins used for the linear tuning curves.
-            sort_map (list of int, optional): Predefined order of neuron indices. If None, the order will be computed based on preferred linear positions.
-            list_neurons (list of int, optional): List of neuron indices to include in the final order. If None, all neurons will be included.
-
-        Returns:
-            ordered_lin_place_fields (np.ndarray): Linear tuning curves ordered according to the computed or provided sort_map.
-            linear_pos_argsort (list of int): The order of neuron indices used for sorting.
-        """
-
-        if sort_map is None:
-            preferred_linear_positions = []
-            for tuning_curve in lin_place_fields:
-                if np.any(tuning_curve > 0):
-                    peak_idx = np.argmax(tuning_curve)
-                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
-                    preferred_linear_positions.append(preferred_pos)
-                else:
-                    preferred_linear_positions.append(bin_edges[0])
-
-            preferred_linear_positions = np.array(preferred_linear_positions)
-            linear_pos_argsort = np.argsort(preferred_linear_positions)
-        else:
-            linear_pos_argsort = sort_map
-
-        if list_neurons is not None:
-            linear_pos_argsort = [i for i in linear_pos_argsort if i in list_neurons]
-            lin_place_fields = [lin_place_fields[i] for i in linear_pos_argsort]
-
-        ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
-
-        return ordered_lin_place_fields, linear_pos_argsort
-
-    def plot_linear_tuning_curves(
-        self,
-        ordered_lin_place_fields,
-        ax=None,
-        **kwargs,
-    ):
-        if ax is None:
-            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
-        else:
-            fig = ax.get_figure()
-
-        calc_kwargs = dict(kwargs)
-        cax = calc_kwargs.pop("cax", None)
-        add_colorbar = calc_kwargs.pop("add_colorbar", True)
-        normalize = calc_kwargs.pop("normalize", True)
-        scaling_method = calc_kwargs.pop("scaling", "minmax")
-        mask = calc_kwargs.pop("mask", None)
-        title = calc_kwargs.pop("title", "Linear Tuning Curves")
-
-        if normalize:
-            if scaling_method == "z-score":
-                # Safe Z-score normalization per neuron (row-wise)
-                mean_vals = np.nanmean(ordered_lin_place_fields, axis=1, keepdims=True)
-                std_val = np.nanstd(ordered_lin_place_fields, axis=1, keepdims=True)
-                fields = (ordered_lin_place_fields - mean_vals) / (std_val + 1e-8)
-
-                # Plotting Setup for Z-Score
-                cmap = "RdBu_r"
-                v_lim = min(np.percentile(np.abs(fields), 99), 4)
-                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
-                cb_label = "Z-Scored FR"
-            elif scaling_method == "minmax":
-                # Min-Max normalization per neuron (row-wise)
-                min_vals = np.nanmin(ordered_lin_place_fields, axis=1, keepdims=True)
-                max_vals = np.nanmax(ordered_lin_place_fields, axis=1, keepdims=True)
-                fields = (ordered_lin_place_fields - min_vals) / (
-                    max_vals - min_vals + 1e-8
-                )
-
-                # Plotting Setup for Min-Max
-                cmap = "viridis"
-                norm = mcolors.Normalize(vmin=0, vmax=1)
-                cb_label = "Normalized Firing Rate (0-1)"
-            else:
-                raise ValueError(
-                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
-                )
-        else:
-            fields = ordered_lin_place_fields
-            cmap = "viridis"
-            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
-            cb_label = "Firing Rate"
-
-        fields = fields[mask] if mask is not None else fields
-        im = ax.imshow(fields, cmap, norm, origin="lower")
-        linear_bins = np.linspace(0, 1, fields.shape[1])
-        x_ticks = np.arange(0, fields.shape[1], 20)
-        x_labels = np.round(linear_bins[x_ticks], 2)
-        ax.set_xticks(x_ticks)
-        ax.set_xticklabels(x_labels)
-        ax.set_xlabel("Linear Position")
-        ax.set_ylabel(f"Neuron Index ({len(ordered_lin_place_fields)} neurons)")
-        ax.set_title(title)
-        if add_colorbar:
-            if cax is not None:
-                cbar = fig.colorbar(
-                    im,
-                    cax=cax,
-                    label=cb_label,
-                    orientation="horizontal",
-                    location="bottom",
-                )
-            else:
-                cbar = fig.colorbar(
-                    im,
-                    ax=ax,
-                    label=cb_label,
-                    location="bottom",
-                    orientation="horizontal",
-                )
-
-            cbar.outline.set_visible(False)
-
         return im, cb_label
 
     def fig_example_XY(self, timeWindow, suffix=None, phase=None, block=False):

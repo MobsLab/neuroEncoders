@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
-from pynapple import IntervalSet, Tsd, TsdFrame
+from pynapple import IntervalSet, Ts, TsGroup, Tsd, TsdFrame, compute_tuning_curves
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from statannotations.Annotator import Annotator
@@ -25,12 +25,17 @@ from tqdm import tqdm
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_behavior
 from neuroencoders.resultAnalysis import print_results
-from neuroencoders.resultAnalysis.paper_figures import PaperFigures
+from neuroencoders.resultAnalysis.paper_figures import PaperFigures, TuningCurvesPlotter
 from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
-from neuroencoders.utils.global_classes import Params, Project, get_max_nb_spikes
+from neuroencoders.utils.global_classes import (
+    Params,
+    Project,
+    gaussian_filter_nan,
+    get_max_nb_spikes,
+)
 
 plt.style.use("neuroencoders.mobs")
 
@@ -2189,8 +2194,138 @@ class Mouse_Results(Params, PaperFigures):
         if np.sum(density) > 0:
             density /= np.sum(density)
 
+        # Calculate bin centers
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        return density, bin_centers
 
-class Results_Loader:
+    def get_tuning_curves(
+        self,
+        suffix: Optional[str] = None,
+        feature_name: str = "linearTrue",
+        idWindow: int = 0,
+        use_speed_filter: bool = True,
+        count_thresh: Optional[int] = None,
+        **kwargs,
+    ):
+        """
+        Computes the tuning curves for all mice on one suffix.
+
+        Parameters:
+        - suffix: The suffix to use for accessing the results. If None, it will be determined as training.
+        - feature_name: The name of the feature to compute tuning curves for (default is "linearTrue").
+        - idWindow: The index of the window to use for accessing the feature and speed mask (default is 0).
+        - use_speed_filter: Whether to apply a speed filter to the epochs used for computing tuning curves (default is True).
+        - count_thresh: If provided, neurons with total counts below this threshold will be excluded from the tuning curves.
+        - kwargs: Additional keyword arguments for plotting the tuning curves. If 'plot' is True (default), the tuning curves will be plotted. You can also provide 'sort_map' and 'list_neurons' for sorting the tuning curves.
+
+        Returns:
+        - final: A concatenated array of tuning curves for all mice.
+        - sort_map: A mapping of neuron IDs to their sorted positions, if sorting was performed.
+        """
+
+        bin_size = kwargs.pop("bin_size", 0.036)
+        mode = kwargs.pop("mode", "before")
+
+        final, id_neurons, spike_data, phase = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name=feature_name,
+            idWindow=idWindow,
+            use_speed_filter=use_speed_filter,
+            count_thresh=count_thresh,
+            bin_size=bin_size,
+            mode=mode,
+        )
+        self.spikeData = spike_data
+
+        if kwargs.pop("plot", True):
+            ordered, sort_map = self.compute_linear_tuning_curves_order(
+                lin_place_fields=final.values,
+                bin_edges=np.linspace(0, 1, final.values.shape[1] + 1),
+                sort_map=kwargs.pop("sort_map", None),
+                list_neurons=kwargs.pop("list_neurons", None),
+            )
+            title = kwargs.pop(
+                "title",
+                f"LT Curves on {feature_name} ({phase} - speed {use_speed_filter})",
+            )
+            kwargs["title"] = title
+            self.plot_linear_tuning_curves(ordered, **kwargs)
+            return final, sort_map, id_neurons
+
+        return final, np.arange(final.shape[0]), id_neurons
+
+
+def _compute_tuning_curves_for_result(
+    results_obj,
+    suffix: Optional[str] = None,
+    feature_name: str = "linearTrue",
+    idWindow: int = 0,
+    use_speed_filter: bool = True,
+    count_thresh: Optional[int] = None,
+    bin_size: float = 0.05,
+    mode: str = "before",
+):
+    """Shared tuning-curve computation for a single results object."""
+
+    if suffix is None:
+        suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
+
+    if "_" in suffix:
+        phase = suffix.strip("_")
+    else:
+        phase = suffix
+
+    data_helper = getattr(results_obj, "data_helper", None) or getattr(
+        results_obj, "DataHelper", None
+    )
+    if data_helper is None:
+        raise ValueError("Results object does not expose a data helper.")
+
+    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
+    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
+    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
+
+    if hasattr(data_helper, "get_spike_data"):
+        spike_data = data_helper.get_spike_data(force=True)
+    else:
+        spike_data = results_obj.get_spike_data()
+
+    above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
+    not_nan_epoch = (
+        Tsd(
+            t=data_helper.fullBehavior["positionTime"].flatten(),
+            d=np.isnan(data_helper.fullBehavior["Positions"]).any(axis=1).flatten(),
+        )
+        .threshold(1, "below")
+        .time_support
+    )
+
+    tuning_curves = compute_tuning_curves(
+        data=spike_data.restrict(Ts(t=time).time_support).count(bin_size),
+        features=Tsd(t=time, d=feature),
+        epochs=not_nan_epoch.intersect(above_speed_epoch)
+        if use_speed_filter
+        else not_nan_epoch,
+        bins=50,
+        range=(0, 1) if "linear" in feature_name.lower() else None,
+        feature_names=[feature_name],
+        return_counts=False,
+        mode=mode,
+    )
+    tuning_curves = tuning_curves.copy()
+    tuning_curves.values = gaussian_filter_nan(tuning_curves.values, sigma=(0, 2))
+
+    id_neurons = np.arange(0, len(spike_data))
+    if count_thresh is not None:
+        under_thresh = np.sum(tuning_curves.counts, axis=1) < count_thresh
+        tuning_curves = tuning_curves[~under_thresh]
+        id_neurons = id_neurons[~under_thresh]
+
+    return tuning_curves, id_neurons, spike_data, phase
+
+
+class Results_Loader(TuningCurvesPlotter):
     """
     Class to load results from several Mouse_Results object.
     Will create a dict and a pandas DataFrame with the results.
@@ -2249,6 +2384,8 @@ class Results_Loader:
 
 
         """
+        super().__init__()
+        self.all_spikes = None
         if mice_nb is None:
             mice_nb = dir.name.str.extract(r"(\d+)").astype(int)
         if mice_manipes is None:
@@ -5796,6 +5933,133 @@ class Results_Loader:
         plt.close()
 
         return err_df
+
+    def get_concatenated_tuning_curves(
+        self,
+        suffix: str = "_training",
+        feature_name: str = "linearTrue",
+        idWindow: int = 0,
+        use_speed_filter: bool = True,
+        count_thresh: Optional[int] = None,
+        **kwargs,
+    ):
+        """
+        Computes the tuning curves for all mice on one suffix.
+
+        Parameters:
+        - suffix: The suffix to use for accessing the results. If None, it will be determined as training.
+        - feature_name: The name of the feature to compute tuning curves for (default is "linearTrue").
+        - idWindow: The index of the window to use for accessing the feature and speed mask (default is 0).
+        - use_speed_filter: Whether to apply a speed filter to the epochs used for computing tuning curves (default is True).
+        - count_thresh: If provided, neurons with total counts below this threshold will be excluded from the tuning curves.
+        - kwargs: Additional keyword arguments for plotting the tuning curves. If 'plot' is True (default), the tuning curves will be plotted. You can also provide 'sort_map' and 'list_neurons' for sorting the tuning curves.
+
+        Returns:
+        - concat: A concatenated array of tuning curves for all mice.
+        - sort_map: A mapping of neuron IDs to their sorted positions, if sorting was performed.
+        """
+
+        keep_mice = kwargs.pop("keep_mice", None)
+        remove_mice = kwargs.pop("remove_mice", None)
+        bin_size = kwargs.pop("bin_size", 0.05)
+        mode = kwargs.pop("mode", "closest")
+
+        if keep_mice is not None and remove_mice is not None:
+            raise ValueError("Cannot specify both keep_mice and remove_mice.")
+
+        if keep_mice is not None:
+            if not isinstance(keep_mice, list):
+                keep_mice = [keep_mice]
+            keep_mice = set([str(mouse) for mouse in keep_mice])
+
+        if remove_mice is not None:
+            if not isinstance(remove_mice, list):
+                remove_mice = [remove_mice]
+            remove_mice = set([str(mouse) for mouse in remove_mice])
+
+        if "_" in suffix:
+            phase = suffix.strip("_")
+        else:
+            phase = suffix
+
+        spike_datas_list = []
+        tuning_curves_list = []
+
+        for (mouse, manipe), df in self.results_df.query("phase == @phase").groupby(
+            ["mouse", "manipe"]
+        ):
+            if df.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one row per mouse/manipe for phase {phase}, but got {df.shape[0]} rows."
+                )
+
+            if keep_mice is not None and str(mouse) not in keep_mice:
+                print(f"Skipping mouse {mouse} as it is not in the keep_mice list.")
+                continue
+            if remove_mice is not None and str(mouse) in remove_mice:
+                print(f"Skipping mouse {mouse} as it is in the remove_mice list.")
+                continue
+
+            mouse_results = df.iloc[0].results
+            mouse_label = f"mouse {mouse} | {manipe}"
+
+            mouse_tuning_curves, _, mouse_spike_data, _ = (
+                _compute_tuning_curves_for_result(
+                    mouse_results,
+                    suffix=suffix,
+                    feature_name=feature_name,
+                    idWindow=idWindow,
+                    use_speed_filter=use_speed_filter,
+                    count_thresh=None,
+                    bin_size=bin_size,
+                    mode=mode,
+                )
+            )
+            mouse_spike_data.set_info(
+                metadata={
+                    "phase": [phase] * len(mouse_spike_data),
+                    "mouse": [mouse_label] * len(mouse_spike_data),
+                }
+            )
+
+            spike_datas_list.append(mouse_spike_data)
+            tuning_curves_list.append(mouse_tuning_curves)
+
+        self.all_spikes = TsGroup.merge_group(
+            *spike_datas_list, reset_index=True, reset_time_support=True
+        )
+
+        id_neurons = np.arange(0, len(self.all_spikes))
+        if count_thresh is not None:
+            concat = []
+            kept = []
+            for tc in tuning_curves_list:
+                under_thresh = np.sum(tc.counts, axis=1) < count_thresh
+                concat.append(tc[~under_thresh])
+                kept.append(~under_thresh)
+            concat = np.concatenate(concat, axis=0)
+            kept = np.concatenate(kept, axis=0)
+            id_neurons = id_neurons[kept]
+
+        else:
+            concat = np.concatenate(tuning_curves_list, axis=0)
+
+        if kwargs.pop("plot", True):
+            ordered, sort_map = self.compute_linear_tuning_curves_order(
+                lin_place_fields=concat,
+                bin_edges=np.linspace(0, 1, concat.shape[1] + 1),
+                sort_map=kwargs.pop("sort_map", None),
+                list_neurons=kwargs.pop("list_neurons", None),
+            )
+            title = kwargs.pop(
+                "title",
+                f"LT Curves on {feature_name} ({phase} - speed {use_speed_filter})",
+            )
+            kwargs["title"] = title
+            self.plot_linear_tuning_curves(ordered, **kwargs)
+            return concat, sort_map, id_neurons
+
+        return concat, np.arange(concat.shape[0]), id_neurons
 
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):

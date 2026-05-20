@@ -860,7 +860,7 @@ def plot_place_field_results(
     axes[2, 1].set_xlabel("Time (s)")
     axes[2, 1].legend(fontsize=10)
 
-    plt.tight_layout()
+    fig.tight_layout()
     plt.show()
 
     # Print statistics
