@@ -7,26 +7,13 @@ Based on the original MATLAB PlaceField_DB function
 @author: corrected version
 """
 
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pynapple as nap
 from scipy import signal
 from scipy.ndimage import label
-
-try:
-    import pynapple as nap  # More common neuroseries library
-
-    nts = nap
-    HAS_NEUROSERIES = True
-except ImportError:
-    try:
-        import neuroseries as nts
-
-        HAS_NEUROSERIES = True
-    except ImportError:
-        HAS_NEUROSERIES = False
-        print("Warning: No neuroseries library found. Using numpy arrays.")
 
 
 def smooth_dec(data: np.ndarray, smooth: Union[List, Tuple, np.ndarray]) -> np.ndarray:
@@ -246,92 +233,13 @@ def poisson_kb(lambda_rate: float, t_max: float) -> np.ndarray:
     return np.array(spike_times)
 
 
-def get_time_range(tsd_obj):
-    """
-    Get time range from neuroseries object with fallback methods
-    """
-    if hasattr(tsd_obj, "time_support"):
-        try:
-            support = tsd_obj.time_support
-            if hasattr(support, "start") and hasattr(support, "end"):
-                return support.start[0], support.end[0]
-            elif hasattr(support, "values"):
-                return support.values[0, 0], support.values[0, 1]
-            else:
-                return np.min(support), np.max(support)
-        except AttributeError:
-            pass
-
-    # Fallback: use time range from timestamps
-    if hasattr(tsd_obj, "times"):
-        times = tsd_obj.times()
-        return np.min(times), np.max(times)
-    elif hasattr(tsd_obj, "index"):
-        times = tsd_obj.index
-        return np.min(times), np.max(times)
-    elif hasattr(tsd_obj, "t"):
-        times = tsd_obj.t
-        return np.min(times), np.max(times)
-    else:
-        raise ValueError("Cannot determine time range from neuroseries object")
-
-
-def realign_spikes(pos_tsd, spike_tsd, method="closest"):
-    """
-    Realign spike times to position times with fallback methods
-    """
-    if hasattr(pos_tsd, "realign"):
-        return pos_tsd.realign(spike_tsd, align=method)
-    elif hasattr(spike_tsd, "restrict"):
-        # Try restrict method
-        try:
-            return spike_tsd.restrict(pos_tsd, align=method)
-        except (AttributeError, TypeError):
-            pass
-
-    # Manual interpolation fallback
-    if hasattr(pos_tsd, "times") and hasattr(pos_tsd, "values"):
-        pos_times = pos_tsd.times()
-        pos_values = pos_tsd.values
-    else:
-        pos_times = pos_tsd.index
-        pos_values = pos_tsd.values
-
-    if hasattr(spike_tsd, "times"):
-        spike_times = spike_tsd.times()
-    else:
-        spike_times = spike_tsd.index
-
-    # Interpolate position at spike times
-    spike_pos = np.interp(spike_times, pos_times, pos_values)
-
-    # Create new TSD-like object or just return values
-    if HAS_NEUROSERIES:
-        try:
-            return nts.Tsd(spike_times, spike_pos)
-        except (AttributeError, TypeError):
-            pass
-
-    # Return as simple object with times and values
-    class SimpleTsd:
-        def __init__(self, times, values):
-            self.times_array = times
-            self.values = values
-            self.size = len(values)
-
-        def times(self):
-            return self.times_array
-
-    return SimpleTsd(spike_times, spike_pos)
-
-
 def PlaceField_DB(
-    spike_times,
-    pos_x,
-    pos_y,
-    epoch=None,
+    spike_times: nap.Ts,
+    pos_x: nap.Tsd,
+    pos_y: nap.Tsd,
+    epoch: Optional[nap.IntervalSet] = None,
     smoothing: Union[int, List] = 3,
-    freq_video: float = 30.0,  # Default to 30 Hz like MATLAB version
+    freq_video: Optional[float | int] = None,
     threshold: float = 0.7,  # Default to 0.7 like MATLAB version
     size_map: int = 50,
     limit_maze=None,
@@ -344,7 +252,8 @@ def PlaceField_DB(
 
     Args:
         spike_times: Spike timestamps (neuroseries Tsd or array-like)
-        pos_x, pos_y: Position coordinates (neuroseries Tsd or array-like)
+        pos_x: Position coordinates (neuroseries Tsd or array-like)
+        pos_y: Position coordinates (neuroseries Tsd or array-like)
         epoch: Optional epoch restriction
         smoothing: Spatial smoothing factor(s)
         freq_video: Video sampling rate (Hz) - default 30 Hz
@@ -362,21 +271,26 @@ def PlaceField_DB(
 
     # Ensure freq_video is always defined
     if freq_video is None:
-        freq_video = 30.0
-        print("Warning: freq_video was None, using default value of 30.0 Hz")
+        freq_video = 1 / np.median(pos_x.time_diff().values)
+        if epoch is not None:
+            freq_video = 1 / np.median(pos_x.time_diff(epochs=epoch).values)
+        print(f"Warning: freq_video was None, using default value of {freq_video} Hz")
+
+    pos_x = pos_x.restrict(pos_y.time_support)
+    spike_times = spike_times.restrict(pos_x.time_support)
 
     # Run the core analysis
     results = _run_place_field_analysis(
         spike_times,
         pos_x,
         pos_y,
-        epoch,
-        smoothing,
-        freq_video,
-        threshold,
-        size_map,
-        limit_maze,
-        large_matrix,
+        smoothing=smoothing,
+        freq_video=freq_video,
+        threshold=threshold,
+        size_map=size_map,
+        limit_maze=limit_maze,
+        large_matrix=large_matrix,
+        epoch=epoch,
     )
 
     if not plot_poisson:
@@ -389,105 +303,31 @@ def PlaceField_DB(
         # Poisson control mode
 
         # Generate Poisson spike train
-        try:
-            t_start, t_end = get_time_range(pos_x)
-            total_time = t_end - t_start
-        except AttributeError:
-            # Fallback time calculation
-            if hasattr(pos_x, "times"):
-                times = pos_x.times()
-            else:
-                times = pos_x.index
-            total_time = np.max(times) - np.min(times)
-            t_start = np.min(times)
-
+        t_start = pos_x.time_support.start
+        total_time = pos_x.time_support.tot_length()
         # Use original firing rate for Poisson process
         original_firing_rate = results["firing_rate"]
 
         # Generate Poisson spike times
         poisson_times = poisson_kb(original_firing_rate, total_time)
-        if len(poisson_times) > 0:
-            # Convert to absolute times
-            poisson_times_abs = poisson_times + t_start
+        # Convert to absolute times
+        poisson_times_abs = poisson_times + t_start
 
-            # Create neuroseries object if possible
-            if HAS_NEUROSERIES:
-                try:
-                    poisson_spike_times = nts.Tsd(poisson_times_abs, poisson_times_abs)
-                except AttributeError:
-                    # Fallback: simple object
-                    class SimpleTsd:
-                        def __init__(self, times):
-                            self.times_array = times
-                            self.size = len(times)
-
-                        def times(self):
-                            return self.times_array
-
-                        def __len__(self):
-                            return self.size
-
-                    poisson_spike_times = SimpleTsd(poisson_times_abs)
-            else:
-                # Simple object
-                class SimpleTsd:
-                    def __init__(self, times):
-                        self.times_array = times
-                        self.size = len(times)
-
-                    def times(self):
-                        return self.times_array
-
-                    def __len__(self):
-                        return self.size
-
-                poisson_spike_times = SimpleTsd(poisson_times_abs)
-        else:
-            # Empty spike train
-            if HAS_NEUROSERIES:
-                try:
-                    poisson_spike_times = nts.Tsd(np.array([]), np.array([]))
-                except AttributeError:
-
-                    class SimpleTsd:
-                        def __init__(self):
-                            self.times_array = np.array([])
-                            self.size = 0
-
-                        def times(self):
-                            return self.times_array
-
-                        def __len__(self):
-                            return self.size
-
-                    poisson_spike_times = SimpleTsd()
-            else:
-
-                class SimpleTsd:
-                    def __init__(self):
-                        self.times_array = np.array([])
-                        self.size = 0
-
-                    def times(self):
-                        return self.times_array
-
-                    def __len__(self):
-                        return self.size
-
-                poisson_spike_times = SimpleTsd()
+        # Create neuroseries object if possible
+        poisson_spike_times = nap.Ts(t=poisson_times_abs)
 
         # Run analysis on Poisson data
         poisson_results = _run_place_field_analysis(
             poisson_spike_times,
             pos_x,
             pos_y,
-            epoch,
-            smoothing,
-            freq_video,
-            threshold,
-            size_map,
-            limit_maze,
-            large_matrix,
+            smoothing=smoothing,
+            freq_video=freq_video,
+            threshold=threshold,
+            size_map=size_map,
+            limit_maze=limit_maze,
+            large_matrix=large_matrix,
+            epoch=epoch,
         )
 
         # Plotting for Poisson comparison
@@ -532,16 +372,16 @@ def PlaceField_DB(
 
 
 def _run_place_field_analysis(
-    spike_times,
-    pos_x,
-    pos_y,
-    epoch,
+    spike_times: nap.Ts,
+    pos_x: nap.Tsd,
+    pos_y: nap.Tsd,
     smoothing: Union[int, List],
-    freq_video: float,
+    freq_video: float | int,
     threshold: float,
     size_map: int,
     limit_maze,
     large_matrix: bool,
+    epoch: Optional[nap.IntervalSet] = None,
 ) -> Dict:
     """
     Core place field analysis function
@@ -564,22 +404,13 @@ def _run_place_field_analysis(
 
     # Restrict to epoch if provided
     if epoch is not None:
-        if HAS_NEUROSERIES and hasattr(spike_times, "restrict"):
-            spike_times = spike_times.restrict(epoch)
-            pos_x = pos_x.restrict(epoch)
-            pos_y = pos_y.restrict(epoch)
-        else:
-            print(
-                "Warning: Epoch restriction not supported with current neuroseries setup"
-            )
+        spike_times = spike_times.restrict(epoch)
+        pos_x = pos_x.restrict(epoch)
+        pos_y = pos_y.restrict(epoch)
 
     # Extract position data
-    if hasattr(pos_x, "values"):
-        x_data = pos_x.values
-        y_data = pos_y.values
-    else:
-        x_data = np.array(pos_x)
-        y_data = np.array(pos_y)
+    x_data = pos_x.values
+    y_data = pos_y.values
 
     # Remove NaN values
     valid_pos = np.isfinite(x_data) & np.isfinite(y_data)
@@ -607,16 +438,11 @@ def _run_place_field_analysis(
     occ_hist, _, _ = np.histogram2d(x_data, y_data, bins=[x_edges, y_edges])
 
     # Get spike positions using realignment
-    spike_pos_x = realign_spikes(pos_x, spike_times)
-    spike_pos_y = realign_spikes(pos_y, spike_times)
+    spike_pos_x = spike_times.value_from(pos_x, ep=epoch, mode="before")
+    spike_pos_y = spike_times.value_from(pos_y, ep=epoch, mode="before")
 
-    # Extract spike position data
-    if hasattr(spike_pos_x, "values"):
-        spike_x_data = spike_pos_x.values
-        spike_y_data = spike_pos_y.values
-    else:
-        spike_x_data = np.array(spike_pos_x)
-        spike_y_data = np.array(spike_pos_y)
+    spike_x_data = spike_pos_x.values
+    spike_y_data = spike_pos_y.values
 
     # Remove NaN values from spike positions
     valid_spikes = np.isfinite(spike_x_data) & np.isfinite(spike_y_data)
@@ -707,23 +533,14 @@ def _run_place_field_analysis(
     results["stats"] = calculate_place_field_stats(results["map"], threshold)
 
     # Calculate firing rate and epoch length
-    if epoch is not None and HAS_NEUROSERIES:
-        try:
-            if hasattr(epoch, "tot_length"):
-                epoch_length = epoch.tot_length()
-            else:
-                epoch_length = np.sum(epoch[:, 1] - epoch[:, 0])
-        except AttributeError:
-            epoch_length = get_time_range(pos_x)[1] - get_time_range(pos_x)[0]
+    epoch_length = None
+    if epoch is not None:
+        epoch_length = epoch.tot_length()
+        results["epoch_length"] = epoch_length
     else:
-        try:
-            t_start, t_end = get_time_range(pos_x)
-            epoch_length = t_end - t_start
-        except AttributeError:
-            epoch_length = 1.0  # Fallback
+        results["epoch_length"] = pos_x.time_support.tot_length()
 
-    results["firing_rate"] = len(spike_times) / epoch_length if epoch_length > 0 else 0
-    results["epoch_length"] = epoch_length
+    results["firing_rate"] = len(spike_times) / epoch_length if epoch_length else 0
 
     # Store coordinates
     results["spike_coords"]["x"] = spike_x_data
@@ -888,7 +705,13 @@ def calculate_place_field_stats(maps: Dict, threshold: float) -> Dict:
     return stats
 
 
-def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) -> None:
+def plot_place_field_results(
+    results: Dict,
+    pos_x: nap.Tsd,
+    pos_y: nap.Tsd,
+    spike_times: nap.Ts,
+    epoch: Optional[nap.IntervalSet] = None,
+) -> None:
     """Plot place field analysis results - epoch-restricted data only"""
 
     # Determine if epoch was used
@@ -896,14 +719,12 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
 
     # Restrict to epoch if provided
     if epoch is not None:
-        if HAS_NEUROSERIES and hasattr(spike_times, "restrict"):
-            spike_times = spike_times.restrict(epoch)
-            pos_x = pos_x.restrict(epoch)
-            pos_y = pos_y.restrict(epoch)
-        else:
-            print(
-                "Warning: Epoch restriction not supported with current neuroseries setup"
-            )
+        spike_times = spike_times.restrict(epoch)
+        pos_x = pos_x.restrict(epoch)
+        pos_y = pos_y.restrict(epoch)
+
+    pos_x = pos_x.restrict(pos_y.time_support)
+    spike_times = spike_times.restrict(pos_x.time_support)
 
     fig, axes = plt.subplots(3, 2)
     title = "Place Field Analysis"
@@ -998,12 +819,7 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
     axes[2, 1].plot(y_times, y_vals, "g-", alpha=0.8, linewidth=1, label="Y position")
 
     # Add spike times (epoch-restricted only)
-    if hasattr(spike_times, "times"):
-        spike_time_vals = spike_times.times()
-    elif hasattr(spike_times, "__len__") and len(spike_times) > 0:
-        spike_time_vals = np.array(spike_times)
-    else:
-        spike_time_vals = []
+    spike_time_vals = spike_times.restrict(pos_x.time_support).times()
 
     if len(spike_time_vals) > 0:
         # Determine y-positions for spike markers
@@ -1063,11 +879,11 @@ def plot_place_field_results(results: Dict, pos_x, pos_y, spike_times, epoch) ->
 def plot_poisson_comparison(
     results: Dict,
     poisson_results: Dict,
-    pos_x,
-    pos_y,
-    spike_times,
-    poisson_spike_times,
-    epoch,
+    pos_x: nap.Tsd,
+    pos_y: nap.Tsd,
+    spike_times: nap.Ts,
+    poisson_spike_times: nap.Ts,
+    epoch: Optional[nap.IntervalSet] = None,
 ) -> None:
     """Plot comparison between original and Poisson control analysis"""
 
@@ -1075,14 +891,9 @@ def plot_poisson_comparison(
     epoch_restricted = results.get("epoch_restricted", False)
 
     if epoch_restricted and epoch is not None:
-        if HAS_NEUROSERIES and hasattr(spike_times, "restrict"):
-            spike_times = spike_times.restrict(epoch)
-            pos_x = pos_x.restrict(epoch)
-            pos_y = pos_y.restrict(epoch)
-        else:
-            print(
-                "Warning: Epoch restriction not supported with current neuroseries setup"
-            )
+        spike_times = spike_times.restrict(epoch)
+        pos_x = pos_x.restrict(epoch)
+        pos_y = pos_y.restrict(epoch)
 
     fig, axes = plt.subplots(2, 2)
     title = "Place Field vs Poisson Control Comparison"
@@ -1105,14 +916,14 @@ def plot_poisson_comparison(
         x_vals = np.array(pos_x)
         y_vals = np.array(pos_y)
 
-    axes[0, 1].scatter(x_vals, y_vals, "lightgray", alpha=0.7, linewidth=0.8)
+    axes[0, 1].scatter(x_vals, y_vals, c="lightgray", alpha=0.7, linewidth=0.8)
 
     if len(results["spike_coords"]["x"]) > 0:
         axes[0, 1].scatter(
             results["spike_coords"]["x"],
             results["spike_coords"]["y"],
-            "r.",
-            markersize=2,
+            c="r",
+            s=2,
         )
 
     title_str = f"Original Trajectory + Spikes\nFR: {results['firing_rate']:.2f} Hz"

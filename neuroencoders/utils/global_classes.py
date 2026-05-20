@@ -1847,8 +1847,11 @@ class DataHelper(Project):
         """
         from neuroencoders.utils.wrappers import loadSpikeData
 
+        if hasattr(self, "spikeData") and isinstance(self.spikeData, TsGroup):
+            return self.spikeData
+
         spikes, shanks, spikedata = loadSpikeData(self.folder)
-        spike_group = TsGroup(spikes, time_units="s")
+        spike_group = TsGroup(spikes)
         if add_to_attr:
             self.spikeData = spike_group
 
@@ -2444,7 +2447,7 @@ class SpatialConstraintsMixin:
         )
         return gauss
 
-    def windowed_soft_argmax(self, probs: tf.Tensor, window_size=11):
+    def windowed_soft_argmax(self, probs: tf.Tensor, window_size=9):
         """
         Refines position to sub-pixel precision in normalized [0, 1] space.
         probs: (B, H, W) tensor

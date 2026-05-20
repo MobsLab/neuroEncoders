@@ -699,7 +699,7 @@ class Mouse_Results(Params, PaperFigures):
             self,
             projectPath=self.Project,
             behaviorData=self.DataHelper.fullBehavior,
-            trainerBayes=self.bayes if hasattr(self, "bayes") else None,
+            bayes=self.bayes if hasattr(self, "bayes") else None,
             bayesMatrices=self.bayesMatrices
             if hasattr(self, "bayes_matrices")
             else None,
@@ -1689,6 +1689,7 @@ class Mouse_Results(Params, PaperFigures):
 
         os.makedirs(output_dir, exist_ok=True)
 
+        phase = kwargs.get("phase", self.phase)
         kwargs["output_dir"] = output_dir
         kwargs["setup_plot"] = (
             True  # Ensure setup_plot is True for worker initialization
@@ -1727,7 +1728,7 @@ class Mouse_Results(Params, PaperFigures):
             input_pattern = os.path.join(output_dir, "frame_%09d.png")
             video_name = kwargs.get(
                 "video_name",
-                f"mouse_{self.mouse_name}_win_{winMS}_phase_{self.phase}.mp4",
+                f"mouse_{self.mouse_name}_win_{winMS}_phase_{phase}.mp4",
             )
             ffmpeg_path = kwargs.get("ffmpeg_path", "ffmpeg")  # Default to 'ffmpeg'
             output_video_path = (
@@ -1901,6 +1902,11 @@ class Mouse_Results(Params, PaperFigures):
         Find session epochs from the fullBehavior data.
         This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
         """
+        self.training = IntervalSet(
+            np.array(self.DataHelper.fullBehavior["Times"]["trainEpochs"]).reshape(
+                -1, 2
+            )
+        )
         try:
             self.pre = IntervalSet(
                 np.array(
@@ -3822,7 +3828,7 @@ class Results_Loader:
             try:
                 with open(pkl_path, "rb") as f:
                     res = pickle.load(f)
-            except:
+            except FileNotFoundError:
                 continue
 
             # 2. Extract arrays

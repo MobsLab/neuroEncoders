@@ -22,7 +22,7 @@ class PaperFiguresSleep:
         self,
         projectPath: Project,
         behavior_data: dict,
-        trainerBayes: TrainerBayes,
+        bayes: TrainerBayes,
         linearizationFunction,
         bayesMatrices: dict = {},
         timeWindows=[36],
@@ -31,7 +31,7 @@ class PaperFiguresSleep:
         folderFigures=None,
     ):
         self.projectPath = projectPath
-        self.trainerBayes = trainerBayes
+        self.bayes = bayes
         self.behavior_data = behavior_data
         self.linearizationFunction = linearizationFunction
         self.bayesMatrices = bayesMatrices

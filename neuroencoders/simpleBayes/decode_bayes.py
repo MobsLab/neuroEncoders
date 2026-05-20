@@ -2975,6 +2975,14 @@ class Trainer(SpatialConstraintsMixin):
         )
         histPos, binEdges = np.histogram(linearTraj, bins=linSpace)
 
+        if kwargs.get("find_sampling_rate", True):
+            mean_diff = np.nanmean(np.diff(behaviorData["positionTime"][timesMask, 0]))
+            if mean_diff > 0:
+                sampling_rate = 1 / mean_diff
+                print(
+                    f"Estimated sampling rate from position data: {sampling_rate:.2f} Hz"
+                )
+
         if use_speed_filter:
             # load speed mask in neuron's timedomain
             try:

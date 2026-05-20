@@ -52,8 +52,6 @@ class SpikeData:
         import os
 
         import numpy as np
-
-        # import utils.neuroseries as nts
         import pynapple as nts
         from scipy.io import loadmat
 
