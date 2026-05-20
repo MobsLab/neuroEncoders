@@ -27,6 +27,7 @@ def gaussian_params():
 
 
 def test_gaussian_heatmap_losses_mp(gaussian_params, mock_l_layer_params):
+    gaussian_params.pop("neg", None)  # Remove 'neg'
     losses_layer = nnUtils.GaussianHeatmapLosses(
         l_function_layer_params=mock_l_layer_params,
         loss_type="safe_kl",
