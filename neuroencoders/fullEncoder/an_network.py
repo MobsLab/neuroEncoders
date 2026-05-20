@@ -24,6 +24,7 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -65,7 +66,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -4451,9 +4451,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         grid_size = kwargs.get(
             "grid_size", getattr(self.params, "GaussianGridSize", DEFAULT_GRIDSIZE)
         )
-        eps = kwargs.get("eps", getattr(self.params, "GaussianEps", 1e-8))
         sigma = kwargs.get("sigma", getattr(self.params, "GaussianSigma", 0.03))
-        neg = kwargs.get("neg", getattr(self.params, "GaussianNeg", -100))
         name = kwargs.get("name", "gaussian_heatmap")
 
         print("Setting up GaussianHeatmapLayer...")
@@ -4467,9 +4465,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self.gaussian_heatmap_params = {
             "training_positions": full_training_true_positions,
             "grid_size": grid_size,
-            "eps": eps,
             "sigma": sigma,
-            "neg": neg,
             "device": self.deviceName,
             "maze_params": self.maze_params,
         }

@@ -3612,9 +3612,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self,
         training_positions,
         grid_size,
-        eps=1e-8,
         sigma=0.03,
-        neg=-100,
         maze_params=None,
         **kwargs,
     ):
@@ -3624,9 +3622,9 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             self, grid_size=grid_size, maze_params=maze_params
         )
         self.training_positions = training_positions
-        self.eps = eps
+        self.eps = float(self.common_eps)
         self.sigma = sigma
-        self.neg = neg
+        self.neg = self.common_neg
         self.maze_params = maze_params
 
         self._initialize_computed_attributes()
@@ -3892,9 +3890,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
             {
                 "training_positions": None,  # Avoid storing large arrays
                 "grid_size": self.grid_size,
-                "eps": float(self.eps),
                 "sigma": float(self.sigma),
-                "neg": neg_value,
                 "maze_params": self.maze_params,
                 "WMAP": self.WMAP.numpy().tolist() if hasattr(self, "WMAP") else None,
                 "device": self.deviceName,
@@ -3944,9 +3940,7 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
         l_function_layer_params,
         training_positions=None,
         grid_size=DEFAULT_GRIDSIZE,
-        eps=1e-8,
         sigma=0.03,
-        neg=-100,
         maze_params=None,
         sinkhorn_eps=0.4,
         loss_type="safe_kl",
@@ -3989,8 +3983,8 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
 
         self.grid_size = grid_size
         self.sigma = float(sigma)
-        self.eps = float(eps)
-        self.neg = float(neg)
+        self.eps = float(self.common_eps)
+        self.neg = float(self.common_neg)
         self.maze_params = maze_params
         self.l_function_layer_params = l_function_layer_params
         self.l_function_layer = LinearizationLayer(
@@ -4086,9 +4080,7 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
                 "training_positions": self._training_positions_serializable,
                 "grid_size": self.grid_size,
                 "l_function_layer_params": l_function_layer_params_serializable,
-                "eps": self.eps,
                 "sigma": self.sigma,
-                "neg": neg_value,
                 "maze_params": self.maze_params,
                 "sinkhorn_eps": self.sinkhorn_eps,
                 "loss_type": self.loss_type,
@@ -4104,9 +4096,7 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
         layer_config = {
             "training_positions": config.get("training_positions"),
             "grid_size": config.get("grid_size", DEFAULT_GRIDSIZE),
-            "eps": config.get("eps", 1e-8),
             "sigma": config.get("sigma", 0.03),
-            "neg": config.get("neg", -100),
             "l_function_layer_params": config.get("l_function_layer_params", None),
             "maze_params": config.get("maze_params", None),
             "name": config.get("name", "gaussian_heatmap_losses"),
