@@ -190,7 +190,7 @@ def test_save_alignment_tools(mock_env):
         linearizationFunction = MagicMock()
 
         comparator.save_alignment_tools(
-            trainerBayes=trainerBayes,
+            bayes=trainerBayes,
             linearizationFunction=linearizationFunction,
             windowSizeMS=36,
         )

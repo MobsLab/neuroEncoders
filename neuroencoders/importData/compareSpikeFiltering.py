@@ -1,7 +1,6 @@
 # Load libs
 import os
-
-from tables import Callable
+from typing import Callable
 
 os.environ.setdefault(
     "TF_CPP_MIN_LOG_LEVEL", "2"
@@ -311,7 +310,7 @@ class WaveFormComparator:
 
     def save_alignment_tools(
         self,
-        trainerBayes: Trainer,
+        bayes: Trainer,
         linearizationFunction: Callable,
         windowSizeMS: int = 36,
         redo: bool = False,
@@ -340,8 +339,8 @@ class WaveFormComparator:
 
         # Get data
         self.get_data()
-        if not hasattr(trainerBayes, "linearPreferredPos"):
-            _ = trainerBayes.train_order_by_pos(
+        if not hasattr(bayes, "linearPreferredPos"):
+            _ = bayes.train_order_by_pos(
                 self.behavior_data, l_function=linearizationFunction
             )
         # gather all windows in the tensorflow dataset
@@ -376,10 +375,10 @@ class WaveFormComparator:
         )
 
         ### Mapping spike sorted spike times to windows
-        spikeMat_times_window = np.zeros([trainerBayes.spikeMatTimes.shape[0], 2])
-        spikeMat_times_window[:, 0] = trainerBayes.spikeMatTimes[:, 0]
+        spikeMat_times_window = np.zeros([bayes.spikeMatTimes.shape[0], 2])
+        spikeMat_times_window[:, 0] = bayes.spikeMatTimes[:, 0]
         spikeTime_lazy = pykeops.numpy.LazyTensor(
-            trainerBayes.spikeMatTimes[:, 0][:, None] * self.samplingRate, axis=0
+            bayes.spikeMatTimes[:, 0][:, None] * self.samplingRate, axis=0
         )
         startTimeWindow_lazy = pykeops.numpy.Vj(
             goodStartTimeWindowInSamples[:, None].astype(dtype=np.float64)
@@ -395,13 +394,11 @@ class WaveFormComparator:
         spikeMat_times_window[:, 1] = ans2[1][:, 0]
         # for the pop vector we add one label for the noisy cluster
         spikeMat_window_popVector = np.zeros(
-            [len(inputNN), trainerBayes.spikeMatLabels.shape[1] + 1]
+            [len(inputNN), bayes.spikeMatLabels.shape[1] + 1]
         )
         for idSpike, window in tqdm(enumerate(spikeMat_times_window[:, 1])):
             if window != -1:
-                cluster = np.where(
-                    np.equal(trainerBayes.spikeMatLabels[idSpike, :], 1)
-                )[0]
+                cluster = np.where(np.equal(bayes.spikeMatLabels[idSpike, :], 1))[0]
                 if len(cluster) > 0:
                     spikeMat_window_popVector[int(window), 1 + cluster[0]] += 1
                 else:

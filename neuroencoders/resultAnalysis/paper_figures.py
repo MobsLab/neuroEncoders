@@ -4,7 +4,7 @@ import os
 import platform
 import subprocess
 import warnings
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import dill as pickle
 import matplotlib.axes
@@ -22,7 +22,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import binned_statistic_2d, sem, zscore
 from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.ops import unary_union
@@ -68,7 +68,7 @@ class PaperFigures:
         self,
         projectPath: Project,
         behaviorData: dict,
-        trainerBayes: Optional[TrainerBayes],
+        bayes: Optional[TrainerBayes],
         l_function: Callable,
         bayesMatrices: Optional[dict] = {},
         timeWindows=[36],
@@ -81,7 +81,7 @@ class PaperFigures:
         suffix = f"_{phase}" if phase is not None else ""
         self.suffix = suffix
         self.projectPath = projectPath
-        self.trainerBayes = trainerBayes
+        self.bayes = bayes
         self.behaviorData = behaviorData
         self.l_function = l_function
         self.bayesMatrices = bayesMatrices
@@ -120,7 +120,7 @@ class PaperFigures:
             self.sleepFigures = PaperFiguresSleep(
                 projectPath,
                 behaviorData,
-                trainerBayes,
+                bayes,
                 l_function,
                 bayesMatrices=bayesMatrices,
                 timeWindows=timeWindows,
@@ -160,20 +160,20 @@ class PaperFigures:
 
     def _extract_bayes_spike_counts(self, times, ws):
         """Internal helper for spike count extraction in load_bayes."""
-        if not hasattr(self.trainerBayes, "spikeMatTimes") or not hasattr(
-            self.trainerBayes, "spikeMatLabels"
+        if not hasattr(self.bayes, "spikeMatTimes") or not hasattr(
+            self.bayes, "spikeMatLabels"
         ):
             raise ValueError(
-                "trainerBayes missing spike data. Run train_order_by_pos with extract_spike_counts=True."
+                "bayes missing spike data. Run train_order_by_pos with extract_spike_counts=True."
             )
 
         total_count, _ = extract_spike_counts_keops(
-            times, self.trainerBayes.spikeMatTimes, ws / 1000
+            times, self.bayes.spikeMatTimes, ws / 1000
         )
         matrix_count, _ = extract_spike_counts_matrix_keops(
             times,
-            self.trainerBayes.spikeMatLabels,
-            self.trainerBayes.spikeMatTimes,
+            self.bayes.spikeMatLabels,
+            self.bayes.spikeMatTimes,
             ws / 1000,
         )
         return total_count, matrix_count
@@ -188,7 +188,7 @@ class PaperFigures:
         print(
             f"performing bayesian test with bayes matrices for window {ws}ms, useTrain={useTrain}, useTest={useTest}"
         )
-        if not hasattr(self, "trainerBayes") or self.trainerBayes is None:
+        if not hasattr(self, "bayes") or self.bayes is None:
             raise ValueError(
                 "Bayes trainer not loaded. Please load the bayes trainer first to perform the fallback test."
             )
@@ -197,9 +197,9 @@ class PaperFigures:
             warnings.warn(
                 "will redo bayesian training to get the bayes matrices, as they are not loaded yet. This may take some time..."
             )
-            combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
+            combined_kwargs = {**self.bayes.config.extra_kwargs, **kwargs}
             combined_kwargs.pop("bayesMatrices", None)
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+            self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 **combined_kwargs,
@@ -210,7 +210,7 @@ class PaperFigures:
             f"Bayes matrices sample: { {k: (v.shape if isinstance(v, np.ndarray) else 'non-array') for k, v in self.bayesMatrices.items()} }"
         )
 
-        outputsBayes = self.trainerBayes.test_as_NN(
+        outputsBayes = self.bayes.test_as_NN(
             self.behaviorData,
             self.bayesMatrices,
             timesToPredict,
@@ -411,16 +411,16 @@ class PaperFigures:
         """
         Quickly load the bayesian decoding on the data, using the trainerBayes.
         """
-        if self.trainerBayes is None:
+        if self.bayes is None:
             raise ValueError(
                 "Bayes trainer not loaded. Please load the bayes trainer first."
             )
 
         if kwargs.get(
             "load_bayesMatrices", False
-        ) or self.trainerBayes.config.extra_kwargs.get("load_bayesMatrices", False):
-            combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+        ) or self.bayes.config.extra_kwargs.get("load_bayesMatrices", False):
+            combined_kwargs = {**self.bayes.config.extra_kwargs, **kwargs}
+            self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 bayesMatrices=self.bayesMatrices
@@ -440,7 +440,7 @@ class PaperFigures:
                 suffixes, add_training=kwargs.get("add_training", True)
             )
 
-        base_results_path = self.trainerBayes.folderResult
+        base_results_path = self.bayes.folderResult
 
         for suffix in self.suffixes:
             phase_results = {
@@ -574,13 +574,13 @@ class PaperFigures:
         """
         Run the bayes trainer, not with the true positions but rather the predictions of the ANN, and create the bayes matrices from those predictions. This allows to have a fair comparison between the two methods, as they will be based on the same input data (the ANN predictions) rather than the true positions, which may be more accurate than what the ANN can achieve.
         """
-        if not self.trainerBayes:
+        if not self.bayes:
             raise ValueError(
                 "Bayes trainer not loaded. Please load the bayes trainer first."
             )
         if not self.bayesMatrices or self.bayesMatrices is None:
-            combined_kwargs = {**self.trainerBayes.config.extra_kwargs, **kwargs}
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+            combined_kwargs = {**self.bayes.config.extra_kwargs, **kwargs}
+            self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 bayesMatrices=self.bayesMatrices
@@ -664,7 +664,7 @@ class PaperFigures:
             },
         }
 
-        self.decoded_bayesMatrices = self.trainerBayes.train_order_by_pos(
+        self.decoded_bayesMatrices = self.bayes.train_order_by_pos(
             self.decoded_fullBehavior,
             l_function=self.l_function,
             is_predicted=True,
@@ -673,43 +673,66 @@ class PaperFigures:
         )
         return self.decoded_bayesMatrices
 
-    def plot_linear_tuning_curves(
+    def full_plot_linear_tuning_curves(
         self,
         fullBehavior: Optional[Dict] = None,
         l_function: Optional[Callable] = None,
         use_speed_filter: bool = True,
-        ax: Optional[matplotlib.axes.Axes] = None,
         sort_map: Optional[List[int]] = None,
         list_neurons: Optional[List[int]] = None,
+        lin_place_fields: Optional[List[np.ndarray]] = None,
+        bin_edges: Optional[np.ndarray] = None,
         **kwargs,
     ):
-        if self.trainerBayes is None:
-            raise ValueError(
-                "Bayes trainer not loaded. Please load the bayes trainer first to plot linear tuning curves."
-            )
         if fullBehavior is None:
             fullBehavior = self.behaviorData
         if l_function is None:
             l_function = self.l_function
-        if ax is None:
-            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
-        else:
-            fig = ax.get_figure()
 
         calc_kwargs = dict(kwargs)
-        cax = calc_kwargs.pop("cax", None)
-        add_colorbar = calc_kwargs.pop("add_colorbar", True)
-        normalize = calc_kwargs.pop("normalize", True)
-        scaling_method = calc_kwargs.pop("scaling", "minmax")
-        mask = calc_kwargs.pop("mask", None)
-        title = calc_kwargs.pop("title", "Linear Tuning Curves")
 
-        lin_place_fields, bin_edges = self.trainerBayes.calculate_linear_tuning_curve(
-            l_function=l_function,
-            behaviorData=fullBehavior,
-            use_speed_filter=use_speed_filter,
-            **calc_kwargs,
+        if lin_place_fields is None or bin_edges is None:
+            if self.bayes is None:
+                raise ValueError(
+                    "Bayes trainer not loaded. Please load the bayes trainer first to plot linear tuning curves."
+                )
+            lin_place_fields, bin_edges = self.bayes.calculate_linear_tuning_curve(
+                l_function=l_function,
+                behaviorData=fullBehavior,
+                use_speed_filter=use_speed_filter,
+                **calc_kwargs,
+            )
+
+        ordered_lin_place_fields, _ = self.compute_linear_tuning_curves_order(
+            lin_place_fields, bin_edges, sort_map=sort_map, list_neurons=list_neurons
         )
+
+        im, cb_label = self.plot_linear_tuning_curves(
+            ordered_lin_place_fields, **kwargs
+        )
+        return im, cb_label
+
+    def compute_linear_tuning_curves_order(
+        self,
+        lin_place_fields: List[np.ndarray],
+        bin_edges: np.ndarray,
+        sort_map: Optional[np.ndarray] = None,
+        list_neurons: Optional[List[int]] = None,
+    ) -> Tuple[np.ndarray, List[int]]:
+        """
+        Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
+
+        Args:
+            lin_place_fields (list of np.ndarray): List of linear tuning curves for each neuron.
+            bin_edges (np.ndarray): Edges of the bins used for the linear tuning curves.
+            sort_map (list of int, optional): Predefined order of neuron indices. If None, the order will be computed based on preferred linear positions.
+            list_neurons (list of int, optional): List of neuron indices to include in the final order. If None, all neurons will be included.
+
+        Returns:
+            ordered_lin_place_fields (np.ndarray): Linear tuning curves ordered according to the computed or provided sort_map.
+            linear_pos_argsort (list of int): The order of neuron indices used for sorting.
+        """
+
         if sort_map is None:
             preferred_linear_positions = []
             for tuning_curve in lin_place_fields:
@@ -731,11 +754,32 @@ class PaperFigures:
 
         ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
 
+        return ordered_lin_place_fields, linear_pos_argsort
+
+    def plot_linear_tuning_curves(
+        self,
+        ordered_lin_place_fields,
+        ax=None,
+        **kwargs,
+    ):
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
+        else:
+            fig = ax.get_figure()
+
+        calc_kwargs = dict(kwargs)
+        cax = calc_kwargs.pop("cax", None)
+        add_colorbar = calc_kwargs.pop("add_colorbar", True)
+        normalize = calc_kwargs.pop("normalize", True)
+        scaling_method = calc_kwargs.pop("scaling", "minmax")
+        mask = calc_kwargs.pop("mask", None)
+        title = calc_kwargs.pop("title", "Linear Tuning Curves")
+
         if normalize:
             if scaling_method == "z-score":
                 # Safe Z-score normalization per neuron (row-wise)
-                mean_vals = np.mean(ordered_lin_place_fields, axis=1, keepdims=True)
-                std_val = np.std(ordered_lin_place_fields, axis=1, keepdims=True)
+                mean_vals = np.nanmean(ordered_lin_place_fields, axis=1, keepdims=True)
+                std_val = np.nanstd(ordered_lin_place_fields, axis=1, keepdims=True)
                 fields = (ordered_lin_place_fields - mean_vals) / (std_val + 1e-8)
 
                 # Plotting Setup for Z-Score
@@ -745,8 +789,8 @@ class PaperFigures:
                 cb_label = "Z-Scored FR"
             elif scaling_method == "minmax":
                 # Min-Max normalization per neuron (row-wise)
-                min_vals = np.min(ordered_lin_place_fields, axis=1, keepdims=True)
-                max_vals = np.max(ordered_lin_place_fields, axis=1, keepdims=True)
+                min_vals = np.nanmin(ordered_lin_place_fields, axis=1, keepdims=True)
+                max_vals = np.nanmax(ordered_lin_place_fields, axis=1, keepdims=True)
                 fields = (ordered_lin_place_fields - min_vals) / (
                     max_vals - min_vals + 1e-8
                 )
@@ -5504,6 +5548,7 @@ class PaperFigures:
         useAll=False,
         strideFactor=4,
         use_speed_filter=True,
+        **kwargs,
     ):
         """
                 For each place cell, we want to ask two questions:
@@ -5520,7 +5565,15 @@ class PaperFigures:
         strideFactor (int, optional): Factor for stride when loading aligned spike data. Defaults to 4.
         use_speed_filter (bool, optional): Whether to apply a speed filter to the data. Defaults to True.
         """
-        if self.trainerBayes is None:
+
+        remove_neurons = kwargs.get("remove_neurons", None)
+        keep_only_neurons = kwargs.get("keep_only_neurons", None)
+        if remove_neurons is not None and keep_only_neurons is not None:
+            raise ValueError(
+                "Cannot specify both remove_neurons and keep_only_neurons."
+            )
+
+        if self.bayes is None:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
             )
@@ -5545,20 +5598,28 @@ class PaperFigures:
             os.mkdir(dirSave)
 
         iwindow = self.timeWindows.index(ws)
+
+        linearTuningCurves_training, _ = self.bayes.calculate_linear_tuning_curve(
+            l_function=self.l_function,
+            behaviorData=self.behaviorData,
+            suffix="_training",
+            use_speed_filter=True,
+        )
+
         # WARNING: Calculate the tuning curve of all place cells - for TRAINING/PRE phase
-        linearTuningCurves, binEdges = self.trainerBayes.calculate_linear_tuning_curve(
+        linearTuningCurves, binEdges = self.bayes.calculate_linear_tuning_curve(
             l_function=self.l_function,
             behaviorData=self.behaviorData,
             suffix=suffix,
             use_speed_filter=use_speed_filter,
         )
         try:
-            placeFieldSort = self.trainerBayes.linearPosArgSort
+            placeFieldSort = self.bayes.linearPosArgSort
         except AttributeError:
             print(
                 "linearPosArgSort not found in Trainer Bayes, will try to order by position."
             )
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+            self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 bayesMatrices=self.bayesMatrices
@@ -5568,7 +5629,7 @@ class PaperFigures:
                 )
                 else None,
             )
-            placeFieldSort = self.trainerBayes.linearPosArgSort
+            placeFieldSort = self.bayes.linearPosArgSort
 
         useAll_suffix = "_all" if useAll else ""
         strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
@@ -5606,42 +5667,83 @@ class PaperFigures:
         spikePopAligned = spikePopAligned[allowed_idx]
         linearPred = self.resultsNN_phase[suffix]["linearPred"][iwindow]
 
-        linearTuningCurves_sorted = np.array(linearTuningCurves)[placeFieldSort]
+        tuning_training = np.array(linearTuningCurves_training)
+        tuning_full = np.array(linearTuningCurves)
+        sort_idx = np.array(placeFieldSort)
         spikePop_neurons_only = spikePopAligned[:, 1:]  # exclude "noise" neuron
-        spikePopAligned_sorted = spikePop_neurons_only[
-            :, placeFieldSort
-        ]  # sort neurons by place field position
-        # Assuming you already have:
-        # linearTuningCurves_sorted, spikePop_sorted, linearPred, binEdges
 
-        for i_spatial, tuningCurve in enumerate(linearTuningCurves_sorted):
+        if remove_neurons is not None or keep_only_neurons is not None:
+            if remove_neurons is not None:
+                # Create a mask of neurons to keep
+                mask = np.ones(len(tuning_training), dtype=bool)
+                mask[remove_neurons] = False
+
+                tuning_training = tuning_training[mask]
+                tuning_full = tuning_full[mask]
+                spikePop_filtered = spikePop_neurons_only[:, mask]
+                # Filter the sort map: remove the original neuron IDs that are gone
+                # then determine the new sort order based on remaining elements
+                remaining_indices = np.where(mask)[0]
+
+            if keep_only_neurons is not None:
+                tuning_training = tuning_training[keep_only_neurons]
+                tuning_full = tuning_full[keep_only_neurons]
+                spikePop_filtered = spikePop_neurons_only[:, keep_only_neurons]
+                remaining_indices = np.array(keep_only_neurons)
+
+            new_sort_order = [i for i in sort_idx if i in remaining_indices]
+            lookup = {
+                original_idx: new_pos
+                for new_pos, original_idx in enumerate(remaining_indices)
+            }
+            final_indexing = [lookup[i] for i in new_sort_order]
+            cell_id = remaining_indices[final_indexing]
+
+        else:
+            final_indexing = sort_idx
+            spikePop_filtered = spikePop_neurons_only
+            cell_id = sort_idx
+
+        linearTuningCurves_training_sorted = tuning_training[final_indexing]
+        linearTuningCurves_sorted = tuning_full[final_indexing]
+        spikePopAligned_sorted = spikePop_filtered[:, final_indexing]
+
+        for i_loop, original_cell_name in enumerate(cell_id):
             # Get the data for this window/cell
-            spikeHist = spikePopAligned_sorted[:, i_spatial][: len(linearPred)]
+            spikeHist = spikePopAligned_sorted[:, i_loop][: len(linearPred)]
+            tuningCurve = linearTuningCurves_sorted[i_loop]
+            tuningCurve_training = linearTuningCurves_training_sorted[i_loop]
 
             if np.sum(spikeHist) < 5:  # Skip silent cells
-                print(f"Skipping cell {i_spatial} due to low activity.")
+                print(f"Skipping cell {original_cell_name} due to low activity.")
                 continue
 
             # Question 1: When cell fires, what is the mean prediction?
             self.plot_prediction_given_spikes(
-                i_spatial,
+                original_cell_name,
                 tuningCurve,
                 spikeHist,
                 linearPred,
                 binEdges,
                 suffix=suffix,
                 speed_filter=use_speed_filter,
+                tuningCurve_training=tuningCurve_training,
+                dirSave=dirSave,
+                show=kwargs.get("show", True),
             )
 
             # Question 2: When we predict this field, what is the cell activity?
             self.plot_activity_given_prediction(
-                i_spatial,
+                original_cell_name,
                 tuningCurve,
                 spikeHist,
                 linearPred,
                 binEdges,
                 suffix=suffix,
                 speed_filter=use_speed_filter,
+                tuningCurve_training=tuningCurve_training,
+                dirSave=dirSave,
+                show=kwargs.get("show", True),
             )
 
     def plot_pc_tuning_curve_and_predictions(
@@ -5656,7 +5758,7 @@ class PaperFigures:
         useAll=False,
         strideFactor=4,
     ):
-        if self.trainerBayes is None:
+        if self.bayes is None:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
             )
@@ -5678,16 +5780,16 @@ class PaperFigures:
 
         iwindow = self.timeWindows.index(ws)
         # Calculate the tuning curve of all place cells
-        linearTuningCurves, binEdges = self.trainerBayes.calculate_linear_tuning_curve(
+        linearTuningCurves, binEdges = self.bayes.calculate_linear_tuning_curve(
             l_function=self.l_function, behaviorData=self.behaviorData
         )
         try:
-            placeFieldSort = self.trainerBayes.linearPosArgSort
+            placeFieldSort = self.bayes.linearPosArgSort
         except AttributeError:
             print(
                 "linearPosArgSort not found in Trainer Bayes, will try to order by position."
             )
-            self.bayesMatrices = self.trainerBayes.train_order_by_pos(
+            self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
                 l_function=self.l_function,
                 bayesMatrices=self.bayesMatrices
@@ -5697,7 +5799,7 @@ class PaperFigures:
                 )
                 else None,
             )
-            placeFieldSort = self.trainerBayes.linearPosArgSort
+            placeFieldSort = self.bayes.linearPosArgSort
 
         useAll_suffix = "_all" if useAll else ""
         strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
@@ -5867,12 +5969,17 @@ class PaperFigures:
         binEdges,
         suffix=None,
         speed_filter=True,
+        tuningCurve_training=None,
+        dirSave=None,
+        show=True,
     ):
         """
         Shows the distribution of decoded positions specifically when this cell is active.
         """
         if suffix is None:
             suffix = self.suffix
+        if "_" not in suffix:
+            suffix = "_" + suffix
         # Only look at time windows where this specific cell fired
         spike_mask = spikeHist > 0
         predictions_at_spike = linearPred[spike_mask]
@@ -5894,10 +6001,10 @@ class PaperFigures:
         # Plot the tuning curve as a reference (normalized to fit the plot)
         ax.fill_between(
             bin_centers,
-            norm_tuning_curve,
+            gaussian_filter1d(norm_tuning_curve, 2),
             alpha=0.2,
             color="gray",
-            label="Place Field (True)",
+            label=f"Place Field ({suffix.strip('_')})",
         )
 
         # Plot Prediction Distribution as a bar chart (normalized height)
@@ -5910,20 +6017,37 @@ class PaperFigures:
             label="Decoder Prediction (Norm Height)",
         )
 
+        if tuningCurve_training is not None:
+            norm_tuning_curve_training = (
+                tuningCurve_training / np.max(tuningCurve_training)
+                if np.max(tuningCurve_training) > 0
+                else tuningCurve_training
+            )
+            ax.plot(
+                bin_centers,
+                gaussian_filter(norm_tuning_curve_training, sigma=2),
+                color="navy",
+                linestyle="--",
+                label="Place Field (Training, Speed)",
+            )
+
         ax.set_title(
-            f"Cell {i_spatial}: Where does the Decoder place the animal when this cell spikes? (phase {suffix.strip('_')} & {speed_filter=})"
+            f"Cell {i_spatial}: Where does the Decoder place the animal when this cell spikes?\n(phase {suffix.strip('_')} & {speed_filter=})"
         )
         ax.set_xlabel("Linear Position")
         ax.set_ylabel("Normalized Density")
         ax.set_ylim(0, 1.1)
-        ax.legend()
+        fig.legend()
+        fig.tight_layout()
         fig.savefig(
             os.path.join(
-                self.folderFigures,
+                dirSave if dirSave is not None else self.folderFigures,
                 f"prediction_given_spikes_cell{i_spatial}{suffix}_speed_{speed_filter}.png",
             )
         )
-        plt.show()
+        if show:
+            plt.show()
+        plt.close()
 
     def plot_activity_given_prediction(
         self,
@@ -5934,6 +6058,9 @@ class PaperFigures:
         binEdges,
         suffix=None,
         speed_filter=True,
+        tuningCurve_training=None,
+        dirSave=None,
+        show=True,
     ):
         """
         Shows the average firing rate of the cell relative to the predicted position.
@@ -5961,42 +6088,82 @@ class PaperFigures:
         # True Tuning Curve
         ax.plot(
             bin_centers,
-            tuningCurve,
+            gaussian_filter1d(tuningCurve, sigma=2),
             color="blue",
             label="True Tuning Curve (vs True Pos)",
         )
 
         # 'Predicted' Tuning Curve
-        ax.plot(
+        subax = ax.twinx()
+        # subax.plot(
+        #     bin_centers,
+        #     activity_at_pred,
+        #     color="red",
+        #     linestyle="--",
+        #     alpha=0.5,
+        #     label="Manifested Activity (vs Predicted Pos)",
+        # )
+        # smooth the activity at pred to get a nice curve
+        smooth_acti = gaussian_filter1d(activity_at_pred, sigma=2)
+        subax.plot(
             bin_centers,
-            activity_at_pred,
+            smooth_acti,
             color="red",
             linestyle="--",
-            label="Manifested Activity (vs Predicted Pos)",
+            alpha=0.9,
+            label="Smoothed Manifested Activity (vs Predicted Pos)",
         )
+        # set right spine visible
+        subax.spines["right"].set_visible(True)
+        subax.set_ylabel("Activity density.")
+
+        if tuningCurve_training is not None:
+            ax.plot(
+                bin_centers,
+                gaussian_filter1d(tuningCurve_training, 2),
+                color="navy",
+                linestyle=":",
+                label="Tuning Curve (Training)",
+            )
 
         ax.set_title(
             f"Cell {i_spatial}: Cell activity relative to the Decoder's prediction (phase {suffix.strip('_')} & {speed_filter=})"
         )
         ax.set_xlabel("Linear Position")
         ax.set_ylabel("Firing Rate")
-        ax.legend()
+        fig.tight_layout()
+        fig.legend()
         plt.savefig(
             os.path.join(
-                self.folderFigures,
+                dirSave if dirSave is not None else self.folderFigures,
                 f"activity_given_prediction_cell{i_spatial}{suffix}_speed_{speed_filter}.png",
             )
         )
-        plt.show()
+        if show:
+            plt.show()
+        plt.close()
 
-    def plot_single_cell_remapping(self, suffix1, suffix2, i_spatial, iwindow=0):
+    def plot_single_cell_remapping(
+        self, suffix1, suffix2, neuron_idx=None, i_spatial=None, iwindow=0
+    ):
         """
         Compares the tuning curve and decoding alignment for one cell across two suffixes.
         """
-        if self.trainerBayes is None:
+        if neuron_idx is not None and i_spatial is not None:
+            raise ValueError("Specify either neuron_idx or i_spatial, not both.")
+        if neuron_idx is None and i_spatial is None:
+            raise ValueError("Must specify either neuron_idx or i_spatial.")
+        if self.bayes is None:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
             )
+        if suffix1 == suffix2:
+            raise ValueError("Suffixes must be different to compare remapping.")
+
+        if "_" not in suffix1:
+            suffix1 = "_" + suffix1
+        if "_" not in suffix2:
+            suffix2 = "_" + suffix2
 
         # 1. Fetch data for Suffix 1
         loadName1 = self._get_aligned_path(suffix1, iwindow)
@@ -6034,24 +6201,27 @@ class PaperFigures:
 
         # 3. Identify the Neuron
         # Assuming the spatial sort was done on suffix1
-        original_neuron_idx = self.trainerBayes.linearPosArgSort[i_spatial]
+        if i_spatial is not None and neuron_idx is None:
+            neuron_idx = self.bayes.linearPosArgSort[i_spatial]
 
         # Tuning Curves (calculated previously or re-calculated)
-        tc1 = self.trainerBayes.calculate_linear_tuning_curve(
+        tc1, binEdges = self.bayes.calculate_linear_tuning_curve(
             self.l_function, self.behaviorData, suffix=suffix1
-        )[0][original_neuron_idx]
+        )
+        tc1 = tc1[neuron_idx]
 
-        tc2 = self.trainerBayes.calculate_linear_tuning_curve(
+        tc2, binEdges = self.bayes.calculate_linear_tuning_curve(
             self.l_function, self.behaviorData, suffix=suffix2
-        )[0][original_neuron_idx]
+        )
+        tc2 = tc2[neuron_idx]
 
         # 4. Extract Spiking (remembering the +1 noise offset in spikePop)
-        spikes1 = spikePop1[:, original_neuron_idx + 1][: len(true1)]
-        spikes2 = spikePop2[:, original_neuron_idx + 1][: len(true2)]
+        spikes1 = spikePop1[:, neuron_idx + 1][: len(true1)]
+        spikes2 = spikePop2[:, neuron_idx + 1][: len(true2)]
 
         # Plotting
         fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-        bin_centers = (self.binEdges[:-1] + self.binEdges[1:]) / 2
+        bin_centers = (binEdges[:-1] + binEdges[1:]) / 2
 
         # Top Plot: Condition 1 (Suffix 1)
         axes[0].fill_between(
@@ -6069,7 +6239,7 @@ class PaperFigures:
             color="blue",
             alpha=0.5,
         )
-        axes[0].set_title(f"Neuron {original_neuron_idx} - {suffix1}")
+        axes[0].set_title(f"Neuron {neuron_idx} - {suffix1}")
         axes[0].legend()
 
         # Bottom Plot: Condition 2 (Suffix 2)
@@ -6089,29 +6259,47 @@ class PaperFigures:
                 color="red",
                 alpha=0.5,
             )
-        axes[1].set_title(f"Neuron {original_neuron_idx} - {suffix2}")
+        axes[1].set_title(f"Neuron {neuron_idx} - {suffix2}")
         axes[1].set_xlabel("Linear Position")
         axes[1].legend()
 
         plt.tight_layout()
         plt.show()
 
-    def _get_aligned_path(self, suffix, iwindow):
+    def _get_aligned_path(self, suffix, iwindow, strideFactor=4):
         # Helper to reconstruct your specific file path logic
+        if "_" not in suffix:
+            suffix = "_" + suffix
         ws = self.timeWindows[iwindow]
-        return os.path.join(
-            self.projectPath.dataPath,
-            f"aligned_{suffix}",  # Adjust based on your naming convention
-            str(ws),
-            "test",  # or train
-            f"spikeMat_window_popVector{suffix}.csv",
-        )
+        strideFactor_suffix = f"_factor{strideFactor}" if strideFactor > 1 else ""
+
+        base_dir = self.projectPath.dataPath
+        if os.path.isdir(
+            os.path.join(base_dir, f"aligned{suffix}_all{strideFactor_suffix}")
+        ):
+            aligned_dir = os.path.join(
+                base_dir, f"aligned{suffix}_all{strideFactor_suffix}"
+            )
+            final_dir = os.path.join(aligned_dir, str(ws), "train")
+        elif os.path.isdir(
+            os.path.join(base_dir, f"aligned{suffix}{strideFactor_suffix}")
+        ):
+            aligned_dir = os.path.join(
+                base_dir, f"aligned{suffix}{strideFactor_suffix}"
+            )
+            final_dir = os.path.join(aligned_dir, str(ws), "test")
+        else:
+            raise FileNotFoundError(
+                f"No aligned directory found for suffix {suffix} with or without _all and stride factor. Please run the spike alignment first in the WaveFormComparator class."
+            )
+
+        return os.path.join(final_dir, f"spikeMat_window_popVector{suffix}.csv")
 
     def plot_pv_correlation(self, suffix1, suffix2, **kwargs):
         """
         Calculates the Correlation Matrix between Mean Population Vectors of two conditions.
         """
-        if self.trainerBayes is None:
+        if self.bayes is None:
             raise ValueError(
                 "Trainer Bayes is not defined. Please run the bayesian decoder first in the WaveFormComparator class."
             )
@@ -6143,13 +6331,13 @@ class PaperFigures:
         else:
             behav_data = self.behaviorData
         # Get Tuning Curves for both (ordered the same way)
-        tc1, binEdges1 = self.trainerBayes.calculate_linear_tuning_curve(
+        tc1, binEdges1 = self.bayes.calculate_linear_tuning_curve(
             self.l_function,
             behav_data,
             suffix=suffix1,
             use_speed_filter=use_speed_filter,
         )
-        tc2, binEdges2 = self.trainerBayes.calculate_linear_tuning_curve(
+        tc2, binEdges2 = self.bayes.calculate_linear_tuning_curve(
             self.l_function,
             behav_data,
             suffix=suffix2,
@@ -6908,22 +7096,23 @@ class PaperFigures:
     def _plot_single_place_field(self, ax, neuron_idx, pos_x, pos_y, epoch, title):
         """Helper to plot a single place field on a specific axis."""
         spike_time = nap.Ts(
-            self.trainerBayes.spikeMatTimes[
-                self.trainerBayes.spikeMatLabels[:, neuron_idx] == 1
+            self.bayes.spikeMatTimes[
+                self.bayes.spikeMatLabels[:, neuron_idx] == 1
             ].flatten()
         )
+        freq_video = 1 / np.median(pos_x.time_diff(epochs=epoch).values)
 
         results = _run_place_field_analysis(
             spike_time,
             pos_x,
             pos_y,
-            epoch=nap.IntervalSet(epoch),
             smoothing=3,
-            freq_video=30,
+            freq_video=freq_video,
             threshold=0.7,
             size_map=50,
             limit_maze=(0, 1, 0, 1),
             large_matrix=True,
+            epoch=nap.IntervalSet(epoch),
         )
 
         # Plot Heatmap
@@ -6971,12 +7160,12 @@ class PaperFigures:
     ):
         """Compute mean Pearson correlation across neurons for linear tuning curves."""
         try:
-            true_fields, _ = self.trainerBayes.calculate_linear_tuning_curve(
+            true_fields, _ = self.bayes.calculate_linear_tuning_curve(
                 l_function=self.l_function,
                 behaviorData=true_behavior,
                 use_speed_filter=use_speed_filter,
             )
-            pred_fields, _ = self.trainerBayes.calculate_linear_tuning_curve(
+            pred_fields, _ = self.bayes.calculate_linear_tuning_curve(
                 l_function=self.l_function,
                 behaviorData=predicted_behavior,
                 use_speed_filter=use_speed_filter,
@@ -7022,9 +7211,9 @@ class PaperFigures:
                 - show (bool): If True, displays the figure. Default is True if axs is None, else False.
                 - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
         """
-        if not hasattr(self, "trainerBayes") or self.trainerBayes is None:
+        if not hasattr(self, "bayes") or self.bayes is None:
             raise ValueError(
-                "trainerBayes is not available. Please run Bayesian training first."
+                "bayes is not available. Please run Bayesian training first."
             )
 
         # kwargs processing
@@ -7053,7 +7242,7 @@ class PaperFigures:
                     else None
                 )
 
-                bayes_mat = self.trainerBayes.train_order_by_pos(
+                bayes_mat = self.bayes.train_order_by_pos(
                     self.behaviorData,
                     l_function=self.l_function,
                     bayesMatrices=existing_bayes,
@@ -7120,12 +7309,12 @@ class PaperFigures:
                 else high_quality_indices[i]
             )
             # check if neuron_first has at least 50 spikes in the wake/training epoch and 100 spikes overall
-            spike_count = np.sum(self.trainerBayes.spikeMatLabels[:, neuron_first])
+            spike_count = np.sum(self.bayes.spikeMatLabels[:, neuron_first])
             if (
                 spike_count > 100
                 and nap.Ts(
-                    self.trainerBayes.spikeMatTimes[
-                        self.trainerBayes.spikeMatLabels[:, neuron_first] == 1
+                    self.bayes.spikeMatTimes[
+                        self.bayes.spikeMatLabels[:, neuron_first] == 1
                     ].flatten()
                 )
                 .restrict(nap.IntervalSet(epoch))
@@ -7138,7 +7327,7 @@ class PaperFigures:
         )
 
         # --- Pre-calculate Linear Fields ---
-        has_linear = hasattr(self.trainerBayes, "orderedLinearPlaceFields")
+        has_linear = hasattr(self.bayes, "orderedLinearPlaceFields")
         train_lt_axes = []
         pred_lt_axes = []
         train_lt_im = None
@@ -7149,7 +7338,7 @@ class PaperFigures:
         # --- Panel 1: All Linear Tuning Curves ---
         ax = axs[1]
         if has_linear:
-            train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            train_lt_im, train_cb_label = self.full_plot_linear_tuning_curves(
                 ax=ax,
                 add_colorbar=False,
                 **kwargs,
@@ -7178,12 +7367,12 @@ class PaperFigures:
                 if np.isfinite(corr_speed)
                 else "Predicted LT Curves"
             )
-            pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+            pred_lt_im, pred_cb_label = self.full_plot_linear_tuning_curves(
                 ax=ax,
                 fullBehavior=self.decoded_fullBehavior,
                 title=title,
                 is_predicted=True,
-                sort_map=self.trainerBayes.linearPosArgSort,
+                sort_map=self.bayes.linearPosArgSort,
                 add_colorbar=False,
                 **kwargs,
             )
@@ -7220,12 +7409,12 @@ class PaperFigures:
                     if np.isfinite(corr_all)
                     else "Predicted LT Curves (All Speeds)"
                 )
-                pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+                pred_lt_im, pred_cb_label = self.full_plot_linear_tuning_curves(
                     ax=ax,
                     fullBehavior=self.decoded_fullBehavior,
                     title=title,
                     is_predicted=True,
-                    sort_map=self.trainerBayes.linearPosArgSort,
+                    sort_map=self.bayes.linearPosArgSort,
                     use_speed_filter=False,
                     add_colorbar=False,
                     **kwargs,
@@ -7236,7 +7425,7 @@ class PaperFigures:
                     "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
                 )
                 title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
-                self.plot_linear_tuning_curves(
+                self.full_plot_linear_tuning_curves(
                     ax=ax, mask=high_quality_mask, title=title, **kwargs
                 )
             else:
@@ -7244,12 +7433,12 @@ class PaperFigures:
                 ax.axis("off")
 
         if has_linear and hasattr(self, "decoded_fullBehavior"):
-            train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            train_lt_im, train_cb_label = self.full_plot_linear_tuning_curves(
                 ax=axs[2],
                 fullBehavior=self.behaviorData,
                 title="LT Curves (All Speeds)",
                 is_predicted=False,
-                sort_map=self.trainerBayes.linearPosArgSort,
+                sort_map=self.bayes.linearPosArgSort,
                 use_speed_filter=False,
                 add_colorbar=False,
                 **kwargs,

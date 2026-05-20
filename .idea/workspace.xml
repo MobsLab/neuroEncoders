@@ -5,11 +5,26 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/other.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/dictionaries/project.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/dictionaries/project.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/neuroencoders.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/neuroencoders.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/neuroencoders@1.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/neuroencoders@1.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/environment.yml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/CSI.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/CSI.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/PlaceField_dB.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/PlaceField_dB.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/Spike.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/Spike.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -19,12 +34,12 @@
   <component name="CopilotChats">
     <option name="panelChat">
       <chat>
-        <option name="activeSessionId" value="0bc2a9b7-6bab-4167-b770-4184640c0c2c" />
+        <option name="activeSessionId" value="05b6ad42-1a00-4955-83a5-50eb26de0539" />
         <option name="sessions">
           <session>
             <option name="chatType" value="PANEL" />
             <option name="id" value="05b6ad42-1a00-4955-83a5-50eb26de0539" />
-            <option name="modeId" value="Ask" />
+            <option name="modeId" value="Agent" />
             <option name="modelType" value="builtin_family" />
             <option name="modelValue" value="auto" />
             <option name="status" value="Completed" />
@@ -86,6 +101,46 @@
             <option name="modelValue" value="auto" />
             <option name="targetType" value="LOCAL" />
           </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="af3b7f62-9ee5-4076-99c4-a093dd67b1af" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="097d0a3c-c36e-414b-885e-589cee87d000" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="e182d979-2c07-4351-bb5a-9601d9fcca13" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="cd2e22a8-6732-4176-82e0-23bbd8e09b83" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="b22ad6c7-20f9-40cb-94dd-033a47eb86e7" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
         </option>
         <option name="type" value="PANEL" />
       </chat>
@@ -99,6 +154,7 @@
   <component name="CopilotUserSelectedModel">
     <selectedModels>
       <entry key="agent-panel" value="Auto" />
+      <entry key="inline" value="Auto" />
       <entry key="chat-panel" value="Auto" />
     </selectedModels>
   </component>
@@ -118,14 +174,41 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;theodchrn&quot;
+  }
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;git@github.com:MobsLab/neuroEncoders.git&quot;,
+    &quot;accountId&quot;: &quot;d903e366-364b-44d3-af2b-b92716e09995&quot;
+  }
+}</component>
   <component name="JupyterStructureSortingOptionsState">
     <option name="areErrorsAndDeclinedOnTop" value="true" />
+  </component>
+  <component name="ProblemsViewState">
+    <option name="selectedTabId" value="CurrentFile" />
   </component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 6
 }</component>
   <component name="ProjectId" id="3DOwvJfVMLQIgzKkQAiMvtDqTCw" />
   <component name="ProjectSessionTemplates">
+    <option name="inlineTemplate">
+      <template>
+        <option name="modeId" value="InlineAgent" />
+        <option name="model">
+          <model>
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+          </model>
+        </option>
+        <option name="targetType" value="LOCAL" />
+      </template>
+    </option>
     <option name="panelTemplate">
       <template>
         <option name="modeId" value="Ask" />
@@ -151,21 +234,25 @@
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;dev/working__on&quot;,
+    &quot;javascript.preferred.runtime.type.id&quot;: &quot;node&quot;,
     &quot;last_opened_file_path&quot;: &quot;/home/mickey/Documents/Theotime/neuroEncoders/notebooks&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
     &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.keymap&quot;,
+    &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;jupyter.settings.vcs&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
   <component name="PyConsoleOptionsProvider">
     <option name="myPythonConsoleState">
-      <console-settings module-name="neuroencoders" is-module-sdk="true">
+      <console-settings custom-start-script="import sys; print('Python %s on %s' % (sys.version, sys.platform))&#10;sys.path.extend([WORKING_DIR_AND_PYTHON_PATHS])" module-name="neuroencoders" is-module-sdk="true">
+        <option name="myCustomStartScript" value="import sys; print('Python %s on %s' % (sys.version, sys.platform))&#10;sys.path.extend([WORKING_DIR_AND_PYTHON_PATHS])" />
         <option name="myUseModuleSdk" value="true" />
         <option name="myModuleName" value="neuroencoders" />
       </console-settings>
@@ -184,10 +271,14 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-f4ee427fc208-JavaScript-PY-262.5752.27" />
-        <option value="bundled-python-sdk-ccb261ca2fb8-7b465b3c1629-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.5752.27" />
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
+        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
       </set>
     </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="project-level" UseSingleDictionary="true" transferred="true" />
+  <component name="SvnConfiguration">
+    <configuration>$USER_HOME$/.subversion</configuration>
   </component>
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
@@ -220,6 +311,27 @@
       <workItem from="1779031363070" duration="200000" />
       <workItem from="1779031675443" duration="20000" />
       <workItem from="1779031712185" duration="9607000" />
+      <workItem from="1779109164733" duration="23000" />
+      <workItem from="1779109289832" duration="1000" />
+      <workItem from="1779110132138" duration="8000" />
+      <workItem from="1779110155360" duration="4565000" />
+      <workItem from="1779115389005" duration="839000" />
+      <workItem from="1779116275894" duration="502000" />
+      <workItem from="1779116845781" duration="1086000" />
+      <workItem from="1779118015164" duration="627000" />
+      <workItem from="1779118731531" duration="225000" />
+      <workItem from="1779119474011" duration="321000" />
+      <workItem from="1779119837342" duration="121000" />
+      <workItem from="1779119994832" duration="65000" />
+      <workItem from="1779120152065" duration="2000" />
+      <workItem from="1779120207541" duration="1386000" />
+      <workItem from="1779121648054" duration="1731000" />
+      <workItem from="1779123439463" duration="39089000" />
+      <workItem from="1779218713284" duration="76000" />
+      <workItem from="1779218867552" duration="1286000" />
+      <workItem from="1779222140498" duration="25000" />
+      <workItem from="1779222179198" duration="7282000" />
+      <workItem from="1779277581176" duration="541000" />
     </task>
     <servers />
   </component>
@@ -256,32 +368,30 @@
           <option name="timeStamp" value="6" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py</url>
-          <line>1235</line>
-          <option name="timeStamp" value="8" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py</url>
-          <line>2664</line>
+          <line>2709</line>
           <option name="timeStamp" value="10" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
-          <line>128</line>
+          <line>150</line>
           <option name="timeStamp" value="7" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
-          <line>99</line>
+          <line>121</line>
           <option name="timeStamp" value="9" />
         </line-breakpoint>
       </breakpoints>
       <default-breakpoints>
-        <breakpoint enabled="true" type="python-exception">
+        <breakpoint type="python-exception">
           <properties notifyOnlyOnFirst="true" notifyOnTerminate="true" exception="BaseException">
             <option name="notifyOnTerminate" value="true" />
             <option name="notifyOnlyOnFirst" value="true" />
           </properties>
+        </breakpoint>
+        <breakpoint type="jupyter-exception">
+          <properties exception="BaseException" />
         </breakpoint>
       </default-breakpoints>
     </breakpoint-manager>
