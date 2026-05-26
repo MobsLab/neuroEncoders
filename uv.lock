@@ -5698,7 +5698,7 @@ requires-dist = [
     { name = "pylibraft-cu12", marker = "extra == 'gpu'", specifier = ">=25.10" },
     { name = "pympler", marker = "extra == 'all'", specifier = ">=1.1" },
     { name = "pympler", marker = "extra == 'dev'", specifier = ">=1.1" },
-    { name = "pynapple", extras = ["dev"], editable = "../pynapple" },
+    { name = "pynapple", extras = ["dev"], git = "https://github.com/MobsLab/pynapple.git" },
     { name = "pyqt5", specifier = ">=5.15.11" },
     { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "pytest", specifier = ">=9.0.2" },
@@ -8322,7 +8322,8 @@ wheels = [
 
 [[package]]
 name = "pynapple"
-source = { editable = "../pynapple" }
+version = "0.0.post1.dev2428"
+source = { git = "https://github.com/MobsLab/pynapple.git#62a7ec0ad00bf613ad73c89ed8aa4ff269bfe200" }
 dependencies = [
     { name = "h5py" },
     { name = "neo" },
@@ -8348,56 +8349,6 @@ dev = [
     { name = "pip-tools" },
     { name = "pytest" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", marker = "extra == 'dandi'" },
-    { name = "black", marker = "extra == 'dev'", specifier = ">=24.2.0" },
-    { name = "coverage", marker = "extra == 'dev'" },
-    { name = "dandi", marker = "extra == 'dandi'" },
-    { name = "dandi", marker = "extra == 'doc'" },
-    { name = "flake8", marker = "extra == 'dev'" },
-    { name = "flake8-pyproject", marker = "extra == 'dev'" },
-    { name = "fsspec", marker = "extra == 'dandi'" },
-    { name = "h5py" },
-    { name = "isort", marker = "extra == 'dev'" },
-    { name = "matplotlib", marker = "extra == 'doc'" },
-    { name = "myst-nb", marker = "extra == 'doc'" },
-    { name = "myst-parser", marker = "extra == 'doc'" },
-    { name = "neo" },
-    { name = "numba", specifier = ">=0.46.0" },
-    { name = "numba", marker = "python_full_version >= '3.9'", specifier = ">=0.53.0" },
-    { name = "numba", marker = "python_full_version >= '3.10'", specifier = ">=0.55.0" },
-    { name = "numba", marker = "python_full_version >= '3.11'", specifier = ">=0.57.0" },
-    { name = "numba", marker = "python_full_version >= '3.12'", specifier = ">=0.59.0" },
-    { name = "numba", marker = "python_full_version >= '3.13'", specifier = ">=0.61.0" },
-    { name = "numpy", specifier = ">=1.17.4" },
-    { name = "numpydoc", marker = "extra == 'doc'" },
-    { name = "pandas", specifier = ">1.0.3" },
-    { name = "pip-tools", marker = "extra == 'dev'" },
-    { name = "pydata-sphinx-theme", marker = "extra == 'doc'" },
-    { name = "pynajax", marker = "python_full_version >= '3.11' and extra == 'jax'" },
-    { name = "pynwb", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "requests", marker = "extra == 'dandi'" },
-    { name = "rich" },
-    { name = "scikit-learn", marker = "extra == 'doc'" },
-    { name = "scipy", specifier = ">=1.3.2" },
-    { name = "seaborn", marker = "extra == 'doc'" },
-    { name = "sphinx", marker = "extra == 'doc'" },
-    { name = "sphinx-autobuild", marker = "extra == 'doc'" },
-    { name = "sphinx-autodoc-typehints", marker = "extra == 'doc'" },
-    { name = "sphinx-contributors", marker = "extra == 'doc'" },
-    { name = "sphinx-copybutton", marker = "extra == 'doc'" },
-    { name = "sphinx-design", marker = "extra == 'doc'" },
-    { name = "sphinx-issues", marker = "extra == 'doc'" },
-    { name = "sphinxcontrib-apidoc", marker = "extra == 'doc'" },
-    { name = "tabulate" },
-    { name = "tqdm", marker = "extra == 'doc'" },
-    { name = "xarray", specifier = ">=2023.1.0" },
-    { name = "zarr", marker = "extra == 'doc'" },
-]
-provides-extras = ["jax", "dev", "doc", "dandi"]
 
 [[package]]
 name = "pynndescent"

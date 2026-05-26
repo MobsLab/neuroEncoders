@@ -20,7 +20,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: uv run --no-dev pytest tests/
+        entry: uv run --no-dev pytest -x tests/
         language: system
         pass_filenames: false
         always_run: true

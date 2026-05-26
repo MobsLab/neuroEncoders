@@ -76,7 +76,7 @@ class TuningCurvesPlotter:
         bin_edges: np.ndarray,
         sort_map: Optional[np.ndarray] = None,
         list_neurons: Optional[List[int] | np.ndarray] = None,
-    ) -> Tuple[np.ndarray, List[int]]:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
 
@@ -111,7 +111,7 @@ class TuningCurvesPlotter:
 
         ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
 
-        return ordered_lin_place_fields, linear_pos_argsort
+        return ordered_lin_place_fields, np.array(linear_pos_argsort)
 
     def plot_linear_tuning_curves(
         self,
@@ -7169,7 +7169,13 @@ class PaperFigures(TuningCurvesPlotter):
     def _compute_linear_pf_correlation(
         self, true_behavior, predicted_behavior, timeWindow, use_speed_filter=True
     ):
-        """Compute mean Pearson correlation across neurons for linear tuning curves."""
+        """
+        Compute mean Pearson correlation across neurons for linear tuning curves.
+        """
+        if not hasattr(self, "bayes") or self.bayes is None:
+            raise ValueError(
+                "bayes is not available. Please run Bayesian training first."
+            )
         try:
             true_fields, _ = self.bayes.calculate_linear_tuning_curve(
                 l_function=self.l_function,
@@ -7305,12 +7311,9 @@ class PaperFigures(TuningCurvesPlotter):
             d=self.behaviorData[position_key][:, 1],
             t=self.behaviorData["positionTime"].flatten(),
         )
-        epoch = np.concatenate(
-            [
-                self.behaviorData["Times"]["trainEpochs"],
-                self.behaviorData["Times"]["testEpochs"],
-            ]
-        ).reshape(-1)
+        epoch = nap.IntervalSet(self.behaviorData["Times"]["trainEpochs"]).union(
+            nap.IntervalSet(self.behaviorData["Times"]["testEpochs"])
+        )
 
         # --- Panel 0: First Ordered Place Field ---
         for i in range(len(bayes_mat["linearPosArgSort"])):
@@ -7437,7 +7440,11 @@ class PaperFigures(TuningCurvesPlotter):
                 )
                 title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
                 self.full_plot_linear_tuning_curves(
-                    ax=ax, mask=high_quality_mask, title=title, **kwargs
+                    ax=ax,
+                    mask=high_quality_mask,
+                    title=title,
+                    add_colorbar=False,
+                    **kwargs,
                 )
             else:
                 ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")

@@ -238,7 +238,7 @@ include = ["neuroencoders"]
 
 [tool.uv.sources]
 neuroencoders = { workspace = true }
-pynapple = { path = "../pynapple", editable = true }
+pynapple = { git = "https://github.com/MobsLab/pynapple.git" }
 
 [[tool.uv.index]]
 url = "https://pypi.nvidia.com/"
