@@ -16,7 +16,15 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
-from pynapple import IntervalSet, Ts, TsGroup, Tsd, TsdFrame, compute_tuning_curves
+from pynapple import (
+    IntervalSet,
+    Ts,
+    TsGroup,
+    Tsd,
+    TsdFrame,
+    compute_mutual_information,
+    compute_tuning_curves,
+)
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from statannotations.Annotator import Annotator
@@ -33,6 +41,7 @@ from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import (
     Params,
     Project,
+    SpatialConstraintsMixin,
     gaussian_filter_nan,
     get_max_nb_spikes,
 )
@@ -659,7 +668,110 @@ def path_for_experiments_df(experiment_name: str, training_name: str) -> pd.Data
         return pd.DataFrame()
 
 
-class Mouse_Results(Params, PaperFigures):
+def _compute_tuning_curves_for_result(
+    results_obj,
+    suffix: Optional[str] = None,
+    feature_name: str = "linearTrue",
+    idWindow: int = 0,
+    use_speed_filter: bool = True,
+    count_thresh: Optional[int] = None,
+    bin_size: float = 0.05,
+    mode: str = "closest",
+    **kwargs,
+):
+    """Shared tuning-curve computation for a single results object."""
+
+    n_dims = kwargs.get("n_dims", 2)
+
+    if suffix is None:
+        suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
+
+    if "_" in suffix:
+        phase = suffix.strip("_")
+    else:
+        phase = suffix
+        suffix = "_" + suffix
+
+    data_helper = getattr(results_obj, "data_helper", None) or getattr(
+        results_obj, "DataHelper", None
+    )
+    if data_helper is None:
+        raise ValueError("Results object does not expose a data helper.")
+
+    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
+    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
+    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
+
+    if hasattr(data_helper, "get_spike_data"):
+        spike_data = data_helper.get_spike_data(force=True)
+    else:
+        spike_data = results_obj.get_spike_data()
+
+    above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
+    not_nan_epoch = (
+        Tsd(
+            t=data_helper.fullBehavior["positionTime"].flatten(),
+            d=np.isnan(data_helper.fullBehavior["Positions"]).any(axis=1).flatten(),
+        )
+        .threshold(0.5, "below")
+        .time_support
+    )
+    data_to_use = spike_data.restrict(Ts(t=time).time_support).count(bin_size)
+    features = (
+        Tsd(t=time, d=feature)
+        if len(feature.shape) == 1
+        else TsdFrame(t=time, d=feature[:, :n_dims])
+    )
+    epochs_to_use = (
+        not_nan_epoch.intersect(above_speed_epoch)
+        if use_speed_filter
+        else not_nan_epoch
+    )
+    bin_edges = kwargs.pop("nb_bins", 50 if len(feature.shape) == 1 else 30)
+    range_feature = kwargs.pop(
+        "feat_range", (0, 1) if len(feature.shape) == 1 else None
+    )
+    feature_names = kwargs.pop(
+        "feature_names", [feature_name] if len(feature.shape) == 1 else ["x", "y"]
+    )
+
+    tuning_curves = compute_tuning_curves(
+        data=data_to_use,
+        features=features,
+        bins=bin_edges,
+        epochs=epochs_to_use,
+        range=range_feature,
+        feature_names=feature_names,
+        return_counts=False,
+        mode=mode,
+    )
+
+    tuning_curves = tuning_curves.copy()
+
+    sigma = kwargs.pop("sigma", None)
+    if sigma is None:
+        if len(feature.shape) == 1 or feature.shape[1] == 1:
+            sigma = (0, 2)  # No smoothing across neurons, only across position bin_size
+        elif feature.shape[1] == 2:
+            sigma = (
+                0,
+                2.5,
+                2.5,
+            )
+        else:
+            sigma = 1
+    tuning_curves.values = gaussian_filter_nan(tuning_curves.values, sigma=sigma)
+
+    id_neurons = np.arange(0, len(spike_data))
+    if count_thresh is not None:
+        under_thresh = np.sum(tuning_curves.counts, axis=1) < count_thresh
+        tuning_curves = tuning_curves[~under_thresh]
+        id_neurons = id_neurons[~under_thresh]
+
+    return tuning_curves, id_neurons, spike_data, phase
+
+
+class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
     """
     Class to handle results for a specific mouse in an experiment.
     It will load the directory structure and parse all available windows.
@@ -715,6 +827,11 @@ class Mouse_Results(Params, PaperFigures):
             phase=self.phase,
             verbose=self.verbose,
             add_training=add_training,
+        )
+        SpatialConstraintsMixin.__init__(
+            self,
+            grid_size=self.Params.GaussianGridSize,
+            maze_params=self.Linearizer.maze_params,
         )
 
     def _parse_init_args(self, args, kwargs):
@@ -1914,6 +2031,16 @@ class Mouse_Results(Params, PaperFigures):
                 -1, 2
             )
         )
+        self.trainMask = inEpochsMask(
+            self.DataHelper.fullBehavior["positionTime"][:, 0], self.training
+        )
+        self.testing = IntervalSet(
+            np.array(self.DataHelper.fullBehavior["Times"]["testEpochs"]).reshape(-1, 2)
+        )
+        self.testMask = inEpochsMask(
+            self.DataHelper.fullBehavior["positionTime"][:, 0], self.testing
+        )
+
         try:
             self.pre = IntervalSet(
                 np.array(
@@ -1983,6 +2110,29 @@ class Mouse_Results(Params, PaperFigures):
             )
         except KeyError:
             pass
+
+    def get_epoch_interval(self, phase):
+        if "_" in phase:
+            phase = phase.strip("_")
+
+        return_dict = {
+            "training": (self.training, self.trainMask),
+            "testing": (self.testing, self.testMask),
+            "pre": (self.pre, self.preMask),
+            "hab": (self.hab, self.habMask),
+            "cond": (self.cond, self.condMask),
+            "post": (self.post, self.postMask),
+            "sleep": (self.sleep, self.sleepMask),
+        }
+        if hasattr(self, "extinct") and hasattr(self, "extinctMask"):
+            return_dict["extinction"] = (self.extinct, self.extinctMask)
+
+        if phase not in return_dict:
+            raise ValueError(
+                f"Phase '{phase}' not recognized. Available phases: {list(return_dict.keys())}"
+            )
+
+        return return_dict[phase]
 
     def run_spike_alignment(self, **kwargs):
         """
@@ -2224,7 +2374,7 @@ class Mouse_Results(Params, PaperFigures):
         """
 
         bin_size = kwargs.pop("bin_size", 0.036)
-        mode = kwargs.pop("mode", "before")
+        mode = kwargs.pop("mode", "closest")
 
         final, id_neurons, spike_data, phase = _compute_tuning_curves_for_result(
             self,
@@ -2235,6 +2385,7 @@ class Mouse_Results(Params, PaperFigures):
             count_thresh=count_thresh,
             bin_size=bin_size,
             mode=mode,
+            **kwargs,
         )
         self.spikeData = spike_data
 
@@ -2255,74 +2406,536 @@ class Mouse_Results(Params, PaperFigures):
 
         return final, np.arange(final.shape[0]), id_neurons
 
+    def pynapple_bayesian_neurons_summary(
+        self,
+        feature_name_1d="linearTrue",
+        feature_name_2d="featureTrue",
+        suffix="_training",
+        idWindow=0,
+        use_speed_filter=True,
+        count_thresh=None,
+        axs=None,
+        fig=None,
+        block=False,
+        **kwargs,
+    ):
+        """
+        Summary of the Bayesian neurons.
+        Can create its own figure or plot on provided axes.
 
-def _compute_tuning_curves_for_result(
-    results_obj,
-    suffix: Optional[str] = None,
-    feature_name: str = "linearTrue",
-    idWindow: int = 0,
-    use_speed_filter: bool = True,
-    count_thresh: Optional[int] = None,
-    bin_size: float = 0.05,
-    mode: str = "before",
-):
-    """Shared tuning-curve computation for a single results object."""
+        Args:
+            axs (array-like, optional): Array of matplotlib axes to plot on. If None, a new figure with 6 subplots will be created.
+            fig (matplotlib.figure.Figure, optional): Figure object to associate with the axes. If None and axs is provided, fig will be inferred from axs.
+            block (bool, optional): Whether to block execution when showing the plot. Default is False.
+            **kwargs: Additional keyword arguments for training and plotting.
+                Supported kwargs:
+                - plot_high_quality (bool): If True, plots only high-quality neurons based on Mutual Information. Default is False.
+                - save (bool): If True, saves the figure. Default is True if axs is None, else False.
+                - show (bool): If True, displays the figure. Default is True if axs is None, else False.
+                - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
+        """
+        # kwargs processing
+        plot_high_quality = kwargs.get("plot_high_quality", False)
+        save = kwargs.get("save", True if axs is None else False)
+        show = kwargs.get("show", True if axs is None else False)
+        is_predicted = kwargs.get("is_predicted", False)
+        cax_train = kwargs.pop("cax_train", None)
+        cax_pred = kwargs.pop("cax_pred", None)
 
-    if suffix is None:
-        suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
+        bin_size = kwargs.pop("bin_size", 0.036)
+        mode = kwargs.pop("mode", "closest")
 
-    if "_" in suffix:
-        phase = suffix.strip("_")
-    else:
-        phase = suffix
-
-    data_helper = getattr(results_obj, "data_helper", None) or getattr(
-        results_obj, "DataHelper", None
-    )
-    if data_helper is None:
-        raise ValueError("Results object does not expose a data helper.")
-
-    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
-    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
-    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
-
-    if hasattr(data_helper, "get_spike_data"):
-        spike_data = data_helper.get_spike_data(force=True)
-    else:
-        spike_data = results_obj.get_spike_data()
-
-    above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
-    not_nan_epoch = (
-        Tsd(
-            t=data_helper.fullBehavior["positionTime"].flatten(),
-            d=np.isnan(data_helper.fullBehavior["Positions"]).any(axis=1).flatten(),
+        final1d, id_neurons1d, spike_data, phase = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name=feature_name_1d,
+            idWindow=idWindow,
+            use_speed_filter=use_speed_filter,
+            count_thresh=count_thresh,
+            bin_size=bin_size,
+            mode=mode,
+            **kwargs,
         )
-        .threshold(1, "below")
-        .time_support
-    )
+        ordered1d, sort_map = self.compute_linear_tuning_curves_order(
+            lin_place_fields=final1d.values,
+            bin_edges=np.linspace(0, 1, final1d.values.shape[1] + 1),
+            sort_map=kwargs.pop("sort_map", None),
+            list_neurons=kwargs.pop("list_neurons", None),
+        )
 
-    tuning_curves = compute_tuning_curves(
-        data=spike_data.restrict(Ts(t=time).time_support).count(bin_size),
-        features=Tsd(t=time, d=feature),
-        epochs=not_nan_epoch.intersect(above_speed_epoch)
-        if use_speed_filter
-        else not_nan_epoch,
-        bins=50,
-        range=(0, 1) if "linear" in feature_name.lower() else None,
-        feature_names=[feature_name],
-        return_counts=False,
-        mode=mode,
-    )
-    tuning_curves = tuning_curves.copy()
-    tuning_curves.values = gaussian_filter_nan(tuning_curves.values, sigma=(0, 2))
+        final2d, _, spike_data, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name=feature_name_2d,
+            idWindow=idWindow,
+            use_speed_filter=use_speed_filter,
+            count_thresh=None,
+            bin_size=bin_size,
+            mode=mode,
+            **kwargs,
+        )
+        ordered2d = final2d.values[id_neurons1d][sort_map]
+        ordered2d[
+            :,
+            ~self.get_allowed_mask_for_bin_size(
+                ordered2d.shape[1], ordered2d.shape[2]
+            ).T,
+        ] = np.nan
 
-    id_neurons = np.arange(0, len(spike_data))
-    if count_thresh is not None:
-        under_thresh = np.sum(tuning_curves.counts, axis=1) < count_thresh
-        tuning_curves = tuning_curves[~under_thresh]
-        id_neurons = id_neurons[~under_thresh]
+        self.spikeData = spike_data
 
-    return tuning_curves, id_neurons, spike_data, phase
+        mutual_info = compute_mutual_information(final2d)
+        ordered_mi = mutual_info.to_numpy()[:, 1][id_neurons1d][sort_map]
+
+        thresh = 80
+        percentile_val = np.percentile(ordered_mi, thresh)
+        high_quality_mask = ordered_mi > percentile_val
+
+        print(
+            f"High-quality place cells: {high_quality_mask.sum()} neurons (top {100 - thresh}%)"
+        )
+        print(
+            f"Total neurons {'above ' + str(count_thresh) if count_thresh is not None else ''}: {ordered2d.shape[0]}"
+        )
+        print(
+            f"Position range: {final1d.coords[feature_name_1d].min():.2f} - {final1d.coords[feature_name_1d].max():.2f}"
+        )
+
+        # --- 3. Visualization Setup ---
+        if axs is None:
+            fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+            axs = axs.flatten()
+        else:
+            axs = np.array(axs).flatten()
+            if fig is None:
+                fig = axs[0].figure
+
+        # Validate we have enough axes
+        if len(axs) < 6:
+            raise ValueError(
+                f"Provided 'axs' must have at least 6 subplots, got {len(axs)}."
+            )
+
+        # --- Panel 0: First Ordered Place Field ---
+        idx_to_plot = (
+            -1 if not plot_high_quality else np.where(high_quality_mask)[0][-1]
+        )
+        axs[0].imshow(
+            ordered2d[idx_to_plot].T, aspect="auto", origin="lower", extent=[0, 1, 0, 1]
+        )
+        axs[0].set_title("First Ordered Place Field")
+
+        # --- Pre-calculate Linear Fields ---
+        train_lt_axes = []
+        pred_lt_axes = []
+        train_lt_im = None
+        pred_lt_im = None
+        train_cb_label = None
+        pred_cb_label = None
+
+        # --- Panel 1: All Linear Tuning Curves ---
+        ax = axs[1]
+        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            ordered1d,
+            ax=ax,
+            add_colorbar=False,
+            **kwargs,
+        )
+        train_lt_axes.append(ax)
+
+        # --- Panel 2: Position Coverage ---
+        ax = axs[3]
+        feature = self.resultsNN_phase_pkl[suffix].get(feature_name_1d)[idWindow]
+        speedMask = self.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
+        if use_speed_filter:
+            feature = feature[speedMask]
+
+        ax.hist(
+            feature,
+            density=True,
+            bins=20,
+            alpha=0.7,
+            color="teal",
+        )
+        ax.set_xlabel("Linear Position")
+        ax.set_title("Pos Coverage in Training Data")
+
+        # --- Panel 3: Predicted Linear Tuning Curves (mov epochs) or Quality Metrics (Mutual Info) ---
+        ax = axs[4]
+        true_final1d, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearTrue",
+            idWindow=idWindow,
+            use_speed_filter=True,
+            bin_size=bin_size,
+            mode=mode,
+            **kwargs,
+        )
+        pred_final1d, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearPred",
+            idWindow=idWindow,
+            use_speed_filter=True,
+            bin_size=bin_size,
+            mode=mode,
+        )
+
+        corr_values = []
+        true_fields = true_final1d[id_neurons1d][sort_map].values
+        pred_fields = pred_final1d[id_neurons1d][sort_map].values
+        n_cells = min(len(true_fields), len(pred_fields))
+        for i in range(n_cells):
+            true_pf = np.asarray(true_fields[i]).reshape(-1)
+            pred_pf = np.asarray(pred_fields[i]).reshape(-1)
+            if (
+                true_pf.shape != pred_pf.shape
+                or np.std(true_pf) == 0
+                or np.std(pred_pf) == 0
+            ):
+                continue
+            corr_values.append(pearsonr(true_pf, pred_pf)[0])
+
+        if len(corr_values) == 0:
+            corr_speed = np.nan
+        else:
+            corr_speed = np.nanmean(corr_values)
+
+        title = (
+            f"Predicted LT Curves (r={corr_speed:.3f})"
+            if np.isfinite(corr_speed)
+            else "Predicted LT Curves"
+        )
+        pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+            pred_fields,
+            ax=ax,
+            title=title,
+            add_colorbar=False,
+            **kwargs,
+        )
+        pred_lt_axes.append(ax)
+
+        # --- Panel 4: Predicted Linear Tuning Curves (all speeds) ---
+        true_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearTrue",
+            idWindow=idWindow,
+            use_speed_filter=False,
+            bin_size=bin_size,
+            mode=mode,
+        )
+        ax = axs[5]
+        if "linearPred" in self.resultsNN_phase[suffix]:
+            pred_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
+                self,
+                suffix=suffix,
+                feature_name="linearPred",
+                idWindow=idWindow,
+                use_speed_filter=False,
+                bin_size=bin_size,
+                mode=mode,
+                **kwargs,
+            )
+
+            corr_values = []
+            true_fields = true_final1d_all_speed[id_neurons1d][sort_map].values
+            pred_fields = pred_final1d_all_speed[id_neurons1d][sort_map].values
+            n_cells = min(len(true_fields), len(pred_fields))
+            for i in range(n_cells):
+                true_pf = np.asarray(true_fields[i]).reshape(-1)
+                pred_pf = np.asarray(pred_fields[i]).reshape(-1)
+                if (
+                    true_pf.shape != pred_pf.shape
+                    or np.std(true_pf) == 0
+                    or np.std(pred_pf) == 0
+                ):
+                    continue
+                corr_values.append(pearsonr(true_pf, pred_pf)[0])
+
+            if len(corr_values) == 0:
+                corr_all = np.nan
+            else:
+                corr_all = np.nanmean(corr_values)
+            title = (
+                f"Predicted LT Curves (All Speeds, r={corr_all:.3f})"
+                if np.isfinite(corr_all)
+                else "Predicted LT Curves (All Speeds)"
+            )
+            pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+                pred_fields,
+                ax=ax,
+                title=title,
+                add_colorbar=False,
+                **kwargs,
+            )
+            pred_lt_axes.append(ax)
+        elif high_quality_mask.sum() > 0:
+            print(
+                "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
+            )
+            title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
+            self.plot_linear_tuning_curves(
+                true_final1d_all_speed[id_neurons1d][sort_map][
+                    high_quality_mask
+                ].values,
+                ax=ax,
+                title=title,
+                add_colorbar=False,
+                **kwargs,
+            )
+        else:
+            ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
+            ax.axis("off")
+
+        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            true_final1d_all_speed[id_neurons1d][sort_map].values,
+            ax=axs[2],
+            title="LT Curves (All Speeds)",
+            add_colorbar=False,
+            **kwargs,
+        )
+        train_lt_axes.append(axs[2])
+
+        # Shared colorbars for paired linear tuning curves (same logic as error_map).
+        if train_lt_im is not None and len(train_lt_axes) > 0:
+            if cax_train is not None:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    cax=cax_train,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    ax=train_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if train_cb_label is not None:
+                train_cbar.set_label(train_cb_label)
+            train_cbar.outline.set_visible(False)
+        elif cax_train is not None:
+            cax_train.axis("off")
+
+        if pred_lt_im is not None and len(pred_lt_axes) > 0:
+            if cax_pred is not None:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    cax=cax_pred,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    ax=pred_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if pred_cb_label is not None:
+                pred_cbar.set_label(pred_cb_label)
+            pred_cbar.outline.set_visible(False)
+        elif cax_pred is not None:
+            cax_pred.axis("off")
+
+        # --- Finalize and Save ---
+        if save or show:
+            if fig.get_layout_engine() is None:
+                fig.tight_layout()
+
+        if save:
+            filename = f"pynapple_bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
+
+        if show:
+            plt.show(block=block)
+        elif save:
+            # If we saved but didn't show, close the figure to free memory
+            plt.close(fig)
+
+        return fig
+
+    def plot_tuning_curves_in_order(self, d=2, n=5, **kwargs):
+        if d == 1:
+            return self.plot_linear_tuning_curves_in_order(n=n, **kwargs)
+        elif d == 2:
+            return self.plot_2d_tuning_curves_in_order(n=n, **kwargs)
+
+    def plot_linear_tuning_curves_in_order(self, n=5, **kwargs):
+        ax = kwargs.pop("ax", None)
+        if ax is None:
+            fig = plt.figure(figsize=(20, 8))
+        else:
+            fig = ax.figure
+
+        final1d, id_neurons1d, _, _ = _compute_tuning_curves_for_result(self, **kwargs)
+        bin_edges = np.linspace(0, 1, final1d.values.shape[1] + 1)
+        ordered1d, sort_map = self.compute_linear_tuning_curves_order(
+            lin_place_fields=final1d.values,
+            bin_edges=bin_edges,
+            sort_map=kwargs.get("sort_map", None),
+            list_neurons=kwargs.get("list_neurons", None),
+        )
+
+        positions = Tsd(
+            t=self.DataHelper.fullBehavior["positionTime"].flatten(),
+            d=self.l_function(self.DataHelper.fullBehavior["Positions"][:, :2])[
+                1
+            ].flatten(),
+        )
+
+        time_epoch = self.get_epoch_interval(kwargs.get("suffix", "_training"))[0]
+        not_nan_epoch = np.isnan(positions).threshold(0.5, "below").time_support
+        ep = time_epoch.intersect(not_nan_epoch)
+
+        if kwargs.get("use_speed_filter", True):
+            speed_filter = Tsd(
+                t=self.DataHelper.fullBehavior["positionTime"].flatten(),
+                d=self.DataHelper.fullBehavior["Times"]["speedFilter"],
+            )
+            ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+
+        positions = positions.restrict(ep)
+        linpos = np.linspace(0, 1, final1d.values.shape[1])
+
+        for i in range(n):
+            ax_top = fig.add_subplot(2, n, i + 1)
+            tc_1d = ordered1d[i]
+            tc_1d = (tc_1d - np.nanmin(tc_1d)) / (
+                np.nanmax(tc_1d) - np.nanmin(tc_1d) + 1e-8
+            )
+            ax_top.plot(linpos, tc_1d)
+            ax_top.set_xlabel("Linear Position")
+            ax_top.set_ylabel("Firing Rate (normalized)")
+            ax_top.set_title(f"Neu. {id_neurons1d[sort_map][i]} - Top {i + 1}")
+
+            ax_bot = fig.add_subplot(2, n, n + i + 1)
+            tc_1d = ordered1d[-(i + 1)]
+            tc_1d = (tc_1d - np.nanmin(tc_1d)) / (
+                np.nanmax(tc_1d) - np.nanmin(tc_1d) + 1e-8
+            )
+            ax_bot.plot(linpos, tc_1d)
+            ax_bot.set_xlabel("Linear Position")
+            ax_bot.set_ylabel("Firing Rate")
+            ax_bot.set_title(
+                f"Neu. {id_neurons1d[sort_map][-(i + 1)]} - Bottom {i + 1}"
+            )
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_2d_tuning_curves_in_order(self, n=5, **kwargs):
+        ax = kwargs.pop("ax", None)
+        if ax is None:
+            fig = plt.figure(figsize=(20, 8))
+        else:
+            fig = ax.figure
+
+        kwargs["feature_name"] = "linearTrue"
+        sigma = kwargs.pop("sigma", None)
+        final1d, id_neurons1d, _, _ = _compute_tuning_curves_for_result(self, **kwargs)
+        bin_edges = np.linspace(0, 1, final1d.values.shape[1] + 1)
+        _, sort_map_1d = self.compute_linear_tuning_curves_order(
+            lin_place_fields=final1d.values,
+            bin_edges=bin_edges,
+            sort_map=kwargs.get("sort_map", None),
+            list_neurons=kwargs.get("list_neurons", None),
+        )
+
+        kwargs["count_thresh"] = None
+        kwargs["sigma"] = sigma
+        kwargs["feature_name"] = "featureTrue"
+
+        final2d, id_neurons2d, _, _ = _compute_tuning_curves_for_result(
+            self, n_dims=2, **kwargs
+        )
+        bin_edges = np.linspace(0, 1, final2d.values.shape[1] + 1)
+
+        ordered2d, _ = self.compute_linear_tuning_curves_order(
+            lin_place_fields=final2d.values,
+            bin_edges=bin_edges,
+            sort_map=sort_map_1d,
+            list_neurons=id_neurons1d,
+        )
+
+        ordered2d[
+            :,
+            ~self.get_allowed_mask_for_bin_size(
+                ordered2d.shape[1], ordered2d.shape[2]
+            ).T,
+        ] = np.nan
+
+        positions = TsdFrame(
+            t=self.DataHelper.fullBehavior["positionTime"].flatten(),
+            d=self.DataHelper.fullBehavior["Positions"][:, :2],
+        )
+
+        time_epoch = self.get_epoch_interval(kwargs.get("suffix", "_training"))[0]
+        not_nan_epoch = np.isnan(positions).any(1).threshold(0.5, "below").time_support
+        ep = time_epoch.intersect(not_nan_epoch)
+
+        if kwargs.get("use_speed_filter", True):
+            speed_filter = Tsd(
+                t=self.DataHelper.fullBehavior["positionTime"].flatten(),
+                d=self.DataHelper.fullBehavior["Times"]["speedFilter"],
+            )
+            ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+
+        positions = positions.restrict(ep)
+        extent = (0, 1, 0, 1)
+
+        self.spikeData = self.DataHelper.get_spike_data()
+
+        for i in range(n):
+            ax_top = fig.add_subplot(2, n, i + 1)
+            tc_2d = ordered2d[i].T
+            tc_2d = (tc_2d - np.nanmin(tc_2d)) / (
+                np.nanmax(tc_2d) - np.nanmin(tc_2d) + 1e-8
+            )
+            ax_top.imshow(tc_2d, aspect="auto", origin="lower", extent=extent)
+            spike_pos = (
+                self.spikeData[id_neurons1d[sort_map_1d][i]]
+                .restrict(ep)
+                .value_from(positions)
+            )
+            ax_top.scatter(
+                spike_pos[:, 0], spike_pos[:, 1], s=2, alpha=0.2, marker="+", c="red"
+            )
+            ax_top.set_xlabel("X")
+            ax_top.set_ylabel("Y")
+            ax_top.set_title(f"Neu. {id_neurons1d[sort_map_1d][i]} - Top {i + 1}")
+
+            ax_bot = fig.add_subplot(2, n, n + i + 1)
+            tc_2d = ordered2d[-(i + 1)].T
+            tc_2d = (tc_2d - np.nanmin(tc_2d)) / (
+                np.nanmax(tc_2d) - np.nanmin(tc_2d) + 1e-8
+            )
+            ax_bot.imshow(tc_2d, aspect="auto", origin="lower", extent=extent)
+
+            spike_pos = (
+                self.spikeData[id_neurons1d[sort_map_1d][-(i + 1)]]
+                .restrict(ep)
+                .value_from(positions)
+            )
+            ax_bot.scatter(
+                spike_pos[:, 0], spike_pos[:, 1], s=2, alpha=0.2, marker="+", c="red"
+            )
+            ax_bot.set_xlabel("X")
+            ax_bot.set_ylabel("Y")
+            ax_bot.set_title(
+                f"Neu. {id_neurons1d[sort_map_1d][-(i + 1)]} - Bottom {i + 1}"
+            )
+
+        plt.tight_layout()
+        plt.show()
 
 
 class Results_Loader(TuningCurvesPlotter):

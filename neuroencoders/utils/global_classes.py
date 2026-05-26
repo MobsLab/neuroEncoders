@@ -2782,6 +2782,20 @@ class SpatialConstraintsMixin:
         self.forbid_mask_np = forbid_mask.astype(np.float32)  # dynamic update for ANN
         self.forbid_mask_tf = tf.cast(forbid_mask, tf.float32)  # dynamic update for ANN
 
+    def get_allowed_mask_for_bin_size(self, w, h):
+        """
+        Get allowed mask for a given bin size (eg for place fields, oversampling, etc.)
+        """
+        Xc = np.linspace(0.5 / w, 1 - 0.5 / w, w)
+        Yc = np.linspace(0.5 / h, 1 - 0.5 / h, h)
+        Xc_grid, Yc_grid = np.meshgrid(Xc, Yc, indexing="xy")
+        forbid_mask = (
+            (Xc_grid > self.maze_params_dict["gap_x_min"])
+            & (Xc_grid < self.maze_params_dict["gap_x_max"])
+            & (Yc_grid <= self.maze_params_dict["gap_y_min"])
+        ).astype(np.float32)
+        return (1.0 - forbid_mask).astype(bool)
+
 
 def smooth_signal(signal, N):
     """
