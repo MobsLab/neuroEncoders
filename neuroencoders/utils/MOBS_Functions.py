@@ -13,7 +13,6 @@ from warnings import warn
 import dill as pickle
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
 from pynapple import (
@@ -36,6 +35,7 @@ from neuroencoders.resultAnalysis import print_results
 from neuroencoders.resultAnalysis.paper_figures import PaperFigures, TuningCurvesPlotter
 from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import (
@@ -54,8 +54,9 @@ plt.style.use("neuroencoders.mobs")
 def Info_LFP(LFP_directory, Info_name="InfoLFP"):
     from os.path import join
 
-    import pandas as pd
     from scipy.io import loadmat
+
+    from neuroencoders.utils.backend import pd
 
     # Loading .mat file
 
@@ -4548,9 +4549,10 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
-        import pandas as pd
         import seaborn as sns
         from scipy.stats import linregress
+
+        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -4699,9 +4701,10 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
-        import pandas as pd
         import seaborn as sns
         from scipy.stats import linregress
+
+        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -4891,9 +4894,10 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
-        import pandas as pd
         import seaborn as sns
         from scipy.stats import spearmanr
+
+        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -5099,9 +5103,10 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
-        import pandas as pd
         import seaborn as sns
         from scipy.stats import spearmanr
+
+        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()

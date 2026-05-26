@@ -2,9 +2,8 @@ import json
 import os
 import subprocess
 
-import pandas as pd
-
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.utils.backend import pd
 
 
 def generate_json(

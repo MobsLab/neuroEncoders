@@ -2,9 +2,10 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
 from scipy.stats import sem
+
+from neuroencoders.utils.backend import pd
 
 plt.style.use("neuroencoders.mobs")
 

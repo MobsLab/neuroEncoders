@@ -4,11 +4,11 @@ import os
 import sys
 
 import numpy as np
-import pandas as pd
 import tqdm as tqdm
 
 from neuroencoders.importData import rawdata_parser
 from neuroencoders.simpleBayes import butils
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import Project
 
 

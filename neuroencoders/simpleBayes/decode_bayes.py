@@ -3073,7 +3073,7 @@ class Trainer(SpatialConstraintsMixin):
         save_as_pickle: bool = True,
         folderResult: Optional[str] = None,
     ) -> None:
-        import pandas as pd
+        from neuroencoders.utils.backend import pd
 
         # Manage folders to save
         if folderResult is None:

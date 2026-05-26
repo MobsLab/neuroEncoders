@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pandas as pd
 import pytest
 from pynapple import IntervalSet, Tsd, TsdFrame
 
@@ -10,6 +9,7 @@ from neuroencoders.utils.MOBS_Functions import (
     dict_to_dataframe,
     restrict_path_for_experiment,
 )
+from neuroencoders.utils.backend import pd
 
 
 @pytest.fixture

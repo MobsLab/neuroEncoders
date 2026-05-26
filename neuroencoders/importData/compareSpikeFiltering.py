@@ -7,7 +7,6 @@ os.environ.setdefault(
 )  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pykeops
 import tensorflow as tf
 from tqdm import tqdm
@@ -16,6 +15,7 @@ from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.simpleBayes.decode_bayes import Trainer
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import Params, Project
 
 ## Different strategies are used for spike filtering in the case of the NN and of spike sorting.
@@ -598,7 +598,7 @@ class WaveFormComparator:
 
     def check_distribution(self, reconstructed_spikes, group=0):
         """Basic PCA check on the batch"""
-        from sklearn.decomposition import PCA
+        from neuroencoders.utils.ml.decomposition import PCA
 
         if group >= len(reconstructed_spikes) or reconstructed_spikes[group] is None:
             return

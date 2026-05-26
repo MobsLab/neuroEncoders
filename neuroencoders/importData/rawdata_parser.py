@@ -9,12 +9,12 @@ from warnings import warn
 import matplotlib as mplt
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import tables
 
 # Custom codes
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.simpleBayes.butils import kdenD
+from neuroencoders.utils.backend import pd
 
 
 def get_params(pathToXml):

@@ -196,7 +196,7 @@ def path_for_experiments(
         if os.path.isfile(expe_info_file):
             try:
                 mat_data = scipy.io.loadmat(expe_info_file)
-                return mat_data.get("ExpeInfo", None)
+                return str(mat_data.get("ExpeInfo", None))
             except Exception as e:
                 warnings.warn(f"Could not load ExpeInfo.mat from {expe_info_file}: {e}")
                 return None

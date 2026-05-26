@@ -13,7 +13,6 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
-import pandas as pd
 import pynapple as nap
 import seaborn as sns
 import tqdm
@@ -26,7 +25,6 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import binned_statistic_2d, sem, zscore
 from shapely.geometry import MultiPoint, Point, Polygon
 from shapely.ops import unary_union
-from sklearn.cluster import DBSCAN
 from statsmodels.stats.proportion import proportions_ztest
 
 from neuroencoders.importData.epochs_management import find_closest_index, inEpochsMask
@@ -40,6 +38,7 @@ from neuroencoders.simpleBayes.decode_bayes import (
     extract_spike_counts_matrix_keops,
 )
 from neuroencoders.utils.PlaceField_dB import _run_place_field_analysis
+from neuroencoders.utils.backend import ml, pd
 from neuroencoders.utils.global_classes import (
     MAZE_COORDS,
     ZONEDEF,
@@ -62,6 +61,7 @@ from neuroencoders.utils.viz_params import (
     white_viridis,
 )
 
+DBSCAN = ml.cluster.DBSCAN
 plt.style.use("neuroencoders.mobs")
 
 
@@ -113,6 +113,45 @@ class TuningCurvesPlotter:
 
         return ordered_lin_place_fields, np.array(linear_pos_argsort)
 
+    def normalize_tuning_curves(self, matrix, method="minmax", return_cmap=False):
+        """
+        Normalize the tuning curves using either Z-score or Min-Max normalization.
+        The normalization is done per neuron (row-wise) to preserve the relative tuning shape of each neuron. The method can be specified as "z-score" for Z-score normalization or "minmax" for Min-Max normalization. The function also returns appropriate colormap and normalization settings for plotting based on the chosen method.
+        """
+        if method is None:
+            method = "minmax"
+        method = method.lower()
+        matrix = np.array(matrix)
+        if method == "z-score":
+            # Safe Z-score normalization per neuron (row-wise)
+            mean_vals = np.nanmean(matrix, axis=1, keepdims=True)
+            std_val = np.nanstd(matrix, axis=1, keepdims=True)
+            fields = (matrix - mean_vals) / (std_val + 1e-8)
+
+            # Plotting Setup for Z-Score
+            cmap = "RdBu_r"
+            v_lim = min(np.percentile(np.abs(fields), 99), 4)
+            norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+            cb_label = "Z-Scored FR"
+        elif method == "minmax":
+            # Min-Max normalization per neuron (row-wise)
+            min_vals = np.nanmin(matrix, axis=1, keepdims=True)
+            max_vals = np.nanmax(matrix, axis=1, keepdims=True)
+            fields = (matrix - min_vals) / (max_vals - min_vals + 1e-8)
+
+            # Plotting Setup for Min-Max
+            cmap = "cmc.batlow"
+            norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.median(fields), vmax=1)
+            cb_label = "Normalized Firing Rate (0-1)"
+        else:
+            raise ValueError(
+                f"Unknown scaling method: {method}. Use 'z-score' or 'minmax'."
+            )
+
+        if return_cmap:
+            return fields, cmap, norm, cb_label
+        return fields
+
     def plot_linear_tuning_curves(
         self,
         ordered_lin_place_fields,
@@ -133,33 +172,9 @@ class TuningCurvesPlotter:
         title = calc_kwargs.pop("title", "Linear Tuning Curves")
 
         if normalize:
-            if scaling_method == "z-score":
-                # Safe Z-score normalization per neuron (row-wise)
-                mean_vals = np.nanmean(ordered_lin_place_fields, axis=1, keepdims=True)
-                std_val = np.nanstd(ordered_lin_place_fields, axis=1, keepdims=True)
-                fields = (ordered_lin_place_fields - mean_vals) / (std_val + 1e-8)
-
-                # Plotting Setup for Z-Score
-                cmap = "RdBu_r"
-                v_lim = min(np.percentile(np.abs(fields), 99), 4)
-                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
-                cb_label = "Z-Scored FR"
-            elif scaling_method == "minmax":
-                # Min-Max normalization per neuron (row-wise)
-                min_vals = np.nanmin(ordered_lin_place_fields, axis=1, keepdims=True)
-                max_vals = np.nanmax(ordered_lin_place_fields, axis=1, keepdims=True)
-                fields = (ordered_lin_place_fields - min_vals) / (
-                    max_vals - min_vals + 1e-8
-                )
-
-                # Plotting Setup for Min-Max
-                cmap = "viridis"
-                norm = mcolors.Normalize(vmin=0, vmax=1)
-                cb_label = "Normalized Firing Rate (0-1)"
-            else:
-                raise ValueError(
-                    f"Unknown scaling method: {scaling_method}. Use 'z-score' or 'minmax'."
-                )
+            fields, cmap, norm, cb_label = self.normalize_tuning_curves(
+                ordered_lin_place_fields, method=scaling_method, return_cmap=True
+            )
         else:
             fields = ordered_lin_place_fields
             cmap = "viridis"

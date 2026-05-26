@@ -9,7 +9,8 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.decomposition import PCA
+
+from neuroencoders.utils.backend import ml
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import keras
@@ -27,6 +28,9 @@ from neuroencoders.utils.global_classes import (
     Params,
     SpatialConstraintsMixin,
 )
+
+PCA = ml.decomposition.PCA
+
 
 plt.style.use("neuroencoders.mobs")
 

@@ -25,15 +25,14 @@ import dill as pickle
 # mplt.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import tables
-import tensorflow as tf
 from matplotlib.patches import Rectangle
 from pynapple import IntervalSet, TsGroup, TsdFrame
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.management import get_git_info
 
 MAZE_COORDS = np.array(
@@ -1192,7 +1191,10 @@ class DataHelper(Project):
         """
         from cmcrameri import cm
         from matplotlib.widgets import Button, Slider
-        from skimage.measure import regionprops
+
+        from neuroencoders.utils.backend import skimage
+
+        regionprops = skimage.measure.regionprops
 
         fig, ax = plt.subplots()
         plt.subplots_adjust(bottom=0.25)
@@ -1795,8 +1797,9 @@ class DataHelper(Project):
             merge_gap (float): Maximum gap to merge close immobility epochs in seconds (default: 0.3).
 
         """
-        import pandas as pd
         import pynapple as nap
+
+        from neuroencoders.utils.backend import pd
 
         MovAccTsd = nap.Tsd(
             t=self.fullBehavior["MovTimes"].flatten(),
@@ -1809,7 +1812,7 @@ class DataHelper(Project):
             pd.Series(MovAccTsd.values)
             .rolling(window=smooth_fact_acc, center=True)
             .mean()
-            .values
+            .to_numpy()
         )
         NewMovAccTsd = nap.Tsd(t=MovAccTsd.index, d=smoothed_data)
 
@@ -2414,6 +2417,8 @@ class SpatialConstraintsMixin:
     """
 
     def __init__(self, grid_size=DEFAULT_GRIDSIZE, maze_params=None, **kwargs):
+        import tensorflow as tf
+
         self.grid_size = grid_size
         self.GRID_H, self.GRID_W = grid_size
 
@@ -2432,6 +2437,7 @@ class SpatialConstraintsMixin:
         """
         Generate Gaussian target heatmap for a batch of [x, y] positions.
         """
+        import tensorflow as tf
 
         pos_batch = tf.cast(pos_batch, tf.float32)
         X = self.Xc_tf[None]  # [1, H, W]
@@ -2459,6 +2465,8 @@ class SpatialConstraintsMixin:
         Refines position to sub-pixel precision in normalized [0, 1] space.
         probs: (B, H, W) tensor
         """
+        import tensorflow as tf
+
         B = tf.shape(probs)[0]
         H, W = self.GRID_H, self.GRID_W
 
@@ -2510,6 +2518,8 @@ class SpatialConstraintsMixin:
         """
         Unified decoding logic for Gaussian heatmaps.
         """
+        import tensorflow as tf
+
         B = tf.shape(logits_hw)[0]
         H, W = self.GRID_H, self.GRID_W
 
@@ -2568,6 +2578,8 @@ class SpatialConstraintsMixin:
 
     def _setup_coordinate_grids(self):
         """Create coordinate grids for both numpy and tensorflow"""
+        import tensorflow as tf
+
         # Numpy version (for Bayesian decoder)
         x_cent_np = np.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
         y_cent_np = np.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
@@ -2651,8 +2663,9 @@ class SpatialConstraintsMixin:
                 raise ValueError(f"maze_params dict must contain keys: {required_keys}")
         return maze_params
 
-    def _create_spatial_masks(self) -> Tuple[np.ndarray, tf.Tensor]:
+    def _create_spatial_masks(self) -> Tuple:
         """Create spatial constraint masks for both numpy and tensorflow"""
+        import tensorflow as tf
         # Create forbidden region mask
         # Note: Using your original logic where FORBID=1 means forbidden
 
@@ -2779,6 +2792,8 @@ class SpatialConstraintsMixin:
         return forbid_mask, occ
 
     def update_allowed_mask(self, forbid_mask):
+        import tensorflow as tf
+
         self.forbid_mask_np = forbid_mask.astype(np.float32)  # dynamic update for ANN
         self.forbid_mask_tf = tf.cast(forbid_mask, tf.float32)  # dynamic update for ANN
 

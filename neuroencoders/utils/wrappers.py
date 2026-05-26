@@ -4,10 +4,11 @@ from typing import Optional, Tuple
 
 import mat73
 import numpy as np
-import pandas as pd
 import pynapple as nts
 import scipy.io
 import scipy.signal
+
+from neuroencoders.utils.backend import pd
 
 """
 Wrappers should be able to distinguish between raw data or matlab processed data
