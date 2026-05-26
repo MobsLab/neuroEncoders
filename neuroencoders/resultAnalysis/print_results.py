@@ -9,7 +9,6 @@ import matplotlib as mplt
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.polynomial.polynomial as poly
-import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, MaxNLocator
@@ -23,6 +22,7 @@ from neuroencoders.importData.gui_elements import (
     plot_horizontal_kde,
     time_formatter_vec,
 )
+from neuroencoders.utils.backend import pd
 
 plt.style.use("neuroencoders.mobs")
 EC = np.array([45, 39])  # range of x and y in cm

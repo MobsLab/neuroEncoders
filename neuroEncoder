@@ -14,10 +14,10 @@ import sys
 from warnings import warn
 
 import numpy as np
-import pandas as pd
 from numpy import max as np_max
 
 from neuroencoders.importData.epochs_management import inEpochsMask
+from neuroencoders.utils.backend import pd
 
 # Load custom code
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass

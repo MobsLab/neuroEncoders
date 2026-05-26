@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import spikeinterface as si
 import spikeinterface.extractors as se
 import spikeinterface.preprocessing as spre
@@ -21,6 +20,8 @@ import spikeinterface.qualitymetrics
 from probeinterface import generate_linear_probe
 from resultAnalysis.print_results import print_results
 from spikeinterface.sorters import read_sorter_folder, run_sorter
+
+from neuroencoders.utils.backend import pd
 
 datadir = os.path.join(os.path.expanduser("~/Documents/Theotime"), "DimaERC2")
 assert os.path.isdir(datadir)

@@ -2,7 +2,6 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import pykeops
 import seaborn as sns
 import tables
@@ -11,6 +10,7 @@ from statannotations.Annotator import Annotator
 from neuroencoders.importData.epochs_management import inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.simpleBayes.decode_bayes import Trainer as TrainerBayes
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import Project
 from neuroencoders.utils.viz_params import white_viridis
 

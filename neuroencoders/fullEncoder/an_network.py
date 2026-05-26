@@ -20,10 +20,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 import dill as pickle
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -58,6 +58,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     WandBErrorMapCallback,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
+from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import (
     DEFAULT_GRIDSIZE,
     DataHelper,
@@ -65,7 +66,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
