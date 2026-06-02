@@ -2460,7 +2460,7 @@ class SpatialConstraintsMixin:
         )
         return gauss
 
-    def windowed_soft_argmax(self, probs: tf.Tensor, window_size=9):
+    def windowed_soft_argmax(self, probs, window_size=9):
         """
         Refines position to sub-pixel precision in normalized [0, 1] space.
         probs: (B, H, W) tensor

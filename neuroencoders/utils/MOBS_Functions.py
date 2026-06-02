@@ -380,11 +380,35 @@ def _restrict_by_group(df, filter_value):
         mask = pd.Series([False] * len(df))
         for group_col in group_columns:
             for filter_val in filter_values:
-                mask |= df[group_col] == filter_val
+                col_mask = df[group_col].apply(
+                    lambda x: _check_element_match(x, filter_val)
+                )
+                mask |= col_mask
         return df[mask]
 
     print("No group columns found")
     return pd.DataFrame()
+
+
+def _check_element_match(cell_value, filter_val):
+    """Helper to check if a filter value matches or exists inside a cell's object."""
+    # 1. Handle Pynapple objects safely by extracting underlying numpy arrays
+    # (Pynapple objects usually have a .values or .d property)
+    if hasattr(cell_value, "values") and not isinstance(
+        cell_value, (pd.Series, pd.DataFrame)
+    ):
+        arr = cell_value.values
+        return np.any(arr == filter_val)
+
+    # 2. Handle standard lists, tuples, or numpy arrays stored in the cell
+    elif isinstance(cell_value, (list, tuple, np.ndarray)):
+        return np.any(np.array(cell_value) == filter_val)
+
+    # 3. Handle standard scalar fallback
+    try:
+        return cell_value == filter_val
+    except Exception:
+        return False
 
 
 def _restrict_by_nmice(df, filter_value):
@@ -417,7 +441,7 @@ def _restrict_by_session(df, filter_value):
     if "Session" in df.columns:
         mask = pd.Series([False] * len(df))
         for session_name in filter_values:
-            mask |= df["Session"].astype(str).str.contains(session_name, na=False)
+            mask |= df["Session"].astype(str).str.contains(session_name)
         filtered_df = df[mask]
         if filtered_df.empty:
             for session_name in filter_values:

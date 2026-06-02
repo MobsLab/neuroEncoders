@@ -79,7 +79,7 @@ def test_restrict_path_for_experiment():
     # Test Group filter
     res = restrict_path_for_experiment(df, "Group", "A")
     assert len(res) == 2
-    assert all(res["group"] == "A")
+    assert (res["group"] == "A").all()
 
     # Test nMice filter
     res = restrict_path_for_experiment(df, "nMice", 1)
