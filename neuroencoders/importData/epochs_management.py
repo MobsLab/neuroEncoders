@@ -220,7 +220,7 @@ def inEpochsMask(t, epochs):
         ],
         axis=0,
     )
-    return mask >= 1
+    return (mask >= 1).reshape(-1).astype(bool)
 
 
 def get_epochs_mask(

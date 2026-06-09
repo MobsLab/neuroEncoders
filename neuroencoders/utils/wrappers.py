@@ -4,11 +4,10 @@ from typing import Optional, Tuple
 
 import mat73
 import numpy as np
+import pandas as pd
 import pynapple as nts
 import scipy.io
 import scipy.signal
-
-from neuroencoders.utils.backend import pd
 
 """
 Wrappers should be able to distinguish between raw data or matlab processed data
@@ -16,7 +15,7 @@ Wrappers should be able to distinguish between raw data or matlab processed data
 
 
 def loadSpikeData(
-    path: str, index: Optional = None, fs: int = 20000, force: bool = False
+    path: str, index: Optional[int] = None, fs: int = 20000, force: bool = False
 ) -> Tuple[nts.TsGroup | dict, np.ndarray, dict]:
     """
     if the path contains a folder named /Analysis,
@@ -763,6 +762,157 @@ def loadAuxiliary(path, fs=20000):
         return tmp
 
 
+def clean_mat_structure(element):
+    """
+    Recursively unpacks nested numpy structured arrays into clean Python dicts/lists.
+    """
+    # 1. Handle NumPy structured arrays (they have dtype fields)
+    if isinstance(element, np.ndarray) and element.dtype.names is not None:
+        # If it's an array of structs, we usually just want the first record
+        # or a list of dicts if it has multiple entries.
+        if element.size == 1:
+            record = element[0]
+            return {
+                name: clean_mat_structure(record[name]) for name in element.dtype.names
+            }
+        else:
+            return [clean_mat_structure(item) for item in element]
+
+    # 2. Handle standard NumPy arrays (unwrap dimensions)
+    if isinstance(element, np.ndarray):
+        # If it's empty, return None or empty list
+        if element.size == 0:
+            return None
+        # If it's a single element array (e.g., array([[1199]])), unwrap it
+        if element.size == 1:
+            return clean_mat_structure(element.item())
+        # If it's a 1D or multi-D array/list of data (like your folder paths)
+        return [clean_mat_structure(x) for x in element.flatten()]
+
+    # 3. Clean up specific data types (bytes, numpy scalars)
+    if isinstance(element, (bytes, str)):
+        # Decode bytes to string if necessary, strip whitespace
+        val = element.decode("utf-8") if isinstance(element, bytes) else element
+        return val.strip()
+
+    if isinstance(element, np.generic):
+        # Convert numpy types (uint16, uint8, etc.) to standard Python types
+        return element.item()
+
+    return element
+
+
+def loadRespiData(path):
+    """
+    Extract the respiration data from the respiration.dat for each epochs
+
+    Args:
+    path: string
+
+    Returns:
+    Respiration times,
+    Respiration values
+    """
+    if not os.path.exists(path):
+        if os.path.isdir(
+            os.path.join(os.path.dirname(path), "LFPData")
+        ) and os.path.isdir(os.path.join(os.path.dirname(path), "ChannelsToAnalyse")):
+            try:
+                print(
+                    "Could not find respiration data at "
+                    + path
+                    + "; Attempting to reconstruct from LFPData and ChannelsToAnalyse through matlab..."
+                )
+                compute_spectro_from_matlab(os.path.dirname(path))
+            except Exception as e:
+                print(
+                    "Could not compute spectro from matlab for respiration data. Error: ",
+                    e,
+                )
+        raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
+
+    if not os.path.isfile(path):
+        path = os.path.join(os.path.dirname(path), "Bulb_deep_low_Spectrum.mat")
+
+    try:
+        from scipy.io import loadmat
+
+        loaded_file = loadmat(path)
+        spectro = clean_mat_structure(loaded_file["Spectro"])
+    except NotImplementedError:
+        from mat73 import loadmat
+
+        loaded_file = loadmat(path)
+        spectro = loaded_file["Spectro"]
+
+    full_spectro, time, freqs = spectro
+
+    return full_spectro, time, freqs
+
+
+def compute_spectro_from_matlab(path):
+    """
+    Launches MATLAB, navigates to the target folder, loads the specified
+    channel file, and runs the LowSpectrum_AD analysis.
+
+    Parameters:
+    -----------
+    path : str
+        The absolute path to the directory where the MATLAB files are located.
+    """
+    print("Importing MATLAB engine...")
+    import matlab.engine
+
+    # Clean and normalize the path for the operating system
+    path = os.path.abspath(path)
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The folder path '{path}' does not exist.")
+
+    print("Starting MATLAB engine...")
+    eng = matlab.engine.start_matlab()
+
+    try:
+        eng.addtopath(nargout=0)
+        eng.cd(path, nargout=0)
+
+        print(f"Changed MATLAB directory to: {path}")
+
+        # 3. Load the specific .mat file
+        # MATLAB equivalent: load('ChannelsToAnalyse/Bulb_deep.mat');
+        mat_file_path = os.path.join(path, "ChannelsToAnalyse", "Bulb_deep.mat")
+        if not os.path.isfile(mat_file_path):
+            mat_file_path = os.path.join(path, "ChannelsToAnalyse", "B.mat")
+
+        if not os.path.isfile(mat_file_path):
+            raise FileNotFoundError(
+                f"Could not find the .mat file at '{mat_file_path}'."
+            )
+
+        eng.load(mat_file_path, nargout=0)
+        print("Loaded 'ChannelsToAnalyse/Bulb_deep.mat'.")
+
+        # 4. Fetch the 'channel' variable from the MATLAB workspace
+        # (Assuming 'channel' is inside Bulb_deep.mat)
+        channel_var = eng.workspace["channel"]
+
+        # 5. Execute the analysis function
+        # MATLAB: LowSpectrum_AD([cd filesep], channel, 'Bulb_deep');
+        # In python, eng.cd() returns the current path string
+        current_dir_with_sep = eng.cd() + os.sep
+
+        print("Running LowSpectrum_AD...")
+        eng.LowSpectrum_AD(current_dir_with_sep, channel_var, "Bulb_deep", nargout=0)
+        print("Analysis completed successfully!")
+
+    except matlab.engine.MatlabExecutionError as e:
+        print(f"MATLAB Error encountered:\n{e}")
+    finally:
+        # Always close the engine connection to free up memory/licenses
+        eng.quit()
+        print("MATLAB engine closed.")
+
+
 ##########################################################################################################
 # TODO
 ##########################################################################################################
@@ -869,3 +1019,49 @@ def loadBunch_Of_LFP(
     elif type(channel) is list:
         timestep = np.arange(0, len(data)) / frequency
         return nts.TsdFrame(timestep, data[:, channel], time_units="s")
+
+
+def compute_matrix_correlation(matrix_A, matrix_B):
+    # Center the rows (subtract the mean of each neuron's tuning curve)
+    A_centered = matrix_A - matrix_A.mean(axis=1, keepdims=True)
+    B_centered = matrix_B - matrix_B.mean(axis=1, keepdims=True)
+
+    # Compute the dot product along the bins, normalized by the norms
+    numerator = np.sum(A_centered * B_centered, axis=1)
+    denominator = np.linalg.norm(A_centered, axis=1) * np.linalg.norm(
+        B_centered, axis=1
+    )
+
+    # Avoid division by zero for silent/dead neurons
+    with np.errstate(divide="ignore", invalid="ignore"):
+        neuron_correlations_fast = numerator / denominator
+        neuron_correlations_fast[~np.isfinite(neuron_correlations_fast)] = 0.0
+
+    return neuron_correlations_fast
+
+
+def get_raw_pv_corr(M1, M2):
+    # Center population vectors across columns (axis=0)
+    m1_c = M1 - M1.mean(axis=0, keepdims=True)
+    m2_c = M2 - M2.mean(axis=0, keepdims=True)
+    num = np.sum(m1_c * m2_c, axis=0)
+    denom = np.linalg.norm(m1_c, axis=0) * np.linalg.norm(m2_c, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.nan_to_num(num / denom, nan=0.0)
+
+
+def compute_debiased_pv_corr(A_full, B_full, A_odd, A_even, B_odd, B_even):
+    """
+    Computes true debiased population vector correlation across spatial bins (columns).
+    Inputs shape: (n_neurons, n_bins)
+    """
+
+    rho_AB = get_raw_pv_corr(A_full, B_full)
+    rho_AA = get_raw_pv_corr(A_odd, A_even)
+    rho_BB = get_raw_pv_corr(B_odd, B_even)
+
+    reliability_term = np.sqrt(np.clip(rho_AA * rho_BB, 1e-6, 1.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corrected_pv_corr = rho_AB / reliability_term
+
+    return np.clip(corrected_pv_corr, -1.0, 1.0)

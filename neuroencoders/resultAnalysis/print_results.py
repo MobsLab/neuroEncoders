@@ -9,6 +9,7 @@ import matplotlib as mplt
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.polynomial.polynomial as poly
+import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, MaxNLocator
@@ -22,7 +23,6 @@ from neuroencoders.importData.gui_elements import (
     plot_horizontal_kde,
     time_formatter_vec,
 )
-from neuroencoders.utils.backend import pd
 
 plt.style.use("neuroencoders.mobs")
 EC = np.array([45, 39])  # range of x and y in cm
@@ -108,19 +108,19 @@ def print_results(
             os.path.expanduser(
                 os.path.join(dir, str(windowSizeMS), f"featureTrue{suffix}.csv")
             )
-        ).values[:, 1:]
+        ).to_numpy()[:, 1:]
         inferring = pd.read_csv(
             os.path.expanduser(
                 os.path.join(dir, str(windowSizeMS), f"featurePred{suffix}.csv")
             )
-        ).values[:, 1:]
+        ).to_numpy()[:, 1:]
         speedMask = (
             pd.read_csv(
                 os.path.expanduser(
                     os.path.join(dir, str(windowSizeMS), f"speedMask{suffix}.csv")
                 )
             )
-            .values[:, 1:]
+            .to_numpy()[:, 1:]
             .flatten()
             .astype(bool)
         )
@@ -130,7 +130,7 @@ def print_results(
                     os.path.join(dir, str(windowSizeMS), f"posIndex{suffix}.csv")
                 )
             )
-            .values[:, 1]
+            .to_numpy()[:, 1]
             .astype(int)
         )
         timeStepsPred = (
@@ -139,7 +139,7 @@ def print_results(
                     os.path.join(dir, str(windowSizeMS), f"timeStepsPred{suffix}.csv")
                 )
             )
-            .values[:, 1]
+            .to_numpy()[:, 1]
             .astype(float)
         )
         try:
@@ -148,7 +148,7 @@ def print_results(
                     os.path.expanduser(
                         os.path.join(dir, str(windowSizeMS), f"lossPred{suffix}.csv")
                     )
-                ).values[:, 1:]
+                ).to_numpy()[:, 1:]
             )
         except FileNotFoundError:
             print(
@@ -160,7 +160,7 @@ def print_results(
                         os.path.expanduser(
                             os.path.join(dir, str(windowSizeMS), f"Hn{suffix}.csv")
                         )
-                    ).values[:, 1:]
+                    ).to_numpy()[:, 1:]
                 )
             except FileNotFoundError:
                 print(
@@ -178,14 +178,14 @@ def print_results(
                     os.path.expanduser(
                         os.path.join(dir, str(windowSizeMS), f"linearTrue{suffix}.csv")
                     )
-                ).values[:, 1:]
+                ).to_numpy()[:, 1:]
             )
             linferring = np.squeeze(
                 pd.read_csv(
                     os.path.expanduser(
                         os.path.join(dir, str(windowSizeMS), f"linearPred{suffix}.csv")
                     )
-                ).values[:, 1:]
+                ).to_numpy()[:, 1:]
             )
         else:
             linear = False
@@ -220,14 +220,14 @@ def print_results(
                         dir, str(windowSizeMS), f"bayes_featureTrue{suffix}.csv"
                     )
                 )
-            ).values[:, 1:]
+            ).to_numpy()[:, 1:]
             inferring = pd.read_csv(
                 os.path.expanduser(
                     os.path.join(
                         dir, str(windowSizeMS), f"bayes_featurePred{suffix}.csv"
                     )
                 )
-            ).values[:, 1:]
+            ).to_numpy()[:, 1:]
             qControl = np.squeeze(
                 pd.read_csv(
                     os.path.expanduser(
@@ -235,7 +235,7 @@ def print_results(
                             dir, str(windowSizeMS), f"bayes_{predLossName}{suffix}.csv"
                         )
                     )
-                ).values[:, 1:]
+                ).to_numpy()[:, 1:]
             )
             timeStepsPred = np.squeeze(
                 pd.read_csv(
@@ -244,7 +244,7 @@ def print_results(
                             dir, str(windowSizeMS), f"bayes_timeStepsPred{suffix}.csv"
                         )
                     )
-                ).values[:, 1:]
+                ).to_numpy()[:, 1:]
             )
             speedMask = np.ones(
                 shape=pos.shape[0], dtype=bool
@@ -266,7 +266,7 @@ def print_results(
                                 dir, str(windowSizeMS), f"bayes_linearTrue{suffix}.csv"
                             )
                         )
-                    ).values[:, 1:]
+                    ).to_numpy()[:, 1:]
                 )
                 linferring = np.squeeze(
                     pd.read_csv(
@@ -275,7 +275,7 @@ def print_results(
                                 dir, str(windowSizeMS), f"bayes_linearPred{suffix}.csv"
                             )
                         )
-                    ).values[:, 1:]
+                    ).to_numpy()[:, 1:]
                 )
             else:
                 linear = False

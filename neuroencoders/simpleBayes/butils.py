@@ -2,8 +2,7 @@
 import random
 
 import numpy as np
-
-from neuroencoders.utils.backend import ml
+import sklearn as ml
 
 KernelDensity = ml.neighbors.KernelDensity
 

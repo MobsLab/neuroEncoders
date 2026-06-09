@@ -12,7 +12,7 @@ import psutil
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [
-    [0.036],
+    # [0.036],
     [0.108],
     [0.252],
     # [0.036, 0.108, 0.252, 0.504],
@@ -30,6 +30,7 @@ mice_nb = [
     "M1182_PAG",
     "M1239_PAG",
     "M1162_PAG",
+    "M1186_PAG",
     "M905",
     "M1239_MFB",
     "M1162_MFB",
@@ -39,6 +40,18 @@ mice_nb = [
     "M1230_Known",
     "M1230_Novel",
     "M1199_reversal",
+]
+mice_nb = [
+    # "1162_PAG", 252 left!!!!
+    "1186_PAG",
+    "1239_PAG",
+    # "905_PAG",
+    "1162_MFB",
+    "1168_MFB",
+    "1199_reversal",
+]
+mice_nb = [
+    "1168_MFB",
 ]
 ####
 nameExp = "consensus_high_speed_mask_posandheaddirection"

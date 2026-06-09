@@ -6,20 +6,13 @@
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractTsd.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractTsd.m" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/decoder/decode.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/decoder/decode.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/importData/epochs_management.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/epochs_management.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/importData/import_clusters.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/import_clusters.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/juliaData/Manifest.toml" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/juliaData/Manifest.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/juliaData/Project.toml" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/juliaData/Project.toml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/juliaData/executeFilter_stride.sh" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/juliaData/executeFilter_stride.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/juliaData/julia_data_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/juliaData/julia_data_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/juliaData/spikeFilter_withStride.jl" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/juliaData/spikeFilter_withStride.jl" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/mobs.mplstyle" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/mobs.mplstyle" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/openEphysExport/generate_json.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/openEphysExport/generate_json.py" afterDir="false" />
@@ -40,11 +33,8 @@
       <change beforePath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_dataset_saving.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_dataset_saving.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_mobs_functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_mobs_functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

@@ -1,15 +1,15 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 import pytest
-from pynapple import IntervalSet, Tsd, TsdFrame
+from pynapple import IntervalSet, Tsd
 
 from neuroencoders.utils.MOBS_Functions import (
     Load_Behav,
     dict_to_dataframe,
     restrict_path_for_experiment,
 )
-from neuroencoders.utils.backend import pd
 
 
 @pytest.fixture
@@ -62,8 +62,6 @@ def test_load_behav(mock_loadmat, mock_behav_data):
 
         assert "X" in behav["Tracking"]
         assert isinstance(behav["Tracking"]["X"], Tsd)
-        assert "Pos" in behav["Tracking"]
-        assert isinstance(behav["Tracking"]["Pos"], TsdFrame)
 
 
 def test_restrict_path_for_experiment():

@@ -6,13 +6,17 @@ Created on Wed May 27 21:28:52 2020
 @author: quarantine-charenton
 """
 
+import copy
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional, Union
 from warnings import warn
 
 import dill as pickle
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import pynapple as nap
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
 from pynapple import (
@@ -21,30 +25,70 @@ from pynapple import (
     TsGroup,
     Tsd,
     TsdFrame,
-    compute_mutual_information,
-    compute_tuning_curves,
 )
+from scipy.io import loadmat
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import accuracy_score, confusion_matrix
 from statannotations.Annotator import Annotator
 from tqdm import tqdm
 
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
+from neuroencoders.importData.gui_elements import connect_points
 from neuroencoders.importData.rawdata_parser import get_behavior
 from neuroencoders.resultAnalysis import print_results
-from neuroencoders.resultAnalysis.paper_figures import PaperFigures, TuningCurvesPlotter
+from neuroencoders.resultAnalysis.paper_figures import PaperFigures
 from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
-from neuroencoders.utils.backend import pd
 from neuroencoders.utils.func_wrappers import timing
-from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
 from neuroencoders.utils.global_classes import (
+    ZONELABELS,
     Params,
     Project,
     SpatialConstraintsMixin,
-    gaussian_filter_nan,
+    TuningCurvesPlotter,
+    _compute_tuning_curves_for_result,
     get_max_nb_spikes,
 )
+from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
+from neuroencoders.utils.wrappers import clean_mat_structure, compute_debiased_pv_corr
+
+EXPORT_COLS = [
+    "mouse",
+    "manipe",
+    "mouse_name",
+    "phase",
+    "winMS",
+    "time",
+    "x",
+    "y",
+    "head_dir",
+    "thigmo",
+    "head_dir_hat",
+    "thigmo_hat",
+    "x_hat",
+    "y_hat",
+    "linear",
+    "linear_hat",
+    "speed",
+    "is_ripples",
+    "is_freezing",
+    "is_stim",
+    "is_fast",
+    "certainty",
+    "breathing_rate",
+]
+[EXPORT_COLS.append(f"{zone}_epoch") for zone in ZONELABELS]
+
+PHASE_MAPPING = {
+    "training": 0,
+    "pre": 1,
+    "full_pre": 2,
+    "cond": 3,
+    "post": 4,
+    "extinct": 5,
+}
+EPOCH_MAPPING = {f"{k}_epoch": i for i, k in enumerate(ZONELABELS)}
 
 plt.style.use("neuroencoders.mobs")
 
@@ -54,9 +98,7 @@ plt.style.use("neuroencoders.mobs")
 def Info_LFP(LFP_directory, Info_name="InfoLFP"):
     from os.path import join
 
-    from scipy.io import loadmat
-
-    from neuroencoders.utils.backend import pd
+    import pandas as pd
 
     # Loading .mat file
 
@@ -97,8 +139,6 @@ def Info_LFP(LFP_directory, Info_name="InfoLFP"):
 
 
 def Load_LFP(LFP_path, time_unit="us", frequency=1250.0):
-    from scipy.io import loadmat
-
     if isinstance(LFP_path, str):
         try:
             LFP = loadmat(LFP_path, squeeze_me=True)
@@ -133,8 +173,6 @@ def Load_LFP(LFP_path, time_unit="us", frequency=1250.0):
 
 
 def Make_Epoch(struc, dic, key, time_unit="us", word="start"):
-    from pynapple import IntervalSet
-
     try:
         if word in list(struc.dtype.fields.keys()):
             if time_unit == "us":
@@ -166,15 +204,23 @@ def _parse_tracking_data(Behav_data, keys, time_unit):
 
     for key in tsd_keys:
         tsd_temp = Behav_data[key]
+
         # Robustly handle MATLAB nested structure
-        dat = np.atleast_1d(np.array(tsd_temp["data"]).squeeze())
-        t = np.atleast_1d(np.array(tsd_temp["t"]).squeeze())
+        dat_arr = np.atleast_1d(np.array(tsd_temp["data"]).squeeze())
+        t_arr = np.atleast_1d(np.array(tsd_temp["t"]).squeeze())
+
+        if t_arr.dtype == object and t_arr.size > 0:
+            t_arr = t_arr.item() if t_arr.ndim == 0 else t_arr[0]
+        if dat_arr.dtype == object and dat_arr.size > 0:
+            dat_arr = dat_arr.item() if dat_arr.ndim == 0 else dat_arr[0]
+
+        t = np.asarray(t_arr, dtype=np.float64).ravel()
+        dat = np.asarray(dat_arr, dtype=np.float64)
 
         # Correct temporal scaling (seconds to microseconds)
         t = t * 10**6
 
         new_key = key.replace("tsd", "")
-        # Tsd expects (t, d)
         Tracking[new_key] = Tsd(t, dat.T, time_units=time_unit)
 
     Pos_keys = [key for key in keys if "Pos" in key]
@@ -182,33 +228,53 @@ def _parse_tracking_data(Behav_data, keys, time_unit):
         if key in keys:
             keys.remove(key)
         Pos_temp = Behav_data[key]
-        t = Pos_temp[:, 0] * 10**6
-        d = Pos_temp[:, 1:4]
-        Tsd_temp = TsdFrame(t, d, columns=["x", "y", "stim"], time_units=time_unit)
-        Tracking[key] = Tsd_temp
+
+        # Robustly handle matrix array wraps
+        pos_arr = np.atleast_1d(np.array(Pos_temp).squeeze())
+        if pos_arr.dtype == object and pos_arr.size > 0:
+            pos_arr = pos_arr.item() if pos_arr.ndim == 0 else pos_arr[0]
+        pos_arr = np.asarray(pos_arr, dtype=np.float64)
+
+        t = pos_arr[:, 0] * 10**6
+        d = pos_arr[:, 1:4]
+
+        t = np.asarray(t, dtype=np.float64).ravel()
+        Tracking[key] = TsdFrame(t, d, columns=["x", "y", "stim"], time_units=time_unit)
 
     Im = ["im_diff", "im_diffInit"]
     for key in Im:
         if key in keys:
             keys.remove(key)
             Im_temp = Behav_data[key]
+
+            # Robustly unpack imagery data metrics
+            im_arr = np.atleast_1d(np.array(Im_temp).squeeze())
+            if im_arr.dtype == object and im_arr.size > 0:
+                im_arr = im_arr.item() if im_arr.ndim == 0 else im_arr[0]
+
             Tracking[key] = pd.DataFrame(
-                Im_temp, columns=["times", "average change", "pixel range"]
+                im_arr, columns=["times", "average change", "pixel range"]
             )
 
     if "MouseTemp" in keys:
         keys.remove("MouseTemp")
         Temp_temp = Behav_data["MouseTemp"]
-        t = Temp_temp[:, 0] * 10**6
-        d = Temp_temp[:, 1]
+
+        temp_arr = np.atleast_1d(np.array(Temp_temp).squeeze())
+        if temp_arr.dtype == object and temp_arr.size > 0:
+            temp_arr = temp_arr.item() if temp_arr.ndim == 0 else temp_arr[0]
+        temp_arr = np.asarray(temp_arr, dtype=np.float64)
+
+        t = temp_arr[:, 0] * 10**6
+        d = temp_arr[:, 1]
+
+        t = np.asarray(t, dtype=np.float64).ravel()
         Tracking["MouseTemp"] = Tsd(t, d, time_units=time_unit)
 
     return Tracking
 
 
 def _parse_epoch_data(Behav_data, keys, time_unit):
-    import re
-
     Epoch = {}
     Epoch_keys = [key for key in keys if "Epoch" in key]
 
@@ -252,8 +318,6 @@ def _parse_epoch_data(Behav_data, keys, time_unit):
 
 
 def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
-    from pynapple import IntervalSet, Ts
-
     Other = {}
 
     if "tpsCatEvt" in keys and "nameCatEvt" in keys:
@@ -261,14 +325,35 @@ def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
         keys.remove("nameCatEvt")
         t = Behav_data["tpsCatEvt"]
         name = Behav_data["nameCatEvt"]
-        Other["CatEvt"] = pd.DataFrame(np.transpose([t, name]), columns=["t", "name"])
+
+        # Robustly handle text / timestamps references from MATLAB
+        t_arr = np.atleast_1d(np.array(t).squeeze())
+        if t_arr.dtype == object and t_arr.size > 0:
+            t_arr = t_arr.item() if t_arr.ndim == 0 else t_arr[0]
+
+        name_arr = np.atleast_1d(np.array(name).squeeze())
+        if name_arr.dtype == object and name_arr.size > 0:
+            name_arr = name_arr.item() if name_arr.ndim == 0 else name_arr[0]
+
+        t_final = np.atleast_1d(t_arr).ravel()
+        name_final = np.atleast_1d(name_arr).ravel()
+        Other["CatEvt"] = pd.DataFrame({"t": t_final, "name": name_final})
 
     if "TTLInfo" in keys:
         keys.remove("TTLInfo")
         TTL = Behav_data["TTLInfo"]
-        # Correct temporal scaling for TTL Info (match epoch and ThousandFrames units)
-        start = np.atleast_1d(np.array(TTL["StartSession"]).squeeze()) * 100
-        stop = np.atleast_1d(np.array(TTL["StopSession"]).squeeze()) * 100
+
+        # Safe extraction for TTL data structs
+        start_arr = np.atleast_1d(np.array(TTL["StartSession"]).squeeze())
+        stop_arr = np.atleast_1d(np.array(TTL["StopSession"]).squeeze())
+
+        if start_arr.dtype == object and start_arr.size > 0:
+            start_arr = start_arr.item() if start_arr.ndim == 0 else start_arr[0]
+        if stop_arr.dtype == object and stop_arr.size > 0:
+            stop_arr = stop_arr.item() if stop_arr.ndim == 0 else stop_arr[0]
+
+        start = np.asarray(start_arr, dtype=np.float64) * 100
+        stop = np.asarray(stop_arr, dtype=np.float64) * 100
         Other["TTLInfo"] = IntervalSet(start, stop, time_units=time_unit)
 
     if "ThousandFrames" in keys:
@@ -277,15 +362,42 @@ def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
         TF = {}
         Nb_session = len(data)
         Session_name = list(Epoch["Session"].keys())
+
         for n in range(Nb_session):
-            data_temp = data[n]["tsd"].tolist()
-            t = data_temp["t"].tolist() * 100
-            TF[Session_name[n]] = Ts(t, time_units=time_unit)
+            # Safe parsing for array profiles nested deep inside a cell list
+            session_data = data[n]
+            if isinstance(session_data, np.ndarray) and session_data.dtype == object:
+                session_data = (
+                    session_data.item() if session_data.ndim == 0 else session_data[0]
+                )
+
+            data_temp = session_data["tsd"]
+            if isinstance(data_temp, np.ndarray) and data_temp.dtype == object:
+                data_temp = data_temp.item() if data_temp.ndim == 0 else data_temp[0]
+
+            t_raw = data_temp["t"]
+            t_arr = np.atleast_1d(np.array(t_raw).squeeze())
+            if t_arr.dtype == object and t_arr.size > 0:
+                t_arr = t_arr.item() if t_arr.ndim == 0 else t_arr[0]
+
+            t = np.asarray(t_arr, dtype=np.float64) * 100
+
+            if n < len(Session_name):
+                lbl = Session_name[n]
+            else:
+                lbl = f"Session_{n + 1}"
+
+            TF[lbl] = Ts(t, time_units=time_unit)
         Other["ThousandFrames"] = TF
 
     if "GotFrame" in keys:
         keys.remove("GotFrame")
-        GF = np.transpose(Behav_data["GotFrame"].astype(bool))
+
+        gf_arr = np.atleast_1d(np.array(Behav_data["GotFrame"]).squeeze())
+        if gf_arr.dtype == object and gf_arr.size > 0:
+            gf_arr = gf_arr.item() if gf_arr.ndim == 0 else gf_arr[0]
+
+        GF = np.transpose(gf_arr.astype(bool))
         t = None
         for k in ["X", "x", "Xpos", "pos"]:
             if k in Tracking:
@@ -298,10 +410,18 @@ def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
     for key in ZI_keys:
         keys.remove(key)
         Z_temp = Behav_data[key]
+
+        # Handle cases where ZoneIndices array is inside an object array block
+        if isinstance(Z_temp, np.ndarray) and Z_temp.dtype == object:
+            Z_temp = Z_temp.item() if Z_temp.ndim == 0 else Z_temp[0]
+
         Z = {}
         names = list(Z_temp.dtype.fields.keys())
         for n in names:
-            Z[n] = Z_temp[n].tolist()
+            val_arr = np.atleast_1d(np.array(Z_temp[n]).squeeze())
+            if val_arr.dtype == object and val_arr.size > 0:
+                val_arr = val_arr.item() if val_arr.ndim == 0 else val_arr[0]
+            Z[n] = val_arr.tolist()
         Other[key] = Z
 
     for key in list(keys):
@@ -315,8 +435,6 @@ def _parse_other_data(Behav_data, keys, time_unit, Tracking, Epoch):
 
 
 def Load_Behav(Behav_path: str, time_unit="us"):
-    from scipy.io import loadmat
-
     try:
         Behav_data = loadmat(Behav_path, squeeze_me=True)
     except FileNotFoundError:
@@ -693,109 +811,6 @@ def path_for_experiments_df(experiment_name: str, training_name: str) -> pd.Data
         return pd.DataFrame()
 
 
-def _compute_tuning_curves_for_result(
-    results_obj,
-    suffix: Optional[str] = None,
-    feature_name: str = "linearTrue",
-    idWindow: int = 0,
-    use_speed_filter: bool = True,
-    count_thresh: Optional[int] = None,
-    bin_size: float = 0.05,
-    mode: str = "closest",
-    **kwargs,
-):
-    """Shared tuning-curve computation for a single results object."""
-
-    n_dims = kwargs.get("n_dims", 2)
-
-    if suffix is None:
-        suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
-
-    if "_" in suffix:
-        phase = suffix.strip("_")
-    else:
-        phase = suffix
-        suffix = "_" + suffix
-
-    data_helper = getattr(results_obj, "data_helper", None) or getattr(
-        results_obj, "DataHelper", None
-    )
-    if data_helper is None:
-        raise ValueError("Results object does not expose a data helper.")
-
-    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
-    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
-    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
-
-    if hasattr(data_helper, "get_spike_data"):
-        spike_data = data_helper.get_spike_data(force=True)
-    else:
-        spike_data = results_obj.get_spike_data()
-
-    above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
-    not_nan_epoch = (
-        Tsd(
-            t=data_helper.fullBehavior["positionTime"].flatten(),
-            d=np.isnan(data_helper.fullBehavior["Positions"]).any(axis=1).flatten(),
-        )
-        .threshold(0.5, "below")
-        .time_support
-    )
-    data_to_use = spike_data.restrict(Ts(t=time).time_support).count(bin_size)
-    features = (
-        Tsd(t=time, d=feature)
-        if len(feature.shape) == 1
-        else TsdFrame(t=time, d=feature[:, :n_dims])
-    )
-    epochs_to_use = (
-        not_nan_epoch.intersect(above_speed_epoch)
-        if use_speed_filter
-        else not_nan_epoch
-    )
-    bin_edges = kwargs.pop("nb_bins", 50 if len(feature.shape) == 1 else 30)
-    range_feature = kwargs.pop(
-        "feat_range", (0, 1) if len(feature.shape) == 1 else None
-    )
-    feature_names = kwargs.pop(
-        "feature_names", [feature_name] if len(feature.shape) == 1 else ["x", "y"]
-    )
-
-    tuning_curves = compute_tuning_curves(
-        data=data_to_use,
-        features=features,
-        bins=bin_edges,
-        epochs=epochs_to_use,
-        range=range_feature,
-        feature_names=feature_names,
-        return_counts=False,
-        mode=mode,
-    )
-
-    tuning_curves = tuning_curves.copy()
-
-    sigma = kwargs.pop("sigma", None)
-    if sigma is None:
-        if len(feature.shape) == 1 or feature.shape[1] == 1:
-            sigma = (0, 2)  # No smoothing across neurons, only across position bin_size
-        elif feature.shape[1] == 2:
-            sigma = (
-                0,
-                2.5,
-                2.5,
-            )
-        else:
-            sigma = 1
-    tuning_curves.values = gaussian_filter_nan(tuning_curves.values, sigma=sigma)
-
-    id_neurons = np.arange(0, len(spike_data))
-    if count_thresh is not None:
-        under_thresh = np.sum(tuning_curves.counts, axis=1) < count_thresh
-        tuning_curves = tuning_curves[~under_thresh]
-        id_neurons = id_neurons[~under_thresh]
-
-    return tuning_curves, id_neurons, spike_data, phase
-
-
 class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
     """
     Class to handle results for a specific mouse in an experiment.
@@ -839,6 +854,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             self.load_trainers(**kwargs)
 
         add_training = kwargs.get("add_training", True)
+        add_full_pre = kwargs.get("add_full_pre", False)
         PaperFigures.__init__(
             self,
             projectPath=self.Project,
@@ -852,9 +868,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             phase=self.phase,
             verbose=self.verbose,
             add_training=add_training,
-        )
-        SpatialConstraintsMixin.__init__(
-            self,
+            add_full_pre=add_full_pre,
             grid_size=self.Params.GaussianGridSize,
             maze_params=self.Linearizer.maze_params,
         )
@@ -983,7 +997,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             windowSize=int(winMS) / 1000,
             **kwargs,
         )
-        self.find_session_epochs()
         print(self)
 
     def cpu_linearization(self, x):
@@ -1103,8 +1116,14 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                         f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe} and exp_index {self.exp_index}. Please check the exp_index value and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
                     )
 
-        self.path = self.Dir[conditions].iloc[0].path
-        self.network_path = self.Dir[conditions].iloc[0].network_path
+        if hasattr(self.Dir, "to_pandas"):
+            Dir = self.Dir.to_pandas()
+            conditions = conditions.to_pandas()
+        else:
+            Dir = self.Dir
+        self.path = Dir[conditions].iloc[0].path
+        self.network_path = Dir[conditions].iloc[0].network_path
+        self.subDir = Dir[conditions]
         print(f"Path for {self.mouse_name} found: {self.path}")
 
     def find_xml(self):
@@ -1224,7 +1243,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         if hasattr(self, "deviceName"):
             deviceName = kwargs.pop("deviceName", self.deviceName)
         else:
-            deviceName = kwargs.pop("deviceName", "gpu")
+            deviceName = kwargs.pop("deviceName", "cpu")
 
         if deviceName.lower() == "gpu" or deviceName.lower() == "cpu":
             from neuroencoders.utils.management import manage_devices
@@ -2046,96 +2065,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             raise TypeError(f"window must be an int or str, got {type(window)}")
         return windows, windows_values
 
-    def find_session_epochs(self):
-        """
-        Find session epochs from the fullBehavior data.
-        This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
-        """
-        self.training = IntervalSet(
-            np.array(self.DataHelper.fullBehavior["Times"]["trainEpochs"]).reshape(
-                -1, 2
-            )
-        )
-        self.trainMask = inEpochsMask(
-            self.DataHelper.fullBehavior["positionTime"][:, 0], self.training
-        )
-        self.testing = IntervalSet(
-            np.array(self.DataHelper.fullBehavior["Times"]["testEpochs"]).reshape(-1, 2)
-        )
-        self.testMask = inEpochsMask(
-            self.DataHelper.fullBehavior["positionTime"][:, 0], self.testing
-        )
-
-        try:
-            self.pre = IntervalSet(
-                np.array(
-                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["pre"]
-                ).reshape(-1, 2)
-            )
-            self.preMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.pre
-            )
-        except KeyError:
-            warn(
-                "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
-            )
-        try:
-            self.hab = IntervalSet(
-                np.array(
-                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["hab"]
-                ).reshape(-1, 2)
-            )
-            self.habMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.hab
-            )
-        except KeyError:
-            pass
-        try:
-            self.cond = IntervalSet(
-                np.array(
-                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["cond"]
-                ).reshape(-1, 2)
-            )
-            self.condMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.cond
-            )
-        except KeyError:
-            pass
-        try:
-            self.post = IntervalSet(
-                np.array(
-                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["post"]
-                ).reshape(-1, 2)
-            )
-            self.postMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.post
-            )
-        except KeyError:
-            pass
-        try:
-            self.extinct = IntervalSet(
-                np.array(
-                    self.DataHelper.fullBehavior["Times"]["SessionEpochs"]["extinct"]
-                ).reshape(-1, 2)
-            )
-            self.extinctMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.extinct
-            )
-        except KeyError:
-            pass
-
-        try:
-            self.sleep = IntervalSet(
-                np.array(self.DataHelper.fullBehavior["Times"]["sleepEpochs"]).reshape(
-                    -1, 2
-                )
-            )
-            self.sleepMask = inEpochsMask(
-                self.DataHelper.fullBehavior["positionTime"][:, 0], self.sleep
-            )
-        except KeyError:
-            pass
-
     def get_epoch_interval(self, phase):
         if "_" in phase:
             phase = phase.strip("_")
@@ -2240,11 +2169,14 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
 
         return fullbehav_phase
 
-    def convert_to_df(self, redo=False):
+    def convert_to_df(self, redo=False, disable=False):
         if (
             hasattr(self, "results_df")
             and not redo
-            and isinstance(self.results_df, pd.DataFrame)
+            and (
+                isinstance(self.results_df, pd.DataFrame)
+                or isinstance(self.results_df, pd.DataFrame)
+            )
         ):
             print("Results DataFrame already exists. Use redo=True to recreate it.")
             return self.results_df
@@ -2260,7 +2192,11 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         data = []
         total_iterations = len(self.suffixes) * len(self.windows_values)
 
-        with tqdm(total=total_iterations, desc=f"Converting {self.mouse_name}") as pbar:
+        with tqdm(
+            total=total_iterations,
+            desc=f"Converting {self.mouse_name}",
+            disable=disable,
+        ) as pbar:
             for suffix in self.suffixes:
                 # Pre-strip suffix once
                 phase_name = suffix.strip("_") if suffix else "all"
@@ -2300,6 +2236,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                     direction_fromNN = data_helper_win._get_traveling_direction(
                         linTruePos
                     )
+                    if posIndex.max() == len(speed):
+                        posIndex = posIndex - 1
 
                     # Build row dictionary
                     row = {
@@ -2308,20 +2246,17 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                         "manipe": self.manipe,
                         "phase": phase_name,
                         "winMS": win,
-                        "asymmetry_index": data_helper_win.get_training_imbalance(),
-                        "fullTruePos_fromBehavior": full_truePos_from_behavior,
+                        "asymmetry_index": data_helper_win.get_training_imbalance()
+                        * np.ones_like(linTruePos),
                         "alignedTruePos_fromBehavior": full_truePos_from_behavior[
                             posIndex
                         ],
-                        "fullTrueLinPos_from_behavior": full_trueLinPos_from_behavior,
                         "alignedTrueLinPos_from_behavior": full_trueLinPos_from_behavior[
                             posIndex
                         ],
-                        "fullTimeBehavior": fullBehavior["positionTime"].flatten(),
                         "alignedTimeBehavior": fullBehavior["positionTime"][posIndex],
                         "timeNN": resultsNN_suffix["times"][id].flatten(),
-                        "fullSpeed": speed,
-                        "alignedSpeed": speed[posIndex - 1],  # -1 for shift
+                        "alignedSpeed": speed[posIndex],
                         "posIndex_NN": posIndex,
                         "speedMask": resultsNN_suffix["speedMask"][id].flatten(),
                         "linearPred": resultsNN_suffix["linearPred"][id].flatten(),
@@ -2349,29 +2284,10 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                     pbar.update(1)
 
         self.results_df = pd.DataFrame(data)
+        self.results_df.set_index(
+            ["nameExp", "mouse", "manipe", "phase", "winMS"], inplace=True
+        )
         return self.results_df
-
-    def get_1d_tuning_curve(self, positions, mask_indices, bins=50, sigma=1.5):
-        """
-        Generates a smoothed 1D density curve.
-        Returns: (density_values, bin_centers)
-        """
-        # Filter data by mask (e.g., is_freeze)
-        masked_data = positions[mask_indices]
-
-        # Calculate histogram
-        counts, bin_edges = np.histogram(masked_data, bins=bins, range=(0, 1))
-
-        # Smooth the curve
-        density = gaussian_filter1d(counts.astype(float), sigma=sigma)
-
-        # Optional: Normalize to unit area or max (unit area is better for probability)
-        if np.sum(density) > 0:
-            density /= np.sum(density)
-
-        # Calculate bin centers
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        return density, bin_centers
 
     def get_tuning_curves(
         self,
@@ -2430,363 +2346,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             return final, sort_map, id_neurons
 
         return final, np.arange(final.shape[0]), id_neurons
-
-    def pynapple_bayesian_neurons_summary(
-        self,
-        feature_name_1d="linearTrue",
-        feature_name_2d="featureTrue",
-        suffix="_training",
-        idWindow=0,
-        use_speed_filter=True,
-        count_thresh=None,
-        axs=None,
-        fig=None,
-        block=False,
-        **kwargs,
-    ):
-        """
-        Summary of the Bayesian neurons.
-        Can create its own figure or plot on provided axes.
-
-        Args:
-            axs (array-like, optional): Array of matplotlib axes to plot on. If None, a new figure with 6 subplots will be created.
-            fig (matplotlib.figure.Figure, optional): Figure object to associate with the axes. If None and axs is provided, fig will be inferred from axs.
-            block (bool, optional): Whether to block execution when showing the plot. Default is False.
-            **kwargs: Additional keyword arguments for training and plotting.
-                Supported kwargs:
-                - plot_high_quality (bool): If True, plots only high-quality neurons based on Mutual Information. Default is False.
-                - save (bool): If True, saves the figure. Default is True if axs is None, else False.
-                - show (bool): If True, displays the figure. Default is True if axs is None, else False.
-                - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
-        """
-        # kwargs processing
-        plot_high_quality = kwargs.get("plot_high_quality", False)
-        save = kwargs.get("save", True if axs is None else False)
-        show = kwargs.get("show", True if axs is None else False)
-        is_predicted = kwargs.get("is_predicted", False)
-        cax_train = kwargs.pop("cax_train", None)
-        cax_pred = kwargs.pop("cax_pred", None)
-
-        bin_size = kwargs.pop("bin_size", 0.036)
-        mode = kwargs.pop("mode", "closest")
-
-        final1d, id_neurons1d, spike_data, phase = _compute_tuning_curves_for_result(
-            self,
-            suffix=suffix,
-            feature_name=feature_name_1d,
-            idWindow=idWindow,
-            use_speed_filter=use_speed_filter,
-            count_thresh=count_thresh,
-            bin_size=bin_size,
-            mode=mode,
-            **kwargs,
-        )
-        ordered1d, sort_map = self.compute_linear_tuning_curves_order(
-            lin_place_fields=final1d.values,
-            bin_edges=np.linspace(0, 1, final1d.values.shape[1] + 1),
-            sort_map=kwargs.pop("sort_map", None),
-            list_neurons=kwargs.pop("list_neurons", None),
-        )
-
-        final2d, _, spike_data, _ = _compute_tuning_curves_for_result(
-            self,
-            suffix=suffix,
-            feature_name=feature_name_2d,
-            idWindow=idWindow,
-            use_speed_filter=use_speed_filter,
-            count_thresh=None,
-            bin_size=bin_size,
-            mode=mode,
-            **kwargs,
-        )
-        ordered2d = final2d.values[id_neurons1d][sort_map]
-        ordered2d[
-            :,
-            ~self.get_allowed_mask_for_bin_size(
-                ordered2d.shape[1], ordered2d.shape[2]
-            ).T,
-        ] = np.nan
-
-        self.spikeData = spike_data
-
-        mutual_info = compute_mutual_information(final2d)
-        ordered_mi = mutual_info.to_numpy()[:, 1][id_neurons1d][sort_map]
-
-        thresh = 80
-        percentile_val = np.percentile(ordered_mi, thresh)
-        high_quality_mask = ordered_mi > percentile_val
-
-        print(
-            f"High-quality place cells: {high_quality_mask.sum()} neurons (top {100 - thresh}%)"
-        )
-        print(
-            f"Total neurons {'above ' + str(count_thresh) if count_thresh is not None else ''}: {ordered2d.shape[0]}"
-        )
-        print(
-            f"Position range: {final1d.coords[feature_name_1d].min():.2f} - {final1d.coords[feature_name_1d].max():.2f}"
-        )
-
-        # --- 3. Visualization Setup ---
-        if axs is None:
-            fig, axs = plt.subplots(2, 3, figsize=(18, 10))
-            axs = axs.flatten()
-        else:
-            axs = np.array(axs).flatten()
-            if fig is None:
-                fig = axs[0].figure
-
-        # Validate we have enough axes
-        if len(axs) < 6:
-            raise ValueError(
-                f"Provided 'axs' must have at least 6 subplots, got {len(axs)}."
-            )
-
-        # --- Panel 0: First Ordered Place Field ---
-        idx_to_plot = (
-            -1 if not plot_high_quality else np.where(high_quality_mask)[0][-1]
-        )
-        axs[0].imshow(
-            ordered2d[idx_to_plot].T, aspect="auto", origin="lower", extent=[0, 1, 0, 1]
-        )
-        axs[0].set_title("First Ordered Place Field")
-
-        # --- Pre-calculate Linear Fields ---
-        train_lt_axes = []
-        pred_lt_axes = []
-        train_lt_im = None
-        pred_lt_im = None
-        train_cb_label = None
-        pred_cb_label = None
-
-        # --- Panel 1: All Linear Tuning Curves ---
-        ax = axs[1]
-        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
-            ordered1d,
-            ax=ax,
-            add_colorbar=False,
-            **kwargs,
-        )
-        train_lt_axes.append(ax)
-
-        # --- Panel 2: Position Coverage ---
-        ax = axs[3]
-        feature = self.resultsNN_phase_pkl[suffix].get(feature_name_1d)[idWindow]
-        speedMask = self.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
-        if use_speed_filter:
-            feature = feature[speedMask]
-
-        ax.hist(
-            feature,
-            density=True,
-            bins=20,
-            alpha=0.7,
-            color="teal",
-        )
-        ax.set_xlabel("Linear Position")
-        ax.set_title("Pos Coverage in Training Data")
-
-        # --- Panel 3: Predicted Linear Tuning Curves (mov epochs) or Quality Metrics (Mutual Info) ---
-        ax = axs[4]
-        true_final1d, _, _, _ = _compute_tuning_curves_for_result(
-            self,
-            suffix=suffix,
-            feature_name="linearTrue",
-            idWindow=idWindow,
-            use_speed_filter=True,
-            bin_size=bin_size,
-            mode=mode,
-            **kwargs,
-        )
-        pred_final1d, _, _, _ = _compute_tuning_curves_for_result(
-            self,
-            suffix=suffix,
-            feature_name="linearPred",
-            idWindow=idWindow,
-            use_speed_filter=True,
-            bin_size=bin_size,
-            mode=mode,
-        )
-
-        corr_values = []
-        true_fields = true_final1d[id_neurons1d][sort_map].values
-        pred_fields = pred_final1d[id_neurons1d][sort_map].values
-        n_cells = min(len(true_fields), len(pred_fields))
-        for i in range(n_cells):
-            true_pf = np.asarray(true_fields[i]).reshape(-1)
-            pred_pf = np.asarray(pred_fields[i]).reshape(-1)
-            if (
-                true_pf.shape != pred_pf.shape
-                or np.std(true_pf) == 0
-                or np.std(pred_pf) == 0
-            ):
-                continue
-            corr_values.append(pearsonr(true_pf, pred_pf)[0])
-
-        if len(corr_values) == 0:
-            corr_speed = np.nan
-        else:
-            corr_speed = np.nanmean(corr_values)
-
-        title = (
-            f"Predicted LT Curves (r={corr_speed:.3f})"
-            if np.isfinite(corr_speed)
-            else "Predicted LT Curves"
-        )
-        pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
-            pred_fields,
-            ax=ax,
-            title=title,
-            add_colorbar=False,
-            **kwargs,
-        )
-        pred_lt_axes.append(ax)
-
-        # --- Panel 4: Predicted Linear Tuning Curves (all speeds) ---
-        true_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
-            self,
-            suffix=suffix,
-            feature_name="linearTrue",
-            idWindow=idWindow,
-            use_speed_filter=False,
-            bin_size=bin_size,
-            mode=mode,
-        )
-        ax = axs[5]
-        if "linearPred" in self.resultsNN_phase[suffix]:
-            pred_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
-                self,
-                suffix=suffix,
-                feature_name="linearPred",
-                idWindow=idWindow,
-                use_speed_filter=False,
-                bin_size=bin_size,
-                mode=mode,
-                **kwargs,
-            )
-
-            corr_values = []
-            true_fields = true_final1d_all_speed[id_neurons1d][sort_map].values
-            pred_fields = pred_final1d_all_speed[id_neurons1d][sort_map].values
-            n_cells = min(len(true_fields), len(pred_fields))
-            for i in range(n_cells):
-                true_pf = np.asarray(true_fields[i]).reshape(-1)
-                pred_pf = np.asarray(pred_fields[i]).reshape(-1)
-                if (
-                    true_pf.shape != pred_pf.shape
-                    or np.std(true_pf) == 0
-                    or np.std(pred_pf) == 0
-                ):
-                    continue
-                corr_values.append(pearsonr(true_pf, pred_pf)[0])
-
-            if len(corr_values) == 0:
-                corr_all = np.nan
-            else:
-                corr_all = np.nanmean(corr_values)
-            title = (
-                f"Predicted LT Curves (All Speeds, r={corr_all:.3f})"
-                if np.isfinite(corr_all)
-                else "Predicted LT Curves (All Speeds)"
-            )
-            pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
-                pred_fields,
-                ax=ax,
-                title=title,
-                add_colorbar=False,
-                **kwargs,
-            )
-            pred_lt_axes.append(ax)
-        elif high_quality_mask.sum() > 0:
-            print(
-                "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
-            )
-            title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
-            self.plot_linear_tuning_curves(
-                true_final1d_all_speed[id_neurons1d][sort_map][
-                    high_quality_mask
-                ].values,
-                ax=ax,
-                title=title,
-                add_colorbar=False,
-                **kwargs,
-            )
-        else:
-            ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
-            ax.axis("off")
-
-        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
-            true_final1d_all_speed[id_neurons1d][sort_map].values,
-            ax=axs[2],
-            title="LT Curves (All Speeds)",
-            add_colorbar=False,
-            **kwargs,
-        )
-        train_lt_axes.append(axs[2])
-
-        # Shared colorbars for paired linear tuning curves (same logic as error_map).
-        if train_lt_im is not None and len(train_lt_axes) > 0:
-            if cax_train is not None:
-                train_cbar = fig.colorbar(
-                    train_lt_im,
-                    cax=cax_train,
-                    orientation="horizontal",
-                    location="bottom",
-                )
-            else:
-                train_cbar = fig.colorbar(
-                    train_lt_im,
-                    ax=train_lt_axes,
-                    shrink=0.5,
-                    location="bottom",
-                    orientation="horizontal",
-                    pad=0.08,
-                )
-            if train_cb_label is not None:
-                train_cbar.set_label(train_cb_label)
-            train_cbar.outline.set_visible(False)
-        elif cax_train is not None:
-            cax_train.axis("off")
-
-        if pred_lt_im is not None and len(pred_lt_axes) > 0:
-            if cax_pred is not None:
-                pred_cbar = fig.colorbar(
-                    pred_lt_im,
-                    cax=cax_pred,
-                    orientation="horizontal",
-                    location="bottom",
-                )
-            else:
-                pred_cbar = fig.colorbar(
-                    pred_lt_im,
-                    ax=pred_lt_axes,
-                    shrink=0.5,
-                    location="bottom",
-                    orientation="horizontal",
-                    pad=0.08,
-                )
-            if pred_cb_label is not None:
-                pred_cbar.set_label(pred_cb_label)
-            pred_cbar.outline.set_visible(False)
-        elif cax_pred is not None:
-            cax_pred.axis("off")
-
-        # --- Finalize and Save ---
-        if save or show:
-            if fig.get_layout_engine() is None:
-                fig.tight_layout()
-
-        if save:
-            filename = f"pynapple_bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"
-            fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
-            fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
-
-        if show:
-            plt.show(block=block)
-        elif save:
-            # If we saved but didn't show, close the figure to free memory
-            plt.close(fig)
-
-        return fig
 
     def plot_tuning_curves_in_order(self, d=2, n=5, **kwargs):
         if d == 1:
@@ -2865,6 +2424,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             fig = ax.figure
 
         kwargs["feature_name"] = "linearTrue"
+        title = kwargs.get("title", "2D Tuning Curves in Order")
+
         sigma = kwargs.pop("sigma", None)
         final1d, id_neurons1d, _, _ = _compute_tuning_curves_for_result(self, **kwargs)
         bin_edges = np.linspace(0, 1, final1d.values.shape[1] + 1)
@@ -2874,6 +2435,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             sort_map=kwargs.get("sort_map", None),
             list_neurons=kwargs.get("list_neurons", None),
         )
+        path = kwargs.get("path", None)
 
         kwargs["count_thresh"] = None
         kwargs["sigma"] = sigma
@@ -2959,8 +2521,474 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                 f"Neu. {id_neurons1d[sort_map_1d][-(i + 1)]} - Bottom {i + 1}"
             )
 
+        if title is not None:
+            plt.suptitle(title, fontsize=16)
+
         plt.tight_layout()
+
+        if path is not None:
+            plt.savefig(path)
+
         plt.show()
+
+    def plot_respi_spectro_during_immobility(
+        self, which: str = "freezing", path: Optional[str] = None, **kwargs
+    ):
+        from neuroencoders.utils.global_classes import ZONELABELS, ZONE_COLORS
+        from neuroencoders.utils.viz_params import ALL_STIMS_COLOR, RIPPLES_COLOR
+
+        try:
+            respi = self.DataHelper.get_respi_data()
+        except FileNotFoundError:
+            respi = self.DataHelper.get_respi_data(self.network_path)
+
+        max_respi_freq = kwargs.get("max_respi_freq", None)
+        smooth_fact = kwargs.get("smooth_fact", 5)
+        bin_size = kwargs.get("bin_size", 1)
+        phase = kwargs.get("phase", "cond")
+        interval_set = getattr(self, phase)
+
+        if which == "freezing":
+            interval = self.DataHelper.get_freeze_epochs()
+        elif which == "ripples":
+            interval = self.DataHelper.get_ripples_epochs()
+        elif which == "stims":
+            interval = self.DataHelper.get_stim_epochs()
+        else:
+            raise ValueError(
+                "Invalid 'which' parameter. Choose from 'freezing', 'ripples', or 'stims'."
+            )
+
+        spectr, _ = self.DataHelper.compute_breathing_rate(
+            spectro_tsd=respi, bin_size=bin_size, smooth_fact=smooth_fact
+        )
+
+        if max_respi_freq is not None:
+            respi = respi.loc[[i for i in respi.columns if i <= max_respi_freq]]
+
+        to_plot = respi.restrict(interval)
+
+        to_plot_clean = to_plot.restrict(interval_set)
+
+        results = self.resultsNN_phase[f"_{phase}"]
+
+        pred_pos = results["linearPred"][0]
+        true_pos = results["linearTrue"][0]
+        times = results["times"][0]
+
+        spectr = spectr.restrict(self.DataHelper.freeze_epochs).restrict(interval_set)
+        pred_tsd = (
+            Tsd(t=times, d=pred_pos)
+            .restrict(interval_set)
+            .restrict(self.DataHelper.freeze_epochs)
+        )
+        true_tsd = (
+            Tsd(t=times, d=true_pos)
+            .restrict(interval_set)
+            .restrict(self.DataHelper.freeze_epochs)
+        )
+        stim_tsd = (
+            self.DataHelper.get_stim_epochs()
+            .intersect(interval_set)
+            .intersect(self.DataHelper.freeze_epochs)
+        )
+        ripples_tsd = (
+            self.DataHelper.get_ripples_epochs()
+            .intersect(interval_set)
+            .intersect(self.DataHelper.freeze_epochs)
+        )
+
+        # -------------------------------------------------------------------------
+        # NEW: Create a continuous virtual time index to defeat non-linear spacing
+        # -------------------------------------------------------------------------
+        timestamps = to_plot_clean.as_units("s").index.values
+        n_samples = len(timestamps)
+        virtual_time = np.arange(n_samples)  # Simply 0, 1, 2, ..., N
+
+        # Extent for imshow now uses indices instead of raw absolute time
+        extent = [0, n_samples - 1, to_plot_clean.columns[0], to_plot_clean.columns[-1]]
+
+        # Helper function to map non-linear timestamps to continuous virtual indices
+        def time_to_index(t_array, reference_timestamps=timestamps):
+            # Searches where the raw timestamps fit into our sliced/concatenated array
+            return np.searchsorted(reference_timestamps, t_array)
+
+        # 2. Map zones to their designated colors
+        zone_color_dict = dict(zip(ZONELABELS, ZONE_COLORS))
+
+        # 3. Create a 3-panel stacked layout
+        fig, (ax_hypno, ax_matrix, ax_bias) = plt.subplots(
+            nrows=3,
+            ncols=1,
+            figsize=(14, 11),
+            sharex=True,  # This still works flawlessly using indices!
+            gridspec_kw={"height_ratios": [1, 3, 1.5]},
+        )
+
+        # -------------------------------------------------------------------------
+        # PANEL 1: Hypnogram (Zone Epochs mapped to index space)
+        # -------------------------------------------------------------------------
+        zone_labels = self.DataHelper.ZoneLabels
+        y_ticks = np.arange(len(zone_labels))
+
+        zone_mapping = {
+            "Safe": 1,
+            "SafeCenter": 2,
+            "Center": 3,
+            "ShockCenter": 4,
+            "Shock": 5,
+        }
+        zone_labels = sorted(zone_labels, key=lambda t: zone_mapping[t])
+
+        for y_idx, zone_name in enumerate(zone_labels):
+            zone_epochs = getattr(self.DataHelper, f"{zone_name}_EpochAligned")
+            zone_epochs_clean = zone_epochs.intersect(
+                to_plot_clean.time_support
+            )  # Match the exact matrix timeframe
+
+            for start, end in zip(zone_epochs_clean.start, zone_epochs_clean.end):
+                # Convert absolute epochs boundaries into their corresponding indexed positions
+                start_idx = time_to_index(start)
+                end_idx = time_to_index(end)
+
+                ax_hypno.hlines(
+                    y=y_idx,
+                    xmin=start_idx,
+                    xmax=end_idx,
+                    color=zone_color_dict[zone_name],
+                    linewidth=6,
+                )
+
+        ax_hypno.set_yticks(y_ticks)
+        ax_hypno.set_yticklabels(zone_labels)
+        ax_hypno.set_ylim(-0.5, len(zone_labels) - 0.5)
+        ax_hypno.invert_yaxis()
+        ax_hypno.set_ylabel("Zones")
+        ax_hypno.grid(axis="x", alpha=0.3, linestyle="--")
+        ax_hypno.title.set_text(
+            "Behavioral Zone, OB spectro and linear predictions (Concatenated Freeze Epochs)"
+        )
+
+        # -------------------------------------------------------------------------
+        # PANEL 2: Main Continuous Matrix
+        # -------------------------------------------------------------------------
+        ax_matrix.imshow(
+            to_plot_clean.values.T,
+            aspect="auto",
+            extent=extent,
+            cmap="cmc.batlow",
+            origin="lower",
+        )
+        ax_matrix.plot(
+            virtual_time,
+            to_plot_clean.value_from(spectr).values,
+            color="grey",
+            label="Detected breathing rate",
+            linewidth=1.5,
+        )
+        ax_matrix.set_ylabel("Frequency (Hz)")
+
+        # -------------------------------------------------------------------------
+        # PANEL 3: Evolution of Shock Zone Bias (Decoded vs True)
+        # -------------------------------------------------------------------------
+        true_tsd = to_plot_clean.value_from(
+            true_tsd.restrict(to_plot_clean.time_support)
+        )
+        pred_tsd = to_plot_clean.value_from(
+            pred_tsd.restrict(to_plot_clean.time_support)
+        )
+
+        try:
+            # Smooth in value space so non-linear gaps don't corrupt the smoothing logic
+            true_vals = true_tsd.smooth(3).values
+            pred_vals = pred_tsd.smooth(3).values
+        except ValueError:
+            true_vals = true_tsd.values
+            pred_vals = pred_tsd.values
+
+        # We plot directly against our linear virtual_time step spacing
+        ax_bias.plot(
+            virtual_time,
+            true_vals,
+            color="crimson",
+            alpha=0.8,
+            label="True Position",
+            linewidth=1.5,
+        )
+        ax_bias.plot(
+            virtual_time,
+            pred_vals,
+            color="navy",
+            alpha=0.8,
+            label="Predicted Position",
+            linewidth=1.5,
+        )
+
+        ax_bias.set_ylabel("Shock Zone Bias\n(1=Safe, 0=Shock)")
+        ax_bias.set_xlabel("Cumulative Sliced Time (Samples)")
+        ax_bias.grid(True, alpha=0.3, linestyle="--")
+        ax_bias.set_xlim(0, n_samples - 1)
+
+        tick_locs = ax_bias.get_xticks()
+        ax_bias.set_xticklabels([f"{int(loc)}" for loc in tick_locs])
+
+        for end_time in stim_tsd.intersect(to_plot_clean.time_support).end:
+            stim_idx = time_to_index(end_time)
+            ax_matrix.axvline(stim_idx, linestyle="--", c=ALL_STIMS_COLOR, label="Stim")
+            ax_bias.plot(stim_idx, 1.1, "*", c=ALL_STIMS_COLOR, label="Stim")
+
+        for end_time in ripples_tsd.intersect(to_plot_clean.time_support).end:
+            ripples_idx = time_to_index(end_time)
+            ax_matrix.plot(
+                ripples_idx,
+                max(to_plot_clean.columns.values) - 1,
+                "*",
+                c=RIPPLES_COLOR,
+                zorder=4,
+                label="Ripple",
+            )
+            ax_bias.plot(ripples_idx, 1.1, "*", c=RIPPLES_COLOR, label="Ripple")
+
+        handles, labels = ax_bias.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        handles_mat, labels_mat = ax_matrix.get_legend_handles_labels()
+        by_label.update(dict(zip(labels_mat, handles_mat)))
+        plt.legend(by_label.values(), by_label.keys(), loc="best")
+        plt.tight_layout()
+
+        if path is not None:
+            import pathlib
+
+            if not pathlib.Path(path).suffix:
+                plt.savefig(
+                    os.path.join(path, f"OB_spectro_during_{which}.png"), dpi=300
+                )
+                plt.savefig(os.path.join(path, f"OB_spectro_during_{which}.svg"))
+            else:
+                suffix = pathlib.Path(path).suffix
+                # If the provided path has an extension, save directly to that path + svg
+                plt.savefig(path, dpi=300)
+                if suffix != ".svg":
+                    plt.savefig(path.replace(suffix, ".svg"))
+
+        plt.show()
+
+    def compute_freeze_onoff_counts(
+        self, wi=2.0, bin_size=0.05, smooth_sigma=0.05, count_thresh=200
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Identifies ON and OFF modulated freezing neurons using raw count/firing rates.
+        Filters out quiet neurons below count_thresh (total spikes in conditioning epoch).
+        """
+        try:
+            spikes = self.DataHelper.get_spike_data()
+        except FileNotFoundError:
+            if os.path.isfile(os.path.join(self.network_path, "SpikeData.mat")):
+                import shutil
+
+                shutil.copyfile(
+                    os.path.join(self.network_path, "SpikeData.mat"),
+                    os.path.join(self.DataHelper.folder, "SpikeData.mat"),
+                )
+                spikes = self.DataHelper.get_spike_data()
+            else:
+                raise
+
+        cond_epoch = nap.IntervalSet(self.cond)
+        freeze_epochs = self.DataHelper.get_freeze_epochs().intersect(cond_epoch)
+        if len(freeze_epochs) == 0:
+            return None
+
+        # Get raw spike counts per bin restricted to the target condition epoch
+        spikes_cond = spikes.restrict(cond_epoch)
+        counts = spikes_cond.count(bin_size)
+
+        # Calculate the total integrated spike count for each neuron across the entire epoch
+        total_counts_per_neuron = np.array(counts.restrict(freeze_epochs).sum(axis=0))
+        # Keep only well-sampled neurons (matching the tuning curve count thresholding rule)
+        valid_mask = total_counts_per_neuron >= count_thresh
+        n_neurons_raw = len(valid_mask)
+        print(
+            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {valid_mask.shape[0]}"
+        )
+
+        if valid_mask.sum() == 0:
+            return None
+
+        # Convert counts to firing rates (Hz) and smooth for robust PETH calculations
+        fr = counts / bin_size
+        smoothed_fr = fr.smooth(smooth_sigma)
+
+        onsets = nap.Ts(freeze_epochs.start)
+        offsets = nap.Ts(freeze_epochs.end)
+
+        peth_on = nap.compute_perievent(
+            smoothed_fr, onsets, window=(-wi, wi), epochs=cond_epoch
+        )
+        peth_off = nap.compute_perievent(
+            smoothed_fr, offsets, window=(-wi, wi), epochs=cond_epoch
+        )
+
+        # Extract trial-averaged timecourses
+        mean_on = np.nanmean(peth_on.values, axis=1).astype(float)
+        mean_off = np.nanmean(peth_off.values, axis=1).astype(float)
+
+        mean_on[np.isinf(mean_on)] = np.nan
+        mean_off[np.isinf(mean_off)] = np.nan
+
+        # Force low-count/invalid neurons to NaN in raw outputs so they drop cleanly
+        # mean_on[:, invalid_mask] = np.nan
+        # mean_off[:, invalid_mask] = np.nan
+
+        t_on = peth_on.times()
+        t_off = peth_off.times()
+
+        # Define baseline vs active freezing windows
+        # here we force the response mask to the full freezing episode, from onset to offset
+        baseline_mask = t_on <= -0.5
+        response_mask_on = (t_on >= 0.0) & (t_on <= wi)
+        response_mask_off = t_off <= 0
+        response_mask = np.concatenate([response_mask_on, response_mask_off])
+        mean_full = np.vstack([mean_on, mean_off])
+
+        # Compute raw average firing rates within windows
+        base_line_avg = np.nanmean(mean_on[baseline_mask, :], axis=0)
+        response_avg = np.nanmean(mean_full[response_mask, :], axis=0)
+
+        # Absolute difference in firing rate (Hz)
+        modulation = response_avg - base_line_avg
+
+        # Classify active subpopulations using raw Hz delta thresholds
+        on_neurons = (modulation > 0.75) & valid_mask
+        off_neurons = (modulation < -1.5) & valid_mask
+
+        # Sort map layout calculation based on mean activation trajectory
+        sort_idx = np.argsort(np.nanmean(mean_on, axis=0))
+
+        return {
+            "peth_on": peth_on,
+            "peth_off": peth_off,
+            "mean_on_raw": mean_on,
+            "mean_off_raw": mean_off,
+            "on_neurons_mask": on_neurons,
+            "off_neurons_mask": off_neurons,
+            "sort_idx": sort_idx,
+            "n_neurons_raw": n_neurons_raw,
+            "valid_mask": valid_mask,  # Retained to ensure clean sub-indexing
+        }
+
+    def compute_event_onoff_counts(
+        self,
+        wi=2.0,
+        bin_size=0.05,
+        smooth_sigma=0.05,
+        count_thresh=200,
+        around="ripples",
+        focus_on=0.5,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Identifies ON and OFF modulated neurons around single-point events (ripples/stims).
+        Filters out quiet neurons below count_thresh based on total spikes in the condition epoch.
+        """
+        try:
+            spikes = self.DataHelper.get_spike_data()
+        except FileNotFoundError:
+            if os.path.isfile(os.path.join(self.network_path, "SpikeData.mat")):
+                import shutil
+
+                shutil.copyfile(
+                    os.path.join(self.network_path, "SpikeData.mat"),
+                    os.path.join(self.DataHelper.folder, "SpikeData.mat"),
+                )
+                spikes = self.DataHelper.get_spike_data()
+            else:
+                raise
+
+        cond_epoch = nap.IntervalSet(self.cond)
+
+        # --- SINGLE POINT EVENT EXTRACTION ---
+        # Adjust attribute names below ('get_ripple_timestamps' or 'get_stim_timestamps')
+        # to match your DataHelper's actual API for discrete events.
+        if around == "ripples":
+            event_ts = nap.Ts(self.DataHelper.get_ripples_epochs().start).restrict(
+                cond_epoch
+            )
+        elif around == "stims":
+            # Fallback placeholder if your event handles use a different method name
+            event_ts = nap.Ts(self.DataHelper.get_stim_epochs().start).restrict(
+                cond_epoch
+            )
+        else:
+            raise ValueError(
+                f"Undefined value {around}: choose between either 'ripples' or 'stims'"
+            )
+        if len(event_ts) == 0:
+            return None
+
+        # Calculate raw spike counts per bin over the condition epoch
+        spikes_cond = spikes.restrict(cond_epoch)
+        counts = spikes_cond.count(bin_size)
+
+        # Filter out inactive neurons across the whole session frame
+        total_counts_per_neuron = np.array(counts.sum(axis=0))
+        valid_mask = total_counts_per_neuron >= count_thresh
+        n_neurons_raw = len(valid_mask)
+        print(
+            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {valid_mask.shape[0]}"
+        )
+
+        if valid_mask.sum() == 0:
+            return None
+
+        # Convert counts to firing rates (Hz) and apply smoothing
+        fr = counts / bin_size
+        smoothed_fr = fr.smooth(smooth_sigma)
+
+        # --- SINGLE PETH COMPUTATION ---
+        peth_event = nap.compute_perievent(
+            smoothed_fr, event_ts, window=(-wi, wi), epochs=cond_epoch
+        )
+
+        # Extract trial-averaged timecourse along axis=1 -> Shape: [time_bins, neurons]
+        mean_event = np.nanmean(peth_event.values, axis=1).astype(float)
+        mean_event[np.isinf(mean_event)] = np.nan
+
+        # Zero out or invalidate low-count rows
+        invalid_mask = ~valid_mask
+        mean_event[:, invalid_mask] = np.nan
+
+        t_event = peth_event.times()
+
+        # Define baseline vs sharp-transient response windows relative to single timestamp
+        baseline_mask = t_event <= -0.1  # e.g., pre-event baseline
+
+        response_mask = (t_event >= 0.0) & (
+            t_event <= focus_on
+        )  # post-event modulation window
+
+        # Compute raw average firing rates within windows
+        base_line_avg = np.nanmean(mean_event[baseline_mask, :], axis=0)
+        response_avg = np.nanmean(mean_event[response_mask, :], axis=0)
+
+        # Calculate difference in raw rates (Hz)
+        modulation = response_avg - base_line_avg
+
+        # Classify active subpopulations using raw Hz delta thresholds (adjust thresholds for ripples/stims if needed)
+        on_neurons = (modulation > 1.0) & valid_mask
+        off_neurons = (modulation < -1.0) & valid_mask
+
+        # Sort map layout calculation based on mean activation trajectory
+        sort_idx = np.argsort(np.nanmean(mean_event, axis=0))
+
+        return {
+            "peth_event": peth_event,
+            "mean_event_raw": mean_event,
+            "on_neurons_mask": on_neurons,
+            "off_neurons_mask": off_neurons,
+            "sort_idx": sort_idx,
+            "n_neurons_raw": n_neurons_raw,
+            "valid_mask": valid_mask,
+        }
 
 
 class Results_Loader(TuningCurvesPlotter):
@@ -3026,8 +3054,12 @@ class Results_Loader(TuningCurvesPlotter):
         self.all_spikes = None
         if mice_nb is None:
             mice_nb = dir.name.str.extract(r"(\d+)").astype(int)
+        else:
+            mice_nb = [int(m) for m in mice_nb]
         if mice_manipes is None:
             mice_manipes = dir.manipe.str.extract(r"(\w+)").astype(str)
+        else:
+            mice_manipes = [str(m) for m in mice_manipes]
         if timeWindows is None:
             warn("No timeWindows provided, using all windowSizeMS available in Dir.")
             self.timeWindows = "all"
@@ -3089,6 +3121,9 @@ class Results_Loader(TuningCurvesPlotter):
                 conditions = (
                     self.Dir.name.str.lower().str.contains(mouse_nb.lower())
                 ) & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
+                print(
+                    f"Loading results for mouse {mouse_full_name} with conditions: {conditions.sum()} matching entries."
+                )
                 if not conditions.any():
                     raise ValueError(
                         f"Mouse {mouse_nb} with manipe {manipe} not found in the directory."
@@ -3159,6 +3194,7 @@ class Results_Loader(TuningCurvesPlotter):
 
                 for suffix, phase in zip(self.suffixes, self.phases):
                     add_training = phase == kwargs.get("template", "pre")
+                    add_full_pre = phase == kwargs.get("template", "pre")
                     self.results_dict[nameExp][mouse_full_name][phase] = Mouse_Results(
                         dir,
                         mouse_name=mouse_nb,
@@ -3175,6 +3211,7 @@ class Results_Loader(TuningCurvesPlotter):
                         else "log" in nameExp.lower(),
                         denseweight=denseweight,
                         add_training=add_training,
+                        add_full_pre=add_full_pre,
                         **kwargs,
                     )
 
@@ -3182,6 +3219,7 @@ class Results_Loader(TuningCurvesPlotter):
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=[suffix],
                             add_training=phase == kwargs.get("template", "pre"),
+                            add_full_pre=phase == kwargs.get("template", "pre"),
                             load_pickle=kwargs.get("load_pickle", False),
                         )
                         found_training = True
@@ -3193,12 +3231,14 @@ class Results_Loader(TuningCurvesPlotter):
                             ].load_bayes(
                                 suffixes=[suffix],
                                 add_training=phase == kwargs.get("template", "pre"),
+                                add_full_pre=phase == kwargs.get("template", "pre"),
                                 **kwargs,
                             )
                     except FileNotFoundError:
                         self.results_dict[nameExp][mouse_full_name][phase].load_data(
                             suffixes=[suffix],
                             add_training=False,
+                            add_full_pre=False,
                             load_pickle=kwargs.get("load_pickle", False),
                         )
                         if kwargs.get("load_bayes", False) or kwargs.get(
@@ -3207,12 +3247,19 @@ class Results_Loader(TuningCurvesPlotter):
                             self.results_dict[nameExp][mouse_full_name][
                                 phase
                             ].load_bayes(
-                                suffixes=[suffix], add_training=False, **kwargs
+                                suffixes=[suffix],
+                                add_training=False,
+                                add_full_pre=False,
+                                **kwargs,
                             )
 
         if found_training and "training" not in self.phases:
             self.phases.append("training")
             self.suffixes.append("_training")
+
+            if "pre" in self.phases:
+                self.phases.append("full_pre")
+                self.suffixes.append("_full_pre")
 
         if kwargs.get("df", None) is None:
             try:
@@ -3220,10 +3267,11 @@ class Results_Loader(TuningCurvesPlotter):
             except Exception as e:
                 print(f"Issues converting to DataFrame: {e}")
 
-    def convert_to_df(self, redo=False):
+    def convert_to_df(self, redo=False, redo_sub=False):
         """
         Convert the results_dict to a pandas DataFrame.
-        This method will create a DataFrame with the mouse names, manipes, phases, and results.
+        Collects row dictionaries from all windows, mice, and experiments
+        and packages them cleanly into a single MultiIndexed DataFrame.
         """
         if (
             hasattr(self, "results_df")
@@ -3235,39 +3283,66 @@ class Results_Loader(TuningCurvesPlotter):
                 "Results DataFrame for Results_Loader already exists. Use redo=True to recreate it."
             )
             return self.results_df
+
         # Calculate total iterations for progress bar
         total_iterations = sum(
-            len([p for p in phases.keys() if p != "training"])
+            len([p for p in phases.keys() if p != "training" and p != "full_pre"])
             for mice in self.results_dict.values()
             for phases in mice.values()
         )
 
-        # Pre-allocate list for better performance
-        data_list = []
+        # Pre-allocate a single master list for ALL row dictionaries
+        df_list = []
 
         # Create progress bar
         with tqdm(total=total_iterations, desc="Processing results") as pbar:
             for nameExp, mice in self.results_dict.items():
                 for mouse_name, phases in mice.items():
                     for phase, results in phases.items():
-                        if phase == "training":
+                        if phase == "training" or phase == "full_pre":
                             continue
 
-                        results_df = results.convert_to_df()
-                        # Add metadata columns
-                        results_df["results"] = results
-                        results_df["nameExp"] = nameExp
-                        results_df["mouse_name"] = mouse_name
+                        sub_df = copy.deepcopy(
+                            results.convert_to_df(redo=redo_sub, disable=True)
+                        )
+                        if (
+                            results is None
+                            or not hasattr(results, "results_df")
+                            or results.results_df is None
+                        ):
+                            print(
+                                f"Warning: No results DataFrame for {nameExp} - {mouse_name} - {phase}. Skipping."
+                            )
+                            continue
+                        if not isinstance(sub_df.index, pd.RangeIndex):
+                            sub_df = sub_df.reset_index()
 
-                        # Append to list instead of concatenating
-                        data_list.append(results_df)
+                        # 2. Inject the contextual loop variables as columns
+                        sub_df["nameExp"] = nameExp
+                        sub_df["mouse_name"] = mouse_name
+
+                        # Add a direct reference back to the original results object row-by-row
+                        sub_df["results"] = results
+
+                        # Accumulate the DataFrame slice
+                        df_list.append(sub_df)
+
                         pbar.update(1)
 
-        # Single concatenation at the end (much faster)
-        data = pd.concat(data_list, ignore_index=True) if data_list else pd.DataFrame()
-        self.results_df = data.sort_values(by=["mouse", "phase"]).reset_index(drop=True)
+        if df_list:
+            data = pd.concat(df_list, ignore_index=True)
+            sort_keys = [
+                k for k in ["mouse", "mouse_name", "phase"] if k in data.columns
+            ]
+            if sort_keys:
+                data = data.sort_values(by=sort_keys)
 
-        return self.results_df
+            index_keys = ["nameExp", "mouse_name", "manipe", "phase", "winMS"]
+            actual_index_keys = [k for k in index_keys if k in data.columns]
+            data.set_index(actual_index_keys, inplace=True)
+            self.results_df = data
+
+            return self.results_df
 
     def __getitem__(self, key):
         """
@@ -3450,106 +3525,757 @@ class Results_Loader(TuningCurvesPlotter):
     def apply_analysis(self, redo=False):
         """
         Apply common analysis metrics to the results DataFrame.
+        Optimized for global MultiIndex datasets using parallel core execution.
         """
-        if "mean_speed" in self.results_df.columns and not redo:
+        current_index_names = list(self.results_df.index.names)
+        if "mean_error" in self.results_df.columns and not redo:
             print("Analysis already applied to the DataFrame.")
             return self.results_df
+
+        flat_df = self.results_df.reset_index()
+        # if we redo, drop all columns we will create
+        columns_to_drop = [
+            "error",
+            "mean_error",
+            "lin_error",
+            "mean_lin_error",
+            "predLossThresholderror_selected",
+            "mean_error_selected",
+            "lin_error_selected",
+            "mean_lin_error_selected",
+            "asymmetry_index_on_predictedtrue_binary_direction",
+            "predicted_binary_direction",
+            "training_scalar_index",
+            "training_asymmetry_index",
+            "real_asymmetry_ratiopredicted_asymmetry_ratio",
+            "predicted_asymmetry_ratio_on_selected",
+            "predicted_asymmetry_ratio_normalized",
+            "selected_predicted_asymmetry_ratio_normalized",
+        ]
+        if redo:
+            flat_df = flat_df.drop(columns=columns_to_drop, errors="ignore")
 
         def process_row(row):
             res = {}
 
-            # 1. Base Errors and Speed
-            res["mean_speed"] = (
-                np.nanmean(row["alignedSpeed"])
-                if row["alignedSpeed"] is not None
-                else np.nan
-            )
-
+            # Base validation flags
             has_pred = row["featurePred"] is not None and row["featureTrue"] is not None
             has_lin = row["linearPred"] is not None and row["linearTrue"] is not None
             has_loss = row["predLoss"] is not None
 
+            # 1. Base Errors and Speed
             if has_pred:
-                errors = np.linalg.norm(row["featurePred"] - row["featureTrue"], axis=1)
+                errors = np.linalg.norm(
+                    row["featurePred"] - row["featureTrue"], axis=1
+                ).astype(np.float32)
                 res["error"] = errors
-                res["mean_error"] = np.nanmean(errors)
+                res["mean_error"] = (
+                    np.nanmean(errors, dtype=np.float32) * np.ones_like(errors)
+                ).astype(np.float32)
 
             if has_lin:
-                lin_errors = np.abs(row["linearPred"] - row["linearTrue"])
+                lin_errors = np.abs(row["linearPred"] - row["linearTrue"]).astype(
+                    np.float32
+                )
                 res["lin_error"] = lin_errors
-                res["mean_lin_error"] = np.nanmean(lin_errors)
+                res["mean_lin_error"] = (
+                    np.nanmean(lin_errors, dtype=np.float32) * np.ones_like(lin_errors)
+                ).astype(np.float32)
 
-            # 2. Selected metrics (lowest 20% loss)
+            # 2. Selected metrics (lowest 20% loss window evaluation)
             if has_loss:
-                threshold = np.quantile(row["predLoss"], 0.2)
-                res["predLossThreshold"] = threshold
-                mask = row["predLoss"] <= threshold
+                threshold = np.quantile(row["predLoss"], 0.2).astype(np.float32)
+                res["predLossThreshold"] = (
+                    threshold * np.ones_like(row["predLoss"])
+                ).astype(np.float32)
+                mask = (row["predLoss"] <= threshold).astype(bool)
 
                 if has_pred:
-                    res["mean_error_selected"] = np.nanmean(errors[mask])
-                    res["asymmetry_index_on_selected_predicted"] = row[
-                        "results"
-                    ].get_training_imbalance(positions=row["featurePred"][mask])
+                    errors_selected = copy.deepcopy(errors)
+                    errors_selected[~mask] = np.nan
+                    res["error_selected"] = errors_selected
+                    res["mean_error_selected"] = (
+                        np.nanmean(errors_selected, dtype=np.float32)
+                        * np.ones_like(errors_selected)
+                    ).astype(np.float32)
+
+                    # Fetch custom object pointer mapping safely from row values
+                    res["asymmetry_index_on_selected_predicted"] = (
+                        np.array(
+                            row["results"].get_training_imbalance(
+                                positions=row["featurePred"][mask]
+                            ),
+                            dtype=np.float32,
+                        )
+                        * np.ones_like(errors_selected)
+                    ).astype(np.float32)
+
                 if has_lin:
-                    res["lin_error_selected"] = lin_errors[mask]
-                    res["mean_lin_error_selected"] = np.nanmean(lin_errors[mask])
+                    lin_errors_select = copy.deepcopy(lin_errors)
+                    lin_errors_select[~mask] = np.nan
+                    res["lin_error_selected"] = lin_errors_select
+                    res["mean_lin_error_selected"] = (
+                        np.nanmean(lin_errors_select, dtype=np.float32)
+                        * np.ones_like(lin_errors_select)
+                    ).astype(np.float32)
 
             # 3. Indices and Directions
             if has_pred:
-                res["asymmetry_index_on_predicted"] = row[
-                    "results"
-                ].get_training_imbalance(positions=row["featurePred"])
+                res["asymmetry_index_on_predicted"] = (
+                    np.array(
+                        row["results"].get_training_imbalance(
+                            positions=row["featurePred"]
+                        ),
+                        dtype=np.float32,
+                    )
+                    * np.ones(row["featurePred"].shape[0], dtype=np.float32)
+                ).astype(np.float32)
 
             if has_lin:
-                res["true_binary_direction"] = row[
-                    "results"
-                ].data_helper._get_traveling_direction(row["linearTrue"])
-                res["predicted_binary_direction"] = row[
-                    "results"
-                ].data_helper._get_traveling_direction(row["linearPred"])
+                res["true_binary_direction"] = (
+                    np.array(
+                        row["results"].data_helper._get_traveling_direction(
+                            row["linearTrue"]
+                        ),
+                        dtype=np.float32,
+                    )
+                    * np.ones_like(row["linearTrue"])
+                ).astype(np.float32)
+
+                res["predicted_binary_direction"] = (
+                    np.array(
+                        row["results"].data_helper._get_traveling_direction(
+                            row["linearPred"]
+                        ),
+                        dtype=np.float32,
+                    )
+                    * np.ones_like(row["linearPred"])
+                ).astype(np.float32)
 
             return pd.Series(res)
 
-        # Apply processing in a single pass
-        analysis_columns = self.results_df.apply(process_row, axis=1)
+        analysis_columns = flat_df.apply(process_row, axis=1)
 
-        # Update DataFrame with new columns efficiently
+        # Join the evaluated metrics back into our working flat DataFrame
         for col in analysis_columns.columns:
-            self.results_df[col] = analysis_columns[col]
+            flat_df[col] = analysis_columns[col]
+        # --- 4. FIXED VECTORIZED RATIO CALCULATIONS ---
+        group_keys = ["nameExp", "mouse_name", "manipe", "winMS"]
+        group_keys = [k if k in flat_df.columns else "mouse" for k in group_keys]
 
-        # 4. Vectorized Ratio Calculations (fast operations)
-        training_values = (
-            self.results_df[self.results_df["phase"] == "training"]
-            .groupby(["nameExp", "mouse_name", "manipe", "winMS"])["asymmetry_index"]
-            .first()
+        # Isolate training rows cleanly
+        training_df = flat_df[flat_df["phase"] == "training"].copy()
+
+        if not training_df.empty:
+            # Extract the true scalar value out of the array cell
+            # Since it's an array of repeated values, we grab the very first element [0]
+            training_df["training_scalar_index"] = training_df["asymmetry_index"].apply(
+                lambda x: (
+                    x.flatten()[0] if isinstance(x, np.ndarray) and x.size > 0 else x
+                )
+            )
+
+            # Group by and extract the scalar baseline profiles
+            training_values = (
+                training_df.groupby(group_keys)["training_scalar_index"]
+                .first()
+                .reset_index()
+                .rename(columns={"training_scalar_index": "training_asymmetry_index"})
+            )
+
+            # Merge the single numeric baseline value back into your master flat DataFrame
+            flat_df = flat_df.merge(training_values, on=group_keys, how="left")
+        else:
+            # Fallback if no training records exist in this tracking block
+            flat_df["training_asymmetry_index"] = np.nan
+
+        # Now train_idx becomes a simple scalar column (or NaN), which broadcasts
+        # beautifully across your target data columns containing arrays!
+        train_idx = flat_df["training_asymmetry_index"].replace(0, np.nan)
+
+        # Convert train_idx into a pandas Series alignment value for seamless row broadcasting
+        # This allows array / scalar division to work natively element-by-element across every row!
+        flat_df["real_asymmetry_ratio"] = flat_df["asymmetry_index"] / train_idx
+        flat_df["predicted_asymmetry_ratio"] = (
+            flat_df["asymmetry_index_on_predicted"] / train_idx
+        )
+        flat_df["predicted_asymmetry_ratio_on_selected"] = (
+            flat_df["asymmetry_index_on_selected_predicted"] / train_idx
         )
 
-        self.results_df["training_asymmetry_index"] = self.results_df.set_index(
-            ["nameExp", "mouse_name", "manipe", "winMS"]
-        ).index.map(training_values)
+        # To handle dividing an array column by an array column, use element-wise custom operations
+        def divide_array_columns(row, num_col, denom_col):
+            num = row[num_col]
+            denom = row[denom_col]
+            if isinstance(num, np.ndarray) and isinstance(denom, np.ndarray):
+                # Safe division: mask out denominators that are equal to 0
+                safe_denom = np.where(denom == 0, np.nan, denom)
+                return num / safe_denom
+            return np.nan
 
-        # Safeguard division by zero for ratios
-        train_idx = self.results_df["training_asymmetry_index"].replace(0, np.nan)
-
-        self.results_df["real_asymmetry_ratio"] = (
-            self.results_df["asymmetry_index"] / train_idx
+        print("Normalizing ratio profiles across nested array channels...")
+        flat_df["predicted_asymmetry_ratio_normalized"] = flat_df.apply(
+            divide_array_columns,
+            axis=1,
+            args=("asymmetry_index_on_predicted", "real_asymmetry_ratio"),
         )
-        self.results_df["predicted_asymmetry_ratio"] = (
-            self.results_df["asymmetry_index_on_predicted"] / train_idx
-        )
-        self.results_df["predicted_asymmetry_ratio_on_selected"] = (
-            self.results_df["asymmetry_index_on_selected_predicted"] / train_idx
-        )
-
-        real_ratio = self.results_df["real_asymmetry_ratio"].replace(0, np.nan)
-        self.results_df["predicted_asymmetry_ratio_normalized"] = (
-            self.results_df["asymmetry_index_on_predicted"] / real_ratio
-        )
-        self.results_df["selected_predicted_asymmetry_ratio_normalized"] = (
-            self.results_df["asymmetry_index_on_selected_predicted"] / real_ratio
+        flat_df["selected_predicted_asymmetry_ratio_normalized"] = flat_df.apply(
+            divide_array_columns,
+            axis=1,
+            args=("asymmetry_index_on_selected_predicted", "real_asymmetry_ratio"),
         )
 
+        # go back to full dim for training_asymmetry_index
+        flat_df["training_asymmetry_index"] = flat_df.apply(
+            lambda row: (
+                row["training_asymmetry_index"] * np.ones_like(row["timeNN"])
+                if isinstance(row["training_asymmetry_index"], (int, float))
+                else row["training_asymmetry_index"]
+            ),
+            axis=1,
+        )
+
+        flat_df = flat_df.loc[:, ~flat_df.columns.duplicated()].copy()
+
+        if current_index_names and not all(x is None for x in current_index_names):
+            flat_df.set_index(current_index_names, inplace=True)
+        else:
+            # Fallback default array index configuration matching your description
+            default_keys = [
+                "nameExp",
+                "mouse_name",
+                "manipe",
+                "phase",
+                "winMS",
+                "mouse",
+            ]
+            actual_keys = [k for k in default_keys if k in flat_df.columns]
+            flat_df.set_index(actual_keys, inplace=True)
+
+        self.results_df = flat_df
         return self.results_df
+
+    def add_breathing(self, redo=False):
+        """
+        Add breathing-related metrics to the results DataFrame.
+        This method computes breathing rate and amplitude from the raw breathing signal,
+        and adds these as new columns to the results DataFrame. It also handles any necessary data cleaning and normalization steps.
+
+        If found, it will also add the heart rate as a new column, extracted from the same raw signal if available.
+        """
+        if self.results_df is None:
+            raise ValueError("Please run evaluate() before adding breathing data.")
+        if "breathing_rate" in self.results_df.columns and not redo:
+            print("Breathing column already exists. Set redo=True to overwrite.")
+            return self.results_df
+
+        # Ensure we have the necessary columns to compute breathing
+        required_cols = ["timeNN", "results"]
+
+        for col in required_cols:
+            if col not in self.results_df.columns:
+                raise ValueError(
+                    f"Missing required column '{col}' to compute breathing."
+                )
+        for _, df in self.results_df.groupby(level="mouse_name"):
+            res = df.iloc[0].results
+            try:
+                respi = res.DataHelper.get_respi_data()
+            except FileNotFoundError:
+                respi = res.DataHelper.get_respi_data(folder=res.network_path)
+
+            spectro, power = res.DataHelper.compute_breathing_rate(spectro_tsd=respi)
+            res.find_path()
+            found_ekg = False
+
+            if os.path.exists(
+                os.path.join(res.folder, "HeartBeatInfo.mat")
+            ) or os.path.exists(os.path.join(res.network_path, "HeartBeatInfo.mat")):
+                folder = (
+                    res.folder
+                    if os.path.exists(os.path.join(res.folder, "HeartBeatInfo.mat"))
+                    else res.network_path
+                )
+                heart_file = loadmat(os.path.join(folder, "HeartBeatInfo.mat"))
+                if "EKG" not in heart_file:
+                    raise KeyError(
+                        f"EKG data not found in HeartBeatInfo.mat for {res.mouse_name}. Skipping EKG analysis."
+                    )
+                if (
+                    "HBRate" not in heart_file["EKG"].dtype.names
+                    or "LFP" not in heart_file["EKG"].dtype.names
+                ):
+                    raise KeyError(
+                        f"EKG data missing 'HBRate' or 'LFP' in HeartBeatInfo.mat for {res.mouse_name}. Skipping EKG analysis."
+                    )
+
+                hb_rate = clean_mat_structure(heart_file["EKG"]["HBRate"])
+                hb_lfp = clean_mat_structure(heart_file["EKG"]["LFP"])
+
+                hb_rate_tsd = Tsd(
+                    t=np.array(hb_rate["t"]) / 1e4, d=np.array(hb_rate["data"])
+                )
+                hb_lfp_tsd = Tsd(
+                    t=np.array(hb_lfp["t"]) / 1e4, d=np.array(hb_lfp["data"])
+                )
+
+                found_ekg = True
+
+            for phase, sub in df.groupby("phase"):
+                if phase == "training" or phase == "full_pre":
+                    continue
+                subres = sub.iloc[0].results
+                subres.find_session_epochs()
+
+                updated_subsubs = []
+
+                for subphase, subsub in subres.results_df.groupby("phase"):
+                    time_mask = getattr(subres, subphase)
+                    subsub["lfp_bulb"] = respi.restrict(time_mask)
+                    subsub["breathing_rate"] = spectro.restrict(time_mask)
+                    subsub["breathing_power"] = power.restrict(time_mask)
+
+                    if found_ekg:
+                        subsub["lfp_ekg"] = hb_lfp_tsd.restrict(time_mask)
+                        subsub["heart_rate"] = hb_rate_tsd.restrict(time_mask)
+
+                    updated_subsubs.append(subsub)
+
+                if updated_subsubs:
+                    subres.results_df = pd.concat(updated_subsubs)
+
+                self.results_df.loc[sub.index, "results"] = subres
+
+        # now that each subres has the new columns, we need to extract them back to the main results_df
+        base_df = self.results_df.copy()
+
+        concat_results_df = self.convert_to_df(True)
+        cols_to_add = base_df.columns.difference(concat_results_df.columns)
+        self.results_df = pd.concat([concat_results_df, base_df[cols_to_add]], axis=1)
+        return self.results_df
+
+    def add_zone_epoch(self, redo=False):
+        if self.results_df is None:
+            raise ValueError("Please run evaluate() before adding zone epoch data.")
+        if (
+            any(f"{zone}_epoch" in self.results_df.columns for zone in ZONELABELS)
+            and not redo
+        ):
+            print("zone_epoch column already exists. Set redo=True to overwrite.")
+            return self.results_df
+
+        # Ensure we have the necessary columns to compute zone_epoch
+        required_cols = ["results", "timeNN"]
+
+        for col in required_cols:
+            if col not in self.results_df.columns:
+                raise ValueError(
+                    f"Missing required column '{col}' to compute zone_epoch."
+                )
+        for _, row in self.results_df.iterrows():
+            row["results"].DataHelper._compute_zone_epochs()
+
+        for zone in ZONELABELS:
+            self.results_df[f"{zone}_epoch"] = self.results_df[
+                ["timeNN", "results"]
+            ].apply(
+                lambda row: (
+                    Ts(row["timeNN"])
+                    .value_from(getattr(row["results"].DataHelper, f"{zone}_tsd"))
+                    .values
+                ),
+                axis=1,
+            )
+
+    def save_to_mat(self, df, path):
+        from scipy.io import savemat
+
+        mdict = dict()
+        for col in df.drop(columns=["results"], errors="ignore").columns:
+            mdict[col] = df[col].to_numpy()
+        savemat(os.path.realpath(path), mdict)
+
+    def save_mat_for_each_mouse(self, output_dir: str):
+        """
+        Saves the processed results DataFrame into .mat files for each mouse.
+
+        Parameters:
+        - output_dir: Directory where the .mat files will be saved.
+        """
+        if self.results_df is None:
+            raise ValueError(
+                "Results DataFrame is not available. Please run process_results() first."
+            )
+
+        # Ensure the output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        for mouse_name, group_df in self.results_df.groupby("mouse_name"):
+            clean_df = self.get_clean_df(group_df)
+            output_path = os.path.join(output_dir, f"{mouse_name}_results.mat")
+            self.save_to_mat(clean_df, output_path)
+
+    def _compute_epoch_mask(
+        self, df: pd.DataFrame, col_name: str, fetch_method: str, attr_name: str
+    ) -> pd.Series:
+        """Helper method to dynamically compute an epoch mask column via .apply()"""
+        if "results" not in df.columns:
+            raise ValueError(
+                f"Requested '{col_name}' column but 'results' is not found in the DataFrame."
+            )
+
+        def _get_mask(row):
+            # 1. Dynamically find and call the fetch method (e.g., get_ripples_epochs)
+            fetch_func = getattr(row.results.DataHelper, fetch_method)
+            fetch_func()
+
+            # 2. Dynamically pull the populated attribute (e.g., ripples_epochs)
+            epochs = getattr(row.results.DataHelper, attr_name)
+
+            # 3. Compute and return the mask matching timeNN
+            return inEpochsMask(row["timeNN"], epochs).flatten()
+
+        return df.apply(_get_mask, axis=1)
+
+    def get_clean_df(
+        self, df: Optional[pd.DataFrame] = None, cols: Optional[list] = None
+    ) -> pd.DataFrame:
+        """Flattens nested variable-length time-series data dynamically based on the
+
+        specific columns requested, ensuring uniform timepoint alignment via
+
+        pynapple.
+        """
+        if df is None:
+            warn(
+                "No DataFrame provided to get_clean_df. Using self.results_df. Ensure this is what you intend."
+            )
+            df = self.results_df.copy()
+        else:
+            # Avoid mutating the original dataframe passed to the function
+            df = df.copy()
+
+        if cols is None:
+            cols = EXPORT_COLS
+
+        name_time_column = "timeNN"
+
+        # Standardize names up front
+        col_name_mapping = {
+            "speed": "alignedSpeed",
+            "time": name_time_column,
+            "certainty": "predLoss",
+            "linear": "linearTrue",
+            "linear_hat": "linearPred",
+            "is_fast": "speedMask",
+        }
+        cols = [col_name_mapping.get(col, col) for col in cols]
+        name_time_column = col_name_mapping.get(name_time_column, name_time_column)
+
+        # Determine whether any requested column needs pynapple time-remapping
+        restrict_targets = [
+            "breathing_rate",
+            "breathing_power",
+            "lfp_bulb",
+            "heart_rate",
+        ]
+        restrict_cols_present = [c for c in cols if c in restrict_targets]
+        need_to_restrict = len(restrict_cols_present) > 0
+
+        # Locate the target pynapple object whose timestamps we want to match
+        which_restrictor = next((c for c in cols if c in restrict_targets), None)
+
+        # 1. Configuration Mappings
+        if df.iloc[0].featureTrue.shape[1] == 4:
+            true_mapping = {"x": 0, "y": 1, "head_dir": 2, "thigmo": 3}
+            pred_mapping = {"x_hat": 0, "y_hat": 1, "head_dir_hat": 2, "thigmo_hat": 3}
+        elif df.iloc[0].featureTrue.shape[1] == 3:
+            try:
+                cols.remove("thigmo")
+                cols.remove("thigmo_hat")
+            except ValueError:
+                pass
+            true_mapping = {"x": 0, "y": 1, "head_dir": 2}
+            pred_mapping = {"x_hat": 0, "y_hat": 1, "head_dir_hat": 2}
+
+        epoch_configs = {
+            "is_ripples": {
+                "fetch_method": "get_ripples_epochs",
+                "attr_name": "ripples_epochs",
+            },
+            "is_freezing": {
+                "fetch_method": "get_freeze_epochs",
+                "attr_name": "freeze_epochs",
+            },
+            "is_stim": {
+                "fetch_method": "get_stim_epochs",
+                "attr_name": "stim_epochs",
+            },
+        }
+
+        # 2. Preprocess Metadata, Index levels, and Custom Mask Arrays
+        for col in cols:
+            if col in true_mapping or col in pred_mapping:
+                continue
+            if col in df.index.names and col not in df.columns:
+                df[col] = df.index.get_level_values(col)
+            if col in epoch_configs and col not in df.columns:
+                cfg = epoch_configs[col]
+                df[col] = self._compute_epoch_mask(
+                    df, col, cfg["fetch_method"], cfg["attr_name"]
+                )
+            if col not in df.columns:
+                raise ValueError(f"Requested column '{col}' not found in DataFrame.")
+            if col == "phase":
+                df[col] = df[col].map(PHASE_MAPPING)
+            if col == "mouse":
+                df[col] = df[col].astype(int)
+
+        # 3. Synchronize All Time Series via Pynapple from_value()
+        # We execute this row-by-row IN ONE PASS to prevent performance decay
+        # 3. Synchronize All Time Series via Pynapple value_from()
+        if need_to_restrict:
+            # Automatically detect any column that contains array data per row
+            # This ensures features, speeds, and custom masks are ALL processed
+            array_cols = [
+                c
+                for c in df.columns
+                if isinstance(df[c].iloc[0], (np.ndarray, list)) and c in cols
+            ]
+
+            array_cols.append(
+                name_time_column
+            )  # Ensure timeNN is included for remapping
+            array_cols.append(
+                which_restrictor
+            )  # Ensure the restrictor column is included
+            if any(c in true_mapping for c in cols):
+                array_cols.append("featureTrue")
+            if any(c in pred_mapping for c in cols):
+                array_cols.append("featurePred")
+
+            array_cols = list(set(array_cols))  # Remove duplicates if any
+
+            def align_row_time_series(row):
+                times = row[name_time_column]
+                time_ts = Ts(t=times)
+
+                target_tsd = row[which_restrictor].restrict(time_ts.time_support)
+                expected_len = len(target_tsd.values)
+
+                # --- CASE 1: EMPTY TIME SUPPORT FOR THIS PHASE ---
+                if expected_len == 0:
+                    fallback_len = len(times)
+                    for c in array_cols:
+                        if c in cols or c == which_restrictor:
+                            val = row[c]
+                            if isinstance(val, (int, float, str)) or (
+                                hasattr(val, "__len__")
+                                and len(val) == 1
+                                and not isinstance(val, (np.ndarray, list))
+                            ):
+                                continue
+
+                            if isinstance(val, np.ndarray) and len(val.shape) > 1:
+                                row[c] = [np.full((fallback_len, val.shape[1]), np.nan)]
+                            else:
+                                row[c] = [np.full(fallback_len, np.nan)]
+                    return row
+
+                # --- CASE 2: NORMAL ALIGNMENT PASS ---
+                # Run the Pynapple time-mapping on ALL array columns, including features!
+                for c in array_cols:
+                    if c == which_restrictor:
+                        row[c] = [target_tsd.values]
+                        continue
+
+                    val = np.array(row[c])
+
+                    if len(val.shape) == 1 or val.shape[1] <= 1:
+                        source_tsd = Tsd(t=times, d=val)
+                        # Map to the new target baseline timestamps
+                        row[c] = [target_tsd.value_from(source_tsd).values]
+                    else:
+                        source_tsd = TsdFrame(t=times, d=val)
+                        row[c] = [target_tsd.value_from(source_tsd).values]
+
+                return row
+
+            df[array_cols] = df[array_cols].apply(align_row_time_series, axis=1)
+
+            # UNWRAP: Restore the inner numpy arrays back to direct cell values
+            for c in array_cols:
+                df[c] = df[c].apply(lambda x: x[0] if isinstance(x, list) else x)
+
+            print("Time alignment complete.")
+
+        # 4. Establish accurate tracking for final array lengths
+        if "featureTrue" in df.columns:
+            lengths = [len(x) for x in df["featureTrue"]]
+        elif "featurePred" in df.columns:
+            lengths = [len(x) for x in df["featurePred"]]
+        elif need_to_restrict:
+            lengths = [len(x) for x in df[which_restrictor]]
+        else:
+            raise ValueError("Cannot determine time-series lengths securely.")
+
+        # 5. Extract and Construct long-form Matrix arrays
+        true_matrix = None
+        pred_matrix = None
+        extracted_data = {}
+
+        for col in cols:
+            if col in true_mapping:
+                if true_matrix is None:
+                    true_matrix = np.concatenate(df["featureTrue"].values, axis=0)
+                idx = true_mapping[col]
+                extracted_data[col] = true_matrix[:, idx]
+
+            elif col in pred_mapping:
+                if pred_matrix is None:
+                    pred_matrix = np.concatenate(df["featurePred"].values, axis=0)
+                idx = pred_mapping[col]
+                extracted_data[col] = pred_matrix[:, idx]
+
+            elif col in df.columns:
+                first_val = df[col].iloc[0]
+                if isinstance(first_val, (np.ndarray, list)):
+                    extracted_data[col] = np.concatenate(df[col].values)
+                else:
+                    extracted_data[col] = np.repeat(df[col].values, lengths)
+            else:
+                raise KeyError(f"Column '{col}' not found in configuration layouts.")
+
+        # 6. Revert standardized names back to their requested external aliases
+        inverted_mapping = {v: k for k, v in col_name_mapping.items()}
+        clean_df = pd.DataFrame(extracted_data)
+        clean_df.rename(columns=inverted_mapping, inplace=True)
+
+        for col in clean_df.columns:
+            if col.startswith("is") and len(np.unique(clean_df[col].values)) == 2:
+                clean_df[col] = clean_df[col].astype(bool)
+
+        if all([col in clean_df.columns for col in EPOCH_MAPPING.keys()]):
+            epoch_cols = list(EPOCH_MAPPING.keys())
+            clean_df["ZoneEpoch"] = (
+                clean_df.reset_index(drop=True)[epoch_cols]
+                .astype(bool)
+                .idxmax(axis=1)
+                .map(EPOCH_MAPPING)
+            )
+
+        return clean_df
+
+    def plot_1d_tuning_curves_during_events_from_clean(
+        self,
+        clean_df: Optional[pd.DataFrame] = None,
+        feature: str = "linear",
+        phase="cond",
+        which: Union[str, List[str]] = "ripples",
+        plot_bias: bool = False,
+        path: Optional[str] = None,
+        title_suffix: Optional[str] = None,
+    ):
+        if clean_df is None:
+            clean_df = self.get_clean_df()
+        else:
+            clean_df = clean_df.copy()
+
+        # we assume otherwise the dataframe is already flattened in the correct format, and subsetted for interesting manipe etc
+        clean_df.reset_index(drop=False, inplace=True)
+
+        if isinstance(which, str):
+            which = [which]
+
+        event_mask = np.zeros(len(clean_df), dtype=bool)
+        if "ripples" in which:
+            event_mask += clean_df["is_ripples"].astype(bool)
+
+        if "freezing" in which:
+            event_mask += clean_df["is_freezing"].astype(bool)
+
+        if "fast" in which:
+            event_mask += clean_df["is_fast"].astype(bool)
+
+        if "stim" in which:
+            event_mask += clean_df["is_stim"].astype(bool)
+
+        event_mask = event_mask.astype(bool)
+        phase_mask = clean_df["phase"] == PHASE_MAPPING[phase]
+
+        true_feature = clean_df[feature][event_mask & phase_mask].values
+        pred_feature = clean_df[f"{feature}_hat"][event_mask & phase_mask].values
+
+        true_density, centers = get_1d_tuning_curve(
+            true_feature, np.ones_like(true_feature, dtype=bool)
+        )
+        pred_density, _ = get_1d_tuning_curve(
+            pred_feature, np.ones_like(pred_feature, dtype=bool)
+        )
+
+        if plot_bias:
+            fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+            ax1, ax2 = axs
+        else:
+            fig, ax1 = plt.subplots(1, 1, figsize=(10, 8))
+
+        ax1.plot(
+            centers, true_density, label=f"True Position {which}", color="black", lw=2
+        )
+        ax1.plot(
+            centers,
+            pred_density,
+            label="Predicted Position",
+            color="red",
+            linestyle="--",
+        )
+        ax1.fill_between(
+            centers,
+            pred_density,
+            alpha=0.3,
+            color="red",
+        )
+
+        title = f"Spatial Representation During {which} in {phase} (n_evts = {clean_df[phase_mask & event_mask].shape[0]})."
+
+        if title_suffix is None:
+            title_suffix = f"Gathered from {clean_df[phase_mask]['mouse_name'].unique().shape[0]} PAG mice."
+        title += f"\n{title_suffix}"
+
+        ax1.set_title(title)
+        ax1.set_ylabel("Normalized Density")
+        ax1.legend()
+
+        if plot_bias:
+            bias = pred_density - true_density
+            ax2.bar(
+                centers,
+                bias,
+                width=(centers[1] - centers[0]),
+                color="purple",
+                alpha=0.7,
+            )
+            ax2.axhline(0, color="grey", lw=1)
+            ax2.set_title(
+                "Prediction Bias (Pred - True) during Freezing in Conditioning"
+            )
+            ax2.set_xlabel("Linearized Position (0-1)")
+            ax2.set_ylabel("Bias Delta")
+            ax2.legend()
+
+        plt.tight_layout()
+        if path is not None:
+            plt.savefig(path)
+
+        plt.show()
+
+    def plot_2d_tuning_curves_during_events_from_pickle(
+        self,
+        feature_x: str = "linear",
+        feature_y: str = "angular",
+        phase="cond",
+        which: Union[str, List[str]] = "ripples",
+    ):
+        pass
 
     @classmethod
     def from_dict_and_df(
@@ -3592,27 +4318,27 @@ class Results_Loader(TuningCurvesPlotter):
     def mean_error_matrix_linerrors_by_speed(
         self,
         nbins=40,
-        normalized=True,
         save=True,
         folder=None,
         show=False,
         nameExp_list=None,
         phase_list=None,
         winMS_list=None,
+        removeMice_list=None,
     ):
-        """
-        Plot error matrices (2D histograms) of predicted vs. true linear position,
-        split by speed, across experiments, phases, and time windows.
-
-        Args:
-            nbins (int): Number of bins for the 2D histogram.
-            normalized (bool): Whether to normalize rows of the histogram to [0,1].
-            save (bool): If True, saves figures to disk.
-            folder (str): Folder to save figures in (defaults to self.folderFigures).
-        """
+        import cmcrameri.cm as cmc
 
         folder = folder or getattr(self, "folderFigures", None)
-        grouped = self.results_df.groupby(["nameExp", "phase", "winMS"])
+        used_df = self.results_df.copy()
+
+        if removeMice_list is not None:
+            if not isinstance(removeMice_list, list):
+                removeMice_list = [removeMice_list]
+            used_df = used_df.query("mouse_name not in @removeMice_list")
+
+        grouped = used_df.groupby(["nameExp", "phase", "winMS"])
+
+        # --- [Filtering Logic remains the same as your original code] ---
         if nameExp_list is not None:
             if not isinstance(nameExp_list, list):
                 nameExp_list = [nameExp_list]
@@ -3628,150 +4354,145 @@ class Results_Loader(TuningCurvesPlotter):
         if winMS_list is not None:
             if not isinstance(winMS_list, list):
                 winMS_list = [winMS_list]
-            # assert winMS_list is only int
             winMS_list = [int(w) for w in winMS_list]
-
             grouped = grouped.filter(lambda x: int(x.name[2]) in winMS_list).groupby(
                 ["nameExp", "phase", "winMS"]
             )
 
+        # ---------------------------------------------------------
+        # PASS 1: Gather data and normalize rows locally [0, 1]
+        # ---------------------------------------------------------
+        all_matrices = []
+
         for (nameExp, phase, winMS), df in grouped:
-            fig, axes = plt.subplots(
-                ncols=2, nrows=1, figsize=(10, 5), sharex=True, sharey=True
-            )
-            # -------- Fast speeds --------
-            # Assumes "speedMask" is stored per row in the df
-            linPred_fast = []
-            linTrue_fast = []
+            df = df.reset_index(drop=False)
+
+            linPred_fast, linTrue_fast = [], []
+            linPred_slow, linTrue_slow = [], []
+
             for _, row in df.iterrows():
-                # get speed_mask from training Mouse_Results object
-                mouse_val = row["mouse"]  # noqa F8641
-                mouse_manipe = row["manipe"]  # noqa F8641
-                speed_mask = (
-                    self.results_df.query(
-                        "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
-                    )["results"]
-                    .values[0]
-                    .data_helper.fullBehavior["Times"]["speedFilter"]
-                    .flatten()[row["posIndex_NN"]]
-                )
+                row["mouse_name"]
+                speed_mask = row["speedMask"]
+                epochMask = np.ones_like(row["timeNN"], dtype=bool)
 
-                if phase == "training":
-                    # remove the last bit that is actually not training
-                    real_train = (
-                        self.results_df.query(
-                            "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
-                        )["results"]
-                        .values[0]
-                        .data_helper.fullBehavior["Times"]["trainEpochs"]
-                    )
+                # Fast
+                mask_fast = speed_mask & epochMask
+                linPred_fast.append(row["linearPred"][mask_fast])
+                linTrue_fast.append(row["linearTrue"][mask_fast])
 
-                    epochMask = inEpochsMask(row["timeNN"], real_train)
-                else:
-                    epochMask = np.ones_like(row["timeNN"], dtype=bool)
+                # Slow
+                mask_slow = ~speed_mask & epochMask
+                linPred_slow.append(row["linearPred"][mask_slow])
+                linTrue_slow.append(row["linearTrue"][mask_slow])
 
-                mask = speed_mask & epochMask
+            # Compute Histograms
+            H_fast, H_slow, xedges, yedges = None, None, None, None
 
-                linPred_fast.append(row["linearPred"][mask])
-                linTrue_fast.append(row["linearTrue"][mask])
-
-            if linPred_fast:  # check non-empty
-                H, xedges, yedges = np.histogram2d(
+            if linPred_fast:
+                # Note: We use density=False here because we will manually normalize rows by counts
+                H_fast, xedges, yedges = np.histogram2d(
                     np.concatenate(linPred_fast).reshape(-1),
                     np.concatenate(linTrue_fast).reshape(-1),
                     bins=(nbins, nbins),
-                    density=True,
+                    range=[[0, 1], [0, 1]],
                 )
-                if normalized:
-                    with np.errstate(invalid="ignore"):
-                        H = H / H.max(axis=1, keepdims=True)
-                extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+                # Local Row-wise Normalization (Maximum of each true position row becomes 1.0)
+                # with np.errstate(invalid="ignore"):
+                #     row_maxs = H_fast.max(axis=1, keepdims=True)
+                #     H_fast = np.where(row_maxs > 0, H_fast / row_maxs, 0)
+                # Normalize by row SUM instead of row MAX
+                with np.errstate(invalid="ignore"):
+                    row_sums = H_fast.sum(axis=1, keepdims=True)
+                    H_fast = np.where(row_sums > 0, H_fast / row_sums, 0)
 
-                ax_fast = axes[0]
-                ax_fast.set_xlim(0, 1)
-                ax_fast.set_ylim(0, 1)
-                im = ax_fast.imshow(
-                    H.T,
+            if linPred_slow:
+                H_slow, xedges, yedges = np.histogram2d(
+                    np.concatenate(linPred_slow).reshape(-1),
+                    np.concatenate(linTrue_slow).reshape(-1),
+                    bins=(nbins, nbins),
+                    range=[[0, 1], [0, 1]],
+                )
+                # # Local Row-wise Normalization
+                # with np.errstate(invalid="ignore"):
+                #     row_maxs = H_slow.max(axis=1, keepdims=True)
+                #     H_slow = np.where(row_maxs > 0, H_slow / row_maxs, 0)
+                #
+                with np.errstate(invalid="ignore"):
+                    row_sums = H_slow.sum(axis=1, keepdims=True)
+                    H_slow = np.where(row_sums > 0, H_fast / row_sums, 0)
+
+            if H_fast is not None or H_slow is not None:
+                extent = (
+                    [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+                    if xedges is not None
+                    else [0, 1, 0, 1]
+                )
+                all_matrices.append(
+                    {
+                        "metadata": (nameExp, phase, winMS),
+                        "H_fast": H_fast,
+                        "H_slow": H_slow,
+                        "extent": extent,
+                    }
+                )
+
+        # ---------------------------------------------------------
+        # PASS 2: Plot everything with a forced absolute limit of [0, 1]
+        # ---------------------------------------------------------
+        for item in all_matrices:
+            nameExp, phase, winMS = item["metadata"]
+            extent = item["extent"]
+
+            fig, axes = plt.subplots(
+                ncols=2, nrows=1, figsize=(11, 5), sharex=True, sharey=True
+            )
+
+            # Plot Fast Speeds
+            ax_fast = axes[0]
+            ax_fast.set_xlim(0, 1)
+            ax_fast.set_ylim(0, 1)
+            if item["H_fast"] is not None:
+                im_fast = ax_fast.imshow(
+                    item["H_fast"].T,
                     extent=extent,
-                    cmap="viridis",
+                    cmap=cmc.batlow,
+                    vmin=0,
+                    vmax=1.0,  # Scale is now strictly 0 to 1 across ALL phases
                     interpolation="none",
                     origin="lower",
                     aspect="auto",
                 )
-                fig.colorbar(im, ax=ax_fast)
-                ax_fast.set_title("Fast speeds only")
+                fig.colorbar(im_fast, ax=ax_fast)
+            ax_fast.set_title("Fast speeds only")
 
-            # -------- Slow speeds --------
-            # Assumes "speedMask" is stored per row in the df
-            linPred = []
-            linTrue = []
-            for _, row in df.iterrows():
-                # get speed_mask from training Mouse_Results object
-                mouse_val = row["mouse"]  # noqa F8641
-                mouse_manipe = row["manipe"]  # noqa F8641
-                speed_mask = (
-                    self.results_df.query(
-                        "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
-                    )["results"]
-                    .values[0]
-                    .data_helper.fullBehavior["Times"]["speedFilter"]
-                    .flatten()[row["posIndex_NN"]]
+            # Plot Slow Speeds
+            ax_slow = axes[1]
+            ax_slow.set_xlim(0, 1)
+            ax_slow.set_ylim(0, 1)
+            if item["H_slow"] is not None:
+                im_slow = ax_slow.imshow(
+                    item["H_slow"].T,
+                    extent=extent,
+                    cmap=cmc.batlow,
+                    vmin=0,
+                    vmax=1.0,  # Scale is now strictly 0 to 1 across ALL phases
+                    interpolation="none",
+                    origin="lower",
+                    aspect="auto",
                 )
+                fig.colorbar(im_slow, ax=ax_slow)
+            ax_slow.set_title("Slow speeds only")
 
-                if phase == "training":
-                    # remove the last bit that is actually not training
-                    real_train = (
-                        self.results_df.query(
-                            "nameExp == @nameExp and phase == 'training' and winMS == @winMS and mouse == @mouse_val and manipe == @mouse_manipe"
-                        )["results"]
-                        .values[0]
-                        .data_helper.fullBehavior["Times"]["trainEpochs"]
-                    )
-
-                    epochMask = inEpochsMask(row["timeNN"], real_train)
-                else:
-                    epochMask = np.ones_like(row["timeNN"], dtype=bool)
-
-                mask = ~speed_mask & epochMask
-
-                linPred.append(row["linearPred"][mask])
-                linTrue.append(row["linearTrue"][mask])
-
-            H, xedges, yedges = np.histogram2d(
-                np.concatenate(linPred).reshape(-1),
-                np.concatenate(linTrue).reshape(-1),
-                bins=(nbins, nbins),
-                density=True,
-            )
-            if normalized:
-                with np.errstate(invalid="ignore"):
-                    H = H / H.max(axis=1, keepdims=True)
-            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-
-            ax_all = axes[1]
-            ax_all.set_xlim(0, 1)
-            ax_all.set_ylim(0, 1)
-            im = ax_all.imshow(
-                H.T,
-                extent=extent,
-                cmap="viridis",
-                interpolation="none",
-                origin="lower",
-                aspect="auto",
-            )
-            fig.colorbar(im, ax=ax_all)
-            ax_all.set_title("Slow speeds only")
-
-            # -------- Labels and layout --------
             fig.suptitle(f"{nameExp} | Phase: {phase} | winMS: {winMS}")
             fig.text(0.5, 0.04, "Predicted linPos", ha="center")
             fig.text(0.04, 0.5, "True linPos", va="center", rotation="vertical")
             fig.tight_layout(rect=[0.05, 0.05, 0.95, 0.9])
 
             if save and folder is not None:
-                fname = f"errorMatrix_{nameExp}_phase{phase}_win{winMS}"
+                fname = f"errorMatrix_{nameExp}_phase{phase}_win{winMS}_rowNorm_batlow"
                 fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
                 fig.savefig(os.path.join(folder, fname + ".svg"))
+
             if show:
                 plt.show()
             plt.close(fig)
@@ -4573,10 +5294,9 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
+        import pandas as pd
         import seaborn as sns
         from scipy.stats import linregress
-
-        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -4725,10 +5445,9 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
+        import pandas as pd
         import seaborn as sns
         from scipy.stats import linregress
-
-        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -4918,10 +5637,9 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
+        import pandas as pd
         import seaborn as sns
         from scipy.stats import spearmanr
-
-        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -5127,10 +5845,9 @@ class Results_Loader(TuningCurvesPlotter):
 
         import matplotlib.pyplot as plt
         import numpy as np
+        import pandas as pd
         import seaborn as sns
         from scipy.stats import spearmanr
-
-        from neuroencoders.utils.backend import pd
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -6045,7 +6762,7 @@ class Results_Loader(TuningCurvesPlotter):
         reduce_fn="median",  # function to reduce errors within each group
     ):
         # --- Filter relevant rows first ---
-        df = self.results_df.copy()
+        df = self.results_df.copy().reset_index(drop=False)
         if phase_list is not None:
             tmp_phase_list = (
                 phase_list if isinstance(phase_list, list) else [phase_list]
@@ -6619,22 +7336,43 @@ class Results_Loader(TuningCurvesPlotter):
                 remove_mice = [remove_mice]
             remove_mice = set([str(mouse) for mouse in remove_mice])
 
-        if "_" in suffix:
-            phase = suffix.strip("_")
+        # Standardize phase extraction text string
+        phase = suffix.strip("_") if "_" in suffix else suffix
+
+        # --- MULTIINDEX FIX 1: Extract phase cross-section safely ---
+        # Instead of flat column querying, pull the explicit index slice
+        if "phase" in self.results_df.index.names:
+            phase_df = self.results_df.xs(phase, level="phase")
         else:
-            phase = suffix
+            # Fallback if index was completely flattened beforehand
+            phase_df = self.results_df[self.results_df["phase"] == phase]
+
+        if phase_df.empty:
+            print(f"Warning: No data found matching phase '{phase}' in results_df.")
+            return np.array([]), np.array([]), np.array([])
+
+        manipe = kwargs.pop("manipe", None)
+        if manipe is not None:
+            if "manipe" in phase_df.index.names:
+                phase_df = phase_df.xs(manipe, level="manipe", drop_level=False)
+            else:
+                phase_df = phase_df[phase_df["manipe"] == manipe]
+
+            if phase_df.empty:
+                print(
+                    f"Warning: No data found matching manipe '{manipe}' in phase '{phase}' of results_df."
+                )
 
         spike_datas_list = []
         tuning_curves_list = []
 
-        for (mouse, manipe), df in self.results_df.query("phase == @phase").groupby(
-            ["mouse", "manipe"]
-        ):
-            if df.shape[0] != 1:
-                raise ValueError(
-                    f"Expected one row per mouse/manipe for phase {phase}, but got {df.shape[0]} rows."
-                )
+        # Dynamic detection of your exact indexing names to support either variant
+        mouse_col = "mouse_name" if "mouse_name" in phase_df.index.names else "mouse"
+        groupby_levels = [mouse_col, "manipe"]
 
+        # --- MULTIINDEX FIX 2: Group by MultiIndex Levels cleanly ---
+        for (mouse, manipe), group_df in phase_df.groupby(level=groupby_levels):
+            # Keep/Remove identifier filtering flags
             if keep_mice is not None and str(mouse) not in keep_mice:
                 print(f"Skipping mouse {mouse} as it is not in the keep_mice list.")
                 continue
@@ -6642,7 +7380,25 @@ class Results_Loader(TuningCurvesPlotter):
                 print(f"Skipping mouse {mouse} as it is in the remove_mice list.")
                 continue
 
-            mouse_results = df.iloc[0].results
+            # --- MULTIINDEX FIX 3: Target a single window safely ---
+            # Since group_df contains multiple windows, locate the specified idWindow index row
+            if "winMS" in group_df.index.names:
+                try:
+                    # Find the row matching the explicit window index value
+                    # (Assuming windows are indexed by actual ID numbers or ordinal locations)
+                    unique_wins = group_df.index.get_level_values("winMS").unique()
+                    target_win = unique_wins[idWindow]
+                    row_slice = group_df.xs(target_win, level="winMS").iloc[0]
+                except IndexError:
+                    print(
+                        f"Warning: Window offset idWindow={idWindow} out of range for mouse {mouse}. Defaulting to first row."
+                    )
+                    row_slice = group_df.iloc[0]
+            else:
+                row_slice = group_df.iloc[0]
+
+            # Extract object data container out of your row metrics
+            mouse_results = row_slice["results"]
             mouse_label = f"mouse {mouse} | {manipe}"
 
             mouse_tuning_curves, _, mouse_spike_data, _ = (
@@ -6655,8 +7411,11 @@ class Results_Loader(TuningCurvesPlotter):
                     count_thresh=None,
                     bin_size=bin_size,
                     mode=mode,
+                    epoch=kwargs.get("epoch", None),
+                    on=kwargs.get("on", None),
                 )
             )
+
             mouse_spike_data.set_info(
                 metadata={
                     "phase": [phase] * len(mouse_spike_data),
@@ -6666,6 +7425,10 @@ class Results_Loader(TuningCurvesPlotter):
 
             spike_datas_list.append(mouse_spike_data)
             tuning_curves_list.append(mouse_tuning_curves)
+
+        if not tuning_curves_list:
+            print("No valid data processed for concatenated tuning curves.")
+            return np.array([]), np.array([]), np.array([])
 
         self.all_spikes = TsGroup.merge_group(
             *spike_datas_list, reset_index=True, reset_time_support=True
@@ -6682,7 +7445,9 @@ class Results_Loader(TuningCurvesPlotter):
             concat = np.concatenate(concat, axis=0)
             kept = np.concatenate(kept, axis=0)
             id_neurons = id_neurons[kept]
-
+            print(
+                f"Applied count threshold of {count_thresh}, keeping {len(id_neurons)} neurons out of {kept.shape[0]}."
+            )
         else:
             concat = np.concatenate(tuning_curves_list, axis=0)
 
@@ -6695,13 +7460,952 @@ class Results_Loader(TuningCurvesPlotter):
             )
             title = kwargs.pop(
                 "title",
-                f"LT Curves on {feature_name} ({phase} - speed {use_speed_filter})",
+                f"""LT Curves on {feature_name}
+                ({phase} - speed {use_speed_filter})""",
             )
             kwargs["title"] = title
+            kwargs["normalize"] = True
             self.plot_linear_tuning_curves(ordered, **kwargs)
             return concat, sort_map, id_neurons
 
         return concat, np.arange(concat.shape[0]), id_neurons
+
+    def run_comprehensive_onoff_analysis(
+        self,
+        feature_name: str = "linearTrue",
+        around: str = "freezing",
+        use_speed_filter: bool = True,
+        remove_mice: Optional[List[str]] = None,
+        count_thresh: int = 200,
+        min_count_thresh: int = 200,
+        manipe: Optional[str] = None,
+        focus_on: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extracts PETH count properties, defines ON/OFF populations, and cross-references
+        them directly to Multi-Phase Spatial Tuning Curves aligned to your index rules.
+        """
+        phase_build = "_training"
+        phases = ["cond", "post"]
+        all_phases = [phase_build] + phases
+
+        # 1. Base reference extraction to establish master arrays and id allocations
+        print("Extracting baseline tuning curve structures...")
+        concat_base, sort_map_base, id_neurons_base = (
+            self.get_concatenated_tuning_curves(
+                suffix=phase_build,
+                feature_name=feature_name,
+                add_colorbar=False,
+                count_thresh=count_thresh,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+                manipe=manipe,
+            )
+        )
+        concat_base, sort_map_base = self.compute_linear_tuning_curves_order(
+            concat_base, bin_edges=np.linspace(0, 1, concat_base.shape[1] + 1)
+        )
+
+        mouse_peth_registry = {}
+
+        phase = phase_build.strip("_") if "_" in phase_build else phase_build
+        phase_df = (
+            self.results_df.xs(phase, level="phase")
+            if "phase" in self.results_df.index.names
+            else self.results_df
+        )
+        if manipe is not None:
+            phase_df = phase_df.xs(manipe, level="manipe", drop_level=False)
+
+        mouse_col = "mouse_name" if "mouse_name" in phase_df.index.names else "mouse"
+        groupby_levels = [mouse_col, "manipe"]
+
+        # 2. Iterate through rows to find raw modulated freeze properties
+        print("Processing freeze modulation metrics on raw count data...")
+        global_neuron_offset = 0
+        global_on_indices = []
+        global_off_indices = []
+
+        for (mouse, manipe), group_df in phase_df.groupby(level=groupby_levels):
+            if remove_mice is not None and str(mouse) in remove_mice:
+                continue
+
+            row_slice = (
+                group_df.xs(
+                    group_df.index.get_level_values("winMS").unique()[0], level="winMS"
+                ).iloc[0]
+                if "winMS" in group_df.index.names
+                else group_df.iloc[0]
+            )
+            mouse_results: Mouse_Results = row_slice["results"]
+
+            if around == "freezing":
+                peth_res = mouse_results.compute_freeze_onoff_counts(
+                    count_thresh=min_count_thresh
+                )
+            else:
+                peth_res = mouse_results.compute_event_onoff_counts(
+                    around=around, count_thresh=min_count_thresh, focus_on=focus_on
+                )
+
+            if peth_res is not None:
+                mouse_peth_registry[str(mouse)] = peth_res
+
+                local_on = (
+                    np.where(peth_res["on_neurons_mask"])[0] + global_neuron_offset
+                )
+                local_off = (
+                    np.where(peth_res["off_neurons_mask"])[0] + global_neuron_offset
+                )
+
+                global_on_indices.extend(local_on)
+                global_off_indices.extend(local_off)
+                global_neuron_offset += peth_res["n_neurons_raw"]
+            else:
+                try:
+                    global_neuron_offset += len(
+                        mouse_results.DataHelper.get_spike_data()
+                    )
+                except Exception:
+                    pass
+
+        global_on_indices = np.array(global_on_indices)
+        global_off_indices = np.array(global_off_indices)
+
+        # 3. Dynamic multi-phase tracking loops for spatial tuning maps
+        tuning_curves_by_phase = {}
+
+        print(f"Extracting spatial patterns for feature target: {feature_name}...")
+        for suff in all_phases:
+            tc_matrix, _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                add_colorbar=False,
+                count_thresh=None,
+                sort_map=sort_map_base,
+                list_neurons=id_neurons_base,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            tuning_curves_by_phase[suff] = tc_matrix
+
+        on_neurons_aligned = np.intersect1d(id_neurons_base, global_on_indices)
+        off_neurons_aligned = np.intersect1d(id_neurons_base, global_off_indices)
+
+        on_locs_in_base = np.searchsorted(id_neurons_base, on_neurons_aligned)
+        off_locs_in_base = np.searchsorted(id_neurons_base, off_neurons_aligned)
+
+        tuning_curves_on_population = {}
+        tuning_curves_off_population = {}
+
+        for suff in all_phases:
+            tuning_curves_on_population[suff] = tuning_curves_by_phase[suff][
+                on_locs_in_base
+            ]
+            tuning_curves_off_population[suff] = tuning_curves_by_phase[suff][
+                off_locs_in_base
+            ]
+
+        print("Pipeline run successfully completed.")
+        return {
+            "mouse_peths": mouse_peth_registry,
+            "id_neurons_true_baseline": id_neurons_base,
+            "sort_map_true_baseline": sort_map_base,
+            "id_neurons_on": on_neurons_aligned,
+            "id_neurons_off": off_neurons_aligned,
+            "tuning_curves_all_phases": tuning_curves_by_phase,
+            "tuning_curves_on_subset": tuning_curves_on_population,
+            "tuning_curves_off_subset": tuning_curves_off_population,
+        }
+
+    def run_tuning_curve_analysis(
+        self,
+        feature_name: str = "linearPred",
+        use_speed_filter: bool = True,
+        remove_mice: Optional[List[str]] = None,
+        count_thresh: int = 200,
+        path: Optional[str] = None,
+    ):
+        phase_build = "_training"
+        phases = ["cond", "post"]
+        all_phases = [phase_build] + phases
+
+        fig, axs = plt.subplots(
+            2, len(phases) + 1, figsize=(14, 10), sharex=True, sharey=True
+        )
+
+        # Raw dictionary stores from the loader
+        raw_true, raw_true_odd, raw_true_even = dict(), dict(), dict()
+        raw_pred, raw_pred_odd, raw_pred_even = dict(), dict(), dict()
+
+        # 1. Base extraction to lock in reference neuron IDs and sorting maps
+        unordered_true_training, sort_map, id_neurons = (
+            self.get_concatenated_tuning_curves(
+                suffix=phase_build,
+                add_colorbar=False,
+                count_thresh=count_thresh,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+        )
+        _, sort_map = self.compute_linear_tuning_curves_order(
+            lin_place_fields=unordered_true_training,
+            bin_edges=np.linspace(0, 1, unordered_true_training.shape[1] + 1),
+        )
+
+        # 2. Extract every condition group (Full, Odd, Even) for True and Pred
+        for suff in all_phases:
+            print(f"Extracting tuning curves for phase: {suff}...")
+            # True Data Maps
+            raw_true[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                add_colorbar=False,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            raw_true_odd[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                add_colorbar=False,
+                on="odd",
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            raw_true_even[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                add_colorbar=False,
+                on="even",
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+
+            # Predicted Model Maps
+            raw_pred[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                add_colorbar=False,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            raw_pred_odd[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                add_colorbar=False,
+                on="odd",
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            raw_pred_even[suff], _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                add_colorbar=False,
+                on="even",
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+
+        # 3. Clean, sort, and slice matrices explicitly via the locked references
+        concat_true, concat_true_odd, concat_true_even = dict(), dict(), dict()
+        concat_pred, concat_pred_odd, concat_pred_even = dict(), dict(), dict()
+
+        for i, suff in enumerate(all_phases):
+            # Explicit filtering and sorting applied uniformly across all datasets
+            concat_true[suff] = raw_true[suff][id_neurons][sort_map]
+            concat_true_odd[suff] = raw_true_odd[suff][id_neurons][sort_map]
+            concat_true_even[suff] = raw_true_even[suff][id_neurons][sort_map]
+
+            concat_pred[suff] = raw_pred[suff][id_neurons][sort_map]
+            concat_pred_odd[suff] = raw_pred_odd[suff][id_neurons][sort_map]
+            concat_pred_even[suff] = raw_pred_even[suff][id_neurons][sort_map]
+
+            # Explicitly plot the cleanly sliced/sorted matrices into their assigned axis
+            axs[0, i].imshow(
+                self.normalize_tuning_curves(concat_true[suff]),
+                aspect="auto",
+                cmap="cmc.batlow",
+            )
+            axs[1, i].imshow(
+                self.normalize_tuning_curves(concat_pred[suff]),
+                aspect="auto",
+                cmap="cmc.batlow",
+            )
+            for ax in [axs[0, i], axs[1, i]]:
+                plt.setp(
+                    ax.get_xticklabels(),
+                    rotation=45,
+                    ha="right",
+                    rotation_mode="anchor",
+                )
+                ax.set_xlabel("Linear Position")
+
+        # --- Compute Debiased Correlations ---
+        corr_true_true = dict()
+        corr_pred_pred = dict()
+        corr_pred_true = dict()
+
+        ref_true = concat_true[phase_build]
+        ref_true_odd = concat_true_odd[phase_build]
+        ref_true_even = concat_true_even[phase_build]
+
+        ref_pred = concat_pred[phase_build]
+        ref_pred_odd = concat_pred_odd[phase_build]
+        ref_pred_even = concat_pred_even[phase_build]
+
+        for i, suff in enumerate(all_phases):
+            # True vs True stability across phases
+            corr_true_true[suff] = compute_debiased_pv_corr(
+                ref_true,
+                concat_true[suff],
+                ref_true_odd,
+                ref_true_even,
+                concat_true_odd[suff],
+                concat_true_even[suff],
+            )
+
+            # Predicted vs Predicted consistency across phases
+            corr_pred_pred[suff] = compute_debiased_pv_corr(
+                ref_pred,
+                concat_pred[suff],
+                ref_pred_odd,
+                ref_pred_even,
+                concat_pred_odd[suff],
+                concat_pred_even[suff],
+            )
+
+            # Model Fit (Predicted vs True within the same phase)
+            corr_pred_true[suff] = compute_debiased_pv_corr(
+                concat_true[suff],
+                concat_pred[suff],
+                concat_true_odd[suff],
+                concat_true_even[suff],
+                concat_pred_odd[suff],
+                concat_pred_even[suff],
+            )
+
+            # Set labels on subplots safely
+            axs[0, i].set_title(
+                f"Debiased PV Stability = {corr_true_true[suff].mean():.3f}"
+            )
+            axs[1, i].set_title(
+                f"Pred vs Pred = {corr_pred_pred[suff].mean():.3f}\n"
+                f"Model Fit (Pred vs True) = {corr_pred_true[suff].mean():.3f}"
+            )
+
+        fig.suptitle(f"Tuning Curves & Debiased PV Correlations ({feature_name})")
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(os.path.join(path, f"tc_{feature_name}_{use_speed_filter}.png"))
+            fig.savefig(os.path.join(path, f"tc_{feature_name}_{use_speed_filter}.svg"))
+        plt.show()
+
+        return corr_true_true, corr_pred_pred, corr_pred_true
+
+    def compute_chance_level(self, use_speed_filter=True):
+        true_position = self.results_df["results"].iloc[0].positions[:, :2]
+        if use_speed_filter:
+            true_position = true_position[
+                self.results_df["results"].iloc[0].fullBehavior["Times"]["speedFilter"]
+            ]
+        true_position = true_position[~np.isnan(true_position).any(axis=1)]
+
+        # random chance by simply shuffling positions
+        random_position = np.random.permutation(true_position)
+
+        # apply lin function
+        lin_true = self.results_df["results"].iloc[0].l_function(true_position)[1]
+        lin_random = self.results_df["results"].iloc[0].l_function(random_position)[1]
+        # compute error
+        np.linalg.norm(true_position - random_position, axis=1)
+        error_lin = np.abs(lin_true - lin_random)
+        chance_level_mean = np.mean(error_lin)
+        chance_level_median = np.median(error_lin)
+
+        return chance_level_mean, chance_level_median
+
+    def plot_median_error_barplot(
+        self, winMS: int, use_speed_filter: bool = True, path: Optional[str] = None
+    ):
+        phase_order = ["training", "pre", "cond", "post"]
+        chance_mean, chance_median = self.compute_chance_level()
+
+        # 1. Dynamically compute the median linear error based on the speed filter flag
+        value_vars = ["computed_median_error", "computed_median_error_filtered"]
+        if use_speed_filter:
+            # Mask the lin_error array using the speedMask array for each row
+            self.results_df["computed_median_error"] = self.results_df.apply(
+                lambda row: np.nanmedian(np.array(row["lin_error"])[row["speedMask"]]),
+                axis=1,
+            )
+            self.results_df["computed_median_error_filtered"] = self.results_df.apply(
+                lambda row: np.nanmedian(
+                    np.array(row["lin_error_selected"])[row["speedMask"]]
+                ),
+                axis=1,
+            )
+        else:
+            # Use the full unfiltered array
+            self.results_df["computed_median_error"] = self.results_df.apply(
+                lambda row: np.nanmedian(row["lin_error"]), axis=1
+            )
+            self.results_df["computed_median_error_filtered"] = self.results_df.apply(
+                lambda row: np.nanmedian(np.array(row["lin_error_selected"])),
+                axis=1,
+            )
+
+        to_plot = pd.melt(
+            self.results_df.xs(winMS, level="winMS", drop_level=False)
+            .query("phase != 'full_pre'")
+            .reset_index(),
+            id_vars=["mouse_name", "phase", "winMS"],
+            value_vars=value_vars,
+            var_name="Error Type",
+            value_name="Median Linear Error",
+        ).copy()
+
+        fig, ax = plt.subplots(figsize=(16, 9))
+        sns.barplot(
+            data=to_plot,
+            x="phase",
+            y="Median Linear Error",
+            hue="Error Type",
+            palette="Set2",
+            order=phase_order,
+            ax=ax,
+        )
+
+        # add a black circle to the points (stripplot)
+        sns.stripplot(
+            data=to_plot,
+            x="phase",
+            y="Median Linear Error",
+            hue="Error Type",
+            palette="Set2",
+            order=phase_order,
+            dodge=True,
+            edgecolor="black",
+            linewidth=1,
+            alpha=0.7,
+            ax=ax,
+            marker="o",
+            size=10,
+        )
+
+        ax.axhline(chance_median, linestyle="--", label="Chance level")
+
+        connect_points(
+            ax=ax,
+            df=to_plot,
+            x_col="phase",
+            y_col="Median Linear Error",
+            hue_col="Error Type",
+            id_col="mouse_name",
+            x_order=phase_order,
+        )
+
+        all_handles, all_labels = ax.get_legend_handles_labels()
+        unique_labels = []
+        unique_handles = []
+        for handle, label in zip(all_handles, all_labels):
+            if label not in unique_labels:
+                unique_labels.append(label)
+                unique_handles.append(handle)
+
+        # Assign the cleaned legend to the figure
+        fig.legend(
+            handles=unique_handles,
+            labels=unique_labels,
+            loc="upper left",
+            bbox_to_anchor=(0.95, 0.95),
+        )
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(
+                os.path.join(
+                    path,
+                    f"boxplot_mean_lin_error_and_filtered_speed_{use_speed_filter}_{winMS}.png",
+                ),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(
+                    path,
+                    f"boxplot_mean_lin_error_and_filtered_speed_{use_speed_filter}_{winMS}.svg",
+                )
+            )
+
+        plt.show()
+
+    def plot_median_error_barplot_old(
+        self, winMS: int, use_speed_filter: bool = True, path: Optional[str] = None
+    ):
+        from neuroencoders.importData.gui_elements import connect_points
+
+        phase_order = ["training", "pre", "cond", "post"]
+        chance_mean, chance_median = self.compute_chance_level()
+        value_vars = ["median_error", "median_error_filtered"]
+
+        self.results_df["median_error"] = self.results_df.apply(
+            lambda row: np.nanmedian(row["lin_error"]), axis=1
+        )
+        self.results_df["median_error_filtered"] = self.results_df.apply(
+            lambda row: np.nanmedian(row["lin_error_selected"]), axis=1
+        )
+        to_plot = pd.melt(
+            self.results_df.xs(winMS, level="winMS", drop_level=False)
+            .query("phase != 'full_pre'")
+            .reset_index(),
+            id_vars=["mouse_name", "phase", "winMS"],
+            value_vars=value_vars,
+            var_name="Error Type",
+            value_name="Median Linear Error",
+        ).copy()
+
+        fig, ax = plt.subplots(figsize=(16, 9))
+        sns.barplot(
+            data=to_plot,
+            x="phase",
+            y="Median Linear Error",
+            hue="Error Type",
+            palette="Set2",
+            order=phase_order,
+            ax=ax,
+        )
+
+        # add a black circle to the points (stripplot)
+        sns.stripplot(
+            data=to_plot,
+            x="phase",
+            y="Median Linear Error",
+            hue="Error Type",
+            palette="Set2",
+            order=phase_order,
+            dodge=True,
+            edgecolor="black",
+            linewidth=1,
+            alpha=0.7,
+            ax=ax,
+            marker="o",
+            size=10,
+        )
+
+        ax.axhline(chance_median, linestyle="--", label="Chance level")
+
+        connect_points(
+            ax=ax,
+            df=to_plot,
+            x_col="phase",
+            y_col="Median Linear Error",
+            hue_col="Error Type",
+            id_col="mouse_name",
+            x_order=phase_order,
+        )
+
+        all_handles, all_labels = ax.get_legend_handles_labels()
+        unique_labels = []
+        unique_handles = []
+        for handle, label in zip(all_handles, all_labels):
+            if label not in unique_labels:
+                unique_labels.append(label)
+                unique_handles.append(handle)
+
+        # Assign the cleaned legend to the figure
+        fig.legend(
+            handles=unique_handles,
+            labels=unique_labels,
+            loc="upper left",
+            bbox_to_anchor=(0.95, 0.95),
+        )
+        fig.tight_layout()
+        if path is not None:
+            fig.savefig(
+                os.path.join(
+                    path, f"boxplot_mean_lin_error_and_filtered_with_lines_{winMS}.png"
+                ),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(
+                    path, f"boxplot_mean_lin_error_and_filtered_with_lines_{winMS}.svg"
+                )
+            )
+
+        plt.show()
+
+    def compute_zone_classification_metrics(
+        self, winMS: int, shock_threshold: float = 0.15, use_speed_filter: bool = True
+    ):
+        """
+        Computes true vs. predicted zone classification metrics across all mice and phases.
+
+        Parameters:
+        -----------
+        winMS : int
+            The time window size to filter from the index levels.
+        shock_threshold : float
+            The cutoff boundary for the linearized shock zone (e.g., 0.35).
+        """
+        # Filter for the specific window size
+        df_subset = self.results_df.xs(winMS, level="winMS", drop_level=False).copy()
+
+        classification_results = []
+
+        for idx, row in df_subset.iterrows():
+            # Safely extract multi-index parameters
+            # Index layout: ('nameExp', 'mouse_name', 'manipe', 'phase', 'winMS')
+            mouse_name = idx[1]
+            phase = idx[3]
+
+            # Extract time-series arrays
+            y_true_lin = np.array(row["linearTrue"])
+            y_pred_lin = np.array(row["linearPred"])
+
+            # Drop nan values if any exist in the alignment
+            valid_mask = ~np.isnan(y_true_lin) & ~np.isnan(y_pred_lin)
+
+            if use_speed_filter:
+                speedMask = np.array(row["speedMask"])
+                valid_mask &= speedMask
+
+            if not np.any(valid_mask):
+                continue
+
+            y_true_lin = y_true_lin[valid_mask]
+            y_pred_lin = y_pred_lin[valid_mask]
+
+            # Determine binary states (In Shock Zone vs Not In Shock Zone)
+            # Using the linearized position boundaries
+            is_in_shock_true = y_true_lin <= shock_threshold
+            is_in_shock_pred = y_pred_lin <= shock_threshold
+
+            # --- Alternatively, if you prefer using your pre-computed epochs ---
+            # is_in_shock_true = np.array(row["Shock_epoch"])[valid_mask].astype(bool)
+
+            # Calculate Classification Metrics
+            acc = accuracy_score(is_in_shock_true, is_in_shock_pred)
+            class_error = 1.0 - acc
+
+            # Confusion matrix elements: tn, fp, fn, tp
+            # Negative = Safe/Other, Positive = Shock
+            cm = confusion_matrix(
+                is_in_shock_true, is_in_shock_pred, labels=[False, True]
+            )
+            tn, fp, fn, tp = cm.ravel()
+
+            # Rates safely handling divisions by zero
+            false_alarm_rate = (
+                fp / (tn + fp) if (tn + fp) > 0 else np.nan
+            )  # Safe called Shock
+            miss_rate = fn / (tp + fn) if (tp + fn) > 0 else np.nan  # Shock called Safe
+
+            classification_results.append(
+                {
+                    "mouse_name": mouse_name,
+                    "phase": phase,
+                    "winMS": winMS,
+                    "classification_error": class_error,
+                    "false_alarm_rate": false_alarm_rate,
+                    "miss_rate": miss_rate,
+                    "total_timepoints": len(y_true_lin),
+                }
+            )
+
+        return pd.DataFrame(classification_results)
+
+    def plot_classification_error_barplot(self, winMS: int, path: Optional[str] = None):
+        """Plots the overall classification error alongside false alarm and miss rates
+
+        per phase per mouse.
+        """
+        from neuroencoders.importData.gui_elements import connect_points
+
+        phase_order = ["training", "pre", "cond", "post"]
+
+        # 1. Compute the metrics dataframe using the previously defined method
+        metrics_df = self.compute_zone_classification_metrics(winMS=winMS)
+
+        if metrics_df.empty:
+            print(f"No valid data found for winMS={winMS}")
+            return
+
+        # 2. Melt the dataframe to make it seaborn-friendly
+        # We want to compare overall error, false alarms, and missed detections side-by-side
+        value_vars = ["classification_error", "false_alarm_rate", "miss_rate"]
+        to_plot = pd.melt(
+            metrics_df.query("phase != 'full_pre'"),
+            id_vars=["mouse_name", "phase", "winMS"],
+            value_vars=value_vars,
+            var_name="Metric Type",
+            value_name="Rate (0-1)",
+        )
+
+        # Clean up metric names for a nicer plot legend
+        metric_labels = {
+            "classification_error": "Total Classification Error",
+            "false_alarm_rate": "False Alarm Rate (Safe called Shock)",
+            "miss_rate": "Miss Rate (Shock called Safe)",
+        }
+        to_plot["Metric Type"] = to_plot["Metric Type"].map(metric_labels)
+
+        # 3. Setup the plotting canvas
+        fig, ax = plt.subplots(figsize=(16, 9))
+
+        # Base barplot showing the mean performance per phase
+        sns.barplot(
+            data=to_plot,
+            x="phase",
+            y="Rate (0-1)",
+            hue="Metric Type",
+            palette="Set2",
+            order=phase_order,
+            ax=ax,
+            edgecolor="black",
+            linewidth=1,
+        )
+
+        # Overlay individual mouse points (stripplot) to see variance
+        sns.stripplot(
+            data=to_plot,
+            x="phase",
+            y="Rate (0-1)",
+            hue="Metric Type",
+            palette="Set2",
+            order=phase_order,
+            dodge=True,
+            edgecolor="black",
+            linewidth=1,
+            alpha=0.7,
+            ax=ax,
+            marker="o",
+            size=10,
+            legend=False,  # Avoid duplicating legend items from stripplot
+        )
+
+        # Connect individual mice paths across phases for each distinct metric type
+        connect_points(
+            ax=ax,
+            df=to_plot,
+            x_col="phase",
+            y_col="Rate (0-1)",
+            hue_col="Metric Type",
+            id_col="mouse_name",
+            x_order=phase_order,
+        )
+
+        # 4. Refine Aesthetics and Labels
+        ax.set_title(
+            f"Zone Classification Performance (Window: {winMS}ms)",
+            fontsize=16,
+            fontweight="bold",
+            pad=15,
+        )
+        ax.set_ylabel("Rate (Proportion of Frames)", fontsize=14)
+        ax.set_xlabel("Experimental Phase", fontsize=14)
+        ax.set_ylim(-0.05, 1.05)  # Error rates are strictly bounded between 0 and 1
+
+        # De-duplicate and position the legend cleanly outside the plot frame
+        all_handles, all_labels = ax.get_legend_handles_labels()
+        unique_labels = []
+        unique_handles = []
+        for handle, label in zip(all_handles, all_labels):
+            if label not in unique_labels:
+                unique_labels.append(label)
+                unique_handles.append(handle)
+
+        # fig.legend(
+        #     handles=unique_handles,
+        #     labels=unique_labels,
+        #     loc="upper left",
+        #     bbox_to_anchor=(0.95, 0.95),
+        #     title="Performance Metrics",
+        # )
+
+        fig.tight_layout()
+
+        # 5. Save functionality
+        if path is not None:
+            os.makedirs(path, exist_ok=True)
+            base_filename = f"classification_error_summary_{winMS}"
+            fig.savefig(
+                os.path.join(path, f"{base_filename}.png"),
+                dpi=300,
+            )
+            fig.savefig(os.path.join(path, f"{base_filename}.svg"))
+
+        plt.show()
+
+    def compute_error_vs_distance_to_boundary(
+        self,
+        winMS: int,
+        shock_threshold: float = 0.15,
+        n_bins: int = 10,
+        use_speed_filter: bool = True,
+    ):
+        """
+        Computes binary classification error binned by the true distance to the shock boundary.
+        """
+        df_subset = self.results_df.xs(winMS, level="winMS", drop_level=False).copy()
+
+        # Track raw frame statistics across all mice/phases
+        all_frames = []
+
+        for idx, row in df_subset.iterrows():
+            mouse_name = idx[1]
+            phase = idx[3]
+
+            y_true = np.array(row["linearTrue"])
+            y_pred = np.array(row["linearPred"])
+
+            valid_mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+            if use_speed_filter:
+                valid_mask &= np.array(row["speedMask"])
+
+            if not np.any(valid_mask):
+                continue
+
+            y_true = y_true[valid_mask]
+            y_pred = y_pred[valid_mask]
+
+            # Calculate absolute distance to the decision boundary
+            distance_to_boundary = np.abs(y_true - shock_threshold)
+
+            # Binary classifications
+            is_in_shock_true = y_true <= shock_threshold
+            is_in_shock_pred = y_pred <= shock_threshold
+
+            # Was it misclassified? (Binary Error: True/False)
+            is_misclassified = is_in_shock_true != is_in_shock_pred
+
+            # Store every frame data point
+            df_mouse_frames = pd.DataFrame(
+                {
+                    "mouse_name": mouse_name,
+                    "phase": phase,
+                    "distance_to_boundary": distance_to_boundary,
+                    "is_misclassified": is_misclassified.astype(int),
+                }
+            )
+            all_frames.append(df_mouse_frames)
+
+        if not all_frames:
+            return pd.DataFrame()
+
+        total_frame_df = pd.concat(all_frames, ignore_index=True)
+
+        # Define bins for the distance to boundary (max distance possible is max |x - threshold|)
+        max_dist = total_frame_df["distance_to_boundary"].max()
+        bin_edges = np.linspace(0, max_dist, n_bins + 1)
+        bin_labels = [
+            f"{np.round((bin_edges[i] + bin_edges[i + 1]) / 2, 2)}"
+            for i in range(n_bins)
+        ]
+
+        # Assign each frame to a distance bin
+        total_frame_df["Distance Bin Center"] = pd.cut(
+            total_frame_df["distance_to_boundary"],
+            bins=bin_edges,
+            labels=bin_labels,
+            include_lowest=True,
+        )
+
+        # Aggregate: Calculate mean classification error per bin, per phase, per mouse
+        binned_results = (
+            total_frame_df.groupby(
+                ["mouse_name", "phase", "Distance Bin Center"], observed=False
+            )["is_misclassified"]
+            .mean()
+            .reset_index()
+        )
+
+        binned_results.rename(
+            columns={"is_misclassified": "Classification Error Rate"}, inplace=True
+        )
+        return binned_results
+
+    def plot_error_vs_distance(
+        self, winMS: int, shock_threshold: float = 0.15, path: Optional[str] = None
+    ):
+        """
+        Plots a line plot tracking how binary classification error rates drop
+        as the animal moves further away from the shock decision boundary.
+        """
+        phase_order = ["training", "pre", "cond", "post"]
+
+        # 1. Gather the binned data
+        plot_df = self.compute_error_vs_distance_to_boundary(
+            winMS=winMS, shock_threshold=shock_threshold, n_bins=8
+        )
+
+        if plot_df.empty:
+            print("No valid tracking data found to compute distance relationships.")
+            return
+
+        # Filter out any auxiliary phases you don't track
+        plot_df = plot_df[plot_df["phase"].isin(phase_order)].copy()
+
+        # Ensure categorical order for distance bins on the X-axis
+        plot_df["Distance Bin Center"] = pd.to_numeric(plot_df["Distance Bin Center"])
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        # 2. Draw lines with error bands across experimental phases
+        # Using lineplot will aggregate across mice automatically and show confidence intervals
+        sns.lineplot(
+            data=plot_df,
+            x="Distance Bin Center",
+            y="Classification Error Rate",
+            hue="phase",
+            hue_order=phase_order,
+            palette="Set2",
+            marker="o",
+            markersize=8,
+            linewidth=2.5,
+            ax=ax,
+        )
+
+        # 3. Aesthetics
+        ax.set_title(
+            f"Classification Error Rate vs. Distance to Shock Boundary (Window: {winMS}ms)",
+            fontsize=14,
+            fontweight="bold",
+            pad=15,
+        )
+        ax.set_xlabel(
+            "Absolute Distance to Shock Boundary (|True Position - Threshold|)",
+            fontsize=12,
+        )
+        ax.set_ylabel("Classification Error Rate (Proportion)", fontsize=12)
+
+        ax.set_ylim(
+            -0.02, 0.55
+        )  # Error rate maxes mathematically at 0.5 (pure chance) at the exact boundary
+        ax.axhline(0.5, linestyle=":", color="red", alpha=0.5, label="Chance level")
+        ax.grid(True, linestyle="--", alpha=0.5)
+
+        ax.legend(
+            title="Experimental Phase",
+            frameon=True,
+            facecolor="white",
+            edgecolor="none",
+        )
+        fig.tight_layout()
+
+        # 4. Save Options
+        if path is not None:
+            os.makedirs(path, exist_ok=True)
+            fig.savefig(
+                os.path.join(path, f"error_vs_boundary_distance_{winMS}.png"), dpi=300
+            )
+            fig.savefig(os.path.join(path, f"error_vs_boundary_distance_{winMS}.svg"))
+
+        plt.show()
 
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):
@@ -6725,6 +8429,29 @@ def _render_frame_worker(i, **kwargs):
     global _plotter_instance
     save_path = os.path.join(_plotter_instance.output_dir, f"frame_{i:04d}.png")
     _plotter_instance.animate_frame(i, save_path=save_path, **kwargs)
+
+
+def get_1d_tuning_curve(positions, mask_indices, bins=50, sigma=1.5):
+    """
+    Generates a smoothed 1D density curve.
+    Returns: (density_values, bin_centers)
+    """
+    # Filter data by mask (e.g., is_freeze)
+    masked_data = positions[mask_indices]
+
+    # Calculate histogram
+    counts, bin_edges = np.histogram(masked_data, bins=bins, range=(0, 1))
+
+    # Smooth the curve
+    density = gaussian_filter1d(counts.astype(float), sigma=sigma)
+
+    # Optional: Normalize to unit area or max (unit area is better for probability)
+    if np.sum(density) > 0:
+        density /= np.sum(density)
+
+    # Calculate bin centers
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    return density, bin_centers
 
 
 # Example usage:

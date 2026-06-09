@@ -12,7 +12,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from pykeops import set_verbose as pykeopsset_verbose
 from pykeops.numpy import LazyTensor as LazyTensor_np
 
-from neuroencoders.utils.global_classes import MAZE_COORDS
+from neuroencoders.utils.global_classes import MAZE_COORDS, DataHelper
 
 pykeopsset_verbose(False)  # Disable verbose output from PyKeOps
 
@@ -109,7 +109,7 @@ class UMazeLinearizer:
 
         self._create_interpolation()
 
-        self.data_helper = kwargs.pop("data_helper", None)
+        self.data_helper: DataHelper = kwargs.pop("data_helper", None)
         custom_lines = kwargs.pop("custom_lines", None)
         if self.data_helper is not None:
             print("found data_helper, using its custom lines")

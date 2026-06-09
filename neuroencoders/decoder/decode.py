@@ -10,8 +10,7 @@ import os
 
 # Get common libraries
 import numpy as np
-
-from neuroencoders.utils.backend import pd
+import pandas as pd
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import tensorflow as tf

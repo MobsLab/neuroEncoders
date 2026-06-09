@@ -14,10 +14,10 @@ import sys
 from warnings import warn
 
 import numpy as np
+import pandas as pd
 from numpy import max as np_max
 
 from neuroencoders.importData.epochs_management import inEpochsMask
-from neuroencoders.utils.backend import pd
 
 # Load custom code
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
@@ -149,7 +149,7 @@ def main(args):
         windowSize=windowSizeMS / 1000,
         force_ref=False,
         isPredLoss=isPL,
-        load_at_init=True,  # we load a new params
+        load_at_init=False,  # we load a new params
     )
     helpers = [DataHelper]
     if args.phase != "cond":
@@ -189,7 +189,7 @@ def main(args):
             windowSize=windowSizeMS / 1000,
             force_ref=False,
             isPredLoss=isPL,
-            load_at_init=True,  # we load a new params
+            load_at_init=False,  # we load a new params
         )
         # adding post test helper
         rawdata_parser.speed_filter(
@@ -228,7 +228,7 @@ def main(args):
             windowSize=windowSizeMS / 1000,
             force_ref=False,
             isPredLoss=isPL,
-            load_at_init=True,  # we load a new params
+            load_at_init=False,  # we load a new params
         )
         helpers = [DataHelper_cond, DataHelper_post, DataHelper]
     for helper in helpers:
@@ -293,7 +293,7 @@ def main(args):
         nFeatures=args.n_features,
         batch_size=batch_size,
         save_json=True,
-        load_at_init=True,  # we load a new params
+        load_at_init=False,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=args.dense_weight,
@@ -698,7 +698,7 @@ def main(args):
             windowStride=windowStride,  # This way the striding is always 36ms-based
             strideFactor=strideFactor,
             redo=False,
-            BUFFERSIZE=216000,
+            BUFFERSIZE=432000,
         )
 
         # Network
@@ -739,7 +739,7 @@ def main(args):
                 windowSizeMS=windowSizeMSlist,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=False,
+                load_model=True,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=num_augmentations,
@@ -773,6 +773,7 @@ def main(args):
                 )
             )
             or args.redo
+            or args.test_sleep
         ):
             print("Will now run temperature scaling for gaussian heatmap")
             T = NNTrainer.test(
@@ -952,6 +953,14 @@ def main(args):
                     "featurePred.csv",
                 )
             )
+            or not os.path.exists(
+                os.path.join(
+                    NNTrainer.folderResultSleep,
+                    str(windowSizeMS),
+                    "PreSleep",
+                    "featurePred.csv",
+                )
+            )
             or args.redo
         ):
             NNTrainer.testSleep(
@@ -964,7 +973,7 @@ def main(args):
                 # TODO: add window Size Decoder --> decode small windows with big window trained model
             )
 
-        if args.plot_id or (
+        if args.plot_id and (
             not os.path.exists(
                 os.path.join(
                     ProjectPath.experimentPath,
@@ -1196,6 +1205,8 @@ def main(args):
             l_function,
             bayesMatrices=bayesMatrices,
             phase=args.phase,
+            grid_size=NNTrainer.ann.params.GaussianGridSize,
+            maze_params=Linearizer.maze_params,
         )
         figures.load_data()
         figures.load_bayes()

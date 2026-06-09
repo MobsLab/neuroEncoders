@@ -26,7 +26,11 @@ from neuroencoders.importData.epochs_management import (
 
 # Load custom code
 from neuroencoders.simpleBayes import butils
-from neuroencoders.utils.global_classes import Project, SpatialConstraintsMixin
+from neuroencoders.utils.global_classes import (
+    Project,
+    SpatialConstraintsMixin,
+    TuningCurvesPlotter,
+)
 
 # !!!! TODO: all train-test in one function, too much repetition
 # TODO: option to remove zero cluster from training and testing
@@ -82,25 +86,26 @@ class DecoderConfig:
 
 
 # trainer class
-class Trainer(SpatialConstraintsMixin):
+class Trainer(SpatialConstraintsMixin, TuningCurvesPlotter):
     """
-    Unified Trainer class for Bayesian decoder - now implements same spatial constraints as ANN.
+    Unified Trainer class for Bayesian decoder - now implements same spatial constraints as ANN, as well as a tuning curves plotter module.
     """
 
     def __init__(
         self,
         projectPath: Project,
-        config: DecoderConfig = None,
-        phase: Literal[
-            "all",
-            "pre",
-            "preNoHab",
-            "hab",
-            "cond",
-            "post",
-            "postNoExtinction",
-            "extinction",
-            None,
+        config: Optional[DecoderConfig] = None,
+        phase: Optional[
+            Literal[
+                "all",
+                "pre",
+                "preNoHab",
+                "hab",
+                "cond",
+                "post",
+                "postNoExtinction",
+                "extinction",
+            ]
         ] = None,
         verbose: bool = True,
         maze_params=None,
@@ -120,7 +125,8 @@ class Trainer(SpatialConstraintsMixin):
             ValueError: If the projectPath is not provided or if the phase is not valid.
         """
 
-        super().__init__(maze_params=maze_params, **kwargs)
+        SpatialConstraintsMixin.__init__(self, maze_params=maze_params)
+        TuningCurvesPlotter.__init__(self)
 
         self.phase = phase
         self.suffix = "_" + phase if phase else ""
@@ -2864,6 +2870,8 @@ class Trainer(SpatialConstraintsMixin):
         """
         is_predicted = kwargs.get("is_predicted", False)
         use_speed_filter = kwargs.get("use_speed_filter", True)
+        normalize = kwargs.get("normalize", True)
+        scaling_method = kwargs.get("scaling_method", "minmax")  # 'minmax' or 'zscore'
         print(f"using speed filter: {use_speed_filter}")
 
         winMS = kwargs.get("winMS", None)
@@ -3060,6 +3068,14 @@ class Trainer(SpatialConstraintsMixin):
                 else:
                     linearPlaceFields.append(np.zeros(len(linSpace) - 1))
 
+        if normalize:
+            linearPlaceFields = np.array(linearPlaceFields)
+            linearPlaceFields = self.normalize_tuning_curves(
+                linearPlaceFields,
+                method=scaling_method,
+                return_cmap=kwargs.get("return_cmap", False),
+            )
+
         return linearPlaceFields, binEdges
 
     def saveResults(
@@ -3073,7 +3089,7 @@ class Trainer(SpatialConstraintsMixin):
         save_as_pickle: bool = True,
         folderResult: Optional[str] = None,
     ) -> None:
-        from neuroencoders.utils.backend import pd
+        import pandas as pd
 
         # Manage folders to save
         if folderResult is None:

@@ -4259,3 +4259,61 @@ def plot_spikes_sequence(proto_example, nChannelsPerGroup):
     plt.suptitle("First 50 spikes from the sequence, separated by channel")
     plt.tight_layout()
     plt.show()
+
+
+def connect_points(ax, df, x_col, y_col, hue_col, id_col, x_order):
+    """
+    Connects points belonging to the same subject across phases and hues.
+
+    Parameters:
+    - ax: The matplotlib Axes object.
+    - df: The melted DataFrame used for the plot.
+    - x_col: Name of the x-axis column (e.g., 'phase').
+    - y_col: Name of the y-axis column (e.g., 'Median_Linear_Error').
+    - hue_col: Name of the hue column (e.g., 'Error_Type').
+    - id_col: Name of the unique subject identifier column (e.g., 'mouse_manipe').
+    - x_order: The explicit order of categories on the x-axis.
+    """
+    # Get unique hues in the order they appear in the data/plot
+    hue_levels = df[hue_col].unique()
+    n_hues = len(hue_levels)
+
+    # Calculate the dodge shift exactly how Seaborn does it
+    # Total width allocated for all bars/points at one x-tick is usually ~0.8
+    # With 2 hues, they are centered around the integer x-ticks
+    width = 0.8
+    offsets = np.linspace(-width / 4, width / 4, n_hues) if n_hues > 1 else [0]
+    hue_to_offset = dict(zip(hue_levels, offsets))
+
+    # Create a mapping for x positions based on the ordered categories
+    x_to_idx = {cat: i for i, cat in enumerate(x_order)}
+
+    # Group by the individual mouse to draw their specific trajectory line
+    for mouse_id, group in df.groupby(id_col):
+        # We need to sort the group so lines flow logically chronologically
+        # and across variables if needed. Let's build explicit coordinates.
+        plot_coords = []
+
+        for phase in x_order:
+            for hue in hue_levels:
+                # Find the specific row for this mouse, phase, and error type
+                row = group[(group[x_col] == phase) & (group[hue_col] == hue)]
+
+                if not row.empty:
+                    # Calculate true X: integer position + dodge offset
+                    x_pos = x_to_idx[phase] + hue_to_offset[hue]
+                    y_pos = row[y_col].values[0]
+                    plot_coords.append((x_pos, y_pos))
+
+        # Unpack coordinates and plot the connecting line for this mouse
+        if len(plot_coords) > 1:
+            xs, ys = zip(*plot_coords)
+            ax.plot(
+                xs,
+                ys,
+                color="grey",
+                alpha=0.4,
+                linewidth=1,
+                linestyle="-",
+                zorder=1,  # Put lines behind the stripplot markers (zorder=2+)
+            )
