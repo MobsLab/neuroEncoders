@@ -6,35 +6,12 @@
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/decoder/decode.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/decoder/decode.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/epochs_management.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/epochs_management.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/import_clusters.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/import_clusters.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/mobs.mplstyle" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/mobs.mplstyle" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/openEphysExport/generate_json.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/openEphysExport/generate_json.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/hyper_paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/hyper_paper_figures.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/butils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/butils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/PathForExperiments.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/PathForExperiments.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/SpikeLoading.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/SpikeLoading.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/management.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/management.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/viz_params.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/viz_params.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_LinAndDirection.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_LinAndDirection.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_mobs_functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_mobs_functions.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -250,7 +227,7 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
+        <option value="bundled-python-sdk-024ed6589d45-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.23567.174" />
       </set>
     </attachedChunks>
   </component>
@@ -313,6 +290,7 @@
       <workItem from="1780566700172" duration="342000" />
       <workItem from="1780583032904" duration="2537000" />
       <workItem from="1780586456351" duration="8766000" />
+      <workItem from="1781012993189" duration="90000" />
     </task>
     <servers />
   </component>
@@ -344,11 +322,6 @@
           <option name="timeStamp" value="10" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py</url>
-          <line>796</line>
-          <option name="timeStamp" value="13" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py</url>
           <line>2269</line>
           <option name="timeStamp" value="30" />
@@ -377,11 +350,6 @@
           <url>file://$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py</url>
           <line>1073</line>
           <option name="timeStamp" value="41" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
-          <url>file://$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py</url>
-          <line>4056</line>
-          <option name="timeStamp" value="43" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
@@ -420,9 +388,6 @@
             <option name="notifyOnTerminate" value="true" />
             <option name="notifyOnlyOnFirst" value="true" />
           </properties>
-        </breakpoint>
-        <breakpoint type="jupyter-exception">
-          <properties exception="BaseException" />
         </breakpoint>
       </default-breakpoints>
     </breakpoint-manager>

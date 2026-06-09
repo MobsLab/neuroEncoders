@@ -62,6 +62,14 @@ DELTA_COLOR_FORWARD = "xkcd:electric green"
 DELTA_COLOR_REVERSE = "xkcd:gray"
 MAX_NUM_STARS = 5
 
+GROUPS_PALETTE = {
+    "MFB": "xkcd:green",
+    "PAG": "xkcd:red",
+    "Novel": "xkcd:blue",
+    "Known": "xkcd:grey",
+    "reversal": "xkcd:orange",
+}
+
 
 # Helper function to get significance stars based on p-value
 def get_pvalue_stars(p_value):
