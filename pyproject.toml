@@ -16,7 +16,6 @@ dependencies = [
     "ffmpeg>=1.4",
     "graphviz>=0.20.3",
     "h5py>=3.13.0",
-    "hdbscan>=0.8.40",
     "lxml>=5.3.2",
     "mat73>=0.65",
     "matplotlib>=3.6.2",
@@ -46,6 +45,7 @@ dependencies = [
     "pynapple",
     "numpy>=2.2.6",
     "pykeops>=2.3",
+    "tensorboard>=2.20.0",
 ]
 
 [project.optional-dependencies]
@@ -107,6 +107,10 @@ dev = [
     "pyright>=1.1.409",
     "tensorboard-plugin-profile==2.22.1",
     "polars>=1.40.1",
+    "pyside6>=6.11.1",
+    "matlab>=0.1",
+    "pip>=26.1.2",
+    "matlabengine>=26.1.12",
 ]
 
 [tool.ruff]

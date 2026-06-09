@@ -27,7 +27,7 @@ Behavior=importdata(strcat(folderData,'behavResources.mat'));
 disp('Data Loaded.')
 
 disp(['target: ', target]);
-if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndThigmo') || strcmp(target, 'thigmo') || strcmp(target, 'LinAndDirection') || strcmp(target, "PosAndHeadDirectionAndThigmo")
+if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndThigmo') || strcmp(target, 'thigmo') || strcmp(target, 'LinAndDirection') || strcmp(target, "PosAndHeadDirectionAndThigmo") || strcmp(target, "PosAndHeadDirection") || strcmp(target, "PosAndThigmo") || strcmp(target, "LinAndHeadDirection")
     try
         X = Data(Behavior.("CleanAlignedXtsd"));
         Y = Data(Behavior.("CleanAlignedYtsd"));
