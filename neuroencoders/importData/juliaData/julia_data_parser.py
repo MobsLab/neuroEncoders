@@ -17,7 +17,6 @@ def julia_spike_filter(
     singleSpike=False,
     BUFFERSIZE=72000,
     redo=False,
-    run_all=False,
 ):
     """
     Launch an extraction of the spikes in Julia:
@@ -117,47 +116,3 @@ def julia_spike_filter(
                     str(windowStride),
                 ]
             )
-
-    if run_all:
-        if not os.path.exists(os.path.join(projectPath.folder, "nnBehavior.mat")):
-            raise ValueError(
-                "the behavior file does not exist :"
-                + os.path.join(projectPath.folder, "nnBehavior.mat")
-                + " Please run the behavior extraction first using the extractTsd.m function - should be handled by neuroEncoder main script as well."
-            )
-        if not os.path.exists(projectPath.dat):
-            raise ValueError("the dat file does not exist :" + projectPath.dat)
-        codepath = os.path.join(folderCode, "importData/juliaData/")
-        windowSizes_list = [round(wl * 0.036, 3) for wl in [1, 3, 5, 7, 14, 30, 60]]
-        # Let us obtain all spike dataset in parallel:
-        print(windowSizes_list)
-
-        def run_subprocess(windowSize):
-            subprocess.run(
-                [
-                    os.path.join(codepath, "executeFilter_stride.sh"),
-                    codepath,
-                    projectPath.xml,
-                    projectPath.dat,
-                    os.path.join(projectPath.folder, "nnBehavior.mat"),
-                    os.path.join(projectPath.folder, "spikeData_fromJulia.csv"),
-                    filename,
-                    sleepFilename,
-                    str(BUFFERSIZE),
-                    str(windowSize),
-                    str(windowStride),
-                ]
-            )
-
-        import multiprocessing
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        max_workers = multiprocessing.cpu_count()
-        print("max_workers: ", max_workers)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(run_subprocess, windowSize)
-                for windowSize in windowSizes_list
-            ]
-            for future in as_completed(futures):
-                future.result()
