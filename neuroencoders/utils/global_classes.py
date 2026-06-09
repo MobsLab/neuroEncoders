@@ -15,8 +15,9 @@ os.environ.setdefault(
     "TF_CPP_MIN_LOG_LEVEL", "2"
 )  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
 import os.path
+import warnings
 from datetime import date
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from warnings import warn
 
 import dill as pickle
@@ -25,15 +26,31 @@ import dill as pickle
 # mplt.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
 import tables
 from matplotlib.patches import Rectangle
-from pynapple import IntervalSet, TsGroup, TsdFrame
+from pynapple import (
+    IntervalSet,
+    Ts,
+    TsGroup,
+    Tsd,
+    TsdFrame,
+    compute_tuning_curves,
+)
+from scipy.ndimage import gaussian_filter1d
 from shapely import MultiPoint, Polygon
 
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
-from neuroencoders.utils.backend import pd
 from neuroencoders.utils.management import get_git_info
+from neuroencoders.utils.viz_params import (
+    MIDDLE_COLOR,
+    SAFE_CENTER_COLOR,
+    SAFE_COLOR,
+    SHOCK_CENTER_COLOR,
+    SHOCK_COLOR,
+)
 
 MAZE_COORDS = np.array(
     [
@@ -59,7 +76,13 @@ ZONEDEF = np.array(
 )
 ZONELABELS = ["Shock", "ShockCenter", "Center", "SafeCenter", "Safe"]
 
-ZONE_COLORS = ["r", "m", "k", "c", "b"]
+ZONE_COLORS = [
+    SHOCK_COLOR,  # Hot Pink
+    SHOCK_CENTER_COLOR,  # Orchid
+    MIDDLE_COLOR,  # Lavender
+    SAFE_CENTER_COLOR,  # Periwinkle
+    SAFE_COLOR,  # Cornflower Blue
+]
 
 DEFAULT_GRIDSIZE = (35, 35)
 
@@ -258,11 +281,11 @@ class DataHelper(Project):
 
     def __new__(
         cls,
-        xmlPath=None,
-        mode=None,
-        target=None,
+        xmlPath: Optional[str] = None,
+        mode: Optional[str] = None,
+        target: Optional[str] = None,
         *args,
-        load_path=None,
+        load_path: Optional[str] = None,
         **kwargs,
     ):
         if cls._skip_new:
@@ -298,6 +321,10 @@ class DataHelper(Project):
                 return super().__new__(cls)
         if os.path.isfile(load_path) and kwargs.pop("load_at_init", True):
             obj = cls.load(load_path)
+            if target is None:
+                raise ValueError(
+                    "target must be provided when loading a DataHelper object"
+                )
             if (
                 ("_loaded_from_pickle" in dir(obj))
                 and (
@@ -315,15 +342,24 @@ class DataHelper(Project):
                 return obj
             else:
                 raise ValueError(
-                    "DataHelper load failed, incompatible target or not loaded from pickle"
+                    f"""DataHelper load failed, incompatible target or not loaded from pickle
+                    You didn't fulfill one the required arguments:
+                    - was loaded from pickle :{("_loaded_from_pickle" in dir(obj))}
+                    AND
+                        (
+                        - same targets : {obj.target.lower() == target.lower()}
+                        OR
+                        - or target is simplypos : {target.lower() == "pos"}
+                        )
+                    """
                 )
         return super().__new__(cls)
 
     def __init__(
         self,
-        xmlPath=None,
-        mode=None,
-        target=None,
+        xmlPath: Optional[str] = None,
+        mode: Optional[str] = None,
+        target: Optional[str] = None,
         *args,
         **kwargs,
     ):
@@ -419,9 +455,11 @@ class DataHelper(Project):
         self._get_ref_and_xy(phase=self.phase, force=self.force_ref)
         self.get_freeze_epochs()
         self.get_ripples_epochs()
+        self.get_stim_epochs()
+        self._compute_zone_epochs()
 
     @classmethod
-    def load(cls, path, phase=None):
+    def load(cls, path: str, phase: Optional[str] = None):
         cls._skip_new = True
         suffix = f"_{phase}" if phase is not None else ""
         try:
@@ -440,35 +478,34 @@ class DataHelper(Project):
         Robustly scales positions to [0, 1] using percentiles to handle outliers
         and ensures the 'bottom' starts at 0.
         """
-        for sess_name, epoch in self.fullBehavior["Times"]["SessionEpochs"].items():
-            # Get the mask for this specific session
-            mask = ep.inEpochsMask(self.positionTime, epoch).flatten()
+        session_pos = (
+            self.positions[:, :2]
+            if not hasattr(self, "old_positions")
+            else self.old_positions[:, :2]
+        )
 
-            if np.any(mask):
-                session_pos = self.positions[mask, :2]
+        # 1. Identify the 'corners' using quantiles instead of absolute min/max
+        # This ignores 0.5% of extreme tracking jumps (artifacts)
+        min_pos = np.nanquantile(session_pos, 1 - quantile_threshold, axis=0)
+        max_pos = np.nanquantile(session_pos, quantile_threshold, axis=0)
 
-                # 1. Identify the 'corners' using quantiles instead of absolute min/max
-                # This ignores 0.5% of extreme tracking jumps (artifacts)
-                min_pos = np.nanquantile(session_pos, 1 - quantile_threshold, axis=0)
-                max_pos = np.nanquantile(session_pos, quantile_threshold, axis=0)
+        # 2. Shift to 0,0
+        shifted_pos = session_pos - min_pos
 
-                # 2. Shift to 0,0
-                shifted_pos = session_pos - min_pos
+        # 3. Scale to 1.0 (using the new adjusted max)
+        new_range = max_pos - min_pos
 
-                # 3. Scale to 1.0 (using the new adjusted max)
-                new_range = max_pos - min_pos
+        # Avoid division by zero
+        new_range[new_range == 0] = 1.0
 
-                # Avoid division by zero
-                new_range[new_range == 0] = 1.0
+        normalized_pos = shifted_pos / new_range
 
-                normalized_pos = shifted_pos / new_range
+        # 4. Hard-clip to [0, 1] to keep everything inside the box
+        normalized_pos = np.clip(normalized_pos, 0, 1)
 
-                # 4. Hard-clip to [0, 1] to keep everything inside the box
-                normalized_pos = np.clip(normalized_pos, 0, 1)
-
-                self.positions[mask, :2] = normalized_pos
-                if hasattr(self, "old_positions"):
-                    self.old_positions[mask, :2] = normalized_pos
+        self.positions[:, :2] = normalized_pos
+        if hasattr(self, "old_positions"):
+            self.old_positions[:, :2] = normalized_pos
 
         self.fullBehavior["Positions"] = self.positions
 
@@ -883,13 +920,13 @@ class DataHelper(Project):
         lower_left_positions_x = positions[lower_left_mask, 0]
         self.lower_x = (
             lower_left_positions_x.max()
-            if lower_left_positions_x.size > 0
+            if lower_left_positions_x.size > 0 and lower_left_positions_x.max() < 0.37
             else MAZE_COORDS[4:8, 0].min()
         )
         lower_right_positions_x = positions[lower_right_mask, 0]
         self.upper_x = (
             lower_right_positions_x.min()
-            if lower_right_positions_x.size > 0
+            if lower_right_positions_x.size > 0 and lower_right_positions_x.min() > 0.62
             else MAZE_COORDS[4:8, 0].max()
         )
         self.xlims = [self.lower_x, self.upper_x]
@@ -899,15 +936,16 @@ class DataHelper(Project):
         )
         self.ylim = (
             positions[y_mask, 1].min()
-            if len(positions[y_mask, 1]) > 0
-            else MAZE_COORDS[4:8, 1].min()
+            if len(positions[y_mask, 1]) > 0 and positions[y_mask, 1].min() > 0.7
+            else MAZE_COORDS[4:8, 1].max()
         )
         self._define_maze_zones()
         if show:
-            plt.plot(positions[:, 0], positions[:, 1], "--.")
-            plt.axvline(self.lower_x, color="r")
-            plt.axvline(self.upper_x, color="r")
-            plt.axhline(self.ylim, color="black")
+            # plt.plot(positions[:, 0], positions[:, 1], "--.")
+            plt.scatter(positions[:, 0], positions[:, 1], s=20, c="grey")
+            plt.axvline(self.lower_x, 0, self.ylim, color="r")
+            plt.axvline(self.upper_x, 0, self.ylim, color="r")
+            plt.axhline(self.ylim, self.lower_x, self.upper_x, color="black")
             plt.xlim(0, 1)
             plt.ylim(0, 1)
             plt.tight_layout()
@@ -960,9 +998,9 @@ class DataHelper(Project):
             [[0, self.lower_x], [self.zone_height, 1]],  # shock center
             [[self.upper_x, 1], [self.zone_height, 1]],  # safe center
         ]
-        self.ZoneLabels = ["Shock", "Safe", "Center", "ShockCenter", "SafeCenter"]
+        self.ZoneLabels = ZONELABELS
 
-        self.zone_colors = ["r", "b", "k", "m", "c"]
+        self.zone_colors = ZONE_COLORS
         self.shock_zone = np.array(self.shock_zone)
         self.safe_zone = np.array(self.safe_zone)
         self.maze_coords = np.array(self.maze_coords)
@@ -1189,10 +1227,9 @@ class DataHelper(Project):
         Returns:
             XYOutput: user-defined or pre-defined coordinates
         """
+        import skimage
         from cmcrameri import cm
         from matplotlib.widgets import Button, Slider
-
-        from neuroencoders.utils.backend import skimage
 
         regionprops = skimage.measure.regionprops
 
@@ -1457,7 +1494,7 @@ class DataHelper(Project):
         )
 
         # Define zones
-        self.ZoneEpochAligned = []
+        self.ZoneEpochAligned = self._compute_zone_epochs()
 
         fig, ax = plt.subplots()
 
@@ -1475,7 +1512,6 @@ class DataHelper(Project):
                 x_mask = (AlignedXtsd >= zone[0][0]) & (AlignedXtsd <= zone[0][1])
                 y_mask = (AlignedYtsd >= zone[1][0]) & (AlignedYtsd <= zone[1][1])
                 zone_mask = x_mask & y_mask
-                self.ZoneEpochAligned.append(zone_mask)
                 ax.plot(
                     AlignedXtsd[zone_mask],
                     AlignedYtsd[zone_mask],
@@ -1499,6 +1535,36 @@ class DataHelper(Project):
 
         return fig
 
+    def _compute_zone_epochs(self):
+        """
+        Computes the epochs for each zone based on the positions.
+        """
+
+        if not hasattr(self, "old_positions"):
+            if hasattr(self, "positions"):
+                AlignedXtsd = self.positions[:, 0]
+                AlignedYtsd = self.positions[:, 1]
+            else:
+                AlignedXtsd = self.fullBehavior["Positions"][:, 0]
+                AlignedYtsd = self.fullBehavior["Positions"][:, 1]
+        else:
+            AlignedXtsd = self.old_positions[:, 0]
+            AlignedYtsd = self.old_positions[:, 1]
+
+        times = self.positionTime.flatten()
+        self.ZoneEpochAligned = dict()
+
+        for zone_name, zone_lims in zip(self.ZoneLabels, self.ZoneDef):
+            x_mask = (AlignedXtsd >= zone_lims[0][0]) & (AlignedXtsd <= zone_lims[0][1])
+            y_mask = (AlignedYtsd >= zone_lims[1][0]) & (AlignedYtsd <= zone_lims[1][1])
+            zone_mask = x_mask & y_mask
+            self.ZoneEpochAligned[zone_name] = zone_mask
+            setattr(self, f"{zone_name}_tsd", Tsd(t=times, d=zone_mask.astype(bool)))
+            zone_interval = (
+                getattr(self, f"{zone_name}_tsd").threshold(0.5, "above").time_support
+            )
+            setattr(self, f"{zone_name}_EpochAligned", zone_interval)
+
     def plot_maze_and_zones(self, savepath=None):
         """Plot maze boundaries and forbidden zones"""
         maze = np.array(MAZE_COORDS)
@@ -1511,9 +1577,10 @@ class DataHelper(Project):
                 (zone[0, 0], zone[1, 0]),
                 width=zone[0, 1] - zone[0, 0],
                 height=zone[1, 1] - zone[1, 0],
-                alpha=0.2,
+                alpha=0.8,
                 color=ZONE_COLORS[i],
                 label=ZONELABELS[i],
+                zorder=1,
             )
             ax.add_patch(poly)
 
@@ -1530,14 +1597,26 @@ class DataHelper(Project):
             ]
         )
         ax.plot(
-            linearized[:, 0],
-            linearized[:, 1],
+            linearized[:-1, 0],
+            linearized[:-1, 1],
             "_-",
             color="r",
-            alpha=0.5,
+            alpha=1,
             linewidth=4,
             markersize=20,
             markeredgewidth=10,
+            zorder=2,
+        )
+        ax.plot(
+            linearized[-2:, 0],
+            linearized[-2:, 1],
+            "-",
+            color="r",
+            alpha=1,
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+            zorder=2,
         )
         # make the last marker an arrow pointing downards
         ax.plot(
@@ -1545,9 +1624,10 @@ class DataHelper(Project):
             linearized[-1, 1],
             "v",
             color="r",
-            alpha=0.8,
+            alpha=1,
             markersize=10,
             markeredgewidth=10,
+            zorder=2,
         )
 
         # make the ticks bigger
@@ -1569,9 +1649,10 @@ class DataHelper(Project):
                 old_start,
                 width=0.2,
                 height=0.35,
-                alpha=0.2,
+                alpha=0.6,
                 color=ZONE_COLORS[i],
                 label=ZONELABELS[i],
+                zorder=1,
             )
             old_start = (old_start[0] + 0.2, 0)
             ax.add_patch(poly)
@@ -1579,24 +1660,38 @@ class DataHelper(Project):
         # plot the red line
         linearized = np.linspace(0, 1, 7)
         ax.plot(
-            linearized,
-            np.zeros_like(linearized) + 0.17,
+            linearized[:-1],
+            np.zeros_like(linearized[:-1]) + 0.17,
             "|-",
             color="r",
-            alpha=0.5,
+            alpha=1,
             label="Linearization",
             linewidth=4,
             markersize=20,
             markeredgewidth=10,
+            zorder=2,
+        )
+        ax.plot(
+            linearized[-2:],
+            np.zeros_like(linearized[-2:]) + 0.17,
+            "-",
+            color="r",
+            alpha=1,
+            label="Linearization",
+            linewidth=4,
+            markersize=20,
+            markeredgewidth=10,
+            zorder=2,
         )
         ax.plot(
             linearized[-1],
             0.17,
             ">",
             color="r",
-            alpha=0.8,
+            alpha=1,
             markersize=10,
             markeredgewidth=10,
+            zorder=1,
         )
         ax.tick_params(axis="both", which="major", labelsize=20)
 
@@ -1605,7 +1700,7 @@ class DataHelper(Project):
         # make the x ticks bigger
         ax.tick_params(axis="x", which="major", labelsize=20)
         ax.set_xlabel("Maze Linearized position", fontsize=20)
-        ax.set_xlim(0, 1)
+        ax.set_xlim(0, 1.1)
         ax.set_ylim(0, 0.35)
         if savepath is not None:
             plt.savefig(savepath, dpi=300)
@@ -1797,9 +1892,8 @@ class DataHelper(Project):
             merge_gap (float): Maximum gap to merge close immobility epochs in seconds (default: 0.3).
 
         """
+        import pandas as pd
         import pynapple as nap
-
-        from neuroencoders.utils.backend import pd
 
         MovAccTsd = nap.Tsd(
             t=self.fullBehavior["MovTimes"].flatten(),
@@ -1831,23 +1925,41 @@ class DataHelper(Project):
 
         return self.freeze_epochs
 
-    def get_ripples_epochs(self, before=0.1, after=0.1):
-        self.tRipples = self.fullBehavior["Times"].get("tRipples", None).flatten()
+    def get_ripples_epochs(self, before=0.05, after=0.1):
+        self.tRipples = self.fullBehavior["Times"].get("tRipples", None)
+        if self.tRipples is None:
+            return None
+
+        self.tRipples = self.tRipples.flatten()
         ripples_epochs = IntervalSet(
             np.array([[t - before, t + after] for t in self.tRipples])
         )
         self.ripples_epochs = ripples_epochs
         return self.ripples_epochs
 
-    def get_stim_epochs(self):
-        stim_epochs = self.fullBehavior["Times"].get("StimEpoch", None)
-        if stim_epochs is None:
-            warn("No StimEpoch found in Times. Please check your data.")
+    def get_stim_epochs(self, before=0.1, after=0.1):
+        start_stim = self.fullBehavior["Times"].get("start_stim", None)
+        stop_stim = self.fullBehavior["Times"].get("stop_stim", None)
+        if start_stim is None and stop_stim is None:
+            warnings.warn(
+                "Both startStim and stopStim are absent. Please provide at least one of them."
+            )
         else:
-            self.stim_epochs = IntervalSet(stim_epochs)
-        return self.stim_epochs
+            start_stim = (
+                np.array(start_stim).flatten() if start_stim is not None else None
+            )
+            stop_stim = np.array(stop_stim).flatten() if stop_stim is not None else None
+            self.stim_epochs = IntervalSet(
+                np.array(
+                    [
+                        [t_bef - before, t_aft + after]
+                        for t_bef, t_aft in zip(start_stim, stop_stim)
+                    ]
+                )
+            )
+            return self.stim_epochs
 
-    def get_spike_data(self, add_to_attr=True, force=False) -> TsGroup:
+    def get_spike_data(self, folder=None, add_to_attr=True, force=False) -> TsGroup:
         """
         Get spike data from the DataHelper and store it in the fullBehavior dict for later use.
         """
@@ -1860,12 +1972,197 @@ class DataHelper(Project):
         ):
             return self.spikeData
 
-        spikes, shanks, spikedata = loadSpikeData(self.folder)
+        if folder is None:
+            folder = self.folder
+        spikes, shanks, spikedata = loadSpikeData(folder)
         spike_group = TsGroup(spikes)
         if add_to_attr:
             self.spikeData = spike_group
 
         return spike_group
+
+    def get_respi_data(
+        self, folder: Optional[str] = None, add_to_attr=True, force=False
+    ) -> Tsd:
+        """
+        Get respiratory spectro from the DataHelper and store it in the fullBehavior dict for later use.
+        """
+        from neuroencoders.utils.wrappers import loadRespiData
+
+        if folder is None:
+            folder = self.folder
+
+        if hasattr(self, "respiData") and isinstance(self.respiData, Tsd) and not force:
+            print("Respiratory data already loaded, returning existing data.")
+            return self.respiData
+
+        try:
+            if not os.path.exists(os.path.join(folder, "B_Low_Spectrum.mat")):
+                raise FileNotFoundError(
+                    f"B_Low_Spectrum.mat not found in {folder}. Please check the path and try again."
+                )
+            respi_values, respi_times, freqs = loadRespiData(
+                os.path.join(folder, "B_Low_Spectrum.mat")
+                if "mat" not in folder
+                else folder
+            )
+        except FileNotFoundError:
+            respi_values, respi_times, freqs = loadRespiData(
+                os.path.join(folder, "Bulb_deep_Low_Spectrum.mat")
+                if "mat" not in folder
+                else folder
+            )
+
+        # weirdly enough the times are in seconds here although they come from matlab tsds
+        # round freqs to 2 decimals to avoid floating point issues
+        freqs = np.round(freqs, 2)
+        respi_tsd = TsdFrame(respi_times, respi_values, columns=freqs)
+        if add_to_attr:
+            self.respiData = respi_tsd
+
+        return respi_tsd
+
+    def compute_breathing_rate(
+        self,
+        f: Optional[List] = None,
+        t: Optional[List] = None,
+        data_spectro: Optional[np.ndarray] = None,
+        spectro_tsd: Optional[TsdFrame] = None,
+        **kwargs,
+    ) -> tuple[Tsd, Tsd]:
+        """
+        Convert spectrogram data into dominant frequencies and power over time.
+
+        Parameters:
+        -----------
+        Either
+        f : array-like
+            Frequency axis vector.
+        t : array-like
+            Time axis vector (e.g., in 1e-4s).
+        data_spectro : 2D array-like
+            Spectrogram data matrix of shape (time_bins, frequency_bins).
+
+        Or
+        spectro_tsd : TsdFrame that already contains the spectrogram data with time index and frequency columns.
+
+        **kwargs:
+            bin_size (int): Size of the binning window. Default is 1.
+            frequency_band (list/tuple): [min_freq, max_freq]. Default is [2, 8].
+            smooth_fact (int): Window size for smoothing the frequency output.
+
+        Returns:
+        --------
+        spectrum_frequency : pynapple.Tsd
+            Time series of the dominant frequencies.
+        power_tsd : pynapple.Tsd
+            Time series of the power at those peak frequencies.
+        """
+        if f is None and t is None and data_spectro is None and spectro_tsd is None:
+            raise ValueError(
+                "Either (f, t, data_spectro) or spectro_tsd must be provided."
+            )
+
+        # 1. Handle optional arguments (varargin equivalent)
+        bin_size = kwargs.get("bin_size", 1)
+        frequency_band = kwargs.get("frequency_band", [2, 8])
+        smooth_fact = kwargs.get("smooth_fact", None)
+
+        print(
+            f"Using bin_size={bin_size}, frequency_band={frequency_band}, smooth_fact={smooth_fact}"
+        )
+
+        if spectro_tsd is not None:
+            if not isinstance(spectro_tsd, TsdFrame):
+                raise ValueError("spectro_tsd must be a TsdFrame.")
+            t = spectro_tsd.times()
+            f = spectro_tsd.columns.astype(float).values
+            data_spectro = spectro_tsd.values
+
+        f = np.asarray(f)
+        t = np.asarray(t)
+        data_spectro = np.asarray(data_spectro)
+
+        # 2. Find closest indices for the frequency band
+        f_diff_median = np.median(np.diff(f))
+
+        # MATLAB: find(f > band - median & f < band + median)
+        f1_indices = np.where(
+            (f > frequency_band[0] - f_diff_median)
+            & (f < frequency_band[0] + f_diff_median)
+        )[0]
+        f2_indices = np.where(
+            (f > frequency_band[1] - f_diff_median)
+            & (f < frequency_band[1] + f_diff_median)
+        )[0]
+
+        if len(f1_indices) == 0 or len(f2_indices) == 0:
+            raise ValueError(
+                "Frequency band bounds could not be matched with the frequency vector."
+            )
+
+        f1 = np.min(f1_indices)
+        f2 = np.min(f2_indices)
+
+        # 3. Extract peak power and peak frequency indices
+        if bin_size == 1:
+            # Slice data for the frequency band
+            spectro_slice = data_spectro[
+                :, f1 : f2 + 1
+            ]  # +1 to include f2 in Python slicing
+
+            # Max along the frequency axis (axis=1)
+            power = np.max(spectro_slice, axis=1)
+            spectrum_peak = np.argmax(spectro_slice, axis=1)
+            time_vector = t
+        else:
+            num_bins = int(np.ceil(len(t) / bin_size)) - 1
+            power = np.zeros(num_bins)
+            spectrum_peak = np.zeros(num_bins, dtype=int)
+            time_vector = np.zeros(num_bins)
+
+            for i in range(num_bins):
+                # MATLAB: (i-1)*bin_size+1:i*bin_size -> Python slicing: i*bin_size : (i+1)*bin_size
+                start_idx = i * bin_size
+                end_idx = (i + 1) * bin_size
+
+                # Equivalent to MATLAB nanmean(Data_Spectro(..., F1:F2))
+                mean_spectro_window = np.nanmean(
+                    data_spectro[start_idx:end_idx, f1 : f2 + 1], axis=0
+                )
+
+                power[i] = np.max(mean_spectro_window)
+                spectrum_peak[i] = np.argmax(mean_spectro_window)
+
+                # Mean time for the bin
+                time_vector[i] = np.nanmean([t[start_idx], t[end_idx - 1]])
+
+        # 4. Map indices back to actual frequencies and handle noise/boundaries
+        frequencies_with_noise = f[spectrum_peak + f1]
+
+        # Set values exactly equal to the lower bound frequency to NaN
+        frequencies_with_noise = np.where(
+            frequencies_with_noise == f[f1], np.nan, frequencies_with_noise
+        )
+
+        # 5. Apply Smoothing (Equivalent to runmean_BM)
+        if smooth_fact is not None and smooth_fact > 1:
+            # Using pandas rolling mean to mimic running mean with NaN handling
+            frequencies_with_noise = (
+                pd.Series(frequencies_with_noise)
+                .rolling(window=smooth_fact, center=True, min_periods=1)
+                .mean()
+                .to_numpy()
+            )
+
+        # 6. Assign NaNs to power where frequency is NaN
+        power = np.where(np.isnan(frequencies_with_noise), np.nan, power)
+
+        # 7. Convert to pynapple Time Series Data (tsd) objects
+        spectrum_frequency = Tsd(t=time_vector, d=frequencies_with_noise)
+        power_tsd = Tsd(t=time_vector, d=power)
+
+        return spectrum_frequency, power_tsd
 
     def compute_firing_rate(
         self, spike_group: Optional[TsGroup] = None, bin_size=0.01
@@ -1877,7 +2174,6 @@ class DataHelper(Project):
             spike_group: A nap.TsGroup containing spike times. If None, uses self.spikeData.
             bin_size: Size of the bins for counting spikes (in seconds).
         """
-        from scipy.ndimage import gaussian_filter1d
 
         if spike_group is None:
             if not hasattr(self, "spikeData"):
@@ -2041,7 +2337,7 @@ class Params:
             self.windowSize = windowSize  # in seconds
             self.windowSizeMS = int(windowSize * 1000)  # in milliseconds
 
-        self.earlyStop_start = kwargs.pop("earlyStop_start", 16)
+        self.earlyStop_start = kwargs.pop("earlyStop_start", 23)
         # add the helper object
         self.helper = helper
         # Initialize all other parameters...
@@ -2416,22 +2712,30 @@ class SpatialConstraintsMixin:
     Mixin class to provide unified spatial constraints for both Bayesian and ANN decoders
     """
 
-    def __init__(self, grid_size=DEFAULT_GRIDSIZE, maze_params=None, **kwargs):
+    def __init__(
+        self, grid_size=DEFAULT_GRIDSIZE, maze_params=None, device="CPU", **kwargs
+    ):
         import tensorflow as tf
 
+        from neuroencoders.utils.management import manage_devices
+
+        self.device = manage_devices(
+            device, set_memory_growth=kwargs.pop("set_memory_growth", True)
+        )
         self.grid_size = grid_size
         self.GRID_H, self.GRID_W = grid_size
 
-        # Create coordinate grids (both numpy and tensorflow versions)
-        self._setup_coordinate_grids()
+        with tf.device(self.device):
+            # Create coordinate grids (both numpy and tensorflow versions)
+            self._setup_coordinate_grids()
 
-        # Setup spatial constraints
-        self.maze_params_dict = self._extract_maze_boundaries(maze_params)
-        self.forbid_mask_np, self.forbid_mask_tf = self._create_spatial_masks()
+            # Setup spatial constraints
+            self.maze_params_dict = self._extract_maze_boundaries(maze_params)
+            self.forbid_mask_np, self.forbid_mask_tf = self._create_spatial_masks()
 
-        # Added for unified NN operations
-        self.common_eps = tf.constant(1e-8, dtype=tf.float32)
-        self.common_neg = tf.constant(-1e5, dtype=tf.float32)
+            # Added for unified NN operations
+            self.common_eps = tf.constant(1e-8, dtype=tf.float32)
+            self.common_neg = tf.constant(-1e5, dtype=tf.float32)
 
     def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.03):
         """
@@ -2439,26 +2743,27 @@ class SpatialConstraintsMixin:
         """
         import tensorflow as tf
 
-        pos_batch = tf.cast(pos_batch, tf.float32)
-        X = self.Xc_tf[None]  # [1, H, W]
-        Y = self.Yc_tf[None]
+        with tf.device(self.device):
+            pos_batch = tf.cast(pos_batch, tf.float32)
+            X = self.Xc_tf[None]  # [1, H, W]
+            Y = self.Yc_tf[None]
 
-        dx = pos_batch[:, 0][:, None, None] - X
-        dy = pos_batch[:, 1][:, None, None] - Y
-        gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
+            dx = pos_batch[:, 0][:, None, None] - X
+            dy = pos_batch[:, 1][:, None, None] - Y
+            gauss = tf.exp(-(dx**2 + dy**2) / (2 * sigma**2))
 
-        # Apply spatial mask
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        gauss *= allowed_mask
+            # Apply spatial mask
+            allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+            gauss *= allowed_mask
 
-        # Normalize across grid
-        gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
-        gauss = tf.where(
-            gauss_sum > self.common_eps,
-            gauss / (gauss_sum + self.common_eps),
-            gauss / (tf.reduce_sum(allowed_mask) + self.common_eps + 1e-9),
-        )
-        return gauss
+            # Normalize across grid
+            gauss_sum = tf.reduce_sum(gauss, axis=[1, 2], keepdims=True)
+            gauss = tf.where(
+                gauss_sum > self.common_eps,
+                gauss / (gauss_sum + self.common_eps),
+                gauss / (tf.reduce_sum(allowed_mask) + self.common_eps + 1e-9),
+            )
+            return gauss
 
     def windowed_soft_argmax(self, probs, window_size=9):
         """
@@ -2467,50 +2772,51 @@ class SpatialConstraintsMixin:
         """
         import tensorflow as tf
 
-        B = tf.shape(probs)[0]
-        H, W = self.GRID_H, self.GRID_W
+        with tf.device(self.device):
+            B = tf.shape(probs)[0]
+            H, W = self.GRID_H, self.GRID_W
 
-        # 1. Get the Hard Argmax Pixel Indices
-        flat_probs = tf.reshape(probs, [B, -1])
-        idx = tf.argmax(flat_probs, axis=-1)
-        py = tf.cast(idx // W, tf.int32)
-        px = tf.cast(idx % W, tf.int32)
+            # 1. Get the Hard Argmax Pixel Indices
+            flat_probs = tf.reshape(probs, [B, -1])
+            idx = tf.argmax(flat_probs, axis=-1)
+            py = tf.cast(idx // W, tf.int32)
+            px = tf.cast(idx % W, tf.int32)
 
-        # 2. Create relative pixel offsets (e.g., -5 to 5)
-        r = window_size // 2
-        offsets = tf.range(-r, r + 1, dtype=tf.int32)
-        yy_off, xx_off = tf.meshgrid(offsets, offsets, indexing="ij")  # (ws, ws)
+            # 2. Create relative pixel offsets (e.g., -5 to 5)
+            r = window_size // 2
+            offsets = tf.range(-r, r + 1, dtype=tf.int32)
+            yy_off, xx_off = tf.meshgrid(offsets, offsets, indexing="ij")  # (ws, ws)
 
-        # 3. Calculate absolute pixel coordinates for the window
-        yy_abs = py[:, None, None] + yy_off[None, :, :]
-        xx_abs = px[:, None, None] + xx_off[None, :, :]
+            # 3. Calculate absolute pixel coordinates for the window
+            yy_abs = py[:, None, None] + yy_off[None, :, :]
+            xx_abs = px[:, None, None] + xx_off[None, :, :]
 
-        # 4. Clip to stay within grid bounds [0, 44]
-        yy_clipped = tf.clip_by_value(yy_abs, 0, H - 1)
-        xx_clipped = tf.clip_by_value(xx_abs, 0, W - 1)
+            # 4. Clip to stay within grid bounds [0, 44]
+            yy_clipped = tf.clip_by_value(yy_abs, 0, H - 1)
+            xx_clipped = tf.clip_by_value(xx_abs, 0, W - 1)
 
-        # 5. Gather indices for gather_nd
-        batch_indices = tf.tile(
-            tf.range(B)[:, None, None], [1, window_size, window_size]
-        )
-        indices = tf.stack([batch_indices, yy_clipped, xx_clipped], axis=-1)
+            # 5. Gather indices for gather_nd
+            batch_indices = tf.tile(
+                tf.range(B)[:, None, None], [1, window_size, window_size]
+            )
+            indices = tf.stack([batch_indices, yy_clipped, xx_clipped], axis=-1)
 
-        # 6. Gather Probs AND Normalized Coordinates for the window
-        # This is the "Fix": we pull from your [0, 1] meshes (Xc, Yc)
-        w_probs = tf.gather_nd(probs, indices)
-        w_xc = tf.gather_nd(tf.tile(self.Xc_tf[None], [B, 1, 1]), indices)
-        w_yc = tf.gather_nd(tf.tile(self.Yc_tf[None], [B, 1, 1]), indices)
+            # 6. Gather Probs AND Normalized Coordinates for the window
+            # This is the "Fix": we pull from your [0, 1] meshes (Xc, Yc)
+            w_probs = tf.gather_nd(probs, indices)
+            w_xc = tf.gather_nd(tf.tile(self.Xc_tf[None], [B, 1, 1]), indices)
+            w_yc = tf.gather_nd(tf.tile(self.Yc_tf[None], [B, 1, 1]), indices)
 
-        # 7. Local Re-normalization of probabilities within the window
-        w_probs_norm = w_probs / (
-            tf.reduce_sum(w_probs, axis=[1, 2], keepdims=True) + 1e-8
-        )
+            # 7. Local Re-normalization of probabilities within the window
+            w_probs_norm = w_probs / (
+                tf.reduce_sum(w_probs, axis=[1, 2], keepdims=True) + 1e-8
+            )
 
-        # 8. Compute refined Center of Mass in [0, 1] space
-        refined_x = tf.reduce_sum(w_probs_norm * w_xc, axis=[1, 2])
-        refined_y = tf.reduce_sum(w_probs_norm * w_yc, axis=[1, 2])
+            # 8. Compute refined Center of Mass in [0, 1] space
+            refined_x = tf.reduce_sum(w_probs_norm * w_xc, axis=[1, 2])
+            refined_y = tf.reduce_sum(w_probs_norm * w_yc, axis=[1, 2])
 
-        return refined_x, refined_y
+            return refined_x, refined_y
 
     def decode_and_uncertainty_tf(
         self, logits_hw, mode="soft_argmax", return_probs=False
@@ -2520,61 +2826,62 @@ class SpatialConstraintsMixin:
         """
         import tensorflow as tf
 
-        B = tf.shape(logits_hw)[0]
-        H, W = self.GRID_H, self.GRID_W
+        with tf.device(self.device):
+            B = tf.shape(logits_hw)[0]
+            H, W = self.GRID_H, self.GRID_W
 
-        # Mask forbidden
-        masked_logits = tf.where(
-            self.forbid_mask_tf[None] > 0, self.common_neg, logits_hw
-        )
-
-        # Softmax over grid
-        probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
-        probs = tf.reshape(probs_flat, [B, H, W])
-
-        # Renormalize (safety)
-        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
-        probs_allowed = probs * allowed_mask
-        sum_p = tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True)
-        probs_allowed /= sum_p + self.common_eps
-
-        if mode == "expectation":
-            ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
-            ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
-        elif mode == "argmax":  # argmax
-            idx = tf.argmax(tf.reshape(probs_allowed, [B, H * W]), axis=-1)
-            ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
-            ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
-        elif mode == "soft_argmax":
-            ex, ey = self.windowed_soft_argmax(probs_allowed)
-        else:
-            raise ValueError(
-                f"Invalid mode {mode}, choose 'expectation' or 'argmax' or 'soft_argmax'"
+            # Mask forbidden
+            masked_logits = tf.where(
+                self.forbid_mask_tf[None] > 0, self.common_neg, logits_hw
             )
 
-        # Variance
-        varx = tf.reduce_sum(
-            probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
-        )
-        vary = tf.reduce_sum(
-            probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
-        )
-        var = varx + vary
+            # Softmax over grid
+            probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
+            probs = tf.reshape(probs_flat, [B, H, W])
 
-        # max probability (confidence)
-        maxp = tf.reduce_max(probs_flat, axis=1)
+            # Renormalize (safety)
+            allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+            probs_allowed = probs * allowed_mask
+            sum_p = tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True)
+            probs_allowed /= sum_p + self.common_eps
 
-        # Normalized Entropy
-        H_entropy = -tf.reduce_sum(
-            probs_flat * tf.math.log(probs_flat + self.common_eps), axis=1
-        )
-        n_allowed = tf.reduce_sum(allowed_mask)
-        Hn = H_entropy / tf.math.log(n_allowed + self.common_eps)
+            if mode == "expectation":
+                ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+                ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
+            elif mode == "argmax":  # argmax
+                idx = tf.argmax(tf.reshape(probs_allowed, [B, H * W]), axis=-1)
+                ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
+                ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
+            elif mode == "soft_argmax":
+                ex, ey = self.windowed_soft_argmax(probs_allowed)
+            else:
+                raise ValueError(
+                    f"Invalid mode {mode}, choose 'expectation' or 'argmax' or 'soft_argmax'"
+                )
 
-        xy = tf.stack([ex, ey], axis=-1)
-        if return_probs:
-            return xy, maxp, Hn, var, probs_allowed
-        return xy, maxp, Hn, var
+            # Variance
+            varx = tf.reduce_sum(
+                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
+            )
+            vary = tf.reduce_sum(
+                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
+            )
+            var = varx + vary
+
+            # max probability (confidence)
+            maxp = tf.reduce_max(probs_flat, axis=1)
+
+            # Normalized Entropy
+            H_entropy = -tf.reduce_sum(
+                probs_flat * tf.math.log(probs_flat + self.common_eps), axis=1
+            )
+            n_allowed = tf.reduce_sum(allowed_mask)
+            Hn = H_entropy / tf.math.log(n_allowed + self.common_eps)
+
+            xy = tf.stack([ex, ey], axis=-1)
+            if return_probs:
+                return xy, maxp, Hn, var, probs_allowed
+            return xy, maxp, Hn, var
 
     def _setup_coordinate_grids(self):
         """Create coordinate grids for both numpy and tensorflow"""
@@ -2585,10 +2892,15 @@ class SpatialConstraintsMixin:
         y_cent_np = np.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
         self.Xc_np, self.Yc_np = np.meshgrid(x_cent_np, y_cent_np, indexing="xy")
 
-        # TensorFlow version (for ANN decoder)
-        x_cent_tf = tf.linspace(0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W)
-        y_cent_tf = tf.linspace(0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H)
-        self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
+        with tf.device(self.device):
+            # TensorFlow version (for ANN decoder)
+            x_cent_tf = tf.linspace(
+                0.5 / self.GRID_W, 1 - 0.5 / self.GRID_W, self.GRID_W
+            )
+            y_cent_tf = tf.linspace(
+                0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H
+            )
+            self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
 
     def get_spatial_config(self):
         """Return spatial config for serialization"""
@@ -2676,13 +2988,14 @@ class SpatialConstraintsMixin:
             & (self.Yc_np <= self.maze_params_dict["gap_y_min"])
         ).astype(np.float32)
 
-        # TensorFlow version
-        forbid_tf = tf.cast(
-            (self.Xc_tf > self.maze_params_dict["gap_x_min"])
-            & (self.Xc_tf < self.maze_params_dict["gap_x_max"])
-            & (self.Yc_tf <= self.maze_params_dict["gap_y_min"]),
-            tf.float32,
-        )
+        with tf.device(self.device):
+            # TensorFlow version
+            forbid_tf = tf.cast(
+                (self.Xc_tf > self.maze_params_dict["gap_x_min"])
+                & (self.Xc_tf < self.maze_params_dict["gap_x_max"])
+                & (self.Yc_tf <= self.maze_params_dict["gap_y_min"]),
+                tf.float32,
+            )
 
         self.MAZE_COORDS = np.array(
             [
@@ -2794,8 +3107,13 @@ class SpatialConstraintsMixin:
     def update_allowed_mask(self, forbid_mask):
         import tensorflow as tf
 
-        self.forbid_mask_np = forbid_mask.astype(np.float32)  # dynamic update for ANN
-        self.forbid_mask_tf = tf.cast(forbid_mask, tf.float32)  # dynamic update for ANN
+        with tf.device(self.device):
+            self.forbid_mask_np = forbid_mask.astype(
+                np.float32
+            )  # dynamic update for ANN
+            self.forbid_mask_tf = tf.cast(
+                forbid_mask, tf.float32
+            )  # dynamic update for ANN
 
     def get_allowed_mask_for_bin_size(self, w, h):
         """
@@ -2810,6 +3128,454 @@ class SpatialConstraintsMixin:
             & (Yc_grid <= self.maze_params_dict["gap_y_min"])
         ).astype(np.float32)
         return (1.0 - forbid_mask).astype(bool)
+
+
+class TuningCurvesPlotter:
+    """
+    A simple shared module to compute and plot tuning curves, that can be used across different figure classes. The main idea is to have a consistent way to compute and plot tuning curves, and to be able to reuse the same code across different figures. This is especially useful for the linear tuning curves, which are used in several figures and need to be ordered in a consistent way.
+    """
+
+    def compute_linear_tuning_curves_order(
+        self,
+        lin_place_fields: List[np.ndarray] | np.ndarray,
+        bin_edges: np.ndarray,
+        sort_map: Optional[np.ndarray] = None,
+        list_neurons: Optional[List[int] | np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
+
+        Args:
+            lin_place_fields (list of np.ndarray): List of linear tuning curves for each neuron.
+            bin_edges (np.ndarray): Edges of the bins used for the linear tuning curves.
+            sort_map (list of int, optional): Predefined order of neuron indices. If None, the order will be computed based on preferred linear positions.
+            list_neurons (list of int, optional): List of neuron indices to include in the final order. If None, all neurons will be included.
+
+        Returns:
+            ordered_lin_place_fields (np.ndarray): Linear tuning curves ordered according to the computed or provided sort_map.
+            linear_pos_argsort (list of int): The order of neuron indices used for sorting.
+        """
+
+        if sort_map is None:
+            preferred_linear_positions = []
+            for tuning_curve in lin_place_fields:
+                if np.any(tuning_curve > 0):
+                    peak_idx = np.argmax(tuning_curve)
+                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
+                    preferred_linear_positions.append(preferred_pos)
+                else:
+                    preferred_linear_positions.append(bin_edges[0])
+
+            preferred_linear_positions = np.array(preferred_linear_positions)
+            linear_pos_argsort = np.argsort(preferred_linear_positions)
+        else:
+            linear_pos_argsort = sort_map
+
+        if list_neurons is not None:
+            lin_place_fields = np.array(lin_place_fields)[list_neurons]
+
+        ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
+
+        return ordered_lin_place_fields, np.array(linear_pos_argsort)
+
+    def normalize_tuning_curves(self, matrix, method="minmax", return_cmap=False):
+        """
+        Normalize the tuning curves using either Z-score or Min-Max normalization.
+        The normalization is done per neuron (row-wise) to preserve the relative tuning shape of each neuron. The method can be specified as "z-score" for Z-score normalization or "minmax" for Min-Max normalization. The function also returns appropriate colormap and normalization settings for plotting based on the chosen method.
+        """
+        import matplotlib.colors as mcolors
+
+        if method is None:
+            method = "minmax"
+        method = method.lower()
+        matrix = np.array(matrix)
+        find_nans = np.isnan(matrix)
+        if method == "z-score":
+            # Safe Z-score normalization per neuron (row-wise)
+            mean_vals = np.nanmean(matrix, axis=1, keepdims=True)
+            std_val = np.nanstd(matrix, axis=1, keepdims=True)
+            fields = (matrix - mean_vals) / (std_val + 1e-8)
+
+            # Plotting Setup for Z-Score
+            cmap = "RdBu_r"
+            v_lim = np.nanmin([np.nanpercentile(np.abs(fields), 99), 4])
+            norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+            cb_label = "Z-Scored FR"
+        elif method == "minmax":
+            # Min-Max normalization per neuron (row-wise)
+            min_vals = np.nanmin(matrix, axis=1, keepdims=True)
+            max_vals = np.nanmax(matrix, axis=1, keepdims=True)
+            fields = (matrix - min_vals) / (max_vals - min_vals + 1e-8)
+
+            # Plotting Setup for Min-Max
+            cmap = "cmc.batlow"
+            norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.nanmedian(fields), vmax=1)
+            cb_label = "Normalized Firing Rate (0-1)"
+        else:
+            raise ValueError(
+                f"Unknown scaling method: {method}. Use 'z-score' or 'minmax'."
+            )
+        fields[find_nans] = np.nan
+
+        if return_cmap:
+            return fields, cmap, norm, cb_label
+        return fields
+
+    def plot_linear_tuning_curves(
+        self,
+        ordered_lin_place_fields,
+        ax=None,
+        **kwargs,
+    ):
+        from math import isclose
+
+        import matplotlib.colors as mcolors
+
+        if ax is None:
+            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
+        else:
+            fig = ax.get_figure()
+
+        calc_kwargs = dict(kwargs)
+        cax = calc_kwargs.pop("cax", None)
+        add_colorbar = calc_kwargs.pop("add_colorbar", True)
+        normalize = calc_kwargs.pop("normalize", False)
+        scaling_method = calc_kwargs.pop("scaling", "minmax")
+        mask = calc_kwargs.pop("mask", None)
+        title = calc_kwargs.pop("title", "Linear Tuning Curves")
+
+        if normalize:
+            fields, cmap, norm, cb_label = self.normalize_tuning_curves(
+                ordered_lin_place_fields, method=scaling_method, return_cmap=True
+            )
+        else:
+            fields = ordered_lin_place_fields
+            cmap = "viridis"
+            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
+            cb_label = "Firing Rate"
+            if isclose(np.nanmin(fields), -1) and isclose(np.nanmax(fields), 1):
+                cmap = "RdBu_r"
+                norm = mcolors.TwoSlopeNorm(vmin=-1, vcenter=0, vmax=1)
+                cb_label = "Normalized Firing Rate (-1 to 1)"
+            elif isclose(np.nanmin(fields), 0) and isclose(np.nanmax(fields), 1):
+                cmap = "cmc.batlow"
+                norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.median(fields), vmax=1)
+                cb_label = "Normalized Firing Rate (0-1)"
+
+        fields = fields[mask] if mask is not None else fields
+        im = ax.imshow(
+            fields,
+            cmap,
+            norm,
+            origin="lower",
+            extent=(0, 1, 0, fields.shape[0]),
+            aspect="auto",
+        )
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+        ax.set_xlabel("Linear Position")
+        ax.set_ylabel(f"Neuron Index ({len(ordered_lin_place_fields)} neurons)")
+        ax.set_title(title)
+        if add_colorbar:
+            if cax is not None:
+                cbar = fig.colorbar(
+                    im,
+                    cax=cax,
+                    label=cb_label,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                cbar = fig.colorbar(
+                    im,
+                    ax=ax,
+                    label=cb_label,
+                    location="bottom",
+                    orientation="horizontal",
+                )
+
+            cbar.outline.set_visible(False)
+
+        return im, cb_label
+
+    def _compute_tuning_curves(self, **kwargs):
+        return _compute_tuning_curves_for_result(self, **kwargs)
+
+    def plot_on_off_stability_stats(
+        self,
+        analysis_data: Dict[str, np.ndarray],
+        around: str,
+        spatial_smooth_sigma: float = 1.5,
+        path: Optional[str] = None,
+    ):
+        from statannotations.Annotator import Annotator
+
+        from neuroencoders.utils.wrappers import get_raw_pv_corr
+
+        phase_build = "_training"
+
+        # --- CRITICAL FIX: Extract true neuron counts (axis 0) ---
+        n_on = analysis_data["tuning_curves_on_subset"][phase_build].shape[0]
+        n_off = analysis_data["tuning_curves_off_subset"][phase_build].shape[0]
+
+        # Define custom descriptive labels dynamically
+        on_label = f"ON Cells (n={n_on})"
+        off_label = f"OFF Cells (n={n_off})"
+
+        # 1. Isolate and smooth ground-truth True Training baselines
+        tc_on_base = gaussian_filter1d(
+            analysis_data["tuning_curves_on_subset"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+        tc_off_base = gaussian_filter1d(
+            analysis_data["tuning_curves_off_subset"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+
+        data_rows = []
+
+        # 2. Extract PV stability vectors across phases
+        for phase in ["cond", "post"]:
+            tc_on_curr = gaussian_filter1d(
+                analysis_data["tuning_curves_on_subset"][phase],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            tc_off_curr = gaussian_filter1d(
+                analysis_data["tuning_curves_off_subset"][phase],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+
+            stab_on = get_raw_pv_corr(tc_on_base, tc_on_curr)
+            stab_off = get_raw_pv_corr(tc_off_base, tc_off_curr)
+
+            # Build DataFrame rows with the updated group labels
+            for val in stab_on:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": on_label,
+                        "Stability (PV R)": val,
+                    }
+                )
+            for val in stab_off:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": off_label,
+                        "Stability (PV R)": val,
+                    }
+                )
+
+        df_stab = pd.DataFrame(data_rows)
+
+        # 3. Create the Plot
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        # Draw grouped boxplot comparing ON vs OFF per Phase
+        sns.boxplot(
+            data=df_stab,
+            x="Phase",
+            y="Stability (PV R)",
+            hue="Cell Type",
+            palette={on_label: "#ffcc00", off_label: "#00ccff"},
+            ax=ax,
+            width=0.5,
+        )
+
+        # Define our targeted pairwise statistical comparisons using the dynamic labels
+        pairs = [
+            (("COND", on_label), ("COND", off_label)),
+            (("POST", on_label), ("POST", off_label)),
+        ]
+
+        # 4. Apply Statannotations
+        annotator = Annotator(
+            ax, pairs, data=df_stab, x="Phase", y="Stability (PV R)", hue="Cell Type"
+        )
+        # Using 'Mann-Whitney' as a non-parametric alternative to t-tests for bounded R values
+        annotator.configure(test="Mann-Whitney", text_format="star", loc="inside")
+        annotator.apply_and_annotate()
+
+        # Customization styling
+        ax.set_title(
+            f"Place Map Representational Stability: ON vs OFF {around.upper()} Neurons",
+            fontsize=14,
+            pad=15,
+        )
+        ax.set_xlabel(
+            f"Stability of Population coding for ON and OFF {around.capitalize()}\nwith respect to Habituation.",
+            fontsize=12,
+        )
+        ax.set_ylabel("Population Vector Correlation (R)", fontsize=12)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+
+        plt.tight_layout()
+
+        if path is not None:
+            fig.savefig(os.path.join(path, f"stability_stats_{around}.png"), dpi=300)
+            fig.savefig(os.path.join(path, f"stability_stats_{around}.svg"))
+
+        plt.show()
+
+        # Console summary output
+        for ph in ["COND", "POST"]:
+            on_mean = df_stab[
+                (df_stab["Phase"] == ph) & (df_stab["Cell Type"] == on_label)
+            ]["Stability (PV R)"].mean()
+            off_mean = df_stab[
+                (df_stab["Phase"] == ph) & (df_stab["Cell Type"] == off_label)
+            ]["Stability (PV R)"].mean()
+            print(
+                f"[{ph}] Mean Stability -> {on_label}: {on_mean:.3f} | {off_label}: {off_mean:.3f}"
+            )
+
+
+def _compute_tuning_curves_for_result(
+    results_obj,
+    suffix: Optional[str] = None,
+    feature_name: str = "linearTrue",
+    idWindow: int = 0,
+    use_speed_filter: bool = True,
+    count_thresh: Optional[int] = None,
+    bin_size: float = 0.05,
+    mode: str = "closest",
+    **kwargs,
+):
+    """Shared tuning-curve computation for a single results object."""
+
+    n_dims = kwargs.get("n_dims", 2)
+    normalize = kwargs.get("normalize", "linear" in feature_name)
+    on = kwargs.get("on", None)
+
+    if suffix is None:
+        suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
+
+    if "_" in suffix:
+        phase = suffix.strip("_")
+    else:
+        phase = suffix
+        suffix = "_" + suffix
+
+    data_helper = getattr(results_obj, "data_helper", None) or getattr(
+        results_obj, "DataHelper", None
+    )
+
+    if kwargs.get("data_helper", None) is not None:
+        data_helper = kwargs["data_helper"]
+
+    if data_helper is None:
+        raise ValueError("Results object does not expose a data helper.")
+
+    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
+    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
+    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
+
+    if on is not None:
+        print(f"Will use {on} indices only.")
+        posIndex = results_obj.resultsNN_phase_pkl[suffix]["posIndex"][
+            idWindow
+        ].flatten()
+        if on == "odd":
+            is_cond = posIndex % 2 != 0
+        elif on == "even":
+            is_cond = posIndex % 2 == 0
+        else:
+            raise ValueError(
+                f"Invalid value for 'on': {on}. Must be 'odd', 'even', or None."
+            )
+
+    try:
+        if hasattr(data_helper, "get_spike_data"):
+            spike_data = data_helper.get_spike_data()
+        else:
+            spike_data = results_obj.get_spike_data()
+    except FileNotFoundError:
+        if hasattr(data_helper, "get_spike_data"):
+            spike_data = data_helper.get_spike_data(folder=results_obj.network_path)
+        else:
+            spike_data = results_obj.get_spike_data(folder=results_obj.network_path)
+
+    above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
+    not_nan_epoch = (
+        Tsd(
+            t=data_helper.fullBehavior["positionTime"].flatten(),
+            d=np.isnan(data_helper.fullBehavior["Positions"]).any(axis=1).flatten(),
+        )
+        .threshold(0.5, "below")
+        .time_support
+    )
+    data_to_use = spike_data.restrict(Ts(t=time).time_support).count(bin_size)
+    features = (
+        Tsd(t=time, d=feature)
+        if len(feature.shape) == 1
+        else TsdFrame(t=time, d=feature[:, :n_dims])
+    )
+    epochs_to_use = (
+        not_nan_epoch.intersect(above_speed_epoch)
+        if use_speed_filter
+        else not_nan_epoch
+    )
+    bin_edges = kwargs.pop("nb_bins", 50 if len(feature.shape) == 1 else 30)
+    range_feature = kwargs.pop(
+        "feat_range", (0, 1) if len(feature.shape) == 1 else None
+    )
+    feature_names = kwargs.pop(
+        "feature_names", [feature_name] if len(feature.shape) == 1 else ["x", "y"]
+    )
+
+    if kwargs.get("epoch", None) is not None:
+        my_epoch = kwargs.get("epoch")
+        epochs_to_use = epochs_to_use.intersect(my_epoch)
+
+    if on is not None:
+        epochs_cond = Tsd(t=time, d=is_cond).threshold(1, "aboveequal").time_support
+        epochs_to_use = epochs_to_use.intersect(epochs_cond)
+
+    tuning_curves = compute_tuning_curves(
+        data=data_to_use,
+        features=features,
+        bins=bin_edges,
+        epochs=epochs_to_use,
+        range=range_feature,
+        feature_names=feature_names,
+        return_counts=False,
+        mode=mode,
+    )
+
+    tuning_curves = tuning_curves.copy()
+
+    sigma = kwargs.pop("sigma", None)
+    if sigma is None:
+        if len(features.values.shape) == 1 or features.values.shape[1] == 1:
+            sigma = (0, 2)  # No smoothing across neurons, only across position bin_size
+        elif features.values.shape[1] == 2:
+            sigma = (
+                0,
+                2.5,
+                2.5,
+            )
+        else:
+            sigma = 1
+
+    tuning_curves.values = gaussian_filter_nan(tuning_curves.values, sigma=sigma)
+
+    id_neurons = np.arange(0, len(spike_data))
+    if count_thresh is not None:
+        under_thresh = np.sum(tuning_curves.counts, axis=1) < count_thresh
+        tuning_curves = tuning_curves[~under_thresh]
+        id_neurons = id_neurons[~under_thresh]
+
+    if normalize:
+        tuning_curves.values = results_obj.normalize_tuning_curves(
+            tuning_curves.values,
+            method=kwargs.get("scaling_method", "minmax"),
+            return_cmap=kwargs.get("return_cmap", False),
+        )
+
+    return tuning_curves, id_neurons, spike_data, phase
 
 
 def smooth_signal(signal, N):
@@ -2846,3 +3612,118 @@ def gaussian_filter_nan(a, sigma):
     v = np.where(np.isnan(a), 0, a)
     w = gaussian_filter((~np.isnan(a)).astype(float), sigma)
     return gaussian_filter(v, sigma) / w
+
+
+def convert_spectrum_in_frequencies(f, t, data_spectro, **kwargs):
+    """
+    Convert spectrogram data into dominant frequencies and power over time.
+
+    Parameters:
+    -----------
+    f : array-like
+        Frequency axis vector.
+    t : array-like
+        Time axis vector (e.g., in 1e-4s).
+    data_spectro : 2D array-like
+        Spectrogram data matrix of shape (time_bins, frequency_bins).
+    **kwargs:
+        bin_size (int): Size of the binning window. Default is 1.
+        frequency_band (list/tuple): [min_freq, max_freq]. Default is [1, 8].
+        smooth_fact (int): Window size for smoothing the frequency output.
+
+    Returns:
+    --------
+    spectrum_frequency : pynapple.Tsd
+        Time series of the dominant frequencies.
+    power_tsd : pynapple.Tsd
+        Time series of the power at those peak frequencies.
+    """
+    # 1. Handle optional arguments (varargin equivalent)
+    bin_size = kwargs.get("bin_size", 1)
+    frequency_band = kwargs.get("frequency_band", [1, 8])
+    smooth_fact = kwargs.get("smooth_fact", None)
+
+    f = np.asarray(f)
+    t = np.asarray(t)
+    data_spectro = np.asarray(data_spectro)
+
+    # 2. Find closest indices for the frequency band
+    f_diff_median = np.median(np.diff(f))
+
+    # MATLAB: find(f > band - median & f < band + median)
+    f1_indices = np.where(
+        (f > frequency_band[0] - f_diff_median)
+        & (f < frequency_band[0] + f_diff_median)
+    )[0]
+    f2_indices = np.where(
+        (f > frequency_band[1] - f_diff_median)
+        & (f < frequency_band[1] + f_diff_median)
+    )[0]
+
+    if len(f1_indices) == 0 or len(f2_indices) == 0:
+        raise ValueError(
+            "Frequency band bounds could not be matched with the frequency vector."
+        )
+
+    f1 = np.min(f1_indices)
+    f2 = np.min(f2_indices)
+
+    # 3. Extract peak power and peak frequency indices
+    if bin_size == 1:
+        # Slice data for the frequency band
+        spectro_slice = data_spectro[
+            :, f1 : f2 + 1
+        ]  # +1 to include f2 in Python slicing
+
+        # Max along the frequency axis (axis=1)
+        power = np.max(spectro_slice, axis=1)
+        spectrum_peak = np.argmax(spectro_slice, axis=1)
+        time_vector = t
+    else:
+        num_bins = int(np.ceil(len(t) / bin_size)) - 1
+        power = np.zeros(num_bins)
+        spectrum_peak = np.zeros(num_bins, dtype=int)
+        time_vector = np.zeros(num_bins)
+
+        for i in range(num_bins):
+            # MATLAB: (i-1)*bin_size+1:i*bin_size -> Python slicing: i*bin_size : (i+1)*bin_size
+            start_idx = i * bin_size
+            end_idx = (i + 1) * bin_size
+
+            # Equivalent to MATLAB nanmean(Data_Spectro(..., F1:F2))
+            mean_spectro_window = np.nanmean(
+                data_spectro[start_idx:end_idx, f1 : f2 + 1], axis=0
+            )
+
+            power[i] = np.max(mean_spectro_window)
+            spectrum_peak[i] = np.argmax(mean_spectro_window)
+
+            # Mean time for the bin
+            time_vector[i] = np.nanmean([t[start_idx], t[end_idx - 1]])
+
+    # 4. Map indices back to actual frequencies and handle noise/boundaries
+    frequencies_with_noise = f[spectrum_peak + f1]
+
+    # Set values exactly equal to the lower bound frequency to NaN
+    frequencies_with_noise = np.where(
+        frequencies_with_noise == f[f1], np.nan, frequencies_with_noise
+    )
+
+    # 5. Apply Smoothing (Equivalent to runmean_BM)
+    if smooth_fact is not None:
+        # Using pandas rolling mean to mimic running mean with NaN handling
+        frequencies_with_noise = (
+            pd.Series(frequencies_with_noise)
+            .rolling(window=smooth_fact, center=True, min_periods=1)
+            .mean()
+            .to_numpy()
+        )
+
+    # 6. Assign NaNs to power where frequency is NaN
+    power = np.where(np.isnan(frequencies_with_noise), np.nan, power)
+
+    # 7. Convert to pynapple Time Series Data (tsd) objects
+    spectrum_frequency = Tsd(t=time_vector, d=frequencies_with_noise)
+    power_tsd = Tsd(t=time_vector, d=power)
+
+    return spectrum_frequency, power_tsd

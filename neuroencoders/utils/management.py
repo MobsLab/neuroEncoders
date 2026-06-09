@@ -34,6 +34,16 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
     import tensorflow as tf
 
     config = tf.config
+    if "device" in usedDevice.lower() and "physical" not in usedDevice.lower():
+        return usedDevice
+
+    if usedDevice in [device.name for device in tf.config.list_physical_devices()]:
+        idx = [device.name for device in tf.config.list_physical_devices()].index(
+            usedDevice
+        )
+        device = tf.config.list_logical_devices()[idx]
+
+        return device.name
 
     usedDevice_upper = usedDevice.upper()
 

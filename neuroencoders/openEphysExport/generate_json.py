@@ -2,8 +2,9 @@ import json
 import os
 import subprocess
 
+import pandas as pd
+
 from neuroencoders.importData.rawdata_parser import get_params
-from neuroencoders.utils.backend import pd
 
 
 def generate_json(
@@ -43,6 +44,10 @@ def generate_json(
     ]
     thresholds = [[] for _ in range(len(listChannels))]
     for i, j in enumerate(thresholdsJulia[:, 0]):
+        try:
+            j = int(j)
+        except ValueError:
+            j = int(j.split("_")[-1]) + 1
         if offline:
             thresholds[j - 1] = [
                 t / 0.195 for t in thresholdsParsed[i]

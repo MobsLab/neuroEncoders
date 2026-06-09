@@ -9,12 +9,12 @@ from warnings import warn
 import matplotlib as mplt
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tables
 
 # Custom codes
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.simpleBayes.butils import kdenD
-from neuroencoders.utils.backend import pd
 
 
 def get_params(pathToXml):
@@ -1059,16 +1059,21 @@ def select_epochs(
             timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
         )
         # by default last 20% is test set
-        testSetId = (
-            timeToShow.shape[0] - timeToShow.shape[0] // 5
-            if phase == "all"
-            else idx_cut + timeToShowPRE.shape[0] - timeToShowPRE.shape[0] // 5
-        )
+
+        if phase == "all" or phase is None:
+            testSetId = timeToShow.shape[0] - timeToShow.shape[0] // 5
+
+        else:
+            time_start_test = timeToShowPRE[-timeToShowPRE.shape[0] // 5]
+            idx_start = np.where(timeToShow == time_start_test)[0][0]
+            testSetId = idx_start
 
         useLossPredTrainSet = (
             isPredLoss  # whether to use a loss prediction training set
         )
-        lossPredSetId = 0  # the loss prediction set id
+        lossPredSetId = (
+            1 if phase == "all" else idx_cut + 1
+        )  # the loss prediction set id
         sizelossPredSet = (
             timeToShow.shape[0] // 5 if phase == "all" else timeToShowPRE.shape[0] // 5
         )
@@ -1145,7 +1150,6 @@ def select_epochs(
         else:
             bestTestSet = 0  # the best test set is the one that covers the most of the speed and the environment variable
             bestPLSet = 0  # the best loss pred set is the one that covers the most of the speed and the environment variable
-            lossPredSetId = 0
 
         # TODO: implement this best test set.
         SetData = {
@@ -1914,8 +1918,8 @@ def select_epochs(
 
         if not force:
             fig, ax = plt.subplots()
-            trainMask = ep.inEpochsMask(positionTime, trainEpoch)[:, 0]
-            testMask = ep.inEpochsMask(positionTime, testEpochs)[:, 0]
+            trainMask = ep.inEpochsMask(positionTime, trainEpoch)
+            testMask = ep.inEpochsMask(positionTime, testEpochs)
             ax.plot(
                 positionTime[trainMask],
                 positions[trainMask, 0],
@@ -1932,7 +1936,7 @@ def select_epochs(
             )
             ax.set_title("Linearized coordinate of the animal (1st dimension plotted)")
             if SetData["useLossPredTrainSet"]:
-                lossPredMask = ep.inEpochsMask(positionTime, lossPredSetEpochs)[:, 0]
+                lossPredMask = ep.inEpochsMask(positionTime, lossPredSetEpochs)
                 ax.plot(
                     positionTime[lossPredMask],
                     positions[lossPredMask, 0],

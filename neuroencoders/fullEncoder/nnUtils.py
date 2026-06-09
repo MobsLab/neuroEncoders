@@ -9,8 +9,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-
-from neuroencoders.utils.backend import ml
+import sklearn as ml
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import keras
@@ -878,7 +877,6 @@ class SpikeNet1D(tf.keras.layers.Layer):
 
             # Layer 1
             layers.append(tf.keras.layers.Conv1D(16, 3, padding="same"))
-            print(f"batch norm set to {self.batch_normalization}")
             if self.batch_normalization:
                 layers.append(MaskedBatchNormalization())
             layers.append(tf.keras.layers.Activation("relu"))
@@ -1487,7 +1485,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
                 # now expands dims to (Batch*Time, 1, n_groups) for mha
                 # The shape (B, 1, S) allows broadcasting the mask over the query dimension (dim 1).
                 # Meaning: "For every querying group, here are the keys (target groups) you can attend to."
-                mha_mask = tf.expand_dims(mask_reshaped, axis=1)
+                mha_mask = tf.cast(tf.expand_dims(mask_reshaped, axis=1), tf.bool)
 
             # 4. Self-Attention over groups
             attn_out = self.mha(
@@ -2306,6 +2304,8 @@ def parse_serialized_sequence(
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
     # Padding contract: use -1 for index/metadata tensors
     for key in ["pos", "groups", "indexInDat"]:
+        if key not in tensors:
+            continue
         if isinstance(tensors[key], tf.SparseTensor):
             padded_sparse = tf.sparse.reset_shape(tensors[key], new_shape=[max_spikes])
             tensors[key] = tf.sparse.to_dense(padded_sparse, default_value=default)
@@ -2411,6 +2411,136 @@ def squeeze_or_expand_to_same_rank(x1, x2, expand_rank_1=True):
 
 
 class NeuralDataAugmentation:
+    """Highly optimized, fully vectorized Neural data augmentation pipeline."""
+
+    def __init__(self, **kwargs):
+        self.keep_original = kwargs.get("keep_original", True)
+        self.num_augmentations = kwargs.get("num_augmentations", 11)
+        self.white_noise_std = kwargs.get("white_noise_std", 0.05)
+        self.offset_noise_std = kwargs.get("offset_noise_std", 0.05)
+        self.cumulative_noise_std = kwargs.get("cumulative_noise_std", 0.02)
+        self.time_shift_max = int(kwargs.get("time_shift_max", 2))
+        self.channel_dropout_rate = float(kwargs.get("channel_dropout_rate", 0.02))
+        self.spike_dropout_rate = float(kwargs.get("spike_dropout_rate", 0.03))
+        self.span_mask_prob = float(kwargs.get("span_mask_prob", 0.15))
+        self.span_mask_max_width = int(kwargs.get("span_mask_max_width", 4))
+        self.amplitude_jitter_std = float(kwargs.get("amplitude_jitter_std", 0.02))
+        self.normalize = kwargs.get("normalize", False)
+        self.normalization_stats = kwargs.get("normalization_stats", None)
+
+    @tf.function
+    def augment_spike_group_parallel(
+        self, group_data: tf.Tensor, num_augs: int
+    ) -> tf.Tensor:
+        """
+        Applies all augmentations in parallel using a single batch dimension.
+        Input shape: [Spikes, Channels, Time]
+        Output shape: [Num_Augs, Spikes, Channels, Time]
+        """
+        # 1. Tile the data to create an explicit Augmentation Dimension upfront
+        # Shape becomes: [Num_Augs, Spikes, Channels, Time]
+        aug_data = tf.tile(group_data[tf.newaxis, ...], [num_augs, 1, 1, 1])
+
+        # Capture shapes for dynamic noise generation
+        shape = tf.shape(aug_data)
+        n_augs, n_spikes, n_chans, n_time = shape[0], shape[1], shape[2], shape[3]
+
+        # 2. Vectorized Amplitude Jitter
+        if self.amplitude_jitter_std > 0.0:
+            scales = tf.random.normal(
+                [n_augs, 1, 1, 1],
+                mean=1.0,
+                stddev=self.amplitude_jitter_std,
+                dtype=aug_data.dtype,
+            )
+            aug_data = aug_data * scales
+
+        # 3. Vectorized White Noise
+        if self.white_noise_std > 0.0:
+            aug_data += tf.random.normal(
+                shape, mean=0.0, stddev=self.white_noise_std, dtype=aug_data.dtype
+            )
+
+        # 4. Vectorized Constant Channel Offset
+        if self.offset_noise_std > 0.0:
+            offsets = tf.random.normal(
+                [n_augs, 1, n_chans, 1],
+                mean=0.0,
+                stddev=self.offset_noise_std,
+                dtype=aug_data.dtype,
+            )
+            aug_data += offsets
+
+        # 5. Vectorized Cumulative Noise
+        if self.cumulative_noise_std > 0.0:
+            noise_inc = tf.random.normal(
+                shape, mean=0.0, stddev=self.cumulative_noise_std, dtype=aug_data.dtype
+            )
+            aug_data += tf.cumsum(noise_inc, axis=-1)
+
+        # 6. Vectorized Spike Dropout
+        if self.spike_dropout_rate > 0.0:
+            spike_mask = (
+                tf.random.uniform([n_augs, n_spikes, 1, 1], dtype=aug_data.dtype)
+                >= self.spike_dropout_rate
+            )
+            aug_data = aug_data * tf.cast(spike_mask, aug_data.dtype)
+
+        # 7. Vectorized Channel Dropout
+        if self.channel_dropout_rate > 0.0:
+            chan_mask = (
+                tf.random.uniform([n_augs, 1, n_chans, 1], dtype=aug_data.dtype)
+                >= self.channel_dropout_rate
+            )
+            aug_data = aug_data * tf.cast(chan_mask, aug_data.dtype)
+
+        # 8. Fast Vectorized Span Masking (Replaces expensive loops/conditions)
+        if self.span_mask_prob > 0.0:
+            # Decide which augmentations get masked globally
+            should_mask = (
+                tf.random.uniform([n_augs, 1, 1, 1], dtype=tf.float32)
+                < self.span_mask_prob
+            )
+
+            # Generate random start indices and widths for all augmentations at once
+            widths = tf.random.uniform(
+                [n_augs], minval=1, maxval=self.span_mask_max_width + 1, dtype=tf.int32
+            )
+            max_start = tf.maximum(n_time - widths + 1, 1)
+            random_floats = tf.random.uniform(
+                [n_augs], minval=0.0, maxval=1.0, dtype=tf.float32
+            )
+            starts = tf.cast(random_floats * tf.cast(max_start, tf.float32), tf.int32)
+
+            # Create a coordinate grid across the time dimension
+            time_grid = tf.range(n_time, dtype=tf.int32)[tf.newaxis, :]  # [1, Time]
+            start_grid = starts[:, tf.newaxis]  # [Num_Augs, 1]
+            end_grid = (starts + widths)[:, tf.newaxis]  # [Num_Augs, 1]
+
+            # Create mask matrix: True everywhere EXCEPT the masked span
+            span_mask = (time_grid < start_grid) | (time_grid >= end_grid)
+            span_mask = span_mask[
+                :, tf.newaxis, tf.newaxis, :
+            ]  # Broadcast to match [N_Augs, 1, 1, Time]
+
+            # Apply conditionally based on span mask probability check
+            final_span_mask = tf.where(should_mask, span_mask, tf.ones_like(span_mask))
+            aug_data = aug_data * tf.cast(final_span_mask, aug_data.dtype)
+
+        # 9. Clean Padding Preservation Mask
+        # Ensures padding elements stay dead zero
+        rank = len(group_data.shape)
+        mask_axes = list(range(1, rank))  # Channels, Time
+        preserve_mask = tf.reduce_any(
+            tf.not_equal(group_data, 0.0), axis=mask_axes, keepdims=True
+        )
+        # Broadcast preserve mask to include augmentation dimension
+        preserve_mask = tf.tile(preserve_mask[tf.newaxis, ...], [num_augs, 1, 1, 1])
+
+        return tf.where(preserve_mask, aug_data, tf.zeros_like(aug_data))
+
+
+class NeuralDataAugmentation_old:
     """Neural data augmentation pipeline for TFRecord datasets."""
 
     def __init__(
@@ -2893,6 +3023,8 @@ def apply_group_augmentation(
     original_groups: Dict[str, tf.Tensor],
     params: Params,
     augmentation_config: NeuralDataAugmentation,
+    group_keys: List[str],
+    indices_keys: List[str],
     count_spikes: bool = False,
 ):
     """
@@ -2900,22 +3032,18 @@ def apply_group_augmentation(
     """
     num_augs = augmentation_config.num_augmentations
     keep_original = getattr(augmentation_config, "keep_original", False)
+    n_total = num_augs + (1 if keep_original else 0)
 
     result_tensors = {}
     # --- 1. Vectorized Spike Augmentation ---
-    for g in range(params.nGroups):
-        g_key = f"group{g}"
+    for g_idx, g_key in enumerate(group_keys):
+        if g_key not in original_groups:
+            continue
+
         group_data = original_groups[g_key]  # Shape: [Spikes, Chan, Time]
 
-        if augmentation_config.normalize:
-            group_data = augmentation_config.normalize_group(group_data, g)
-
-        augmented_versions = tf.map_fn(
-            lambda _: augmentation_config.augment_spike_group(group_data),
-            elems=tf.range(num_augs),
-            fn_output_signature=tf.TensorSpec(
-                shape=group_data.shape, dtype=group_data.dtype
-            ),
+        augmented_versions = augmentation_config.augment_spike_group_parallel(
+            group_data, num_augs
         )
 
         if keep_original:
@@ -2927,7 +3055,7 @@ def apply_group_augmentation(
 
     # --- 2. Lightning Fast Metadata Replication ---
     # We don't re-calculate indices! We just repeat what Step 1 produced.
-    metadata_keys = [
+    metadata_base = [
         "pos_index",
         "pos",
         "groups",
@@ -2937,10 +3065,11 @@ def apply_group_augmentation(
         "time_behavior",
         "indexInDat",
         "max_spikes_in_groups",
-    ] + [f"indices{g}" for g in range(params.nGroups)]
+    ]
+    metadata_keys = metadata_base + indices_keys
+
     if count_spikes:
         metadata_keys += [f"group{g}_spikes_count" for g in range(params.nGroups)]
-    n_total = num_augs + (1 if keep_original else 0)
 
     for key in metadata_keys:
         if key in tensors:
@@ -2973,16 +3102,11 @@ def apply_single_group_augmentation(
             continue
 
         group_data = result_tensors[g_key]  # Shape: [Spikes, Chan, Time]
-        if augmentation_config.normalize:
-            group_data = augmentation_config.normalize_group(group_data, g)
 
-        augmented_versions = tf.map_fn(
-            lambda _: augmentation_config.augment_spike_group(group_data),
-            elems=tf.range(num_augs),
-            fn_output_signature=tf.TensorSpec(
-                shape=group_data.shape, dtype=group_data.dtype
-            ),
-        )
+        augmented_versions = augmentation_config.augment_spike_group_parallel(
+            group_data, num_augs
+        )  # Shape: [num_augs, Spikes, Chan, Time]
+
         result_tensors[g_key] = augmented_versions
 
     metadata_keys = [
@@ -3005,66 +3129,6 @@ def apply_single_group_augmentation(
             )
 
     return result_tensors
-
-
-def apply_adaptive_group_augmentation(
-    tensors: Dict[str, tf.Tensor],
-    params: Params,
-    augmentation_config: NeuralDataAugmentation,
-):
-    """
-    Apply adaptive augmentation based on oversampling rep_factor.
-
-    This creates multiple augmented copies of underrepresented examples
-    to promote uniform distribution on the (x,y) maze space.
-
-    The rep_factor indicates how many times an example was repeated due to
-    being in an underrepresented spatial bin. We create adaptive augmentations
-    to diversify these repeated samples.
-
-    Args:
-        tensors: Dictionary of parsed example tensors with optional __rep_factor metadata
-        params: Network parameters object
-        augmentation_config: NeuralDataAugmentation configuration
-
-    Returns:
-        List of dictionaries, one for each augmented copy (or original if no augmentation)
-    """
-    # Extract rep_factor as a scalar (convert from tensor to Python int)
-    rep_factor = int(
-        tf.cast(
-            tensors.get("__rep_factor", tf.constant(1, dtype=tf.int32)), tf.int32
-        ).numpy()
-    )
-
-    # Determine number of augmentations based on rep_factor (Python int)
-    num_augmentations = augmentation_config.compute_adaptive_augmentation_count(
-        rep_factor
-    )
-
-    # Clean up metadata fields
-    result_tensors = {k: v for k, v in tensors.items() if not k.startswith("__")}
-
-    # Always include the original (unaugmented) copy
-    augmented_list = [dict(result_tensors)]
-
-    # Apply augmentations for this specific rep_factor
-    for _ in range(num_augmentations):
-        aug_tensors = dict(result_tensors)
-        for g in range(params.nGroups):
-            g_key = f"group{g}"
-            if g_key not in aug_tensors:
-                continue
-
-            group_data = aug_tensors[g_key]  # Shape: [Spikes, Chan, Time]
-            if augmentation_config.normalize:
-                group_data = augmentation_config.normalize_group(group_data, g)
-
-            aug_tensors[g_key] = augmentation_config.augment_spike_group(group_data)
-
-        augmented_list.append(aug_tensors)
-
-    return augmented_list
 
 
 def parse_tfrecord_with_augmentation(

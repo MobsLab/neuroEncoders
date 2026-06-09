@@ -1,10 +1,12 @@
 # Load libs
+import copy
 import logging
 import os
 import platform
 import subprocess
 import warnings
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Union
+from warnings import warn
 
 import dill as pickle
 import matplotlib.axes
@@ -13,8 +15,10 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
+import pandas as pd
 import pynapple as nap
 import seaborn as sns
+import sklearn as ml
 import tqdm
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
@@ -38,13 +42,16 @@ from neuroencoders.simpleBayes.decode_bayes import (
     extract_spike_counts_matrix_keops,
 )
 from neuroencoders.utils.PlaceField_dB import _run_place_field_analysis
-from neuroencoders.utils.backend import ml, pd
 from neuroencoders.utils.global_classes import (
     MAZE_COORDS,
     ZONEDEF,
     ZONELABELS,
     DataHelper,
     Project,
+    SpatialConstraintsMixin,
+    TuningCurvesPlotter,
+    _compute_tuning_curves_for_result,
+    gaussian_filter_nan,
     is_in_zone,
 )
 from neuroencoders.utils.viz_params import (
@@ -65,165 +72,13 @@ DBSCAN = ml.cluster.DBSCAN
 plt.style.use("neuroencoders.mobs")
 
 
-class TuningCurvesPlotter:
-    """
-    A simple shared module to compute and plot tuning curves, that can be used across different figure classes. The main idea is to have a consistent way to compute and plot tuning curves, and to be able to reuse the same code across different figures. This is especially useful for the linear tuning curves, which are used in several figures and need to be ordered in a consistent way.
-    """
-
-    def compute_linear_tuning_curves_order(
-        self,
-        lin_place_fields: List[np.ndarray] | np.ndarray,
-        bin_edges: np.ndarray,
-        sort_map: Optional[np.ndarray] = None,
-        list_neurons: Optional[List[int] | np.ndarray] = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Based on the linear tuning curves, compute an ordering of the neurons to plot them in a more interpretable way. If sort_map is provided, use it directly as the order. Otherwise, compute the preferred linear position for each neuron and sort by that. If list_neurons is provided, only keep those neurons in the final order and place fields.
-
-        Args:
-            lin_place_fields (list of np.ndarray): List of linear tuning curves for each neuron.
-            bin_edges (np.ndarray): Edges of the bins used for the linear tuning curves.
-            sort_map (list of int, optional): Predefined order of neuron indices. If None, the order will be computed based on preferred linear positions.
-            list_neurons (list of int, optional): List of neuron indices to include in the final order. If None, all neurons will be included.
-
-        Returns:
-            ordered_lin_place_fields (np.ndarray): Linear tuning curves ordered according to the computed or provided sort_map.
-            linear_pos_argsort (list of int): The order of neuron indices used for sorting.
-        """
-
-        if sort_map is None:
-            preferred_linear_positions = []
-            for tuning_curve in lin_place_fields:
-                if np.any(tuning_curve > 0):
-                    peak_idx = np.argmax(tuning_curve)
-                    preferred_pos = (bin_edges[peak_idx] + bin_edges[peak_idx + 1]) / 2
-                    preferred_linear_positions.append(preferred_pos)
-                else:
-                    preferred_linear_positions.append(bin_edges[0])
-
-            preferred_linear_positions = np.array(preferred_linear_positions)
-            linear_pos_argsort = np.argsort(preferred_linear_positions)
-        else:
-            linear_pos_argsort = sort_map
-
-        if list_neurons is not None:
-            lin_place_fields = np.array(lin_place_fields)[list_neurons]
-
-        ordered_lin_place_fields = np.array(lin_place_fields)[linear_pos_argsort]
-
-        return ordered_lin_place_fields, np.array(linear_pos_argsort)
-
-    def normalize_tuning_curves(self, matrix, method="minmax", return_cmap=False):
-        """
-        Normalize the tuning curves using either Z-score or Min-Max normalization.
-        The normalization is done per neuron (row-wise) to preserve the relative tuning shape of each neuron. The method can be specified as "z-score" for Z-score normalization or "minmax" for Min-Max normalization. The function also returns appropriate colormap and normalization settings for plotting based on the chosen method.
-        """
-        if method is None:
-            method = "minmax"
-        method = method.lower()
-        matrix = np.array(matrix)
-        if method == "z-score":
-            # Safe Z-score normalization per neuron (row-wise)
-            mean_vals = np.nanmean(matrix, axis=1, keepdims=True)
-            std_val = np.nanstd(matrix, axis=1, keepdims=True)
-            fields = (matrix - mean_vals) / (std_val + 1e-8)
-
-            # Plotting Setup for Z-Score
-            cmap = "RdBu_r"
-            v_lim = min(np.percentile(np.abs(fields), 99), 4)
-            norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
-            cb_label = "Z-Scored FR"
-        elif method == "minmax":
-            # Min-Max normalization per neuron (row-wise)
-            min_vals = np.nanmin(matrix, axis=1, keepdims=True)
-            max_vals = np.nanmax(matrix, axis=1, keepdims=True)
-            fields = (matrix - min_vals) / (max_vals - min_vals + 1e-8)
-
-            # Plotting Setup for Min-Max
-            cmap = "cmc.batlow"
-            norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.median(fields), vmax=1)
-            cb_label = "Normalized Firing Rate (0-1)"
-        else:
-            raise ValueError(
-                f"Unknown scaling method: {method}. Use 'z-score' or 'minmax'."
-            )
-
-        if return_cmap:
-            return fields, cmap, norm, cb_label
-        return fields
-
-    def plot_linear_tuning_curves(
-        self,
-        ordered_lin_place_fields,
-        ax=None,
-        **kwargs,
-    ):
-        if ax is None:
-            fig, ax = plt.subplots(1, 1, figsize=(15, 8))
-        else:
-            fig = ax.get_figure()
-
-        calc_kwargs = dict(kwargs)
-        cax = calc_kwargs.pop("cax", None)
-        add_colorbar = calc_kwargs.pop("add_colorbar", True)
-        normalize = calc_kwargs.pop("normalize", True)
-        scaling_method = calc_kwargs.pop("scaling", "minmax")
-        mask = calc_kwargs.pop("mask", None)
-        title = calc_kwargs.pop("title", "Linear Tuning Curves")
-
-        if normalize:
-            fields, cmap, norm, cb_label = self.normalize_tuning_curves(
-                ordered_lin_place_fields, method=scaling_method, return_cmap=True
-            )
-        else:
-            fields = ordered_lin_place_fields
-            cmap = "viridis"
-            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
-            cb_label = "Firing Rate"
-
-        fields = fields[mask] if mask is not None else fields
-        im = ax.imshow(
-            fields,
-            cmap,
-            norm,
-            origin="lower",
-            extent=(0, 1, 0, fields.shape[0]),
-            aspect="auto",
-        )
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-        ax.set_xlabel("Linear Position")
-        ax.set_ylabel(f"Neuron Index ({len(ordered_lin_place_fields)} neurons)")
-        ax.set_title(title)
-        if add_colorbar:
-            if cax is not None:
-                cbar = fig.colorbar(
-                    im,
-                    cax=cax,
-                    label=cb_label,
-                    orientation="horizontal",
-                    location="bottom",
-                )
-            else:
-                cbar = fig.colorbar(
-                    im,
-                    ax=ax,
-                    label=cb_label,
-                    location="bottom",
-                    orientation="horizontal",
-                )
-
-            cbar.outline.set_visible(False)
-
-        return im, cb_label
-
-
-class PaperFigures(TuningCurvesPlotter):
+class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
     def __init__(
         self,
         projectPath: Project,
         behaviorData: dict,
         bayes: Optional[TrainerBayes],
-        l_function: Callable,
+        l_function: Optional[Callable],
         bayesMatrices: Optional[dict] = {},
         timeWindows=[36],
         phase=None,
@@ -231,7 +86,19 @@ class PaperFigures(TuningCurvesPlotter):
         verbose=True,
         **kwargs,
     ):
-        super().__init__()
+        GaussianGridSize = kwargs.get("grid_size", None)
+        maze_params = kwargs.get("maze_params", None)
+        if GaussianGridSize is None or maze_params is None:
+            raise ValueError(
+                "GaussianGridSize and maze_params must be provided in kwargs"
+            )
+
+        TuningCurvesPlotter.__init__(self)
+        SpatialConstraintsMixin.__init__(
+            self,
+            grid_size=GaussianGridSize,
+            maze_params=maze_params,
+        )
         self.phase = phase
         suffix = f"_{phase}" if phase is not None else ""
         self.suffix = suffix
@@ -260,6 +127,7 @@ class PaperFigures(TuningCurvesPlotter):
         )
         self.logger = logging.getLogger(__name__)
 
+        self.find_session_epochs()
         self.resultsNN_phase = dict()
         self.resultsBayes_phase = dict()
         self.resultsNN_phase_pkl = dict()
@@ -275,11 +143,105 @@ class PaperFigures(TuningCurvesPlotter):
             self.sleepFigures = PaperFiguresSleep(
                 projectPath,
                 behaviorData,
-                bayes,
+                bayes if bayes is not None else None,
                 l_function,
-                bayesMatrices=bayesMatrices,
+                bayesMatrices=bayesMatrices if bayesMatrices is not None else {},
                 timeWindows=timeWindows,
             )
+
+    def find_session_epochs(self):
+        """
+        Find session epochs from the fullBehavior data.
+        This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
+        """
+        self.training = nap.IntervalSet(
+            np.array(self.behaviorData["Times"]["trainEpochs"]).reshape(-1, 2)
+        )
+        self.trainMask = inEpochsMask(
+            self.behaviorData["positionTime"][:, 0], self.training
+        )
+        self.testing = nap.IntervalSet(
+            np.array(self.behaviorData["Times"]["testEpochs"]).reshape(-1, 2)
+        )
+        self.testMask = inEpochsMask(
+            self.behaviorData["positionTime"][:, 0], self.testing
+        )
+
+        try:
+            # WARNING: "pre" is actually pre|hab, see rawdata_parser.py, get_behavior
+            self.pre = nap.IntervalSet(
+                np.array(self.behaviorData["Times"]["SessionEpochs"]["pre"]).reshape(
+                    -1, 2
+                )
+            )
+            self.preMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.pre
+            )
+        except KeyError:
+            warn(
+                "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
+            )
+        try:
+            self.hab = nap.IntervalSet(
+                np.array(self.behaviorData["Times"]["SessionEpochs"]["hab"]).reshape(
+                    -1, 2
+                )
+            )
+            self.habMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.hab
+            )
+        except KeyError:
+            pass
+        try:
+            self.cond = nap.IntervalSet(
+                np.array(self.behaviorData["Times"]["SessionEpochs"]["cond"]).reshape(
+                    -1, 2
+                )
+            )
+            self.condMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.cond
+            )
+        except KeyError:
+            pass
+        try:
+            self.full_pre = self.pre.set_diff(self.hab)
+            self.full_preMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.full_pre
+            )
+        except AttributeError:
+            pass
+        try:
+            self.post = nap.IntervalSet(
+                np.array(self.behaviorData["Times"]["SessionEpochs"]["post"]).reshape(
+                    -1, 2
+                )
+            )
+            self.postMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.post
+            )
+        except KeyError:
+            pass
+        try:
+            self.extinct = nap.IntervalSet(
+                np.array(
+                    self.behaviorData["Times"]["SessionEpochs"]["extinct"]
+                ).reshape(-1, 2)
+            )
+            self.extinctMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.extinct
+            )
+        except KeyError:
+            pass
+
+        try:
+            self.sleep = nap.IntervalSet(
+                np.array(self.behaviorData["Times"]["sleepEpochs"]).reshape(-1, 2)
+            )
+            self.sleepMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.sleep
+            )
+        except KeyError:
+            pass
 
     def _load_csv_result(
         self, base_path: str, ws: int, prefix: str, suffix: str, dtype=np.float32
@@ -289,14 +251,17 @@ class PaperFigures(TuningCurvesPlotter):
         if not os.path.exists(filepath):
             return None
         try:
-            data = pd.read_csv(filepath).values[:, 1:]
+            data = pd.read_csv(filepath).to_numpy()[:, 1:]
             return np.array(data, dtype=dtype)
         except Exception as e:
             self.logger.warning(f"Error loading {filepath}: {e}")
             return None
 
     def _prepare_suffixes(
-        self, suffixes: Optional[Union[str, List[str]]], add_training: bool = True
+        self,
+        suffixes: Optional[Union[str, List[str]]],
+        add_training: bool = True,
+        add_full_pre: bool = False,
     ) -> List[str]:
         """Unified suffix list preparation."""
         if suffixes is None:
@@ -310,8 +275,108 @@ class PaperFigures(TuningCurvesPlotter):
                 suffixes.remove("_training")
             suffixes.insert(0, "_training")
 
+        if add_full_pre:
+            if "_full_pre" in suffixes:
+                suffixes.remove("_full_pre")
+            suffixes.append("_full_pre")
+
         self.suffixes = suffixes
         return suffixes
+
+    def add_full_pre_results(self, redo=False):
+        """
+        Simply based on already loaded training and pre results, create mock full pre results by concatenating pre and training, then selecting based on test Pre mask.
+        """
+        if (
+            self.resultsNN_phase.get("_training", None) is None
+            or self.resultsNN_phase.get("_pre", None) is None
+        ):
+            self.logger.warning(
+                "Training or pre results not loaded, cannot create full pre."
+            )
+            return
+
+        if "_full_pre" in self.resultsNN_phase and not redo:
+            self.logger.info("Full pre results already exist, skipping creation.")
+            return
+
+        self.resultsNN_phase["_full_pre"] = copy.deepcopy(self.resultsNN_phase["_pre"])
+        for key in self.resultsNN_phase["_training"]:
+            if (
+                len(self.resultsNN_phase["_training"][key]) == 0
+                or len(self.resultsNN_phase["_pre"][key]) == 0
+            ):
+                self.logger.warning(
+                    f"Skipping full pre for {key} due to missing training or pre results."
+                )
+                continue
+            for idWin in range(len(self.resultsNN_phase["_training"][key])):
+                if (
+                    len(self.resultsNN_phase["_training"][key][idWin]) == 0
+                    or len(self.resultsNN_phase["_pre"][key][idWin]) == 0
+                ):
+                    self.logger.warning(
+                        f"Skipping full pre for {key} window {idWin} due to missing training or pre results."
+                    )
+                    continue
+                times_train = self.resultsNN_phase["_training"]["times"][idWin]
+                train_in_pre = (inEpochsMask(times_train, self.pre)) & (
+                    ~inEpochsMask(times_train, self.hab)
+                )
+
+                times_pre = self.resultsNN_phase["_pre"]["times"][idWin]
+                pre_in_pre = inEpochsMask(times_pre, self.pre) & ~inEpochsMask(
+                    times_pre, self.hab
+                )
+                final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
+                self.resultsNN_phase["_full_pre"][key][idWin] = np.concatenate(
+                    [
+                        self.resultsNN_phase["_training"][key][idWin],
+                        self.resultsNN_phase["_pre"][key][idWin],
+                    ]
+                )[final_mask]
+
+        self.resultsNN_phase_pkl["_full_pre"] = copy.deepcopy(
+            self.resultsNN_phase_pkl["_pre"]
+        )
+        for key in self.resultsNN_phase_pkl["_training"]:
+            if (
+                self.resultsNN_phase_pkl["_training"][key] is None
+                or len(self.resultsNN_phase_pkl["_training"][key]) == 0
+                or len(self.resultsNN_phase_pkl["_pre"][key]) == 0
+            ):
+                continue
+            for idWin in range(len(self.resultsNN_phase_pkl["_training"][key])):
+                if (
+                    self.resultsNN_phase_pkl["_training"][key][idWin] is None
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], float
+                    )
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], str
+                    )
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], dict
+                    )
+                    or len(self.resultsNN_phase_pkl["_training"][key][idWin]) == 0
+                    or len(self.resultsNN_phase_pkl["_pre"][key][idWin]) == 0
+                ):
+                    continue
+                times_train = self.resultsNN_phase_pkl["_training"]["times"][idWin]
+                train_in_pre = (inEpochsMask(times_train, self.pre)) & (
+                    ~inEpochsMask(times_train, self.hab)
+                )
+                times_pre = self.resultsNN_phase_pkl["_pre"]["times"][idWin]
+                pre_in_pre = (inEpochsMask(times_pre, self.pre)) & (
+                    ~inEpochsMask(times_pre, self.hab)
+                )
+                final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
+                self.resultsNN_phase_pkl["_full_pre"][key][idWin] = np.concatenate(
+                    [
+                        self.resultsNN_phase_pkl["_training"][key][idWin],
+                        self.resultsNN_phase_pkl["_pre"][key][idWin],
+                    ]
+                )[final_mask]
 
     def _extract_bayes_spike_counts(self, times, ws):
         """Internal helper for spike count extraction in load_bayes."""
@@ -416,12 +481,18 @@ class PaperFigures(TuningCurvesPlotter):
 
         if not hasattr(self, "suffixes") or kwargs.get("redo", False):
             self._prepare_suffixes(
-                suffixes, add_training=kwargs.get("add_training", True)
+                suffixes,
+                add_training=kwargs.get("add_training", True),
+                add_full_pre=kwargs.get("add_full_pre", False),
             )
 
         base_results_path = os.path.join(self.projectPath.experimentPath, "results")
 
         for suffix in self.suffixes:
+            if suffix == "_full_pre":
+                if kwargs.get("add_full_pre", False):
+                    self.add_full_pre_results()
+                continue
             phase_results = {
                 "lPredPos": [],
                 "fPredPos": [],
@@ -592,7 +663,9 @@ class PaperFigures(TuningCurvesPlotter):
 
         if not hasattr(self, "suffixes"):
             self._prepare_suffixes(
-                suffixes, add_training=kwargs.get("add_training", True)
+                suffixes,
+                add_training=kwargs.get("add_training", True),
+                add_full_pre=kwargs.get("add_full_pre", False),
             )
 
         base_results_path = self.bayes.folderResult
@@ -729,7 +802,7 @@ class PaperFigures(TuningCurvesPlotter):
         """
         Run the bayes trainer, not with the true positions but rather the predictions of the ANN, and create the bayes matrices from those predictions. This allows to have a fair comparison between the two methods, as they will be based on the same input data (the ANN predictions) rather than the true positions, which may be more accurate than what the ANN can achieve.
         """
-        if not self.bayes:
+        if not hasattr(self, "bayes") or self.bayes is None:
             raise ValueError(
                 "Bayes trainer not loaded. Please load the bayes trainer first."
             )
@@ -1445,7 +1518,7 @@ class PaperFigures(TuningCurvesPlotter):
         if show:
             # Final layout adjustments
             fig.suptitle(
-                "Behavioral Analysis Summary: Occupancy Maps and Zone Occupancy per Session",
+                f"Behavioral Analysis Summary: Occupancy Maps per Session ({os.path.basename(self.projectPath.baseName)})",
             )
             if (
                 fig.get_tight_layout() is None
@@ -1670,7 +1743,7 @@ class PaperFigures(TuningCurvesPlotter):
             # =========================================================
             # PAGES after+: Link with bayesian decoder and spike sorting
             # =========================================================
-            self._plot_summary_bayesian(timeWindow, pdf=pdf)
+            self._plot_summary_bayesian(timeWindow, data_helper=DataHelper, pdf=pdf)
 
         print("PDF generation complete.")
 
@@ -1843,7 +1916,9 @@ class PaperFigures(TuningCurvesPlotter):
         # Barplot
         ax_mean_barplot = fig1_bis.add_subplot(gs_barplot[0, 0])
         if data_box:
-            df_box = pd.DataFrame(
+            import pandas as pd_cpu
+
+            df_box = pd_cpu.DataFrame(
                 {
                     "Linear Error": np.concatenate(data_box),
                     "Phase": np.concatenate(
@@ -2896,7 +2971,7 @@ class PaperFigures(TuningCurvesPlotter):
             fontsize="small",
         )
 
-    def _plot_summary_bayesian(self, timeWindow, pdf=None):
+    def _plot_summary_bayesian(self, timeWindow, data_helper, pdf=None):
         bayesian_page = plt.figure(
             figsize=(self.PDF_FIGSIZE[1], self.PDF_FIGSIZE[0]), constrained_layout=False
         )
@@ -2915,17 +2990,33 @@ class PaperFigures(TuningCurvesPlotter):
         ]
 
         try:
-            self._create_decoding_bayes_matrices(winMS=timeWindow, suffix="_training")
-            self.bayesian_neurons_summary(
-                fig=bayesian_page,
-                axs=bayesian_axs,
-                cax_train=cax_train,
-                cax_pred=cax_pred,
-                show=False,
-                block=False,
-                save=True,
-                winMS=timeWindow,
-            )
+            if hasattr(self, "bayes") and self.bayes is not None:
+                self._create_decoding_bayes_matrices(
+                    winMS=timeWindow, suffix="_training"
+                )
+                self.bayesian_neurons_summary(
+                    fig=bayesian_page,
+                    axs=bayesian_axs,
+                    cax_train=cax_train,
+                    cax_pred=cax_pred,
+                    show=False,
+                    block=False,
+                    save=True,
+                    winMS=timeWindow,
+                )
+            else:
+                self.pynapple_bayesian_neurons_summary(
+                    fig=bayesian_page,
+                    axs=bayesian_axs,
+                    cax_train=cax_train,
+                    cax_pred=cax_pred,
+                    show=False,
+                    block=False,
+                    save=True,
+                    winMS=timeWindow,
+                    data_helper=data_helper,
+                    count_thresh=30,
+                )
         except Exception as e:
             print(f"Could not generate bayesian summary page: {e}")
             import traceback
@@ -7143,6 +7234,8 @@ class PaperFigures(TuningCurvesPlotter):
 
         # Plot Heatmap
         field_data = results["map"]["rate"]
+        field_data = gaussian_filter_nan(field_data, sigma=(5, 5))
+
         ax.imshow(field_data, aspect="auto", origin="lower")
 
         # Plot Peak
@@ -7542,6 +7635,408 @@ class PaperFigures(TuningCurvesPlotter):
 
         if save:
             filename = f"bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
+            fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
+
+        if show:
+            plt.show(block=block)
+        elif save:
+            # If we saved but didn't show, close the figure to free memory
+            plt.close(fig)
+
+        return fig
+
+    def pynapple_bayesian_neurons_summary(
+        self,
+        feature_name_1d="linearTrue",
+        feature_name_2d="featureTrue",
+        suffix="_training",
+        idWindow=0,
+        use_speed_filter=True,
+        count_thresh=None,
+        axs=None,
+        fig=None,
+        block=False,
+        **kwargs,
+    ):
+        """
+        Summary of the Bayesian neurons.
+        Can create its own figure or plot on provided axes.
+
+        Args:
+            axs (array-like, optional): Array of matplotlib axes to plot on. If None, a new figure with 6 subplots will be created.
+            fig (matplotlib.figure.Figure, optional): Figure object to associate with the axes. If None and axs is provided, fig will be inferred from axs.
+            block (bool, optional): Whether to block execution when showing the plot. Default is False.
+            **kwargs: Additional keyword arguments for training and plotting.
+                Supported kwargs:
+                - plot_high_quality (bool): If True, plots only high-quality neurons based on Mutual Information. Default is False.
+                - save (bool): If True, saves the figure. Default is True if axs is None, else False.
+                - show (bool): If True, displays the figure. Default is True if axs is None, else False.
+                - scaling (str): Scaling method for linear place fields ('minmax' or 'z-score'). Default is 'minmax'.
+        """
+        # kwargs processing
+        plot_high_quality = kwargs.get("plot_high_quality", False)
+        save = kwargs.get("save", True if axs is None else False)
+        show = kwargs.get("show", True if axs is None else False)
+        is_predicted = kwargs.get("is_predicted", False)
+        cax_train = kwargs.pop("cax_train", None)
+        cax_pred = kwargs.pop("cax_pred", None)
+
+        bin_size = kwargs.pop("bin_size", 0.036)
+        mode = kwargs.pop("mode", "closest")
+
+        final1d, id_neurons1d, spike_data, phase = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name=feature_name_1d,
+            idWindow=idWindow,
+            use_speed_filter=use_speed_filter,
+            count_thresh=count_thresh,
+            bin_size=bin_size,
+            mode=mode,
+            **kwargs,
+        )
+        ordered1d, sort_map = self.compute_linear_tuning_curves_order(
+            lin_place_fields=final1d.values,
+            bin_edges=np.linspace(0, 1, final1d.values.shape[1] + 1),
+            sort_map=kwargs.pop("sort_map", None),
+            list_neurons=kwargs.pop("list_neurons", None),
+        )
+
+        final2d, _, spike_data, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name=feature_name_2d,
+            idWindow=idWindow,
+            use_speed_filter=use_speed_filter,
+            count_thresh=None,
+            bin_size=bin_size,
+            mode=mode,
+            n_dims=2,
+            **kwargs,
+        )
+        ordered2d = final2d.values[id_neurons1d][sort_map]
+        ordered2d[
+            :,
+            ~self.get_allowed_mask_for_bin_size(
+                ordered2d.shape[1], ordered2d.shape[2]
+            ).T,
+        ] = np.nan
+
+        self.spikeData = spike_data
+
+        mutual_info = nap.compute_mutual_information(final2d)
+        ordered_mi = mutual_info.to_numpy()[:, 1][id_neurons1d][sort_map]
+
+        thresh = 80
+        percentile_val = np.percentile(ordered_mi, thresh)
+        high_quality_mask = ordered_mi > percentile_val
+
+        print(
+            f"High-quality place cells: {high_quality_mask.sum()} neurons (top {100 - thresh}%)"
+        )
+        print(
+            f"Total neurons {'above ' + str(count_thresh) if count_thresh is not None else ''}: {ordered2d.shape[0]}"
+        )
+        print(
+            f"Position range: {final1d.coords[feature_name_1d].min():.2f} - {final1d.coords[feature_name_1d].max():.2f}"
+        )
+
+        # --- 3. Visualization Setup ---
+        if axs is None:
+            fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+            axs = axs.flatten()
+        else:
+            axs = np.array(axs).flatten()
+            if fig is None:
+                fig = axs[0].figure
+
+        # Validate we have enough axes
+        if len(axs) < 6:
+            raise ValueError(
+                f"Provided 'axs' must have at least 6 subplots, got {len(axs)}."
+            )
+
+        # --- Panel 0: First Ordered Place Field ---
+        idx_to_plot = 0 if not plot_high_quality else np.where(high_quality_mask)[0][0]
+        axs[0].imshow(
+            ordered2d[idx_to_plot].T, aspect="auto", origin="lower", extent=[0, 1, 0, 1]
+        )
+        axs[0].set_title("First Ordered Place Field")
+
+        if kwargs.get("data_helper", None) is not None:
+            data_helper = kwargs["data_helper"]
+            spike_data = data_helper.get_spike_data()
+
+            positions = nap.TsdFrame(
+                t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
+                d=self.resultsNN_phase_pkl[suffix]["featureTrue"][idWindow][:, :2],
+            )
+            times = nap.Ts(
+                self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
+            )
+
+            not_nan_epoch = (
+                nap.Tsd(
+                    t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
+                    d=np.isnan(
+                        self.resultsNN_phase_pkl[suffix]["featureTrue"][idWindow][:, :2]
+                    ).any(1),
+                )
+                .threshold(0.5, "below")
+                .time_support
+            )
+
+            ep = times.time_support.intersect(not_nan_epoch)
+            if use_speed_filter:
+                speed_filter = nap.Tsd(
+                    t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
+                    d=self.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten(),
+                )
+                ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+
+            positions = positions.restrict(ep)
+            spike_pos = spike_data[id_neurons1d[sort_map][idx_to_plot]].value_from(
+                positions
+            )
+
+            axs[0].scatter(
+                spike_pos[:, 0],
+                spike_pos[:, 1],
+                s=5,
+                marker="+",
+                color="white",
+                alpha=0.6,
+                label="Spikes",
+            )
+
+        # --- Pre-calculate Linear Fields ---
+        train_lt_axes = []
+        pred_lt_axes = []
+        train_lt_im = None
+        pred_lt_im = None
+        train_cb_label = None
+        pred_cb_label = None
+
+        # --- Panel 1: All Linear Tuning Curves ---
+        ax = axs[1]
+        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            ordered1d,
+            ax=ax,
+            add_colorbar=False,
+            **kwargs,
+        )
+        train_lt_axes.append(ax)
+
+        # --- Panel 2: Position Coverage ---
+        ax = axs[3]
+        feature = self.resultsNN_phase_pkl[suffix].get(feature_name_1d)[idWindow]
+        speedMask = self.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
+        if use_speed_filter:
+            feature = feature[speedMask]
+
+        ax.hist(
+            feature,
+            density=True,
+            bins=20,
+            alpha=0.7,
+            color="teal",
+        )
+        ax.set_xlabel("Linear Position")
+        ax.set_title("Pos Coverage in Training Data")
+
+        # --- Panel 3: Predicted Linear Tuning Curves (mov epochs) or Quality Metrics (Mutual Info) ---
+        ax = axs[4]
+        true_final1d, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearTrue",
+            idWindow=idWindow,
+            use_speed_filter=True,
+            bin_size=bin_size,
+            mode=mode,
+            **kwargs,
+        )
+        pred_final1d, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearPred",
+            idWindow=idWindow,
+            use_speed_filter=True,
+            bin_size=bin_size,
+            mode=mode,
+        )
+
+        corr_values = []
+        true_fields = true_final1d[id_neurons1d][sort_map].values
+        pred_fields = pred_final1d[id_neurons1d][sort_map].values
+        n_cells = min(len(true_fields), len(pred_fields))
+        for i in range(n_cells):
+            true_pf = np.asarray(true_fields[i]).reshape(-1)
+            pred_pf = np.asarray(pred_fields[i]).reshape(-1)
+            if (
+                true_pf.shape != pred_pf.shape
+                or np.std(true_pf) == 0
+                or np.std(pred_pf) == 0
+            ):
+                continue
+            corr_values.append(stats.pearsonr(true_pf, pred_pf)[0])
+
+        if len(corr_values) == 0:
+            corr_speed = np.nan
+        else:
+            corr_speed = np.nanmean(corr_values)
+
+        title = (
+            f"Predicted LT Curves (r={corr_speed:.3f})"
+            if np.isfinite(corr_speed)
+            else "Predicted LT Curves"
+        )
+        pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+            pred_fields,
+            ax=ax,
+            title=title,
+            add_colorbar=False,
+            **kwargs,
+        )
+        pred_lt_axes.append(ax)
+
+        # --- Panel 4: Predicted Linear Tuning Curves (all speeds) ---
+        true_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
+            self,
+            suffix=suffix,
+            feature_name="linearTrue",
+            idWindow=idWindow,
+            use_speed_filter=False,
+            bin_size=bin_size,
+            mode=mode,
+        )
+        ax = axs[5]
+        if "linearPred" in self.resultsNN_phase[suffix]:
+            pred_final1d_all_speed, _, _, _ = _compute_tuning_curves_for_result(
+                self,
+                suffix=suffix,
+                feature_name="linearPred",
+                idWindow=idWindow,
+                use_speed_filter=False,
+                bin_size=bin_size,
+                mode=mode,
+                **kwargs,
+            )
+
+            corr_values = []
+            true_fields = true_final1d_all_speed[id_neurons1d][sort_map].values
+            pred_fields = pred_final1d_all_speed[id_neurons1d][sort_map].values
+            n_cells = min(len(true_fields), len(pred_fields))
+            for i in range(n_cells):
+                true_pf = np.asarray(true_fields[i]).reshape(-1)
+                pred_pf = np.asarray(pred_fields[i]).reshape(-1)
+                if (
+                    true_pf.shape != pred_pf.shape
+                    or np.std(true_pf) == 0
+                    or np.std(pred_pf) == 0
+                ):
+                    continue
+                corr_values.append(stats.pearsonr(true_pf, pred_pf)[0])
+
+            if len(corr_values) == 0:
+                corr_all = np.nan
+            else:
+                corr_all = np.nanmean(corr_values)
+            title = (
+                f"Predicted LT Curves (All Speeds, r={corr_all:.3f})"
+                if np.isfinite(corr_all)
+                else "Predicted LT Curves (All Speeds)"
+            )
+            pred_lt_im, pred_cb_label = self.plot_linear_tuning_curves(
+                pred_fields,
+                ax=ax,
+                title=title,
+                add_colorbar=False,
+                **kwargs,
+            )
+            pred_lt_axes.append(ax)
+        elif high_quality_mask.sum() > 0:
+            print(
+                "No decoded bayes matrix provided, plotting original linear fields for high-quality neurons."
+            )
+            title = f"Best Linear Tuning Curves (Top {100 - thresh}%)"
+            self.plot_linear_tuning_curves(
+                true_final1d_all_speed[id_neurons1d][sort_map][
+                    high_quality_mask
+                ].values,
+                ax=ax,
+                title=title,
+                add_colorbar=False,
+                **kwargs,
+            )
+        else:
+            ax.text(0.5, 0.5, "No High Quality Fields", ha="center", va="center")
+            ax.axis("off")
+
+        train_lt_im, train_cb_label = self.plot_linear_tuning_curves(
+            true_final1d_all_speed[id_neurons1d][sort_map].values,
+            ax=axs[2],
+            title="LT Curves (All Speeds)",
+            add_colorbar=False,
+            **kwargs,
+        )
+        train_lt_axes.append(axs[2])
+
+        # Shared colorbars for paired linear tuning curves (same logic as error_map).
+        if train_lt_im is not None and len(train_lt_axes) > 0:
+            if cax_train is not None:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    cax=cax_train,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                train_cbar = fig.colorbar(
+                    train_lt_im,
+                    ax=train_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if train_cb_label is not None:
+                train_cbar.set_label(train_cb_label)
+            train_cbar.outline.set_visible(False)
+        elif cax_train is not None:
+            cax_train.axis("off")
+
+        if pred_lt_im is not None and len(pred_lt_axes) > 0:
+            if cax_pred is not None:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    cax=cax_pred,
+                    orientation="horizontal",
+                    location="bottom",
+                )
+            else:
+                pred_cbar = fig.colorbar(
+                    pred_lt_im,
+                    ax=pred_lt_axes,
+                    shrink=0.5,
+                    location="bottom",
+                    orientation="horizontal",
+                    pad=0.08,
+                )
+            if pred_cb_label is not None:
+                pred_cbar.set_label(pred_cb_label)
+            pred_cbar.outline.set_visible(False)
+        elif cax_pred is not None:
+            cax_pred.axis("off")
+
+        # --- Finalize and Save ---
+        if save or show:
+            if fig.get_layout_engine() is None:
+                fig.tight_layout()
+
+        if save:
+            filename = f"pynapple_bayesian_neurons_summary{self.suffix}{'_predicted' if is_predicted else ''}"
             fig.savefig(os.path.join(self.folderFigures, f"{filename}.png"), dpi=300)
             fig.savefig(os.path.join(self.folderFigures, f"{filename}.svg"))
 

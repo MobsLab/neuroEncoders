@@ -4,11 +4,11 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 import tqdm as tqdm
 
 from neuroencoders.importData import rawdata_parser
 from neuroencoders.simpleBayes import butils
-from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import Project
 
 
@@ -258,23 +258,23 @@ def load_spike_sorting(projectPath: Project, phase=None) -> dict:
             df = pd.read_csv(
                 os.path.join(cluster_save_path, "Spike_labels" + str(shank) + ".csv")
             )
-            cluster_data["Spike_labels"].append(df.values[:, 1:])
+            cluster_data["Spike_labels"].append(df.to_numpy()[:, 1:])
             df = pd.read_csv(
                 os.path.join(cluster_save_path, "spike_time" + str(shank) + ".csv")
             )
-            cluster_data["Spike_times"].append(df.values[:, 1:])
+            cluster_data["Spike_times"].append(df.to_numpy()[:, 1:])
             df = pd.read_csv(
                 os.path.join(cluster_save_path, "spike_positions" + str(shank) + ".csv")
             )
-            cluster_data["Spike_positions"].append(df.values[:, 1:])
+            cluster_data["Spike_positions"].append(df.to_numpy()[:, 1:])
             df = pd.read_csv(
                 os.path.join(cluster_save_path, "spike_pos_index" + str(shank) + ".csv")
             )
-            cluster_data["Spike_pos_index"].append(df.values[:, 1:])
+            cluster_data["Spike_pos_index"].append(df.to_numpy()[:, 1:])
             df = pd.read_csv(
                 os.path.join(cluster_save_path, "spike_speed" + str(shank) + ".csv")
             )
-            cluster_data["Spike_speed"].append(df.values[:, 1:])
+            cluster_data["Spike_speed"].append(df.to_numpy()[:, 1:])
 
         print("finished reading")
     else:

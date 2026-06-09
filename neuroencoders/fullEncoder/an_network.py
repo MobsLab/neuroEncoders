@@ -20,10 +20,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 import dill as pickle
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
-from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -58,7 +58,6 @@ from neuroencoders.fullEncoder.nnUtils import (
     WandBErrorMapCallback,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
-from neuroencoders.utils.backend import pd
 from neuroencoders.utils.global_classes import (
     DEFAULT_GRIDSIZE,
     DataHelper,
@@ -66,6 +65,7 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
+from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -115,7 +115,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.maze_params = None
 
         super(LSTMandSpikeNetwork, self).__init__(
-            grid_size=grid_size, maze_params=self.maze_params, **kwargs
+            grid_size=grid_size,
+            maze_params=self.maze_params,
+            device=deviceName,
+            **kwargs,
         )
 
         self.clear_session()
@@ -687,9 +690,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.params, "dim_factor", 1
                 )  # factor to increase the dimension of the transformer if needed
                 print("dim_factor:", self.dim_factor)
+                self.project_transformer = (
+                    getattr(self.params, "project_transformer", True),
+                )
                 print(
                     "project transformer:",
-                    getattr(self.params, "project_transformer", True),
+                    self.project_transformer,
                 )
 
                 # Transformer Encoder (Part 1: up to pooling)
@@ -816,7 +822,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.params, "dim_factor", 1
             )  # factor to increase the dimension of the transformer if needed
 
-            if getattr(self.params, "project_transformer", True):
+            if self.project_transformer:
                 self.transformer_projection_layer = tf.keras.layers.Dense(
                     self.params.nFeatures * self.dim_factor,
                     activation="silu",
@@ -877,12 +883,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         masked_features_layer = MaskingLayer(name="masking_layer_transformer")
         masked_features_raw = masked_features_layer([mymask, allFeatures_raw])
 
-        d_model = self.params.sequence_output_dim
-
-        if (
-            getattr(self.params, "project_transformer", True)
-            and self.params.nFeatures != d_model
-        ):
+        if self.project_transformer:
             # 1. Projection layer
             allFeatures = self.transformer_projection_layer(allFeatures)
             sumFeatures = kops.sum(
@@ -1130,7 +1131,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         else:
             winMS_max = windowSizeMS
 
-        scheduler = kwargs.get("scheduler", "cosine")
+        scheduler = kwargs.get("scheduler", "decay")
         isPredLoss = kwargs.get("isPredLoss", False)
         earlyStop = kwargs.get("earlyStop", False)
         strideFactor = kwargs.get("strideFactor", 1)
@@ -1448,18 +1449,34 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             else:
                 viz_linpos.append(l_function(y["latent"][:, :2])[1])
 
-        viz_inputs = {
-            k: np.concatenate([batch[k] for batch in viz_inputs], axis=0)
-            for k in viz_inputs[0].keys()
-        }
-        try:
-            groups = viz_inputs["groups"]
-            neg1_counts = np.sum(groups == -1, axis=1)
-            best_row_idx = np.argmin(neg1_counts)
-        except KeyError:
-            best_row_idx = None
+        if not isinstance(viz_inputs, list):
+            # means we've one only one batch pass
+            warnings.warn(
+                "Only one batch taken for visualization, consider increasing the number of batches for better insights."
+            )
+            viz_inputs = [viz_inputs]
+            viz_linpos = [viz_linpos]
+            print(f"viz inputs now looks like this: {viz_inputs}")
 
-        viz_linpos = np.concatenate(viz_linpos, axis=0)
+        add_viz_callback = False
+        try:
+            viz_inputs = {
+                k: np.concatenate([batch[k] for batch in viz_inputs], axis=0)
+                for k in viz_inputs[0].keys()
+            }
+            try:
+                groups = viz_inputs["groups"]
+                neg1_counts = np.sum(groups == -1, axis=1)
+                best_row_idx = np.argmin(neg1_counts)
+            except KeyError:
+                best_row_idx = None
+
+            viz_linpos = np.concatenate(viz_linpos, axis=0)
+            add_viz_callback = True
+        except Exception as e:
+            print(
+                f"not enough batches taken for visualization so will skip, error was: {e}"
+            )
 
         ### Train the model(s)
         # Train
@@ -1588,12 +1605,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Manage learning rates schedule
             if loaded and fine_tune:
                 print("Fine-tuning the model with a lower learning rate, set to 0.0005")
-                self.model.optimizer.learning_rate.assign(0.0005)
+                self.model.optimizer.learning_rate.assign(
+                    self.params.learningRates[0] / 30
+                )
             elif loaded:
                 print("Loading the model with the initial learning rate")
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
 
-            if found_foundation_transformer:
+            if found_foundation_transformer and not loaded:
                 if transformer_found == "full":
                     print(
                         "Loaded the full foundation transformer, setting it to non-trainable for fine-tuning."
@@ -1713,15 +1732,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         schedule,
                         MemoryUsageCallbackExtended(),
                         ContrastiveMonitor(),
-                        ContrastiveVisualizer(
-                            viz_x=viz_inputs,
-                            viz_y=viz_linpos,
-                            encoder_model=self.viz_encoder,
-                            params=self.params,
-                            save_dir=self.log_dir if is_tbcallback else None,
-                            trial_idx=best_row_idx,
-                            device=self.deviceName,
-                        ),
                         PlotContrastiveWeightsCallback(
                             save_dir=self.log_dir if is_tbcallback else None,
                         ),
@@ -1729,6 +1739,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             save_dir=self.log_dir if is_tbcallback else None,
                         ),
                     ]
+                    if add_viz_callback:
+                        callbacks.append(
+                            ContrastiveVisualizer(
+                                viz_x=viz_inputs,
+                                viz_y=viz_linpos,
+                                encoder_model=self.viz_encoder,
+                                params=self.params,
+                                save_dir=self.log_dir if is_tbcallback else None,
+                                trial_idx=best_row_idx,
+                                device=self.deviceName,
+                            ),
+                        )
                 else:
                     callbacks = [
                         csvLogger[key],
@@ -1736,15 +1758,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         schedule,
                         MemoryUsageCallbackExtended(),
                         ContrastiveMonitor(),
-                        ContrastiveVisualizer(
-                            viz_x=viz_inputs,
-                            viz_y=viz_linpos,
-                            encoder_model=self.viz_encoder,
-                            params=self.params,
-                            save_dir=self.log_dir if is_tbcallback else None,
-                            trial_idx=best_row_idx,
-                            device=self.deviceName,
-                        ),
                         PlotContrastiveWeightsCallback(
                             save_dir=self.log_dir if is_tbcallback else None,
                         ),
@@ -1752,6 +1765,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             save_dir=self.log_dir if is_tbcallback else None,
                         ),
                     ]
+                    if add_viz_callback:
+                        callbacks.append(
+                            ContrastiveVisualizer(
+                                viz_x=viz_inputs,
+                                viz_y=viz_linpos,
+                                encoder_model=self.viz_encoder,
+                                params=self.params,
+                                save_dir=self.log_dir if is_tbcallback else None,
+                                trial_idx=best_row_idx,
+                                device=self.deviceName,
+                            ),
+                        )
 
                 if self.params.reduce_lr_on_plateau:
                     reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -1769,8 +1794,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     # we need to keep wandb callbacks at the very end to get back previous manual logs
                     callbacks.append(wandb_callback)
 
-                if found_foundation_transformer:  # 3. Train for a few "Warmup" epochs
-                    alignment_epochs = kwargs.get("alignment_epochs", 10)
+                if (
+                    found_foundation_transformer and not fine_tune
+                ):  # 3. Train for a few "Warmup" epochs
+                    alignment_epochs = kwargs.get("alignment_epochs", 20)
                     print("Starting Phase 1: Training mouse-dependent CNN only...")
                     self.model.fit(
                         datasets["train"],
@@ -1804,7 +1831,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             lrs=[self.params.learningRates[0] / 10],  # Start lower
                             total_epochs=self.params.nEpochs - alignment_epochs,
                             warmup_epochs=2,  # Short warmup for the new unfrozen weights
-                        ).schedule_cosine_warmup(epoch, lr)
+                        ).schedule_cosine_warmup(epoch - alignment_epochs, lr)
                     )
                     if earlyStop:
                         es_callback = tf.keras.callbacks.EarlyStopping(
@@ -1812,23 +1839,38 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             patience=5,
                             min_delta=0.001,
                             restore_best_weights=True,
-                            start_from_epoch=6,
+                            start_from_epoch=alignment_epochs + 3,
                         )
                         callbacks.append(es_callback)
 
                     callbacks = [
                         c
                         for c in callbacks
-                        if not isinstance(c, tf.keras.callbacks.LearningRateScheduler)
+                        if not isinstance(
+                            c,
+                            (
+                                tf.keras.callbacks.LearningRateScheduler,
+                                WandbMetricsLogger,
+                            ),
+                        )
                     ]
                     callbacks.append(phase2_scheduler)
-                    print(
-                        f"Starting Phase 2: Fine-tuning foundation weights at LR={fine_tune_lr}"
-                    )
+                    if self.debug:
+                        callbacks.append(
+                            wandb_callback
+                        )  # Ensure wandb callback is last for logging
                     remaining_epochs = self.params.nEpochs - alignment_epochs
+                    print(
+                        f"Starting Phase 2: Fine-tuning foundation weights at LR={fine_tune_lr} for max {remaining_epochs} epochs with early stopping={earlyStop}..."
+                    )
+                    if earlyStop:
+                        print(
+                            f"Early stopping will monitor validation loss with patience of 5 epochs and min_delta of 0.001, starting from epoch {alignment_epochs + 3}."
+                        )
                     hist = self.model.fit(
                         datasets["train"],
-                        epochs=remaining_epochs,
+                        epochs=self.params.nEpochs,
+                        initial_epoch=alignment_epochs,
                         callbacks=callbacks,  # Use your existing schedule and ES here
                         validation_data=datasets["test"],
                         steps_per_epoch=int(steps_per_epoch / 2),
@@ -1853,13 +1895,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         ]
                     )
                 )  # tf_op_layer_lossOfLossPredictor_loss
-                valLosses = np.transpose(
-                    np.stack(
-                        [
-                            hist.history["val_loss"],  # tf_op_layer_lossOfManifold
-                        ]
+                try:
+                    valLosses = np.transpose(
+                        np.stack(
+                            [
+                                hist.history["val_loss"],  # tf_op_layer_lossOfManifold
+                            ]
+                        )
                     )
-                )
+                except KeyError:
+                    valLosses = []
                 self.losses_fig(
                     self.trainLosses[key],
                     os.path.join(self.folderModels, str(winMS_max)),
@@ -2069,6 +2114,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         behaviorData: Dict,
         totMask,
         augmentation_config: Optional[NeuralDataAugmentation] = None,
+        is_sleep: bool = False,
         **kwargs,
     ) -> Tuple[Dict[str, tf.data.Dataset], Optional[Dict[str, np.ndarray]]]:
         """
@@ -2106,6 +2152,34 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         normalize_in_pipeline = kwargs.get(
             "normalize_in_pipeline", self.preprocess_normalization
         )
+        timeSleepStart = kwargs.pop("timeSleepStart", None)
+        timeSleepStop = kwargs.pop("timeSleepEnd", None)
+
+        if is_sleep and not isinstance(totMask, dict):
+            timeSleepStart_frombehav = (
+                np.array(behaviorData["positionTime"])
+                .flatten()[totMask.flatten()]
+                .min()
+            )
+            timeSleepStop_frombehav = (
+                np.array(behaviorData["positionTime"])
+                .flatten()[totMask.flatten()]
+                .max()
+            )
+
+            if timeSleepStart is not None and timeSleepStop is not None:
+                assert np.isclose(timeSleepStart, timeSleepStart_frombehav), (
+                    f"Provided timeSleepStart {timeSleepStart} does not match "
+                    f"behavioral data min time {timeSleepStart_frombehav}"
+                )
+                assert np.isclose(timeSleepStop, timeSleepStop_frombehav), (
+                    f"Provided timeSleepStop {timeSleepStop} does not match "
+                    f"timeSleepStart_frombehav {timeSleepStop_frombehav}"
+                )
+            else:
+                timeSleepStart = timeSleepStart_frombehav
+                timeSleepStop = timeSleepStop_frombehav
+
         if inference_mode and shuffle:
             raise ValueError(
                 "Shuffle should be set to False in inference mode to ensure deterministic outputs."
@@ -2140,6 +2214,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             return filter_by_pos_index
 
+        def get_time_filter(time_start, time_stop):
+            time_start = tf.constant(time_start, dtype=tf.float32)
+            time_stop = tf.constant(time_stop, dtype=tf.float32)
+
+            @tf.function
+            def filter_by_time(x):
+                time = x["time"]
+                return tf.logical_and(
+                    tf.greater_equal(time, time_start), tf.less_equal(time, time_stop)
+                )
+
+            return filter_by_time
+
         def filter_nan_pos(x):
             pos_data = x["pos"]
 
@@ -2172,9 +2259,48 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         def create_indices(vals):
             return self.create_indices(vals, shuffle=random_spiking)
 
+        if not os.path.exists(os.path.join(self.projectPath.dataPath, filename)):
+            raise FileNotFoundError(
+                f"TFRecord file {filename} not found in {self.projectPath.dataPath}"
+            )
+
+        pos_array = tf.cast(behaviorData["Positions"].copy(), dtype=tf.float32)
+        out_dim = pos_array.shape[1]
+
+        if not is_sleep:
+            if onTheFlyCorrection:
+                # Extract valid position rows (no NaN)
+                valid_rows = tf.math.logical_not(
+                    tf.math.reduce_any(tf.math.is_nan(pos_array), axis=1)
+                )
+                valid_positions = tf.boolean_mask(pos_array[:, :2], valid_rows)
+                maxPos = tf.reduce_max(valid_positions)
+
+                # Scale only position columns; keep any other columns unchanged
+                pos_array[:, :2] = (
+                    pos_array[:, :2] / maxPos
+                )  # Scale only first 2 columns
+                print(f"Scaling position columns by max value {maxPos:.4f}")
+
+            total_elements = tf.shape(pos_array)[0] * out_dim
+            flat_indices = tf.range(tf.cast(total_elements, tf.int64), dtype=tf.int64)
+
+            # 2. Flatten the position array completely to a 1D vector of shape [939534]
+            flat_pos_values = tf.reshape(pos_array, [-1])
+
+            # 3. Initialize the StaticHashTable with matching 1D constraints
+            pos_initializer = tf.lookup.KeyValueTensorInitializer(
+                flat_indices, flat_pos_values
+            )
+            pos_table = tf.lookup.StaticHashTable(
+                pos_initializer,
+                default_value=-1.0,  # Simple scalar fallback flag
+            )
+
         ndataset = tf.data.TFRecordDataset(
             os.path.join(self.projectPath.dataPath, filename),
-            buffer_size=100 * 1024 * 1024,  # 100MB read buffer
+            buffer_size=512 * 1024 * 1024,  # 512MB read buffer
+            num_parallel_reads=tf.data.AUTOTUNE,
         )
 
         if shuffle:
@@ -2192,30 +2318,42 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         for key in totMask.keys():
             # This is just max normalization to use if the behavioral data have not been normalized yet
             # Note: Only scale position columns (first 2 dims), not mixed-head targets
-            if onTheFlyCorrection:
-                # Extract valid position rows (no NaN)
-                valid_rows = np.logical_not(
-                    np.isnan(np.sum(behaviorData["Positions"], axis=1))
-                )
-                valid_positions = behaviorData["Positions"][
-                    valid_rows, :2
-                ]  # Only first 2 cols (x, y)
-                maxPos = np.nanmax(valid_positions)
-
-                # Scale only position columns; keep any other columns unchanged
-                posFeature = behaviorData["Positions"].copy()
-                posFeature[:, :2] = (
-                    posFeature[:, :2] / maxPos
-                )  # Scale only first 2 columns
-                print(f"Scaling position columns by max value {maxPos:.4f}")
-            else:
-                posFeature = behaviorData["Positions"]
-
             # posFeature is already of shape (N,dimOutput) because we ran data_helper.get_true_target before.
-            filter_op = get_mask_filter(totMask[key])
+            if not is_sleep:
+                filter_op = get_mask_filter(totMask[key])
+            else:
+                filter_op = get_time_filter(timeSleepStart, timeSleepStop)
             dataset = ndataset.filter(filter_op)
-            dataset = dataset.map(nnUtils.import_true_pos(posFeature))
-            dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
+
+            if not is_sleep:
+
+                @tf.function
+                def hash_import_pos(vals):
+                    updated_vals = dict(vals)
+                    start_idx = tf.cast(vals["pos_index"], tf.int64) * out_dim
+                    looked_up_indices = start_idx + tf.range(out_dim, dtype=tf.int64)
+                    looked_up_pos = pos_table.lookup(looked_up_indices)
+                    is_missing = tf.math.reduce_all(tf.math.equal(looked_up_pos, -1.0))
+                    updated_vals["pos"] = tf.cond(
+                        is_missing,
+                        lambda: tf.zeros([out_dim], dtype=tf.float32),
+                        lambda: looked_up_pos,
+                    )
+                    return updated_vals
+
+                dataset = dataset.map(
+                    hash_import_pos, num_parallel_calls=tf.data.AUTOTUNE
+                )
+                dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
+            else:
+
+                @tf.function
+                def remove_pos(vals):
+                    updated_vals = dict(vals)
+                    updated_vals["pos"] = tf.zeros([out_dim], dtype=tf.float32)
+                    return updated_vals
+
+                dataset = dataset.map(remove_pos, num_parallel_calls=tf.data.AUTOTUNE)
 
             # now that we have clean positions, we can resample if needed
             count_before = None
@@ -2223,6 +2361,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.params.OversamplingResampling
                 and key == "train"
                 and kwargs.get("oversampling_resampling", True)
+                and not inference_mode
             ):
                 two_d_pos = behaviorData["old_positions"]
 
@@ -2234,7 +2373,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
                 )
                 if "lin" in self.target.lower():
-                    dataset = dataset.map(nnUtils.import_true_pos(posFeature))
+                    dataset = dataset.map(nnUtils.import_true_pos(pos_array))
 
             def parse_serialized_sequence(vals):
                 return nnUtils.parse_serialized_sequence(
@@ -2275,7 +2414,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 and kwargs.get("enable_augmentation", True)
                 and augmentation_config is not None
                 and key != "test"
-                and not kwargs.get("inference_mode", False)
+                and not inference_mode
             )
 
             selective_oversampled_aug = (
@@ -2284,6 +2423,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 and kwargs.get("oversampling_resampling", True)
                 and kwargs.get("augment_only_oversampled", True)
                 and key == "train"
+                and not inference_mode
             )
 
             if selective_oversampled_aug:
@@ -2314,7 +2454,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         if k not in ["__oversampled_copy", "__rep_factor"]
                     }
 
-                    # branch_1: Augment oversampled data 'rep_factor' times
                     def _augment_path():
                         augmented_dict = nnUtils.apply_single_group_augmentation(
                             clean_vals,
@@ -2322,26 +2461,22 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             oversampling_augmentation_config,
                             num_augs=rep_factor,
                         )
-                        return tf.data.Dataset.from_tensor_slices(augmented_dict)
+                        return augmented_dict
 
-                    # branch_2: Keep original data (wrapped in a dimension of 1 to match structure)
                     def _standard_path():
-                        # If rep_factor can be > 1, the shapes won't match in tf.cond
-                        # We must handle the mismatch by ensuring both branches return the same rank/structure
                         batched_clean = tf.nest.map_structure(
                             lambda x: tf.expand_dims(x, axis=0), clean_vals
                         )
-                        return tf.data.Dataset.from_tensor_slices(batched_clean)
+                        return batched_clean
 
                     return tf.cond(was_oversampled, _augment_path, _standard_path)
 
-                dataset = dataset.interleave(
-                    maybe_augment_oversampled,
-                    num_parallel_calls=tf.data.AUTOTUNE,
-                    cycle_length=64,
-                    block_length=11,
-                    deterministic=False,
+                dataset = dataset.map(
+                    maybe_augment_oversampled, num_parallel_calls=tf.data.AUTOTUNE
                 )
+                dataset = (
+                    dataset.unbatch()
+                )  # Flatten the dataset back to individual examples after augmentation
                 dataset = dataset.shuffle(10000)
 
             if is_aug_active:
@@ -2351,18 +2486,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
                 print(f"Applying data augmentation to {key} dataset")
-                dataset = dataset.interleave(
-                    lambda x: tf.data.Dataset.from_tensor_slices(optimized_fn(x)),
-                    num_parallel_calls=tf.data.AUTOTUNE,
-                    cycle_length=64,
-                    block_length=11,
-                    deterministic=False,
-                )
+                dataset = dataset.map(optimized_fn, num_parallel_calls=tf.data.AUTOTUNE)
+                dataset = dataset.unbatch()
                 dataset = dataset.shuffle(
                     10000
                 )  # Shuffle after interleaving to mix augmented samples
 
-            # --- PRE-BATCHING SAVING POINT ---
             # Save the dataset state here: Unbatched, Unrepeated, Contains 'pos'
             save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
             save_parsed_parquet = kwargs.get("save_parsed_parquet", None)
@@ -2586,15 +2715,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         count_spikes: bool = False,
     ):
         if augmentation and augmentation_config:
+            n_groups = self.params.nGroups
+            group_keys = [f"group{g}" for g in range(n_groups)]
+            indices_keys = [f"indices{g}" for g in range(n_groups)]
 
             @tf.function
             def optimized_parse_with_augmentation(tensors):
                 # 1. Identify Spike Groups
-                original_groups = {}
-                for g in range(self.params.nGroups):
-                    g_key = f"group{g}"
-                    if g_key in tensors:
-                        original_groups[g_key] = tensors[g_key]
+                original_groups = {k: tensors[k] for k in group_keys}
 
                 # 2. Call the Vectorized Augmentation logic
                 # This returns a dict where every tensor has a new leading 'augmentation' dimension
@@ -2603,6 +2731,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     original_groups,
                     self.params,
                     augmentation_config,
+                    group_keys,
+                    indices_keys,
                     count_spikes,
                 )
 
@@ -3047,73 +3177,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             None  # Position loss is not explicitly returned by the model anymore
         )
 
-        # 2. Extract metadata in a single pass
-        print("Extracting metadata...")
-        list_pos = []
-        list_times = []
-        list_times_behavior = []
-        list_pos_index = []
-        list_groups = []
-        list_speed_filter = []
-        list_index_in_dat = []
-
-        # Spike Counts (Dynamic dict to handle variable groups)
-        dict_spike_counts = {
-            f"group{g}_spikes_count": [] for g in range(self.params.nGroups)
-        }
-
-        for inputs, targets in tqdm(dataset, desc="Gathering metadata"):
-            # Reconstruct full Y ground truth from individual target heads
-            max_idx = 0
-            for name, spec in self.target_structure.items():
-                if name == "latent":
-                    continue  # Skip latent for ground truth reconstruction
-                max_idx = max(max_idx, spec["slice"][1])
-
-            batch_size = next(iter(targets.values())).shape[0]
-            batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
-
-            for name, spec in self.target_structure.items():
-                if name == "latent":
-                    continue  # Skip latent for ground truth reconstruction
-                if name in targets:
-                    start, end = spec["slice"]
-                    batch_y_true[:, start:end] = targets[name].numpy()
-
-            list_pos.append(batch_y_true)
-            list_times.append(inputs["time"].numpy())
-            list_times_behavior.append(inputs["time_behavior"].numpy())
-            list_pos_index.append(inputs["pos_index"].numpy())
-            list_index_in_dat.append(inputs["indexInDat"].numpy())
-            list_groups.append(inputs["groups"].numpy())
-
-            # Optional keys (use .get or check)
-            if "speedFilter" in inputs:
-                list_speed_filter.append(inputs["speedFilter"].numpy())
-
-            if extract_spikes_counts:
-                for g in range(self.params.nGroups):
-                    key = f"group{g}_spikes_count"
-                    if key in inputs:
-                        dict_spike_counts[key].append(inputs[key].numpy())
-
-        # 3. Concatenate all batches into single arrays
-        print("Concatenating results...")
-        # full_pred_features and full_pos_loss are already arrays/None from predict
-
-        full_feature_true = np.concatenate(list_pos, axis=0)
-        full_times = np.concatenate(list_times, axis=0).flatten()
-        full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
-        full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
-
-        # Handle Speed Mask
-        # If speedFilter was in dataset, use it. Otherwise compute via lookup
-        if len(list_speed_filter) > 0:
-            windowmaskSpeed = np.concatenate(list_speed_filter, axis=0).flatten()
-        else:
-            # Fallback to your original lookup method
-            print("Looking up speed mask from original array...")
-            windowmaskSpeed = speedMask[full_pos_index]
+        (
+            full_feature_true,
+            full_times,
+            full_times_behavior,
+            full_pos_index,
+            windowmaskSpeed,
+            dict_spike_counts,
+            list_index_in_dat,
+        ) = self._extract_metadata_from_dataset(
+            dataset, speedMask, extract_spikes_counts=extract_spikes_counts
+        )
 
         # -------------------------------------------------------------------------
         # 3. CONSOLIDATED POST-PROCESSING
@@ -3222,6 +3296,93 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         return testOutput
 
+    def _extract_metadata_from_dataset(
+        self,
+        dataset,
+        speedMask: Optional[np.ndarray] = None,
+        extract_spikes_counts: bool = False,
+    ):
+        # 2. Extract metadata in a single pass
+        print("Extracting metadata...")
+        list_pos = []
+        list_times = []
+        list_times_behavior = []
+        list_pos_index = []
+        list_groups = []
+        list_speed_filter = []
+        list_index_in_dat = []
+
+        # Spike Counts (Dynamic dict to handle variable groups)
+        dict_spike_counts = {
+            f"group{g}_spikes_count": [] for g in range(self.params.nGroups)
+        }
+
+        for inputs, targets in tqdm(dataset, desc="Gathering metadata"):
+            # Reconstruct full Y ground truth from individual target heads
+            max_idx = 0
+            for name, spec in self.target_structure.items():
+                if name == "latent":
+                    continue  # Skip latent for ground truth reconstruction
+                max_idx = max(max_idx, spec["slice"][1])
+
+            batch_size = next(iter(targets.values())).shape[0]
+            batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
+
+            for name, spec in self.target_structure.items():
+                if name == "latent":
+                    continue  # Skip latent for ground truth reconstruction
+                if name in targets:
+                    start, end = spec["slice"]
+                    batch_y_true[:, start:end] = targets[name].numpy()
+
+            list_pos.append(batch_y_true)
+            list_times.append(inputs["time"].numpy())
+            list_times_behavior.append(inputs["time_behavior"].numpy())
+            list_pos_index.append(inputs["pos_index"].numpy())
+            list_index_in_dat.append(inputs["indexInDat"].numpy())
+            list_groups.append(inputs["groups"].numpy())
+
+            # Optional keys (use .get or check)
+            if "speedFilter" in inputs:
+                list_speed_filter.append(inputs["speedFilter"].numpy())
+
+            if extract_spikes_counts:
+                for g in range(self.params.nGroups):
+                    key = f"group{g}_spikes_count"
+                    if key in inputs:
+                        dict_spike_counts[key].append(inputs[key].numpy())
+
+        # 3. Concatenate all batches into single arrays
+        print("Concatenating results...")
+        # full_pred_features and full_pos_loss are already arrays/None from predict
+
+        full_feature_true = np.concatenate(list_pos, axis=0)
+        full_times = np.concatenate(list_times, axis=0).flatten()
+        full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
+        full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
+
+        # Handle Speed Mask
+        # If speedFilter was in dataset, use it. Otherwise compute via lookup
+        if len(list_speed_filter) > 0:
+            windowmaskSpeed = np.concatenate(list_speed_filter, axis=0).flatten()
+        elif speedMask is not None:
+            # Fallback to your original lookup method
+            print("Looking up speed mask from original array...")
+            windowmaskSpeed = speedMask[full_pos_index]
+        else:
+            print("No speed mask provided or found in dataset. Defaulting to all True.")
+            windowmaskSpeed = np.ones_like(full_pos_index, dtype=bool)
+
+        return (
+            full_feature_true,
+            full_times,
+            full_times_behavior,
+            full_pos_index,
+            windowmaskSpeed,
+            dict_spike_counts,
+            list_index_in_dat,
+        )
+
     def _compute_metrics_and_plots(
         self, featurePred, featureTrue, phase, windowSizeMS, testOutput, sleep=False
     ):
@@ -3319,10 +3480,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Unpack kwargs
         l_function = kwargs.get("l_function", [])
         windowSizeDecoder = kwargs.get("windowSizeDecoder", None)
-        windowSizeMS = kwargs.get("windowSizeMS", 36)
+        windowSizeMS = kwargs.pop("windowSizeMS", 36)
         isPredLoss = kwargs.get("isPredLoss", False)
         strideFactor = kwargs.get("strideFactor", 1)
         T_scaling = kwargs.get("T_scaling", None)
+        extract_spikes_counts = kwargs.get("extract_spikes_counts", False)
 
         # Create the folder
         if windowSizeDecoder is None:
@@ -3347,32 +3509,36 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
         else:
             try:
-                self.model = tf.keras.models.load_model(
-                    os.path.join(
-                        self.folderModels,
-                        str(windowSizeMS),
-                        "savedModels",
-                        "full_model.keras",
-                    ),
-                    skip_mismatch=True,
-                )
-            except FileNotFoundError:
-                print("loading from savedModels failed, trying full checkpoint ")
                 try:
-                    self.model.load_weights(
+                    self.model = tf.keras.models.load_model(
                         os.path.join(
-                            self.folderModels, str(windowSizeMS), "full" + "/cp.ckpt"
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "savedModels",
+                            "full_model.keras",
                         ),
                     )
-                except (FileNotFoundError, ValueError):
+                except Exception as e:
+                    print(f"could not load keras model due to {e}. Trying with weights")
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
                             str(windowSizeMS),
-                            "full",
-                            "cp.weights.h5",
+                            "savedModels",
+                            "full_cp.weights.h5",
                         ),
+                        skip_mismatch=True,
                     )
+            except FileNotFoundError:
+                print("loading from savedModels failed, trying full checkpoint ")
+                self.model.load_weights(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "full",
+                        "cp.weights.h5",
+                    ),
+                )
 
         print("decoding sleep epochs")
         predictions = {}
@@ -3384,138 +3550,77 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 sleepFilename = f"datasetSleep_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
             else:
                 sleepFilename = f"datasetSleep_stride{str(windowSizeMS)}.tfrec"
-            # Get the dataset
-            dataset = tf.data.TFRecordDataset(
-                os.path.join(self.projectPath.dataPath, sleepFilename)
+
+            totMask = get_epochs_mask(
+                behaviorData=behaviorData,
+                sleepEpochs=[[timeSleepStart, timeSleepStop]],
+            )
+            print(
+                f"Total sleep duration: {(timeSleepStop - timeSleepStart) / 3600:.2f} hours for {sleepName}."
             )
 
-            def _parse_function(*vals):
-                return nnUtils.parse_serialized_spike(self.featDesc, *vals)
-
-            dataset = dataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-
-            def filter_by_time(x):
-                return tf.math.logical_and(
-                    tf.squeeze(tf.math.less_equal(x["time"], timeSleepStop)),
-                    tf.squeeze(tf.math.greater_equal(x["time"], timeSleepStart)),
-                )
-
-            def map_parse_serialized_sequence(*vals):
-                return nnUtils.parse_serialized_sequence(
-                    self.params, *vals, batched=True
-                )
-
-            @tf.function
-            def map_outputs(vals):
-                # Move 'pos' to targets, rest stay in inputs
-                inputs_dict = {k: v for k, v in vals.items() if k != "pos"}
-                # Structured targets matching model outputs
-                targets_dict = {}
-                for name, spec in self.target_structure.items():
-                    start_idx, end_idx = spec["slice"]
-                    targets_dict[name] = vals["pos"][:, start_idx:end_idx]
-
-                # latent targets are the 2D position for contrastive regression
-                if "latent" in self.outNames:
-                    targets_dict["latent"] = vals["pos"]
-
-                return (inputs_dict, targets_dict)
-
-            dataset = dataset.filter(filter_by_time)
-            dataset = dataset.batch(self.params.batch_size, drop_remainder=True)
-
-            dataset = dataset.map(
-                map_parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
+            datasets, counts = self._dataset_loading_pipeline(
+                sleepFilename,
+                windowSizeMS,
+                behaviorData,
+                totMask,
+                inference_mode=True,
+                onTheFlyCorrection=False,
+                shuffle=False,
+                is_sleep=True,
+                timeSleepStart=timeSleepStart,
+                timeSleepStop=timeSleepStop,
+                **kwargs,
             )
-            dataset = dataset.map(
-                self.create_indices, num_parallel_calls=tf.data.AUTOTUNE
-            )
-            dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
-            dataset.cache()
-            dataset.prefetch(tf.data.AUTOTUNE)
+            dataset = datasets["test"]
             # Infer
             print(f"Inferring {sleepName} values")
             preds_dict = self.model.predict(dataset, verbose=1)
 
-            # -------------------------------------------------------------------------
-            # CONSOLIDATED POST-PROCESSING
-            # -------------------------------------------------------------------------
+            (
+                full_feature_true,
+                full_times,
+                full_times_behavior,
+                full_pos_index,
+                windowmaskSpeed,
+                dict_spike_counts,
+                list_index_in_dat,
+            ) = self._extract_metadata_from_dataset(
+                dataset, None, extract_spikes_counts=extract_spikes_counts
+            )
+
             decoded_results = self.decode_predictions(
                 preds=preds_dict,
                 T_scaling=T_scaling,
                 l_function=l_function,
             )
 
-            output_preds = decoded_results["featurePred"]
-
-            # output is used for predictions[sleepName] packaging
-            output = (output_preds, None)
-
-            # Post-infer management: Gather metadata efficiently in a single pass
-            print(f"gathering metadata for {sleepName}")
-            list_times = []
-            list_posIndex = []
-            list_IDdat = []
-            list_pos = []
-
-            for inputs, targets in tqdm(
-                dataset, desc=f"Gathering metadata {sleepName}"
-            ):
-                list_times.append(inputs["time"].numpy())
-                list_posIndex.append(inputs["pos_index"].numpy())
-                list_IDdat.append(inputs["indexInDat"].numpy())
-
-                # Reconstruct full Y ground truth from individual target heads
-                max_idx = 0
-                for spec in self.target_structure.values():
-                    max_idx = max(max_idx, spec["slice"][1])
-
-                batch_size = next(iter(targets.values())).shape[0]
-                batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
-
-                for name, spec in self.target_structure.items():
-                    if name in targets:
-                        start, end = spec["slice"]
-                        batch_y_true[:, start:end] = targets[name].numpy()
-
-                list_pos.append(batch_y_true)
-
-            times = np.concatenate(list_times, axis=0).flatten()
-            posIndex = np.concatenate(list_posIndex, axis=0).flatten()
-            IDdat = [batch for batch in list_IDdat]
-
-            # featureTrue if targets were present (some sleep recordings might have it)
-            featureTrue = None
-            if list_pos:
-                featureTrue = np.concatenate(list_pos, axis=0)
-                featureTrue = np.reshape(featureTrue, [output[0].shape[0], -1])
-
+            full_index_raw = [
+                row.tolist() for batch in list_index_in_dat for row in batch
+            ]
             predictions[sleepName] = {
-                "featurePred": output[0],
-                "featureTrue": featureTrue,  # Still add even if None for consistency
-                "times": times,
-                "posIndex": posIndex,
-                "indexInDat": IDdat,
+                "times": full_times,
+                "posIndex": full_pos_index,
+                "indexInDat": full_index_raw,
             }
+            for name, spec in decoded_results.items():
+                if name not in predictions[sleepName]:
+                    predictions[sleepName][name] = spec
 
-            # If we have targets, compute metrics for this sleep epoch
-            if featureTrue is not None:
-                self._compute_metrics_and_plots(
-                    featurePred=output[0],
-                    featureTrue=featureTrue,
-                    phase=sleepName,
-                    windowSizeMS=windowSizeMS,
-                    testOutput=predictions[sleepName],
-                    sleep=True,
-                )
-            if l_function:
-                projPredPos, linearPred = l_function(output[0][:, :2])
-                predictions[sleepName]["projPred"] = projPredPos
-                predictions[sleepName]["linearPred"] = linearPred
-
-            if getattr(self.params, "GaussianHeatmap", False):
-                # add uncertainty and confidence metrics to output dict
-                print("Not implemented yet")
+            # Merge other metrics from decoding
+            for k in [
+                "projPred",
+                "projTruePos",
+                "linearPred",
+                "linearTrue",
+                "logits_hw",
+                "var_total",
+                "Hn",
+                "maxp",
+                "T_scaling",
+            ]:
+                if k in decoded_results.keys():
+                    predictions[sleepName][k] = decoded_results[k]
 
         # Save the results
         for key in predictions.keys():
@@ -4328,7 +4433,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             fig, ax = plt.subplots()
             ax.plot(trainLosses[:, 0], label="train losses")
             ax.set_title("position loss")
-            ax.plot(valLosses[:, 0], label="validation position loss", c="orange")
+            if list(valLosses):
+                ax.plot(valLosses[:, 0], label="validation position loss", c="orange")
             # ax[1].plot(trainLosses[:, 1], label="train loss prediction loss")
             # ax[1].set_title("loss predictor loss")
             # ax[1].plot(valLosses[:, 1], label="validation loss prediction loss")

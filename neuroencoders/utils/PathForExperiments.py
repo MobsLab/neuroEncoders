@@ -4,7 +4,10 @@ import os
 import warnings
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import scipy.io
+
+from neuroencoders.utils.wrappers import clean_mat_structure
 
 
 def path_for_experiments(
@@ -29,13 +32,13 @@ def path_for_experiments(
         - 'name': List of mouse names
         - 'group': List of group classifications (for UMazePAG)
 
-     Currently used mice 28/05/2025
+     Currently used mice 29/06/2025
      -----------------------------------------------------------------------------------------------
      |      Known       |        MFB         |        UMazePAG        |    Reversal     |   Novel   |
      -----------------------------------------------------------------------------------------------
-     |  M1336_known     |  M1336_MFB         |  M1186                 |  M1199_reversal | M1230_Novel |
-     |  M1230_Known     |  M1117             |  M1199_PAG             |                 |             |
-     |                  |  M1281_MFB         |  M1182                 |                 |             |
+     |  M1336_known     |  M1336_MFB         |  M1186_PAG             |  M1199_reversal | M1230_Novel |
+     |  M1230_Known     |  M1117             |  M1199_PAG             |  M994_reversal  |             |
+     |                  |  M1281_MFB         |  M1182_PAG             |                 |             |
      |                  |  M1168MFB          |  M994_PAG              |                 |             |
      |                  |  M1239MFB          |  M1239_PAG             |                 |             |
      |                  |  M1162_MFB         |  M1162_PAG             |                 |             |
@@ -82,7 +85,7 @@ def path_for_experiments(
         "m1199_mfb2",
     ]
     UMazePAG_keys = [
-        "m1186_mfb",
+        "m1186_pag",
         "m1199_pag",
         "m1182",
         "m994_PAG",
@@ -90,7 +93,7 @@ def path_for_experiments(
         "m1162_PAG",
         "m905_pag",
     ]
-    Reversal_keys = ["m1199_reversal"]
+    Reversal_keys = ["m1199_reversal", "m994_reversal"]
     Known_keys = ["m1336_known", "m1230_Known"]
     Novel_keys = ["m1230_Novel"]
 
@@ -100,11 +103,12 @@ def path_for_experiments(
     # Define the first dictionary (python_dict equivalent)
     python_dict = {
         "m1168MFB": f"neuroencoders_1021/_work/M1168_MFB/{training_name}",
-        "m1186_mfb": f"neuroencoders_1021/_work/M1186_MFB/{training_name}",
+        "m1186_pag": f"neuroencoders_1021/_work/M1186_PAG/{training_name}",
         "m1336_mfb": f"neuroencoders_1021/_work/M1336_MFB/{training_name}",
         "m1336_known": f"neuroencoders_1021/_work/M1336_known/{training_name}",
         "m1199_pag": f"neuroencoders_1021/_work/M1199_PAG/{training_name}",
         "m1199_reversal": f"neuroencoders_1021/_work/M1199_reversal/{training_name}",
+        "m994_reversal": f"neuroencoders_1021/_work/M994_reversal/{training_name}",
         "m1117": f"neuroencoders_1021/_work/M1117_MFB/{training_name}",
         "m1281_mfb": f"neuroencoders_1021/_work/M1281_MFB/{training_name}",
         "m1182": f"neuroencoders_1021/_work/M1182_PAG/{training_name}",
@@ -124,9 +128,10 @@ def path_for_experiments(
     subpython_REAL = {
         "m1336_mfb": "/media/nas7/ProjetERC1/StimMFBWake/M1336/",
         "m1336_known": "/media/nas7/ProjetERC1/Known/M1336/",
-        "m1186_mfb": "/media/nas6/ProjetERC2/Mouse-K186/20210409/_Concatenated/",
+        "m1186_pag": "/media/nas6/ProjetERC2/Mouse-K186/20210409/_Concatenated/",
         "m1199_pag": "/media/nas6/ProjetERC2/Mouse-K199/20210408/_Concatenated/",
         "m1199_reversal": "/media/nas6/ProjetERC3/M1199/Reversal/",
+        "m994_reversal": "/media/nas5/ProjetERC3/M994/Reversal/",
         "m1117": "/media/nas5/ProjetERC1/StimMFBWake/M1117/",
         "m1281_mfb": "/media/nas7/ProjetERC1/StimMFBWake/M1281/",
         "m1168MFB": "/media/nas5/ProjetERC1/StimMFBWake/M1168/",
@@ -143,32 +148,32 @@ def path_for_experiments(
         "m905_pag": "/media/nas5/ProjetERC2/Mouse-905/20190404/PAGExp/_Concatenated/",
     }
 
-    # Select appropriate keys based on experiment name
-    if experiment_name == "SubMFB":
+    # Select appropriate keys based on experiment name.lower()
+    if experiment_name.lower() == "submfb":
         selected_keys = MFB_keys
-    elif experiment_name == "SubMFBReal":
+    elif experiment_name.lower() == "submfbreal":
         selected_keys = MFB_keys
-    elif experiment_name == "SubPAG":
+    elif experiment_name.lower() == "subpag":
         selected_keys = UMazePAG_keys
-    elif experiment_name == "SubPAGReal":
+    elif experiment_name.lower() == "subpagreal":
         selected_keys = UMazePAG_keys
-    elif experiment_name == "SubReversal":
+    elif experiment_name.lower() == "subreversal":
         selected_keys = Reversal_keys
-    elif experiment_name == "SubReversalReal":
+    elif experiment_name.lower() == "subreversalreal":
         selected_keys = Reversal_keys
-    elif experiment_name == "SubKnown":
+    elif experiment_name.lower() == "subknown":
         selected_keys = Known_keys
-    elif experiment_name == "SubKnownReal":
+    elif experiment_name.lower() == "subknownreal":
         selected_keys = Known_keys
-    elif experiment_name == "SubNovel":
+    elif experiment_name.lower() == "subnovel":
         selected_keys = Novel_keys
-    elif experiment_name == "SubNovelReal":
+    elif experiment_name.lower() == "subnovelreal":
         selected_keys = Novel_keys
-    elif experiment_name == "Sub":
+    elif experiment_name.lower() == "sub":
         selected_keys = (
             MFB_keys + UMazePAG_keys + Reversal_keys + Known_keys + Novel_keys
         )
-    elif experiment_name == "SubReal":
+    elif experiment_name.lower() == "subreal":
         selected_keys = (
             MFB_keys + UMazePAG_keys + Reversal_keys + Known_keys + Novel_keys
         )
@@ -195,8 +200,14 @@ def path_for_experiments(
         expe_info_file = os.path.join(path, "ExpeInfo.mat")
         if os.path.isfile(expe_info_file):
             try:
-                mat_data = scipy.io.loadmat(expe_info_file)
-                return str(mat_data.get("ExpeInfo", None))
+                mat_data = scipy.io.loadmat(expe_info_file, spmatrix=False)
+                expe_info = mat_data.get("ExpeInfo", None)
+                if expe_info is not None:
+                    expe_info_clean = clean_mat_structure(expe_info)
+                    return expe_info_clean
+                else:
+                    warnings.warn(f"ExpeInfo variable not found in {expe_info_file}")
+                    return None
             except Exception as e:
                 warnings.warn(f"Could not load ExpeInfo.mat from {expe_info_file}: {e}")
                 return None
@@ -221,7 +232,7 @@ def path_for_experiments(
         Dir["expe_info"].append(expe_info)
 
     # Handle Sub experiments
-    if "Sub" in experiment_name:
+    if "sub" in experiment_name.lower():
         use_real = "Real" in experiment_name
         current_dict = subpython_REAL if use_real else python_dict
         real_dict = subpython_REAL
@@ -277,7 +288,6 @@ def path_for_experiments(
             "/media/nas6/ProjetERC2/Mouse-K199/20210408/_Concatenated/",
             "/media/nas7/ProjetERC2/Mouse-K230/20210927/_Concatenated/",
             "/media/nas7/ProjetERC2/Mouse-K239/2021110/_Concatenated/",
-            "/media/nas5/ProjetERC2/Mouse-905/20190404/PAGExp/_Concatenated/",
         ]
 
         # Special case for Mouse1230 with two paths
@@ -414,7 +424,7 @@ def path_for_experiments(
     # Get mouse names
     for i, path in enumerate(Dir["path"]):
         try:
-            Dir["manipe"].append(Dir["expe_info"][i]["SessionType"].item(0)[0])
+            Dir["manipe"].append(Dir["expe_info"][i]["SessionType"])
         except (KeyError, TypeError):
             Dir["manipe"].append(experiment_name)
 
@@ -496,6 +506,62 @@ def path_for_experiments(
                 group_dict["PFC"][j - 1] = "PFC"
 
         Dir["group"] = group_dict
+
+    if not selected_keys:
+
+        def get_digits(s):
+            digits = "".join(filter(str.isdigit, s))
+            return int(digits) if digits else None
+
+        Dir_sub = path_for_experiments("Sub", training_name)
+        selected_keys = [
+            name + manipe for name, manipe in zip(Dir_sub["name"], Dir_sub["manipe"])
+        ]
+        selected_numbers = [get_digits(key) for key in Dir_sub["name"]]
+
+        for i, (name, manipe) in enumerate(zip(Dir["name"], Dir["manipe"])):
+            # scrap number from name
+            number_curr = int("".join(filter(str.isdigit, name)))
+            if number_curr in selected_numbers:
+                sub_index = np.where(np.array(selected_numbers) == number_curr)[0]
+                # also check that manipe is the same
+                sub_manipe = np.where(
+                    [
+                        manipe.lower() in val.lower()
+                        for i, val in enumerate(selected_keys)
+                        if i in sub_index
+                    ]
+                )[0]
+                # there should be only one match
+                matching_idx = sub_index[sub_manipe]
+                if len(matching_idx) == 1:
+                    final_idx = matching_idx[0]
+                    Dir["path"][i] = Dir_sub["path"][final_idx]
+                    Dir["network_path"][i] = Dir_sub["network_path"][final_idx]
+                    Dir["results"][i] = Dir_sub["results"][final_idx]
+                elif len(matching_idx) > 1:
+                    try:
+                        all_selected_network_path = [
+                            path for path in Dir_sub["network_path"]
+                        ]
+                        curr_net_path = Dir["path"][i]
+                        if curr_net_path in all_selected_network_path:
+                            final_idx = all_selected_network_path.index(curr_net_path)
+                            Dir["path"][i] = Dir_sub["path"][final_idx]
+                            Dir["network_path"][i] = Dir_sub["network_path"][final_idx]
+                            Dir["results"][i] = Dir_sub["results"][final_idx]
+
+                        print(
+                            f"Multiple matches found for {name} with manipe {manipe}. Please check the selected keys because we had to take {Dir['path'][i]}."
+                        )
+                        print(
+                            f"we could have taken {[Dir_sub['path'][idx] for idx in matching_idx if idx != final_idx]} instead"
+                        )
+                    except Exception as e:
+                        print(f"Error accessing network paths: {e}")
+                        raise ValueError(
+                            f"Warning: Multiple matches found for {name}: {[Dir_sub['path'][final_idx] for final_idx in matching_idx]}"
+                        )
 
     return Dir
 

@@ -260,7 +260,7 @@ figure.constrained_layout.use: False
 ## ***************************************************************************
 ## * IMAGES                                                                  *
 ## ***************************************************************************
-image.aspect: equal
+image.aspect: auto
 image.interpolation: auto
 image.cmap: viridis
 image.lut: 256
