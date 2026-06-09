@@ -29,7 +29,12 @@ from pynapple import (
 from scipy.io import loadmat
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+)
 from statannotations.Annotator import Annotator
 from tqdm import tqdm
 
@@ -4315,6 +4320,271 @@ class Results_Loader(TuningCurvesPlotter):
             **kwargs,
         )
 
+    def mean_error_matrix_linerrors_by_speed_new(
+        self,
+        nbins=40,
+        save=True,
+        folder=None,
+        show=False,
+        nameExp_list=None,
+        phase_list=None,
+        winMS_list=None,
+        removeMice_list=None,
+    ):
+        import os
+
+        import cmcrameri.cm as cmc
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        print("this is even newer")
+
+        folder = folder or getattr(self, "folderFigures", None)
+        used_df = self.results_df.copy()
+
+        if removeMice_list is not None:
+            if not isinstance(removeMice_list, list):
+                removeMice_list = [removeMice_list]
+            used_df = used_df.query("mouse_name not in @removeMice_list")
+
+        grouped = used_df.groupby(["nameExp", "phase", "winMS"])
+
+        # --- [Filtering Logic] ---
+        if nameExp_list is not None:
+            if not isinstance(nameExp_list, list):
+                nameExp_list = [nameExp_list]
+            grouped = grouped.filter(lambda x: x.name[0] in nameExp_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
+        if phase_list is not None:
+            if not isinstance(phase_list, list):
+                phase_list = [phase_list]
+            grouped = grouped.filter(lambda x: x.name[1] in phase_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
+        if winMS_list is not None:
+            if not isinstance(winMS_list, list):
+                winMS_list = [winMS_list]
+            winMS_list = [int(w) for w in winMS_list]
+            grouped = grouped.filter(lambda x: int(x.name[2]) in winMS_list).groupby(
+                ["nameExp", "phase", "winMS"]
+            )
+
+        # ---------------------------------------------------------------------
+        # PASS 1: Extract data and determine the GLOBAL minimum sample size
+        # ---------------------------------------------------------------------
+        global_min_samples = float("inf")
+        processed_groups = {}
+
+        for (nameExp, phase, winMS), df in grouped:
+            df = df.reset_index(drop=False)
+
+            linPred_fast_list, linTrue_fast_list = [], []
+            linPred_slow_list, linTrue_slow_list = [], []
+
+            for _, row in df.iterrows():
+                speed_mask = row["speedMask"]
+                epochMask = np.ones_like(row["timeNN"], dtype=bool)
+
+                # Fast
+                mask_fast = speed_mask & epochMask
+                linPred_fast_list.append(row["linearPred"][mask_fast])
+                linTrue_fast_list.append(row["linearTrue"][mask_fast])
+
+                # Slow
+                mask_slow = ~speed_mask & epochMask
+                linPred_slow_list.append(row["linearPred"][mask_slow])
+                linTrue_slow_list.append(row["linearTrue"][mask_slow])
+
+            # Flatten row-wise outputs into continuous arrays
+            fast_pred = (
+                np.concatenate(linPred_fast_list).reshape(-1)
+                if linPred_fast_list
+                else np.array([])
+            )
+            fast_true = (
+                np.concatenate(linTrue_fast_list).reshape(-1)
+                if linTrue_fast_list
+                else np.array([])
+            )
+
+            slow_pred = (
+                np.concatenate(linPred_slow_list).reshape(-1)
+                if linPred_slow_list
+                else np.array([])
+            )
+            slow_true = (
+                np.concatenate(linTrue_slow_list).reshape(-1)
+                if linTrue_slow_list
+                else np.array([])
+            )
+
+            n_fast = len(fast_pred)
+            n_slow = len(slow_pred)
+
+            # Update our global minimum threshold with non-empty groups
+            if n_fast > 0:
+                global_min_samples = min(global_min_samples, n_fast)
+            if n_slow > 0:
+                global_min_samples = min(global_min_samples, n_slow)
+
+            # Cache raw data subsets in memory to avoid repetitive parsing
+            processed_groups[(nameExp, phase, winMS)] = {
+                "fast_pred": fast_pred,
+                "fast_true": fast_true,
+                "slow_pred": slow_pred,
+                "slow_true": slow_true,
+            }
+
+        # If no valid data points were found anywhere, terminate early
+        if global_min_samples == float("inf") or global_min_samples == 0:
+            print("Warning: No valid data found to compute matrices.")
+            return
+
+        print(
+            f"Global matching enabled. Undersampling all conditions to: {global_min_samples} points."
+        )
+
+        # ---------------------------------------------------------------------
+        # PASS 2: Apply global undersampling, build matrices, and calculate global vmax
+        # ---------------------------------------------------------------------
+        all_matrices = []
+        global_vmax = 0.0
+        rng = np.random.default_rng(
+            seed=42
+        )  # Structured random state for reproducibility
+
+        for (nameExp, phase, winMS), data in processed_groups.items():
+            fast_pred, fast_true = data["fast_pred"], data["fast_true"]
+            slow_pred, slow_true = data["slow_pred"], data["slow_true"]
+
+            # Undersample Fast
+            if len(fast_pred) >= global_min_samples:
+                idx_fast = rng.choice(
+                    len(fast_pred), size=global_min_samples, replace=False
+                )
+                fast_pred = fast_pred[idx_fast]
+                fast_true = fast_true[idx_fast]
+
+            # Undersample Slow
+            if len(slow_pred) >= global_min_samples:
+                idx_slow = rng.choice(
+                    len(slow_pred), size=global_min_samples, replace=False
+                )
+                slow_pred = slow_pred[idx_slow]
+                slow_true = slow_true[idx_slow]
+
+            # Compute Histograms
+            H_fast, H_slow, xedges, yedges = None, None, None, None
+
+            if len(fast_pred) > 0:
+                H_fast, xedges, yedges = np.histogram2d(
+                    fast_pred,
+                    fast_true,
+                    bins=(nbins, nbins),
+                    range=[[0, 1], [0, 1]],
+                )
+                with np.errstate(invalid="ignore"):
+                    row_sums = H_fast.sum(axis=1, keepdims=True)
+                    H_fast = np.where(row_sums > 0, H_fast / row_sums, 0)
+                global_vmax = max(global_vmax, H_fast.max())
+
+            if len(slow_pred) > 0:
+                H_slow, xedges, yedges = np.histogram2d(
+                    slow_pred,
+                    slow_true,
+                    bins=(nbins, nbins),
+                    range=[[0, 1], [0, 1]],
+                )
+                with np.errstate(invalid="ignore"):
+                    row_sums = H_slow.sum(axis=1, keepdims=True)
+                    H_slow = np.where(row_sums > 0, H_slow / row_sums, 0)
+                global_vmax = max(global_vmax, H_slow.max())
+
+            if H_fast is not None or H_slow is not None:
+                extent = (
+                    [xedges[0], xedges[-1], yedges[0], yedges[-1]]
+                    if xedges is not None
+                    else [0, 1, 0, 1]
+                )
+                all_matrices.append(
+                    {
+                        "metadata": (nameExp, phase, winMS),
+                        "H_fast": H_fast,
+                        "H_slow": H_slow,
+                        "extent": extent,
+                    }
+                )
+
+        # Fallback value if all computed arrays turned out empty
+        if global_vmax == 0:
+            global_vmax = 1.0
+
+        # ---------------------------------------------------------------------
+        # PASS 3: Plot everything with a shared dynamic global scale
+        # ---------------------------------------------------------------------
+        for item in all_matrices:
+            nameExp, phase, winMS = item["metadata"]
+            extent = item["extent"]
+
+            fig, axes = plt.subplots(
+                ncols=2, nrows=1, figsize=(11, 5), sharex=True, sharey=True
+            )
+
+            # Plot Fast Speeds
+            ax_fast = axes[0]
+            ax_fast.set_xlim(0, 1)
+            ax_fast.set_ylim(0, 1)
+            if item["H_fast"] is not None:
+                im_fast = ax_fast.imshow(
+                    item["H_fast"].T,
+                    extent=extent,
+                    cmap=cmc.batlow,
+                    vmin=0,
+                    vmax=global_vmax,  # Scale matches globally across all plots
+                    interpolation="none",
+                    origin="lower",
+                    aspect="auto",
+                )
+                fig.colorbar(im_fast, ax=ax_fast)
+            ax_fast.set_title("Fast speeds only")
+
+            # Plot Slow Speeds
+            ax_slow = axes[1]
+            ax_slow.set_xlim(0, 1)
+            ax_slow.set_ylim(0, 1)
+            if item["H_slow"] is not None:
+                im_slow = ax_slow.imshow(
+                    item["H_slow"].T,
+                    extent=extent,
+                    cmap=cmc.batlow,
+                    vmin=0,
+                    vmax=global_vmax,  # Scale matches globally across all plots
+                    interpolation="none",
+                    origin="lower",
+                    aspect="auto",
+                )
+                fig.colorbar(im_slow, ax=ax_slow)
+            ax_slow.set_title("Slow speeds only")
+
+            fig.suptitle(
+                f"{nameExp} | Phase: {phase} | winMS: {winMS} (N={global_min_samples})"
+            )
+            fig.text(0.5, 0.04, "Predicted linPos", ha="center")
+            fig.text(0.04, 0.5, "True linPos", va="center", rotation="vertical")
+            fig.tight_layout(rect=[0.05, 0.05, 0.95, 0.9])
+
+            if save and folder is not None:
+                fname = (
+                    f"errorMatrix_{nameExp}_phase{phase}_win{winMS}_globalMatch_batlow"
+                )
+                fig.savefig(os.path.join(folder, fname + ".png"), dpi=150)
+                fig.savefig(os.path.join(folder, fname + ".svg"))
+
+            if show:
+                plt.show()
+            plt.close(fig)
+
     def mean_error_matrix_linerrors_by_speed(
         self,
         nbins=40,
@@ -4419,7 +4689,7 @@ class Results_Loader(TuningCurvesPlotter):
                 #
                 with np.errstate(invalid="ignore"):
                     row_sums = H_slow.sum(axis=1, keepdims=True)
-                    H_slow = np.where(row_sums > 0, H_fast / row_sums, 0)
+                    H_slow = np.where(row_sums > 0, H_slow / row_sums, 0)
 
             if H_fast is not None or H_slow is not None:
                 extent = (
@@ -7830,51 +8100,75 @@ class Results_Loader(TuningCurvesPlotter):
 
         return chance_level_mean, chance_level_median
 
-    def plot_median_error_barplot(
-        self, winMS: int, use_speed_filter: bool = True, path: Optional[str] = None
+    def plot_error_barplot(
+        self,
+        winMS: int,
+        use_speed_filter: bool = True,
+        path: Optional[str] = None,
+        reduce="mean",
+        thresh=0.65,
     ):
         phase_order = ["training", "pre", "cond", "post"]
         chance_mean, chance_median = self.compute_chance_level()
+        if reduce == "median":
+            chance = chance_median
+        elif reduce == "mean":
+            chance = chance_mean
 
-        # 1. Dynamically compute the median linear error based on the speed filter flag
-        value_vars = ["computed_median_error", "computed_median_error_filtered"]
-        if use_speed_filter:
-            # Mask the lin_error array using the speedMask array for each row
-            self.results_df["computed_median_error"] = self.results_df.apply(
-                lambda row: np.nanmedian(np.array(row["lin_error"])[row["speedMask"]]),
-                axis=1,
-            )
-            self.results_df["computed_median_error_filtered"] = self.results_df.apply(
-                lambda row: np.nanmedian(
-                    np.array(row["lin_error_selected"])[row["speedMask"]]
-                ),
-                axis=1,
-            )
-        else:
-            # Use the full unfiltered array
-            self.results_df["computed_median_error"] = self.results_df.apply(
-                lambda row: np.nanmedian(row["lin_error"]), axis=1
-            )
-            self.results_df["computed_median_error_filtered"] = self.results_df.apply(
-                lambda row: np.nanmedian(np.array(row["lin_error_selected"])),
-                axis=1,
-            )
+        import numpy as np
 
+        # Dynamically fetch np.nanmedian or np.nanmean
+        reduce_func = getattr(np, f"nan{reduce}")
+
+        def compute_row_errors(row):
+            # Convert to numpy arrays for masking
+            l_pred = np.array(row["linearPred"])
+            l_true = np.array(row["linearTrue"])
+            p_loss = np.array(row["predLoss"])
+
+            # Calculate base linear error
+            lin_error = np.abs(l_pred - l_true)
+
+            # Generate masks
+            loss_mask = p_loss < thresh
+
+            if use_speed_filter:
+                s_mask = np.array(row["speedMask"])
+
+                err_unfiltered = reduce_func(lin_error[s_mask])
+                err_filtered = reduce_func(lin_error[s_mask & loss_mask])
+            else:
+                err_unfiltered = reduce_func(lin_error)
+                err_filtered = reduce_func(lin_error[loss_mask])
+
+            return err_unfiltered, err_filtered
+
+        # Apply the function and split results into the dynamic columns
+        result_cols = [
+            f"computed_{reduce}_error_{thresh}",
+            f"computed_{reduce}_error_filtered_{thresh}",
+        ]
+
+        self.results_df[result_cols] = self.results_df.apply(
+            compute_row_errors, axis=1, result_type="expand"
+        )
+
+        value_name = f"{reduce.capitalize()} Linear Error"
         to_plot = pd.melt(
             self.results_df.xs(winMS, level="winMS", drop_level=False)
             .query("phase != 'full_pre'")
             .reset_index(),
             id_vars=["mouse_name", "phase", "winMS"],
-            value_vars=value_vars,
+            value_vars=result_cols,
             var_name="Error Type",
-            value_name="Median Linear Error",
+            value_name=value_name,
         ).copy()
 
         fig, ax = plt.subplots(figsize=(16, 9))
         sns.barplot(
             data=to_plot,
             x="phase",
-            y="Median Linear Error",
+            y=value_name,
             hue="Error Type",
             palette="Set2",
             order=phase_order,
@@ -7885,7 +8179,7 @@ class Results_Loader(TuningCurvesPlotter):
         sns.stripplot(
             data=to_plot,
             x="phase",
-            y="Median Linear Error",
+            y=value_name,
             hue="Error Type",
             palette="Set2",
             order=phase_order,
@@ -7898,13 +8192,32 @@ class Results_Loader(TuningCurvesPlotter):
             size=10,
         )
 
-        ax.axhline(chance_median, linestyle="--", label="Chance level")
+        ax.axhline(chance, linestyle="--", label="Chance level")
+        pairs = [
+            ((phase, result_cols[0]), (phase, result_cols[1])) for phase in phase_order
+        ]
+
+        annotator = Annotator(
+            ax,
+            pairs,
+            data=to_plot,
+            x="phase",
+            y=value_name,
+            hue="Error Type",
+            order=phase_order,
+        )
+
+        # Configure your test (e.g., 't-test_paired' or 'Wilcoxon' if data is non-normal)
+        annotator.configure(
+            test="Wilcoxon", text_format="star", loc="inside", verbose=False
+        )
+        annotator.apply_and_annotate()
 
         connect_points(
             ax=ax,
             df=to_plot,
             x_col="phase",
-            y_col="Median Linear Error",
+            y_col=value_name,
             hue_col="Error Type",
             id_col="mouse_name",
             x_order=phase_order,
@@ -7930,18 +8243,20 @@ class Results_Loader(TuningCurvesPlotter):
             fig.savefig(
                 os.path.join(
                     path,
-                    f"boxplot_mean_lin_error_and_filtered_speed_{use_speed_filter}_{winMS}.png",
+                    f"boxplot_{reduce}_lin_error_{thresh}_and_filtered_speed_{use_speed_filter}_{winMS}.png",
                 ),
                 dpi=300,
             )
             fig.savefig(
                 os.path.join(
                     path,
-                    f"boxplot_mean_lin_error_and_filtered_speed_{use_speed_filter}_{winMS}.svg",
+                    f"boxplot_{reduce}_lin_error_{thresh}_and_filtered_speed_{use_speed_filter}_{winMS}.svg",
                 )
             )
 
         plt.show()
+
+        return to_plot
 
     def plot_median_error_barplot_old(
         self, winMS: int, use_speed_filter: bool = True, path: Optional[str] = None
@@ -8042,15 +8357,9 @@ class Results_Loader(TuningCurvesPlotter):
     def compute_zone_classification_metrics(
         self, winMS: int, shock_threshold: float = 0.15, use_speed_filter: bool = True
     ):
-        """
-        Computes true vs. predicted zone classification metrics across all mice and phases.
+        """Computes true vs. predicted zone classification metrics across all mice
 
-        Parameters:
-        -----------
-        winMS : int
-            The time window size to filter from the index levels.
-        shock_threshold : float
-            The cutoff boundary for the linearized shock zone (e.g., 0.35).
+        and phases, now including Balanced Accuracy and F1-Score.
         """
         # Filter for the specific window size
         df_subset = self.results_df.xs(winMS, level="winMS", drop_level=False).copy()
@@ -8058,8 +8367,6 @@ class Results_Loader(TuningCurvesPlotter):
         classification_results = []
 
         for idx, row in df_subset.iterrows():
-            # Safely extract multi-index parameters
-            # Index layout: ('nameExp', 'mouse_name', 'manipe', 'phase', 'winMS')
             mouse_name = idx[1]
             phase = idx[3]
 
@@ -8081,29 +8388,30 @@ class Results_Loader(TuningCurvesPlotter):
             y_pred_lin = y_pred_lin[valid_mask]
 
             # Determine binary states (In Shock Zone vs Not In Shock Zone)
-            # Using the linearized position boundaries
             is_in_shock_true = y_true_lin <= shock_threshold
             is_in_shock_pred = y_pred_lin <= shock_threshold
 
-            # --- Alternatively, if you prefer using your pre-computed epochs ---
-            # is_in_shock_true = np.array(row["Shock_epoch"])[valid_mask].astype(bool)
-
-            # Calculate Classification Metrics
+            # --- Standard Metrics ---
             acc = accuracy_score(is_in_shock_true, is_in_shock_pred)
             class_error = 1.0 - acc
 
-            # Confusion matrix elements: tn, fp, fn, tp
-            # Negative = Safe/Other, Positive = Shock
+            # --- New Robust Metrics ---
+            # Balanced Accuracy handles class imbalance by averaging recall on both classes
+            balanced_acc = balanced_accuracy_score(is_in_shock_true, is_in_shock_pred)
+
+            # F1-score is the harmonic mean of precision and recall (specifically for the Shock Zone class)
+            f1 = f1_score(
+                is_in_shock_true, is_in_shock_pred, pos_label=True, zero_division=0
+            )
+
+            # Confusion matrix elements for rates
             cm = confusion_matrix(
                 is_in_shock_true, is_in_shock_pred, labels=[False, True]
             )
             tn, fp, fn, tp = cm.ravel()
 
-            # Rates safely handling divisions by zero
-            false_alarm_rate = (
-                fp / (tn + fp) if (tn + fp) > 0 else np.nan
-            )  # Safe called Shock
-            miss_rate = fn / (tp + fn) if (tp + fn) > 0 else np.nan  # Shock called Safe
+            false_alarm_rate = fp / (tn + fp) if (tn + fp) > 0 else np.nan
+            miss_rate = fn / (tp + fn) if (tp + fn) > 0 else np.nan
 
             classification_results.append(
                 {
@@ -8111,6 +8419,8 @@ class Results_Loader(TuningCurvesPlotter):
                     "phase": phase,
                     "winMS": winMS,
                     "classification_error": class_error,
+                    "balanced_accuracy": balanced_acc,
+                    "f1_score": f1,
                     "false_alarm_rate": false_alarm_rate,
                     "miss_rate": miss_rate,
                     "total_timepoints": len(y_true_lin),
@@ -8137,7 +8447,8 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 2. Melt the dataframe to make it seaborn-friendly
         # We want to compare overall error, false alarms, and missed detections side-by-side
-        value_vars = ["classification_error", "false_alarm_rate", "miss_rate"]
+        # 2. Melt the dataframe to include the new metrics
+        value_vars = ["classification_error", "balanced_accuracy", "f1_score"]
         to_plot = pd.melt(
             metrics_df.query("phase != 'full_pre'"),
             id_vars=["mouse_name", "phase", "winMS"],
@@ -8146,11 +8457,11 @@ class Results_Loader(TuningCurvesPlotter):
             value_name="Rate (0-1)",
         )
 
-        # Clean up metric names for a nicer plot legend
+        # Clean up metric names for the legend
         metric_labels = {
             "classification_error": "Total Classification Error",
-            "false_alarm_rate": "False Alarm Rate (Safe called Shock)",
-            "miss_rate": "Miss Rate (Shock called Safe)",
+            "balanced_accuracy": "Balanced Accuracy",
+            "f1_score": "F1-Score (Shock Zone)",
         }
         to_plot["Metric Type"] = to_plot["Metric Type"].map(metric_labels)
 
@@ -8275,6 +8586,7 @@ class Results_Loader(TuningCurvesPlotter):
 
             # Calculate absolute distance to the decision boundary
             distance_to_boundary = np.abs(y_true - shock_threshold)
+            distance_to_boundary = y_true
 
             # Binary classifications
             is_in_shock_true = y_true <= shock_threshold
@@ -8404,6 +8716,438 @@ class Results_Loader(TuningCurvesPlotter):
                 os.path.join(path, f"error_vs_boundary_distance_{winMS}.png"), dpi=300
             )
             fig.savefig(os.path.join(path, f"error_vs_boundary_distance_{winMS}.svg"))
+
+        plt.show()
+
+    def _compute_spatial_overprediction(self, winMS, during, compute_type):
+        from neuroencoders.utils.global_classes import ZONEDEF, gaussian_filter_nan
+
+        # Data collection list
+        rows = []
+        bins = 50
+
+        # Loop through your existing dataframe structure
+        for (mouse_manipe, manipe), df in self.results_df.xs(
+            (winMS, "cond"), level=("winMS", "phase")
+        ).groupby(by=["mouse_name", "manipe"]):
+            results = df.iloc[0].results
+            time = results.resultsNN_phase_pkl["_cond"]["times"][0].flatten()
+            if during == "ripples":
+                events = results.DataHelper.get_ripples_epochs()
+            elif during == "freezing":
+                events = results.DataHelper.get_freezing_epochs()
+            elif during == "stims":
+                events = results.DataHelper.get_stim_epochs()
+            else:
+                raise ValueError(
+                    "Invalid 'during' parameter. Use 'ripples', 'freezing', or 'stims'."
+                )
+
+            if compute_type == "percentage":
+                true_pos2d = nap.TsdFrame(
+                    t=time,
+                    d=results.resultsNN_phase_pkl["_cond"]["featureTrue"][0][:, :2],
+                    columns=["x", "y"],
+                )
+            elif compute_type == "overprediction":
+                true_pos2d = nap.TsdFrame(
+                    t=time,
+                    d=results.resultsNN_phase_pkl["_cond"]["featureTrue"][0][:, :2],
+                    columns=["x", "y"],
+                ).restrict(events)
+
+            pred_pos2d = nap.TsdFrame(
+                t=time,
+                d=results.resultsNN_phase_pkl["_cond"]["featurePred"][0][:, :2],
+                columns=["x", "y"],
+            ).restrict(events)
+
+            H_true, _, _ = np.histogram2d(
+                true_pos2d.values[:, 0],
+                true_pos2d.values[:, 1],
+                bins=bins,
+                range=[[0, 1], [0, 1]],
+                density=True,
+            )
+            H_pred, _, _ = np.histogram2d(
+                pred_pos2d.values[:, 0],
+                pred_pos2d.values[:, 1],
+                bins=bins,
+                range=[[0, 1], [0, 1]],
+                density=True,
+            )
+
+            smooth_true = gaussian_filter_nan(H_true, (1.5, 2.5))
+            smooth_pred = gaussian_filter_nan(H_pred, (1.5, 2.5))
+            baseline = smooth_true.copy()
+            allowed = results.get_allowed_mask_for_bin_size(
+                smooth_true.shape[0], smooth_true.shape[1]
+            ).T
+            smooth_true[~allowed] = np.nan
+            smooth_pred[~allowed] = np.nan
+            baseline[~allowed] = np.nan
+
+            baseline = baseline / np.nansum(baseline)
+            pred = smooth_pred / np.nansum(smooth_pred)
+            eps = 1e-12
+
+            if compute_type == "percentage":
+                final = (pred - baseline) / (pred + baseline + eps)
+            elif compute_type == "overprediction":
+                final = pred - baseline
+            else:
+                raise ValueError(
+                    "Invalid type specified. Use 'percentage' or 'overprediction'."
+                )
+
+            # --- NEW: Extract Group and Zone Data ---
+            # Adjust this string check to match how your PAG vs Control mice are named
+            group_label = manipe
+
+            for i, label in enumerate(ZONELABELS):
+                x_lim, y_lim = ZONEDEF[i]
+
+                # Map continuous spatial coordinates [0, 1] to matrix bin indices
+                x_start, x_end = int(x_lim[0] * bins), int(x_lim[1] * bins)
+                y_start, y_end = int(y_lim[0] * bins), int(y_lim[1] * bins)
+
+                # Calculate mean overprediction/reactivation metric for this zone
+                mean_overpred = np.nanmean(final[x_start:x_end, y_start:y_end])
+
+                rows.append(
+                    {
+                        "Mouse": mouse_manipe,
+                        "Group": group_label,
+                        "Zone": label,
+                        "Overprediction": mean_overpred,
+                    }
+                )
+
+        # Create the master long-form DataFrame
+        df_zones = pd.DataFrame(rows)
+
+        return df_zones
+
+    def barplot_zones_prediction(
+        self,
+        winMS: int,
+        during="ripples",
+        compute_type="percentage",
+        text_format="star",
+        path: Optional[str] = None,
+    ):
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from statannotations.Annotator import Annotator
+
+        from neuroencoders.utils.viz_params import GROUPS_PALETTE
+
+        df_zones = self._compute_spatial_overprediction(
+            winMS=winMS, compute_type=compute_type, during=during
+        )
+
+        # Make sure your unique groups are sorted cleanly (e.g., Control first, PAG last)
+        group_order = sorted(df_zones["Group"].unique())
+
+        # Create a row or column of subplots (1 row, 5 columns)
+        fig, axs = plt.subplots(1, 5, figsize=(20, 8), sharey=True)
+        zones = df_zones["Zone"].unique()
+
+        for i, zone in enumerate(zones):
+            ax = axs[i]
+            zone_data = df_zones[df_zones["Zone"] == zone]
+
+            # 1. Boxplot per zone
+            sns.boxplot(
+                data=zone_data,
+                x="Group",
+                y="Overprediction",
+                order=group_order,
+                palette=GROUPS_PALETTE,
+                width=0.6,
+                fliersize=0,
+                boxprops=dict(alpha=0.6),
+                ax=ax,
+                linewidth=3,
+            )
+
+            # 2. Stripplot per zone
+            sns.stripplot(
+                data=zone_data,
+                x="Group",
+                y="Overprediction",
+                order=group_order,
+                palette=GROUPS_PALETTE,
+                size=8,
+                jitter=0.2,
+                linewidth=1.5,
+                edgecolor="black",
+                ax=ax,
+                alpha=0.7,
+            )
+
+            # --- STATS PER ZONE ---
+            # Compare PAG to every other group within this specific zone
+            # (Assuming "PAG" is the exact string name of your PAG group)
+            other_groups = [g for g in group_order if g != "PAG"]
+            box_pairs = [("PAG", other) for other in other_groups] + [("MFB", "Known")]
+
+            if len(zone_data) > 0:
+                annotator = Annotator(
+                    ax,
+                    box_pairs,
+                    data=zone_data,
+                    x="Group",
+                    y="Overprediction",
+                    order=group_order,
+                )
+                annotator.configure(
+                    test="t-test_ind",
+                    text_format=text_format,
+                    loc="inside",
+                    comparisons_correction="Bonferroni",  # Crucial now that you have 5 groups!
+                    hide_non_significant=True,
+                )
+                annotator.apply_and_annotate()
+
+            # Styling tweaks
+            ax.set_title(f"{zone} Zone", fontsize=12, fontweight="bold")
+            ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+            ax.set_xlabel("")
+            if i > 0:
+                ax.set_ylabel(
+                    ""
+                )  # Hide y-label for inner plots since they share limits
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+            ax.set_ylabel(r"$\Delta$ of Overprediction ($\Delta$=Pred - True)")
+            # ax.set_ylim(-6,12)
+
+        plt.suptitle("Spatial Overprediction Bias during Ripples", fontsize=16, y=1.05)
+        sns.despine()
+        plt.tight_layout()
+        if path is not None:
+            plt.savefig(
+                os.path.join(
+                    path,
+                    f"bias_during_{during}_by_manipe_{text_format}_{compute_type}_{winMS}ms.png",
+                )
+            )
+            plt.savefig(
+                os.path.join(
+                    path,
+                    f"bias_during_{during}_by_manipe_{text_format}_{compute_type}_{winMS}ms.png",
+                )
+            )
+        plt.show()
+
+    def _compute_spatial_proportion(self, winMS: int, during: str):
+        """Computes the proportion of discrete events (e.g., individual ripples)
+
+        whose average neural predictions fall within each defined spatial zone.
+        """
+        from neuroencoders.utils.global_classes import ZONEDEF, ZONELABELS
+
+        rows = []
+
+        # Loop through your existing dataframe structure grouped by mouse and manipulation
+        for (mouse_manipe, manipe), df in self.results_df.xs(
+            (winMS, "cond"), level=("winMS", "phase")
+        ).groupby(by=["mouse_name", "manipe"]):
+            results = df.iloc[0].results
+            time = results.resultsNN_phase_pkl["_cond"]["times"][0].flatten()
+
+            # Isolate the targeted event epochs
+            if during == "ripples":
+                events = results.DataHelper.get_ripples_epochs()
+            elif during == "freezing":
+                events = results.DataHelper.get_freezing_epochs()
+            elif during == "stims":
+                events = results.DataHelper.get_stim_epochs()
+            else:
+                raise ValueError(
+                    "Invalid 'during' parameter. Use 'ripples', 'freezing', or 'stims'."
+                )
+
+            # Extract full 2D predicted positions array
+            pred_pos2d = nap.TsdFrame(
+                t=time,
+                d=results.resultsNN_phase_pkl["_cond"]["featurePred"][0][:, :2],
+                columns=["x", "y"],
+            )
+
+            events = events.intersect(pred_pos2d.time_support)
+            total_events = len(events)
+
+            # Initialize counts for each zone to 0 for this session
+            zone_counts = {label: 0 for label in ZONELABELS}
+
+            if total_events > 0:
+                # Loop through each discrete interval (e.g., one specific ripple)
+                for event in events:
+                    # Extract positions decoded solely during this event
+                    event_pred = pred_pos2d.restrict(event)
+
+                    if len(event_pred) == 0:
+                        continue
+
+                    # Calculate the center of mass (mean trajectory) for this event
+                    mean_x = np.nanmean(event_pred.values[:, 0])
+                    mean_y = np.nanmean(event_pred.values[:, 1])
+
+                    # Check which defined bounding box contains this mean prediction
+                    for i, label in enumerate(ZONELABELS):
+                        x_lim, y_lim = ZONEDEF[i]
+
+                        if (x_lim[0] <= mean_x <= x_lim[1]) and (
+                            y_lim[0] <= mean_y <= y_lim[1]
+                        ):
+                            zone_counts[label] += 1
+                            break  # Assumes zones are mutually exclusive; remove if they overlap
+
+            # Package statistics for long-form DataFrame conversion
+            group_label = manipe
+            for label in ZONELABELS:
+                proportion = (
+                    (zone_counts[label] / total_events) if total_events > 0 else 0.0
+                )
+
+                rows.append(
+                    {
+                        "Mouse": mouse_manipe,
+                        "Group": group_label,
+                        "Zone": label,
+                        "Proportion": proportion,  # e.g., 0.50 means 50% of events landed here
+                        "Total_Events": total_events,
+                    }
+                )
+
+        # Build and return the master long-form DataFrame
+        df_zones = pd.DataFrame(rows)
+        return df_zones
+
+    def barplot_zones_proportion_count(
+        self,
+        winMS: int,
+        during: str = "ripples",
+        text_format: str = "star",
+        path: Optional[str] = None,
+    ):
+        """Generates a multi-panel boxplot comparing the event prediction proportions
+
+        across zones and animal groups.
+        """
+        from neuroencoders.utils.viz_params import GROUPS_PALETTE
+
+        # Fetch data processed by the updated event-counting logic
+        df_zones = self._compute_spatial_proportion(winMS=winMS, during=during)
+
+        # Sort the manipulation groups consistently
+        group_order = sorted(df_zones["Group"].unique())
+        zones = df_zones["Zone"].unique()
+
+        # Dynamically fit the subplot column amount based on unique zones
+        fig, axs = plt.subplots(1, len(zones), figsize=(20, 8), sharey=True)
+
+        # Catch instances where only 1 zone exists to avoid indexing errors
+        if len(zones) == 1:
+            axs = [axs]
+
+        for i, zone in enumerate(zones):
+            ax = axs[i]
+            zone_data = df_zones[df_zones["Zone"] == zone]
+
+            # 1. Boxplot distribution per group within this zone
+            sns.boxplot(
+                data=zone_data,
+                x="Group",
+                y="Proportion",
+                order=group_order,
+                palette=GROUPS_PALETTE,
+                width=0.6,
+                fliersize=0,
+                boxprops=dict(alpha=0.6),
+                ax=ax,
+                linewidth=3,
+            )
+
+            # 2. Stripplot overlay to visualize individual mouse points
+            sns.stripplot(
+                data=zone_data,
+                x="Group",
+                y="Proportion",
+                order=group_order,
+                palette=GROUPS_PALETTE,
+                size=8,
+                jitter=0.2,
+                linewidth=1.5,
+                edgecolor="black",
+                ax=ax,
+                alpha=0.7,
+            )
+
+            # --- Statistical Testing Setup ---
+            # Automatically parse groups to compare against your targeted "PAG" category
+            other_groups = [g for g in group_order if g != "PAG"]
+            box_pairs = [("PAG", other) for other in other_groups]
+
+            # Adding your specific hardcoded comparison baseline if both items are present
+            if "MFB" in group_order and "Known" in group_order:
+                box_pairs.append(("MFB", "Known"))
+
+            if len(zone_data) > 0 and len(group_order) > 1:
+                annotator = Annotator(
+                    ax,
+                    box_pairs,
+                    data=zone_data,
+                    x="Group",
+                    y="Proportion",
+                    order=group_order,
+                )
+                annotator.configure(
+                    test="t-test_ind",
+                    text_format=text_format,
+                    loc="inside",
+                    comparisons_correction="Bonferroni",  # Corrects across your comparisons
+                    hide_non_significant=True,
+                )
+                annotator.apply_and_annotate()
+
+            # Individual subplot formatting tweaks
+            ax.set_title(f"{zone} Zone", fontsize=14, fontweight="bold")
+            ax.set_xlabel("")
+            ax.set_xticklabels(
+                ax.get_xticklabels(), rotation=45, ha="right", fontsize=11
+            )
+
+            # Clean up shared y labels and force scale to absolute bounds [0, 1]
+            if i == 0:
+                ax.set_ylabel("Proportion of Events", fontsize=12)
+            else:
+                ax.set_ylabel("")
+
+        plt.suptitle(
+            f"Proportion of Decoded Predictions per Spatial Zone during {during.capitalize()}",
+            fontsize=16,
+            y=1.02,
+            fontweight="bold",
+        )
+        sns.despine()
+        plt.tight_layout()
+
+        # Handle exporting plots securely
+        if path is not None:
+            os.makedirs(path, exist_ok=True)
+            filename = (
+                f"event_proportion_during_{during}_by_manipe_{text_format}_{winMS}ms"
+            )
+            plt.savefig(
+                os.path.join(path, filename + ".png"),
+                dpi=300,
+                bbox_inches="tight",
+            )
+            plt.savefig(
+                os.path.join(path, filename + ".svg"),
+            )
 
         plt.show()
 
