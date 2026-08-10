@@ -399,7 +399,7 @@ function extract_spike_parallel_safe(xmlPath, datPath, behavePath, fileName, thr
                     end
 
                     for g in 1:nGroups
-                        feat["group$(g - 1)"] = Array{Float32}(vcat(spikes[g]...) .* 0.195f0)
+                        feat["group$(g - 1)"] = Array{Float32}(vcat(spikes[g]...))
                     end
                     push!(feats, feat)
                 end

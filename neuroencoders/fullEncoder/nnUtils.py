@@ -3,6 +3,7 @@ import contextlib
 import gc
 import logging
 import os
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, TypeAlias
 
 import matplotlib.gridspec as gridspec
@@ -12,6 +13,8 @@ import seaborn as sns
 import sklearn as ml
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
+import os
+
 import keras
 import keras.utils as keras_utils
 import psutil
@@ -20,6 +23,8 @@ from denseweight import DenseWeight
 from keras import ops as kops
 from pykeops.numpy import LazyTensor as LazyTensor_np
 from scipy.ndimage import gaussian_filter
+from sklearn.linear_model import Ridge
+from sklearn.metrics import r2_score
 
 import wandb
 from neuroencoders.utils.global_classes import (
@@ -473,18 +478,21 @@ class MaskingLayer(tf.keras.layers.Layer):
         self.supports_masking = True
 
     def call(self, inputs):
-        # make sure inputs is a tuple of (mask, features)
-        mask, features = inputs
-        mask_expanded = kops.expand_dims(mask, axis=-1)
-        return kops.where(mask_expanded, features, kops.zeros_like(features))
+        features = inputs
+        mask = getattr(features, "_keras_mask", None)
+        if mask is not None:
+            mask_expanded = kops.expand_dims(mask, axis=-1)
+            mask_expanded = kops.cast(mask_expanded, features.dtype)
+            return kops.where(mask_expanded, features, kops.zeros_like(features))
+        return features  # no mask, return features unchanged
 
     def compute_mask(self, inputs, mask=None):
         # this layer already has a mask in the inputs, so we can just pass it through
-        return inputs[0]  # the mask is the first element of the inputs
+        return mask
 
-    def compute_output_shape(self, input_shapes):
-        # input_shapes = [(batch, seqLen), (batch, seqLen, feat)]
-        return input_shapes[1]
+    def compute_output_shape(self, input_shape):
+        # input_shapes were = [(batch, seqLen), (batch, seqLen, feat)], now they are just (batch, seqLen, feat) with a mask metadata attached
+        return input_shape
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
@@ -839,11 +847,13 @@ class SpikeNet1D(tf.keras.layers.Layer):
         self,
         nChannels=4,
         device: str = "/cpu:0",
-        nFeatures=128,
+        nFeatures=64,
         number="",
         dropout_rate=0.2,
         batch_normalization=False,
-        apply_input_normalization=True,
+        apply_input_normalization=False,
+        normalize_peak_amplitude=True,
+        apply_l2_norm=True,
         **kwargs,
     ):
         name = kwargs.pop("name", "spikeNet1D{}".format(number))
@@ -860,6 +870,11 @@ class SpikeNet1D(tf.keras.layers.Layer):
         self.device = device
         self.number = number
         self.apply_input_normalization = apply_input_normalization
+        self.normalize_peak_amplitude = normalize_peak_amplitude
+        self.apply_l2_norm = apply_l2_norm
+        print(
+            f"SpikeNet1D initialized with nChannels={nChannels}, nFeatures={nFeatures}, device={device}, number={number}, dropout_rate={dropout_rate}, batch_normalization={batch_normalization}, apply_input_normalization={apply_input_normalization}, normalize_peak_amplitude={normalize_peak_amplitude}, apply_l2_norm={apply_l2_norm}"
+        )
         self.supports_masking = True
 
         with get_device_context(self.device):
@@ -900,9 +915,10 @@ class SpikeNet1D(tf.keras.layers.Layer):
             self.temporal_extractor_layers = layers
 
             # Spatial info / channels
-            self.channel_interactor = tf.keras.layers.Conv1D(
-                filters=self.nConvChannels, kernel_size=3, padding="same"
-            )
+            # self.channel_interactor = tf.keras.layers.Conv1D(
+            #     filters=self.nConvChannels, kernel_size=3, padding="same"
+            # )
+            self.channel_interactor = tf.keras.layers.Dense(self.nConvChannels)
 
             # Aggregation
             self.dropout = tf.keras.layers.Dropout(dropout_rate)
@@ -929,6 +945,13 @@ class SpikeNet1D(tf.keras.layers.Layer):
         """
         dtype = self.compute_dtype
         with get_device_context(self.device):
+            if self.normalize_peak_amplitude:
+                # Normalize each spike to have a peak amplitude of 1 across channels
+                max_peaks = (
+                    tf.reduce_max(tf.abs(x), axis=[-2, -1], keepdims=True) + 1e-6
+                )
+                x = x / max_peaks
+
             x = (
                 self.input_normalization(x)
                 if self.input_normalization is not None
@@ -989,6 +1012,9 @@ class SpikeNet1D(tf.keras.layers.Layer):
                     tf.expand_dims(mask, axis=-1), dtype
                 )  # Apply mask to final output
 
+            if self.apply_l2_norm:
+                out = tf.nn.l2_normalize(out, axis=-1)
+
             return out
 
     def get_config(self):
@@ -1004,6 +1030,8 @@ class SpikeNet1D(tf.keras.layers.Layer):
                 "no_cnn": self.no_cnn,
                 "nConvChannels": self.nConvChannels,
                 "apply_input_normalization": self.apply_input_normalization,
+                "normalize_peak_amplitude": self.normalize_peak_amplitude,
+                "apply_l2_norm": self.apply_l2_norm,
             }
         )
         return config
@@ -1299,9 +1327,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             [(None, self.max_nb_spikes), (None, self.max_nb_spikes, self.n_features)]
         )
 
-        self.masking_layer.build(
-            [(None, self.max_nb_spikes), (None, self.max_nb_spikes, self.n_features)]
-        )
+        self.masking_layer.build((None, self.max_nb_spikes, self.n_features))
 
         super().build(input_shape)
 
@@ -1360,14 +1386,23 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
 
             # 4. MASKING
             mymask = self.safe_mask_creation(input_groups)
-            masked_features = self.masking_layer([mymask, all_features])
+            all_features._keras_mask = (
+                mymask  # Attach the mask to the features tensor for downstream layers
+            )
+            masked_features = self.masking_layer(all_features)
 
             # Sum inputs for legacy/diagnostics
             sum_features = kops.sum(masked_features, axis=1)
 
             # The layer returns the processed features sequence and the mask
 
-            return masked_features, mymask, sum_features, all_features
+            return (
+                masked_features,
+                mymask,
+                sum_features,
+                all_features,
+                group_latents_raw,
+            )
 
     def compute_mask(self, inputs, mask=None):
         # The mask is based on the inputGroups tensor, which is the last element in inputs
@@ -1388,6 +1423,8 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             (batch_size, seq_len),  # mymask
             (batch_size, self.n_features),  # sum_features
             (batch_size, seq_len, self.n_features),  # all_features
+            [(batch_size, self.max_spikes_per_group, self.n_features)]
+            * self.n_groups,  # group_latents_raw
         ]
 
     def get_config(self):
@@ -1931,7 +1968,7 @@ class TransformerEncoderBlock(tf.keras.layers.Layer):
         d_model=64,
         num_heads=8,
         ff_dim1=256,
-        dropout_rate=0.5,
+        dropout_rate=0.15,
         device="/cpu:0",
         **kwargs,
     ):
@@ -5828,6 +5865,138 @@ class ContrastiveRegressionLoss(tf.keras.losses.Loss):
         return cls(**config)
 
 
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeLatentDiversityLoss(tf.keras.losses.Loss):
+    """
+    Prevents SpikeEncoder feature collapse by:
+    1. Penalizing high cosine similarity between different spikes (off-diagonal repulsion).
+    2. Maximizing variance across latent dimensions (prevents dead channels).
+    """
+
+    def __init__(
+        self, temperature=0.1, alpha_variance=1.0, name="spike_diversity_loss", **kwargs
+    ):
+        super().__init__(name=name, **kwargs)
+        self.temperature = temperature
+        self.alpha_variance = alpha_variance
+
+    def call(self, y_true, y_pred):
+        # y_pred shape: (BatchSize, nFeatures) — assumes L2-normalized vectors
+        batch_size = tf.shape(y_pred)[0]
+        tf.shape(y_pred)[1]
+
+        # 1. Compute Cosine Similarity Matrix: (Batch, Batch)
+        similarity_matrix = (
+            tf.matmul(y_pred, y_pred, transpose_b=True) / self.temperature
+        )
+
+        # Mask out self-similarity (diagonal)
+        diag_mask = tf.eye(batch_size, dtype=tf.bool)
+        off_diag_sim = tf.boolean_mask(similarity_matrix, ~diag_mask)
+
+        # Cosine repulsion loss (discourages merging spikes into 1-2 blobs)
+        repulsion_loss = tf.reduce_mean(tf.exp(off_diag_sim))
+
+        # 2. Latent Feature Variance Loss (prevents feature dimension collapse)
+        feature_std = tf.math.reduce_std(y_pred, axis=0)
+        variance_loss = tf.reduce_mean(tf.maximum(0.0, 1.0 - feature_std))
+
+        return repulsion_loss + (self.alpha_variance * variance_loss)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "temperature": self.temperature,
+                "alpha_variance": self.alpha_variance,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class SpikeDiversityLossLayer(keras.layers.Layer):
+    """
+    Symbolic Keras 3 Layer that computes L2-normalized cosine repulsion
+    and feature variance loss directly inside the model graph.
+    """
+
+    def __init__(self, temperature=0.1, alpha_variance=1.0, weight=0.3, **kwargs):
+        super().__init__(**kwargs)
+        self.temperature = float(temperature)
+        self.alpha_variance = float(alpha_variance)
+        self.weight = float(weight)
+
+    def call(self, inputs):
+        # inputs: (BatchSize * MaxSpikes, nFeatures) or (Batch, MaxSpikes, nFeatures)
+        y_pred = inputs
+        dtype = y_pred.dtype
+
+        # 1. L2 Normalize vectors along feature axis
+        norm = kops.sqrt(kops.sum(kops.square(y_pred), axis=-1, keepdims=True) + 1e-8)
+        y_pred_norm = y_pred / norm
+
+        # Dynamic number of rows (N = Batch * MaxSpikes)
+        N = kops.shape(y_pred_norm)[0]
+
+        # 2. Cosine Similarity Matrix: (N, N)
+        similarity_matrix = (
+            kops.matmul(y_pred_norm, kops.transpose(y_pred_norm)) / self.temperature
+        )
+
+        # 3. Dynamic Masking without static eye or dynamic arange dtype bugs
+        # kops.arange with explicit start, stop, and int32 dtype
+        idx = kops.arange(0, N, dtype="int32")
+        eye_mask = kops.equal(
+            kops.expand_dims(idx, axis=1), kops.expand_dims(idx, axis=0)
+        )
+
+        # Mask diagonal (self-similarity) with large negative scalar
+        large_neg = kops.cast(-1e9, dtype=dtype)
+        off_diag_sim = kops.where(eye_mask, large_neg, similarity_matrix)
+
+        # 4. Cosine Repulsion Loss
+        exp_sim = kops.exp(off_diag_sim)
+        off_diag_exp_sum = kops.sum(kops.where(eye_mask, 0.0, exp_sim))
+
+        num_off_diag = kops.cast(N * (N - 1), dtype=dtype)
+        repulsion_loss = off_diag_exp_sum / kops.maximum(1.0, num_off_diag)
+
+        # 5. Feature Variance Loss
+        mean = kops.mean(y_pred_norm, axis=0, keepdims=True)
+        var = kops.mean(kops.square(y_pred_norm - mean), axis=0)
+        feature_std = kops.sqrt(var + 1e-8)
+
+        variance_loss = kops.mean(kops.maximum(0.0, 1.0 - feature_std))
+
+        total_loss = repulsion_loss + (self.alpha_variance * variance_loss)
+
+        # Apply loss conditionally if batch has > 1 sample
+        is_valid_batch = kops.greater(N, 1)
+        final_loss = kops.where(is_valid_batch, total_loss, kops.cast(0.0, dtype=dtype))
+
+        # Register loss directly to the current model scope
+        self.add_loss(final_loss * self.weight)
+
+        # Pass through inputs unchanged
+        return inputs
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "temperature": self.temperature,
+                "alpha_variance": self.alpha_variance,
+                "weight": self.weight,
+            }
+        )
+        return config
+
+
 @tf.keras.utils.register_keras_serializable(package="neuroencoders")
 class ContrastiveWeightsMonitor(tf.keras.metrics.Metric):
     def __init__(
@@ -5901,6 +6070,8 @@ class PlotContrastiveWeightsCallback(tf.keras.callbacks.Callback):
         os.makedirs(save_dir, exist_ok=True)
 
     def on_epoch_end(self, epoch, logs=None):
+        if epoch != 1:
+            return
         # Find the monitor metric in the model
         easy_monitor = next(
             (
@@ -5962,6 +6133,257 @@ class PlotContrastiveWeightsCallback(tf.keras.callbacks.Callback):
     @classmethod
     def from_config(cls, config):
         return cls(**config)
+
+
+class EarlyStoppingByLossVal(tf.keras.callbacks.Callback):
+    def __init__(self, monitor="val_loss", value=1e-5, verbose=0):
+        super(tf.keras.callbacks.Callback, self).__init__()
+        self.monitor = monitor
+        self.value = value
+        self.verbose = verbose
+
+    def on_epoch_end(self, epoch: int, logs: Dict = {}):
+        current = logs.get(self.monitor, None)
+        if current is None:
+            warnings.warn(
+                "Early stopping requires %s available!" % self.monitor, RuntimeWarning
+            )
+            return
+
+        if current < self.value:
+            if self.verbose > 0:
+                print("Epoch %05d: early stopping THR" % epoch)
+            self.model.stop_training = True
+
+
+class TransformerIdentityAuditCallback(tf.keras.callbacks.Callback):
+    """
+    Automated zero-overhead tracking suite to verify Transformer activation.
+    Safely adapts to mixed-precision (bfloat16/float32) environments dynamically.
+    """
+
+    def __init__(self, val_dataset, save_dir="transformer_audit_results", **kwargs):
+        super().__init__()
+        self.val_dataset = val_dataset
+        self.save_dir = save_dir
+        self.epoch_outputs = {}
+        self.original_calls = {}
+
+    def on_train_begin(self, logs=None):
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.transformer_blocks = []
+
+        # Discover your Transformer layers safely
+        for layer in self.model.layers:
+            if hasattr(layer, "layers"):
+                for sub_layer in layer.layers:
+                    if (
+                        "transformer_block" in sub_layer.name
+                        or "TransformerEncoderBlock" in type(sub_layer).__name__
+                    ):
+                        self.transformer_blocks.append(sub_layer)
+            elif (
+                "transformer_block" in layer.name
+                or "TransformerEncoderBlock" in type(layer).__name__
+            ):
+                self.transformer_blocks.append(layer)
+
+        print(
+            f"📊 Transformer Audit initialized. Patching execution pathways for {len(self.transformer_blocks)} blocks."
+        )
+
+        # Decorate the call methods to dynamically log activations
+        def make_patched_call(layer_obj, block_name):
+            original_call = layer_obj.call
+            self.original_calls[layer_obj] = original_call
+
+            def patched_call(*args, **kwargs):
+                output = original_call(*args, **kwargs)
+                self.epoch_outputs[block_name] = output
+                return output
+
+            return patched_call
+
+        for idx, block in enumerate(self.transformer_blocks):
+            block.call = make_patched_call(block, f"Block {idx + 1}")
+
+    def on_epoch_end(self, epoch, logs=None):
+        print(
+            f"\n--- RUNNING TRANSFORMER INTRINSIC ACTIVATION AUDIT (Epoch {epoch + 1}) ---"
+        )
+
+        # 1. Pull a single fixed evaluation batch from your validation data stream
+        for x_val, y_val in self.val_dataset.take(1):
+            break
+
+        # 2. Trigger an isolated forward pass to populate our cache dictionary
+        _ = self.model(x_val, training=False)
+
+        # 3. Track weight norms evolution
+        weight_norms = {}
+        for block in self.transformer_blocks:
+            norms = []
+            for weight in block.trainable_weights:
+                if "kernel" in weight.name or "dense" in weight.name:
+                    norms.append(
+                        float(tf.norm(tf.cast(weight, tf.float32), ord=2).numpy())
+                    )
+            if norms:
+                weight_norms[block.name] = np.mean(norms)
+
+        # 4. Extract Multi-Task Linear Probes (R²)
+        r2_hd_scores = []
+        r2_pos_scores = []
+        block_names = []
+
+        true_hd = (
+            y_val["hd"].numpy() if isinstance(y_val, dict) and "hd" in y_val else None
+        )
+        true_pos = (
+            y_val["pos_2d"].numpy()
+            if isinstance(y_val, dict) and "pos_2d" in y_val
+            else None
+        )
+
+        if true_hd is not None and len(true_hd.shape) > 2:
+            true_hd = true_hd.reshape(true_hd.shape[0], -1)
+        if true_pos is not None and len(true_pos.shape) > 2:
+            true_pos = true_pos.reshape(true_pos.shape[0], -1)
+
+        for idx, block in enumerate(self.transformer_blocks):
+            b_name = f"Block {idx + 1}"
+            block_names.append(b_name)
+
+            block_features = self.epoch_outputs.get(b_name, None)
+
+            if block_features is None:
+                print(
+                    f"⚠️ Warning: Dynamic patch missed forward execution pass on {b_name}."
+                )
+                r2_hd_scores.append(0.0)
+                r2_pos_scores.append(0.0)
+                continue
+
+            # Cleanly handle padding elements using the implicit Keras mask tracker matching precision
+            if (
+                hasattr(block_features, "_keras_mask")
+                and block_features._keras_mask is not None
+            ):
+                # !!! THE FIX: Match tensor type (e.g. bfloat16) dynamically !!!
+                mask_dtype = block_features.dtype
+                mask_2d = tf.cast(block_features._keras_mask, mask_dtype)
+                mask_expanded = tf.expand_dims(mask_2d, axis=-1)
+
+                pooled_features = tf.reduce_sum(
+                    block_features * mask_expanded, axis=1
+                ) / (tf.reduce_sum(mask_expanded, axis=1) + 1e-8)
+            else:
+                pooled_features = tf.reduce_mean(block_features, axis=1)
+
+            # Cast back to float32 to execute standard NumPy regression analysis safely
+            features_np = tf.cast(pooled_features, tf.float32).numpy()
+
+            # Ridge Regression Probe evaluations
+            if true_hd is not None:
+                clf_hd = Ridge(alpha=1.0).fit(features_np, true_hd)
+                r2_hd_scores.append(
+                    max(0.0, r2_score(true_hd, clf_hd.predict(features_np)))
+                )
+            else:
+                r2_hd_scores.append(0.0)
+
+            if true_pos is not None:
+                clf_pos = Ridge(alpha=1.0).fit(features_np, true_pos)
+                r2_pos_scores.append(
+                    max(0.0, r2_score(true_pos, clf_pos.predict(features_np)))
+                )
+            else:
+                r2_pos_scores.append(0.0)
+
+        # 5. Print the console summary report
+        print(
+            f"{'Layer Block':<18} | {'Avg Weight Norm':<16} | {'Head Dir R²':<12} | {'2D Position R²'}"
+        )
+        print("-" * 68)
+        for i, b_name in enumerate(block_names):
+            b_obj = self.transformer_blocks[i]
+            w_norm = weight_norms.get(b_obj.name, 0.0)
+            print(
+                f"{b_name:<18} | {w_norm:<16.4f} | {r2_hd_scores[i]:<12.4f} | {r2_pos_scores[i]:.4f}"
+            )
+
+        # Decipher physical identity behavior status
+        if len(r2_hd_scores) >= 2:
+            hd_slope = r2_hd_scores[-1] - r2_hd_scores[0]
+            pos_slope = r2_pos_scores[-1] - r2_pos_scores[0]
+            if np.allclose(r2_hd_scores, r2_hd_scores[0], atol=1e-3) and np.allclose(
+                r2_pos_scores, r2_pos_scores[0], atol=1e-3
+            ):
+                print(
+                    "❌ INTRINSIC COLLAPSE STATUS: Layers are producing uniform outputs. Check for masking dropouts."
+                )
+            elif hd_slope > 0.03 or pos_slope > 0.03:
+                print(
+                    "🔥 HEALTHY SEPARATION STATUS: Network is breaking spatial symmetries block-by-block."
+                )
+            else:
+                print(
+                    "⚠️ MIXED ACTIVATION STATUS: Weights are updating, but specialized task sorting has not materialized yet."
+                )
+
+        # 6. Generate and save diagnostic slope plot chart
+        fig, ax = plt.subplots(1, 1, figsize=(7, 4))
+        x_axis = np.arange(len(block_names))
+        ax.plot(
+            x_axis,
+            r2_hd_scores,
+            marker="o",
+            color="#2ca02c",
+            linewidth=2,
+            label="Head Direction (hd)",
+        )
+        ax.plot(
+            x_axis,
+            r2_pos_scores,
+            marker="s",
+            color="#1f77b4",
+            linewidth=2,
+            label="2D Position (pos_2d)",
+        )
+        ax.set_xticks(x_axis)
+        ax.set_xticklabels(block_names)
+        ax.set_ylabel("Linear Probe Validation $R^2$ Score")
+        ax.set_xlabel("Transformer Network Layer Depth")
+        ax.set_title(
+            f"Multi-Task Spatial Functional Separability Slope - Epoch {epoch + 1}"
+        )
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="upper left")
+        plt.tight_layout()
+
+        plt.savefig(
+            os.path.join(self.save_dir, f"separability_epoch_{epoch + 1:03d}.png"),
+            dpi=120,
+        )
+        if wandb.run is not None:
+            wandb.log(
+                {
+                    "transformer_separability_slope_plot": wandb.Image(fig),
+                    "block_last_hd_r2": float(r2_hd_scores[-1]),
+                    "block_last_pos_r2": float(r2_pos_scores[-1]),
+                },
+                commit=False,
+            )
+        plt.close(fig)
+
+        # Clear out transient variables
+        self.epoch_outputs.clear()
+
+    def on_train_end(self, logs=None):
+        for block, original_call in self.original_calls.items():
+            block.call = original_call
+        print("✓ Transformer Audit complete. Model state clean.")
 
 
 # Register custom layers and losses for Keras serialization

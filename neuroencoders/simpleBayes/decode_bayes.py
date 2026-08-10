@@ -3454,9 +3454,14 @@ def parallel_pred_as_NN(
 
         # Prepare for pykeops operations:
         logRF_r = np.transpose(np.array(logRF[tetrode]), axes=[1, 2, 0])
-        logRF_r = np.reshape(
-            logRF_r, newshape=[np.prod(logRF_r.shape[0:-1]), logRF_r.shape[-1]]
-        )
+        try:
+            logRF_r = np.reshape(
+                logRF_r, newshape=[np.prod(logRF_r.shape[0:-1]), logRF_r.shape[-1]]
+            )
+        except TypeError:
+            logRF_r = np.reshape(
+                logRF_r, shape=[np.prod(logRF_r.shape[0:-1]), logRF_r.shape[-1]]
+            )
         logRFLazy = LazyTensor_np(logRF_r[None, :, :])
         binClustersLazy = LazyTensor_np(binClusters[:, None, :])
 
@@ -3467,12 +3472,22 @@ def parallel_pred_as_NN(
 
     # Finally we need to add the Poisson terms common to all tetrode finalS
     # position posterior estimation:
-    poisson_r = np.reshape(allPoisson, newshape=[np.prod(allPoisson.shape)])[:, None]
+    try:
+        poisson_r = np.reshape(allPoisson, newshape=[np.prod(allPoisson.shape)])[
+            :, None
+        ]
+    except TypeError:
+        poisson_r = np.reshape(allPoisson, shape=[np.prod(allPoisson.shape)])[:, None]
     poissonContribVj = pykeops.numpy.Vj(poisson_r)
     tetrodeContribs = tetrodeContribs + poissonContribVj
 
     # The probability need to be weighted by the position probabilities:
-    occupancy_r = np.reshape(occupancy, newshape=[np.prod(occupancy.shape)])[:, None]
+    try:
+        occupancy_r = np.reshape(occupancy, newshape=[np.prod(occupancy.shape)])[
+            :, None
+        ]
+    except TypeError:
+        occupancy_r = np.reshape(occupancy, shape=[np.prod(occupancy.shape)])[:, None]
     occupancyContrib = pykeops.numpy.Vj(occupancy_r)
     tetrodeContribs = tetrodeContribs + occupancyContrib
 

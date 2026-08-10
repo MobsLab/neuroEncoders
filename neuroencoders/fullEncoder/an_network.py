@@ -14,6 +14,7 @@ import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import warnings
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 # Get common libraries
@@ -35,6 +36,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     ContrastiveVisualizer,
     ContrastiveWeightsMonitor,
     CyclicMAE,
+    EarlyStoppingByLossVal,
     GaussianHeatmapLayer,
     GaussianHeatmapLosses,
     GroupAttentionFusion,
@@ -53,6 +55,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     SpikeNet2D,
     SpikeSequenceProcessor,
     TransformerEncoderBlock,
+    TransformerIdentityAuditCallback,
     UMazeProjectionLayer,
     UnMaskingLayer,
     WandBErrorMapCallback,
@@ -144,10 +147,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self.contrastive_temperature_layer = None
 
         self.max_nb_spikes = kwargs.get(
-            "max_nb_spikes", getattr(self.params, "max_nb_spikes", 400)
+            "max_nb_spikes", None
         )  # maximum number of spikes per group to consider in the window, for batching purposes
         if self.max_nb_spikes is None:
-            self.max_nb_spikes = int(400)
+            raise ValueError(
+                "max_nb_spikes must be provided in kwargs or set in params for batching purposes."
+            )
 
         self.max_spikes_per_group = kwargs.get("max_spikes_per_group", None)
         if self.max_spikes_per_group is None:
@@ -276,6 +281,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # Define structure based on the concatenation order in DataHelper.get_true_target
         structure = {}
+
+        # dummy structure for the output of the transformer.
+        structure["latent_output"] = {
+            "dim": self.params.sequence_output_dim,  # independant on whats predicted,
+            "slice": (0, 1),
+            "activation": "linear",
+        }
 
         if target == "pos":
             structure["pos_2d"] = {
@@ -464,6 +476,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         loss_dict = {}
         loss_weights = {}
         metrics_dict = {}
+        if not hasattr(self.params, "batch_size") and hasattr(self.params, "batchSize"):
+            self.params.batch_size = self.params.batchSize
+
         size = loss_kwargs.pop("batch_size", self.params.batch_size)
 
         for name in self.outNames:
@@ -554,6 +569,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         size=size,
                     )
                 ]
+
+            else:
+                warnings.warn(
+                    f"Output name '{name}' not recognized. No loss or metrics will be set for this output."
+                )
+                loss_dict[name] = None
+                loss_weights[name] = 0
 
         return loss_dict, loss_weights, metrics_dict
 
@@ -881,11 +903,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         latent_output = None
 
         masked_features_layer = MaskingLayer(name="masking_layer_transformer")
-        masked_features_raw = masked_features_layer([mymask, allFeatures_raw])
+        allFeatures_raw._keras_mask = (
+            mymask  # Ensure the mask is set for downstream layers
+        )
+        allFeatures._keras_mask = mymask
+        masked_features_raw = masked_features_layer(allFeatures_raw)
+        allFeatures = masked_features_layer(allFeatures)
 
         if self.project_transformer:
             # 1. Projection layer
             allFeatures = self.transformer_projection_layer(allFeatures)
+            allFeatures._keras_mask = mymask
+            masked_features_raw._keras_mask = mymask
             sumFeatures = kops.sum(
                 self.transformer_projection_layer(masked_features_raw), axis=1
             )
@@ -894,7 +923,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # 2. Positional encoding and Transformer blocks (Part 1 + Pooling)
         # the mask is handled automatically by functional API
-        allFeatures = masked_features_layer([mymask, allFeatures])
         latent_output = self.transformer_encoder(allFeatures)
         # now the mask is gone because we use MaskedSequential(no_mask_return = True)
         # 3. Final dense layers (Part 2)
@@ -940,8 +968,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
             # Call the processor - From single spikes to features sequence
-            masked_features, mymask, sumFeatures, allFeatures = (
+            masked_features, mymask, sumFeatures, allFeatures, group_latents_raw = (
                 self.spike_sequence_processor(processor_inputs)
+            )
+            masked_features._keras_mask = (
+                mymask  # Ensure the mask is set for downstream layers
             )
 
             # 5. RNN / TRANSFORMER
@@ -989,6 +1020,32 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 name="latent_output", dtype="float32"
             )(latent_output)
 
+            if getattr(self.params, "use_diversity_loss", True):
+                getattr(self.params, "diversity_temperature", 0.1)
+                getattr(self.params, "diversity_alpha", 1.0)
+                div_weight = getattr(self.params, "diversity_weight", 0.3)
+
+                from neuroencoders.fullEncoder.nnUtils import SpikeDiversityLossLayer
+
+                div_layer = SpikeDiversityLossLayer(
+                    temperature=getattr(self.params, "diversity_temperature", 0.1),
+                    alpha_variance=getattr(self.params, "diversity_alpha", 1.0),
+                    weight=getattr(self.params, "diversity_weight", 0.3),
+                    name="spike_diversity_loss_layer",
+                )
+
+                for g, raw_group_tensor in enumerate(group_latents_raw):
+                    output_key = f"outputCNN{g if g > 0 else ''}"
+                    print(
+                        f"Adding diversity loss for {output_key} with weight {div_weight}"
+                    )
+
+                    # Flatten (Batch, MaxSpikes, nFeatures) to 2D (Batch * MaxSpikes, nFeatures)
+                    # so SpikeLatentDiversityLoss can evaluate individual spike vectors
+                    flat_group_tensor = kops.reshape(
+                        raw_group_tensor, [-1, self.params.nFeatures]
+                    )
+                    _ = div_layer(flat_group_tensor)
         return outputs
 
     def compile_model(
@@ -1025,11 +1082,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
         tmp_outputs = outputs.copy()
-        tmp_outputs.pop("latent_output", None)
         self.outputs = tmp_outputs
 
         # Initialize and plot the model
         self.outNames = list(tmp_outputs.keys())
+        # Remove any outputCNN keys from self.outNames during init/compilation
+        self.outNames = [
+            name for name in self.outNames if not name.startswith("outputCNN")
+        ]
 
         model = tf.keras.Model(
             inputs=self.inputs, outputs=self.outputs, name="SpikeNetEncoderDecoderModel"
@@ -1092,6 +1152,41 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 print("Could not plot the model:", e)
         return model
 
+    def _get_latent_output_model(self):
+        """Return a model that exposes the hidden latent_output tensor."""
+        latent_model = getattr(self, "viz_encoder", None)
+        if latent_model is not None:
+            return latent_model
+
+        if not hasattr(self, "model"):
+            return None
+
+        try:
+            latent_tensor = self.model.get_layer("latent_output").output
+        except Exception:
+            return None
+
+        latent_model = tf.keras.Model(
+            inputs=self.model.inputs,
+            outputs=latent_tensor,
+            name="SpikeNetLatentOutputModel",
+        )
+        self.viz_encoder = latent_model
+        return latent_model
+
+    def _predict_latent_output(self, dataset, verbose=0):
+        """Predict latent_output for a dataset that may include targets."""
+        latent_model = self._get_latent_output_model()
+        if latent_model is None:
+            return None
+
+        latent_dataset = dataset
+        element_spec = getattr(dataset, "element_spec", None)
+        if isinstance(element_spec, tuple) and len(element_spec) == 2:
+            latent_dataset = dataset.map(lambda inputs, targets: inputs)
+
+        return latent_model.predict(latent_dataset, verbose=verbose)
+
     def train(
         self,
         behaviorData: Dict[str, np.ndarray],
@@ -1131,7 +1226,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         else:
             winMS_max = windowSizeMS
 
-        scheduler = kwargs.get("scheduler", "decay")
+        scheduler = kwargs.get("scheduler", "cosine")
         isPredLoss = kwargs.get("isPredLoss", False)
         earlyStop = kwargs.get("earlyStop", False)
         strideFactor = kwargs.get("strideFactor", 1)
@@ -1258,6 +1353,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 # If not using pipeline normalization, we set the computed stats directly in the model layers (legacy mode).
                 input_normalization = getattr(spike_net, "input_normalization", None)
                 if input_normalization is not None:
+                    print(
+                        f"Setting normalization weights for group {g} in the model layers..."
+                    )
                     input_normalization.set_weights(
                         [
                             np.asarray(means[g], dtype=np.float32),
@@ -1554,8 +1652,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             found_foundation_transformer = False
             if os.path.exists(
                 os.path.join(
-                    self.projectPath.folder,
-                    "..",
+                    Path(self.projectPath.folder).parent,
                     "foundation_transformer",
                     str(winMS_max),
                     "transformer.keras",
@@ -1564,8 +1661,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 try:
                     loaded_transformer = tf.keras.models.load_model(
                         os.path.join(
-                            self.projectPath.folder,
-                            "..",
+                            Path(self.projectPath.folder).parent,
                             "foundation_transformer",
                             str(winMS_max),
                             f"{self.target.lower()}_transformer.keras",
@@ -1582,8 +1678,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     try:
                         loaded_transformer = tf.keras.models.load_model(
                             os.path.join(
-                                self.projectPath.folder,
-                                "..",
+                                Path(self.projectPath.folder).parent,
                                 "foundation_transformer",
                                 str(winMS_max),
                                 "transformer.keras",
@@ -1596,6 +1691,39 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     except Exception as e:
                         print(
                             f"Could not load the foundation transformer for window size {winMS_max} ms, error: {e}"
+                        )
+
+            if any(
+                [
+                    os.path.exists(
+                        os.path.join(
+                            Path(self.projectPath.folder).parent,
+                            "foundation_transformer",
+                            f"spike_net_nCh{num_ch}.weights.pkl",
+                        )
+                    )
+                    for num_ch in self.params.nChannelsPerGroup
+                ]
+            ):
+                for i, spike_net in enumerate(self.spikeNets):
+                    try:
+                        num_channels = self.params.nChannelsPerGroup[i]
+                        with open(
+                            os.path.join(
+                                Path(self.projectPath.folder).parent,
+                                "foundation_transformer",
+                                f"spike_net_nCh{num_channels}.weights.pkl",
+                            ),
+                            "rb",
+                        ) as f:
+                            loaded_weights = pickle.load(f)
+                        spike_net.set_weights(loaded_weights)
+                        print(
+                            f"loaded foundation spike net weights for group {i} with {num_channels} channels"
+                        )
+                    except Exception as e:
+                        print(
+                            f"Could not load the foundation spike nets for window size {winMS_max} ms, error: {e}"
                         )
 
             # Create a callback that saves the model's weights
@@ -1753,6 +1881,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                                 device=self.deviceName,
                             ),
                         )
+                        callbacks.append(
+                            TransformerIdentityAuditCallback(
+                                val_dataset=datasets["test"],
+                                save_dir=os.path.join(
+                                    self.folderResult, "transformer_audit"
+                                ),
+                            ),
+                        )
                 else:
                     callbacks = [
                         csvLogger[key],
@@ -1779,6 +1915,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                                 device=self.deviceName,
                             ),
                         )
+                        callbacks.append(
+                            TransformerIdentityAuditCallback(
+                                val_dataset=datasets["test"],
+                                save_dir=os.path.join(
+                                    self.folderResult, "transformer_audit"
+                                ),
+                            ),
+                        )
 
                 if self.params.reduce_lr_on_plateau:
                     reduce_lr_callback = tf.keras.callbacks.ReduceLROnPlateau(
@@ -1801,12 +1945,23 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 ):  # 3. Train for a few "Warmup" epochs
                     alignment_epochs = kwargs.get("alignment_epochs", 20)
                     print("Starting Phase 1: Training mouse-dependent CNN only...")
+
+                    curr_callbacks = [csvLogger[key], schedule]
+                    if self.debug:
+                        curr_callbacks.append(wandb_callback)
+
+                    curr_es_callback = EarlyStoppingByLossVal(
+                        monitor="pos_2d_dist_2d",
+                        value=0.15,
+                        verbose=1,
+                    )
+                    curr_callbacks.append(curr_es_callback)
                     self.model.fit(
                         datasets["train"],
                         epochs=alignment_epochs,
                         validation_data=datasets["test"],
                         steps_per_epoch=int(steps_per_epoch / 2),
-                        callbacks=[csvLogger[key], schedule],
+                        callbacks=curr_callbacks,
                     )
 
                     if transformer_found == "full":
@@ -1912,68 +2067,215 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     os.path.join(self.folderModels, str(winMS_max)),
                     valLosses=valLosses,
                 )
-                self.model.save_weights(
-                    os.path.join(
-                        self.folderModels,
-                        str(winMS_max),
-                        "savedModels",
-                        "full_cp.weights.h5",
-                    ),
-                )
-                try:
-                    self.model.save(
-                        os.path.join(
-                            self.folderModels,
-                            str(winMS_max),
-                            "savedModels",
-                            "full_model.keras",
-                        )
-                    )
-                except Exception as e:
-                    print("Could not save the full model:", e)
-
-                try:
-                    self.transformer_only.save(
-                        os.path.join(
-                            self.projectPath.folder,
-                            "..",
-                            "foundation_transformer",
-                            str(winMS_max),
-                            "transformer.keras",
-                        )
-                    )
-                    self.transformer_only.save_weights(
-                        os.path.join(
-                            self.projectPath.folder,
-                            "..",
-                            "foundation_transformer",
-                            str(winMS_max),
-                            "transformer.weights.h5",
-                        )
-                    )
-                    self.full_transformer.save(
-                        os.path.join(
-                            self.projectPath.folder,
-                            "..",
-                            "foundation_transformer",
-                            str(winMS_max),
-                            f"{self.target.lower()}_transformer.keras",
-                        )
-                    )
-                    self.full_transformer.save_weights(
-                        os.path.join(
-                            self.projectPath.folder,
-                            "..",
-                            "foundation_transformer",
-                            str(winMS_max),
-                            f"{self.target.lower()}_transformer.weights.h5",
-                        )
-                    )
-                except Exception as e:
-                    print("Could not save the transformer", e)
+                self.save_models(int(winMS_max))
                 if self.debug:
                     # wandb.tensorboard.unpatch()
                     run.finish()
+
+    def save_models(self, winMS_max: int):
+        self.model.save_weights(
+            os.path.join(
+                self.folderModels,
+                str(winMS_max),
+                "savedModels",
+                "full_cp.weights.h5",
+            ),
+        )
+        try:
+            self.model.save(
+                os.path.join(
+                    self.folderModels,
+                    str(winMS_max),
+                    "savedModels",
+                    "full_model.keras",
+                )
+            )
+        except Exception as e:
+            print("Could not save the full model:", e)
+
+        try:
+            # Run the cross-subject greedy soup (backbone + dense layers)
+            self.interpolate_target_weights(winMS_max, alpha=0.5)
+
+            base_path = os.path.join(
+                Path(self.projectPath.folder).parent,
+                "foundation_transformer",
+                str(winMS_max),
+            )
+            os.makedirs(base_path, exist_ok=True)
+
+            # Save the souped backbone
+            self.transformer_only.save(os.path.join(base_path, "transformer.keras"))
+            self.transformer_only.save_weights(
+                os.path.join(base_path, "transformer.weights.h5")
+            )
+
+            # Save the souped full model
+            self.full_transformer.save(
+                os.path.join(base_path, f"{self.target.lower()}_transformer.keras")
+            )
+            self.full_transformer.save_weights(
+                os.path.join(base_path, f"{self.target.lower()}_transformer.weights.h5")
+            )
+
+        except Exception as e:
+            print("Could not complete cross-subject foundation pipeline: ", e)
+
+        try:
+            self.interpolate_spike_nets_weights(alpha=0.5)
+            for i, spike_net in enumerate(self.spikeNets):
+                num_channels = self.params.nChannelsPerGroup[i]
+                weights = spike_net.get_weights()
+                with open(
+                    os.path.join(
+                        Path(self.projectPath.folder).parent,
+                        "foundation_transformer",
+                        f"spike_net_nCh{num_channels}.weights.pkl",
+                    ),
+                    "wb",
+                ) as f:
+                    pickle.dump(weights, f)
+
+            print("✅ Successfully saved the spike nets after interpolation.")
+        except Exception as e:
+            print("Could not save the spike nets: ", e)
+
+    def interpolate_target_weights(self, winMS_max, alpha=0.5):
+        """
+        Directly interpolates weights across subjects for the same target profile.
+        Blends the entire full_transformer and updates transformer_only layer-by-layer.
+        """
+        target_master_path = os.path.join(
+            Path(self.projectPath.folder).parent,
+            "foundation_transformer",
+            str(winMS_max),
+            f"target_{self.target.lower()}_master.keras",
+        )
+
+        # 1. Get weights from the currently trained subject model (Backbone + Dense Heads)
+        current_weights = self.full_transformer.get_weights()
+
+        if os.path.exists(target_master_path):
+            print(
+                f"--- Found target master baseline. Interpolating weights with alpha={alpha} ---"
+            )
+
+            # Load historical master without compiling to safely extract weights
+            historical_model = tf.keras.models.load_model(
+                target_master_path, compile=False
+            )
+            historical_weights = historical_model.get_weights()
+
+            # Perform linear interpolation layer by layer across the full architecture
+            interpolated_weights = []
+            for h_w, c_w in zip(historical_weights, current_weights):
+                interp_w = alpha * h_w + (1.0 - alpha) * c_w
+                interpolated_weights.append(interp_w)
+
+            # 2. Update the live full_transformer with the interpolated weights
+            self.full_transformer.set_weights(interpolated_weights)
+
+            # 3. Safely update the standalone transformer_only view layer-by-layer
+            # Mapping individual leaf layers avoids container weight-count discrepancies
+            print("--- Synchronizing transformer_only leaf layers by name... ---")
+            layers_updated = 0
+
+            # We iterate through the sub-layers of transformer_only
+            for sub_layer in self.transformer_only.layers:
+                # If the sub_layer itself contains nested layers (like an encoder block)
+                if hasattr(sub_layer, "layers"):
+                    for nested_layer in sub_layer.layers:
+                        try:
+                            source_layer = self.full_transformer.get_layer(
+                                nested_layer.name
+                            )
+                            nested_layer.set_weights(source_layer.get_weights())
+                            layers_updated += 1
+                        except (ValueError, AttributeError):
+                            continue
+                else:
+                    try:
+                        source_layer = self.full_transformer.get_layer(sub_layer.name)
+                        sub_layer.set_weights(source_layer.get_weights())
+                        layers_updated += 1
+                    except (ValueError, AttributeError):
+                        continue
+
+            print(
+                f"--- Successfully synchronized {layers_updated} leaf layers to transformer_only ---"
+            )
+            print(
+                "--- Target weights successfully interpolated across both models! ---"
+            )
+
+        else:
+            print(
+                f"--- No master found for target '{self.target}'. Creating baseline from current subject. ---"
+            )
+
+        # Save the updated blend as the master file for the next subject iteration
+        os.makedirs(os.path.dirname(target_master_path), exist_ok=True)
+        self.full_transformer.save(target_master_path)
+
+    def interpolate_spike_nets_weights(self, alpha=0.5):
+        """
+        Directly interpolates weights across subjects for the spike networks.
+        Blends current weights with historical pickle baselines layer-by-layer.
+        """
+        print("--- Starting Spike Networks Weight Interpolation ---")
+
+        for i, spike_net in enumerate(self.spikeNets):
+            num_channels = self.params.nChannelsPerGroup[i]
+
+            # Define path to the historical master file for this specific channel size
+            spike_master_path = os.path.join(
+                Path(self.projectPath.folder).parent,
+                "foundation_transformer",
+                f"spike_net_nCh{num_channels}_master.weights.pkl",
+            )
+
+            # 1. Get the newly trained weights from the active live spike network
+            current_weights = spike_net.get_weights()
+
+            if os.path.exists(spike_master_path):
+                try:
+                    # Load historical master weight list
+                    with open(spike_master_path, "rb") as f:
+                        historical_weights = pickle.load(f)
+
+                    # Perform linear interpolation array-by-array
+                    interpolated_weights = []
+                    for h_w, c_w in zip(historical_weights, current_weights):
+                        # W_new = alpha * W_historical + (1 - alpha) * W_current
+                        interp_w = alpha * h_w + (1.0 - alpha) * c_w
+                        interpolated_weights.append(interp_w)
+
+                    # 2. Update the live spike network with the blended weights
+                    spike_net.set_weights(interpolated_weights)
+                    print(
+                        f"✅ Successfully interpolated weights for spike_net (nCh: {num_channels})"
+                    )
+
+                except Exception as e:
+                    print(
+                        f"⚠️ Failed to interpolate spike_net (nCh: {num_channels}): {e}"
+                    )
+                    print("Keeping current subject weights as fallback.")
+            else:
+                print(
+                    f"--- No master found for spike_net nCh {num_channels}. Creating baseline from current subject. ---"
+                )
+
+            # 3. Overwrite/Save the updated blend as the master file for the next subject iteration
+            os.makedirs(os.path.dirname(spike_master_path), exist_ok=True)
+            try:
+                # We save the updated (potentially blended) weights back to disk
+                with open(spike_master_path, "wb") as f:
+                    pickle.dump(spike_net.get_weights(), f)
+            except Exception as e:
+                print(
+                    f"⚠️ Could not update master pickle file for spike_net nCh {num_channels}: {e}"
+                )
 
     def compute_normalization_stats(self, dataset, max_samples=15000):
         """
@@ -2277,6 +2579,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # TODO: ensure that contrastive regression is always wrt the 2D position
             if "latent" in self.outNames:
                 targets_dict["latent"] = vals["pos"]
+
+            if any(["outputCNN" in name for name in self.outNames]):
+                for g in range(self.params.nGroups):
+                    targets_dict[f"outputCNN{g if g > 0 else ''}"] = vals["pos"]
 
             return (inputs_dict, targets_dict)
 
@@ -2969,8 +3275,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # This ensures the output matrix matches expectations of legacy code
         reconstructed_parts = []
         for name, spec in self.target_structure.items():
-            if name == "latent":
-                continue  # skip latent for now, it's auxiliary and not part of the main reconstructed featurePred
+            if "latent" in name:
+                continue  # skip latent/latent_output for now, it's auxiliary and not part of the main reconstructed featurePred
 
             if name == "pos_2d" and use_heatmap:
                 reconstructed_parts.append(results["pos_2d"])
@@ -3003,6 +3309,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 results["latent_temperature"] = latent_pred[:, -1:]
                 latent_pred = latent_pred[:, :-1]
             results["latent"] = latent_pred
+
+        if "latent_output" in preds:
+            latent_output = (
+                preds["latent_output"].numpy()
+                if hasattr(preds["latent_output"], "numpy")
+                else preds["latent_output"]
+            )
+            results["latent_output"] = latent_output
 
         # Linear projections / ID score
         if (
@@ -3078,13 +3392,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Create the folder
         os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)), exist_ok=True)
         # Loading the weights
-        print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
                     self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
                 ),
             )
+            print("Loading the weights of the predLoss trained network")
         else:
             try:
                 try:
@@ -3096,6 +3410,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "full_model.keras",
                         ),
                     )
+                    print("Loading directly the keras model from full_model.keras")
                 except Exception as e:
                     print(f"could not load keras model due to {e}. Trying with weights")
                     self.model.load_weights(
@@ -3107,6 +3422,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         ),
                         skip_mismatch=True,
                     )
+                    print("Loading the weights of the full trained network")
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
                 self.model.load_weights(
@@ -3116,6 +3432,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "full",
                         "cp.weights.h5",
                     ),
+                )
+                print(
+                    "Loading the weights of the full trained network from full checkpoint"
                 )
 
         # Manage the behavior
@@ -3196,6 +3515,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # dataset yields (inputs, targets)
         preds_dict = self.model.predict(dataset, verbose=1)
         # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent": ...}
+
+        if "latent_output" not in preds_dict:
+            latent_output = self._predict_latent_output(dataset, verbose=1)
+            if latent_output is not None:
+                preds_dict["latent_output"] = latent_output
 
         full_pos_loss = (
             None  # Position loss is not explicitly returned by the model anymore
@@ -3524,13 +3848,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             windowSizeDecoder = windowSizeMS
 
         # Loading the weights
-        print("Loading the weights of the trained network")
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
                     self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
                 ),
             )
+            print("Loading the weights of the predLoss trained network")
         else:
             try:
                 try:
@@ -3542,6 +3866,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             "full_model.keras",
                         ),
                     )
+                    print("Directly loading the keras model from savedModels")
                 except Exception as e:
                     print(f"could not load keras model due to {e}. Trying with weights")
                     self.model.load_weights(
@@ -3553,6 +3878,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         ),
                         skip_mismatch=True,
                     )
+                    print("Loading the weights of the trained network from savedModels")
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
                 self.model.load_weights(
@@ -3563,6 +3889,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "cp.weights.h5",
                     ),
                 )
+                print("Loading the weights of the trained network from full checkpoint")
 
         print("decoding sleep epochs")
         predictions = {}
@@ -3600,6 +3927,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Infer
             print(f"Inferring {sleepName} values")
             preds_dict = self.model.predict(dataset, verbose=1)
+
+            if "latent_output" not in preds_dict:
+                latent_output = self._predict_latent_output(dataset, verbose=1)
+                if latent_output is not None:
+                    preds_dict["latent_output"] = latent_output
 
             (
                 full_feature_true,
@@ -3910,6 +4242,293 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         strideFactor: int = 1,
         phase: str = "test",
         extract_waveforms: bool = False,
+        save: bool = True,
+        pad_shanks: bool = False,
+        groups_list=None,
+        file_path=None,
+        **kwargs,
+    ):
+        """
+        Extract CNN-level embeddings for every spike from the inference dataset,
+        using the backend-safe SpikeEncoder tracer framework for Keras 3.
+
+        Returns:
+            dict with:
+                cnn_features  : (N, feature_dim)
+                group_ids     : (N,)
+                posIndex      : (N,)
+                indexInDat    : (N,)
+        """
+        if groups_list is None:
+            groups_list = [g for g in range(self.params.nGroups)]
+        if not isinstance(groups_list, list):
+            groups_list = [groups_list]
+
+        len(groups_list)
+
+        print("Loading trained weights...")
+        if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
+            self.model.load_weights(
+                os.path.join(
+                    self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
+                ),
+            )
+        else:
+            try:
+                self.model = tf.keras.models.load_model(
+                    os.path.join(
+                        self.folderModels,
+                        str(windowSizeMS),
+                        "savedModels",
+                        "full_model.keras",
+                    ),
+                )
+            except (FileNotFoundError, ValueError):
+                print("fallback loading full/cp.ckpt weights...")
+                try:
+                    self.model.load_weights(
+                        os.path.join(
+                            self.folderModels, str(windowSizeMS), "full", "cp.ckpt"
+                        ),
+                        skip_mismatch=True,
+                    )
+                except (FileNotFoundError, ValueError):
+                    self.model.load_weights(
+                        os.path.join(
+                            self.folderModels,
+                            str(windowSizeMS),
+                            "full",
+                            "cp.weights.h5",
+                        ),
+                        skip_mismatch=True,
+                    )
+
+        # --- Build the same total mask used in test() ---
+        epochMask = get_epochs_mask(
+            behaviorData=behaviorData, useTrain=useTrain, useTest=useTest
+        )
+
+        if useSpeedFilter:
+            speedMask = behaviorData["Times"]["speedFilter"]
+        else:
+            speedMask = np.ones_like(epochMask, dtype=bool)
+
+        totMask = speedMask * epochMask
+
+        # --- Load dataset using SAME pipeline as test() ---
+        filename = (
+            f"dataset_stride{windowSizeMS}_factor{strideFactor}.tfrec"
+            if strideFactor > 1
+            else f"dataset_stride{windowSizeMS}.tfrec"
+        )
+
+        datasets, _ = self._dataset_loading_pipeline(
+            filename,
+            windowSizeMS,
+            behaviorData,
+            totMask,
+            inference_mode=True,
+            extract_spikes_counts=False,
+            shuffle=False,
+            phase=phase,
+        )
+        dataset = datasets["test"]
+
+        # --- THE FIX: DYNAMICALLY ACCUMULATE BACKEND EXTRACOR BLOCK ---
+        # Instead of named layers, we trace the model to locate the processor and build a submodel
+        from keras import ops as kops
+
+        sequence_processor = None
+        for layer in self.model.layers:
+            if (
+                "spike_sequence_processor" in layer.name
+                or "SpikeSequenceProcessor" in type(layer).__name__
+            ):
+                sequence_processor = layer
+                break
+        if sequence_processor is None:
+            raise ValueError(
+                "Could not locate SpikeSequenceProcessor layer inside the active model graph."
+            )
+
+        spike_encoder = sequence_processor.spike_encoder
+        waveform_inputs = self.model.inputs[: self.params.nGroups]
+
+        # Build symbolic mask tracing using backend-agnostic ops
+        all_group_masks = []
+        for g in range(self.params.nGroups):
+            group_data = waveform_inputs[g]
+            not_zero = kops.not_equal(group_data, 0.0)
+            g_mask = kops.any(not_zero, axis=[-1, -2])
+            all_group_masks.append(g_mask)
+
+        # Route symbolics directly to output channels
+        group_latents_raw = spike_encoder(
+            waveform_inputs, mask=all_group_masks, training=False
+        )
+        multi_model = tf.keras.Model(
+            inputs=self.model.inputs,
+            outputs=group_latents_raw,
+            name="inference_extractor",
+        )
+
+        @tf.function
+        def forward(batch, model):
+            return model(batch, training=False)
+
+        print("Extracting submodel spike latents cleanly across functional channels...")
+
+        all_features = []
+        all_group_ids = []
+        all_posIndex = []
+        all_indexInDat = []
+        all_inds = []
+        max_nChan = max(self.params.nChannelsPerGroup[g] for g in groups_list)
+
+        if extract_waveforms:
+            all_waveforms = []  # GLOBAL list matching all_features
+            zero_pad_waveform = {
+                g: np.zeros((self.params.nChannelsPerGroup[g], 32)) for g in groups_list
+            }
+            global_pad = np.zeros((max_nChan, 32))
+        else:
+            all_waveforms = None
+
+        for batch_inputs, _ in dataset:
+            # fetch posIndex and indexInDat for this batch
+            batch_posIndex = batch_inputs["pos_index"].numpy()  # size (batch_size,)
+            batch_indexInDat = batch_inputs[
+                "indexInDat"
+            ].numpy()  # size (max_n_spikes,)
+
+            # Executed batch pass outputs list: [ (Batch, MaxSpikesPerGroup, nFeatures) x n_groups ]
+            batch_outputs = forward(batch_inputs, multi_model)
+
+            for g in groups_list:
+                # 1. Grab output tensor for group g and convert to NumPy array
+                group_tensor = batch_outputs[g]
+                if hasattr(group_tensor, "numpy"):
+                    group_tensor = group_tensor.numpy()
+
+                # 2. !!! RE-SHAPE TO MATCH ORIGINAL PIPELINE !!!
+                # Flatten the Batch and MaxSpikes dimensions down into a single 2D continuous array:
+                # (Batch * MaxSpikes, nFeatures)
+                raw_features = group_tensor.reshape(-1, group_tensor.shape[-1])
+
+                # 3. Resume original reordering code exactly as written
+                zero_pad = np.zeros_like(raw_features[0:1, :])  # shape (1, dim)
+                raw_features = np.concatenate(
+                    [zero_pad, raw_features], 0
+                )  # add 0-vector
+
+                # Indices mapping to original spike order
+                inds = batch_inputs[f"indices{g}"].numpy()  # shape (N,)
+
+                # reorder to match spike stream
+                ordered_feats = np.take(raw_features, inds, axis=0)
+
+                if pad_shanks:
+                    n_chan_g = ordered_feats.shape[1]
+                    if n_chan_g < max_nChan:
+                        pad_shape = (
+                            ordered_feats.shape[0],
+                            max_nChan - n_chan_g,
+                        ) + ordered_feats.shape[2:]
+                        pad = np.zeros(pad_shape)
+                        ordered_feats = np.concatenate([ordered_feats, pad], axis=1)
+
+                if extract_waveforms:
+                    wf_batch = batch_inputs[
+                        f"group{g}"
+                    ].numpy()  # (Batch, MaxSpikesPerGroup, nChan_g, 32)
+                    n_chan_g = wf_batch.shape[
+                        2
+                    ]  # Shape layout changed to index 2 due to 4D representation
+
+                    # Flatten 4D batch inputs into standard continuous sequence row segments: (Batch * MaxSpikes, Channels, Time)
+                    wf_batch_flat = wf_batch.reshape(-1, n_chan_g, 32)
+
+                    # pad index 0 (like feature zero_pad)
+                    wf_padded = np.concatenate(
+                        [zero_pad_waveform[g][None, :, :], wf_batch_flat], axis=0
+                    )
+
+                    # reorder exactly like features
+                    wf_ordered = np.take(wf_padded, inds, axis=0)
+
+                    # pad to max channels with zeros
+                    if n_chan_g < max_nChan:
+                        pad = global_pad[
+                            n_chan_g:max_nChan, :
+                        ]  # (max_nChan - n_chan_g, 32)
+                        pad_expanded = np.broadcast_to(
+                            pad[None, :, :], (wf_ordered.shape[0], pad.shape[0], 32)
+                        )
+                        wf_ordered = np.concatenate([wf_ordered, pad_expanded], axis=1)
+
+                    all_waveforms.append(wf_ordered)
+
+                all_features.append(ordered_feats)
+                all_group_ids.append(np.full(ordered_feats.shape[0], g))
+                all_posIndex.append(batch_posIndex)
+                all_indexInDat.append(batch_indexInDat)
+                all_inds.append(inds)
+
+        # --- Concatenate all groups ---
+        cnn_features = np.concatenate(all_features, axis=0)
+        group_ids = np.concatenate(all_group_ids, axis=0)
+        posIndex = np.concatenate(all_posIndex, axis=0)
+        indexInDat = np.concatenate(all_indexInDat, axis=0)
+        inds = np.concatenate(all_inds, axis=0)
+        if extract_waveforms:
+            all_waveforms = np.concatenate(all_waveforms, axis=0)
+
+        result = {
+            "cnn_features": cnn_features,
+            "group_ids": group_ids,
+            "posIndex": posIndex,
+            "indexInDat": indexInDat,
+            "indices": inds,
+        }
+
+        # optional save
+        if save:
+            out_file = (
+                os.path.join(
+                    self.folderResult, str(windowSizeMS), "artificial_spikes.pkl"
+                )
+                if file_path is None
+                else file_path
+            )
+            print(f"Saving artificial spikes to {out_file}...")
+            import dill as pickle
+
+            with open(out_file, "wb") as f:
+                pickle.dump(result, f)
+
+            if extract_waveforms:
+                out_file = os.path.join(
+                    self.folderResult,
+                    str(windowSizeMS),
+                    "artificial_waveforms.pkl",
+                )
+                print(f"Saving artificial spikes waveforms to {out_file}...")
+                with open(out_file, "wb") as f:
+                    pickle.dump(all_waveforms, f)
+
+        return result, all_waveforms
+
+    def get_artificial_spikes_old(
+        self,
+        behaviorData: dict,
+        windowSizeMS: int = 36,
+        useSpeedFilter: bool = False,
+        useTrain: bool = False,
+        useTest: bool = True,
+        isPredLoss: bool = False,
+        strideFactor: int = 1,
+        phase: str = "test",
+        extract_waveforms: bool = False,
         layer_name="outputCNN",
         save: bool = True,
         pad_shanks: bool = False,
@@ -3953,7 +4572,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         "savedModels",
                         "full_model.keras",
                     ),
-                    skip_mismatch=True,
                 )
             except FileNotFoundError:
                 print("fallback loading full/cp.ckpt")
@@ -4508,6 +5126,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         df = pd.DataFrame(test_output["featurePred"])
         df.to_csv(os.path.join(folderToSave, f"featurePred{suffix}.csv"))
 
+        if "latent_output" in test_output:
+            latent_output = test_output["latent_output"]
+            if hasattr(latent_output, "numpy"):
+                latent_output = latent_output.numpy()
+            latent_output = np.asarray(latent_output)
+            if latent_output.ndim > 2:
+                latent_output = latent_output.reshape(latent_output.shape[0], -1)
+            df = pd.DataFrame(latent_output)
+            df.to_csv(os.path.join(folderToSave, f"latent_output{suffix}.csv"))
+
         if "Hn" in test_output:
             df = pd.DataFrame(test_output["Hn"])
             df.to_csv(os.path.join(folderToSave, f"Hn{suffix}.csv"))
@@ -4720,8 +5348,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             mask_tensor = self.model.get_layer("spike_sequence_processor").output[1]
 
             # Apply your masking layer to the cnn_output to clean the bias
+            cnn_output_tensor._keras_mask = mask_tensor
             clean_cnn_output = MaskingLayer(name="cnn_output_cleaner")(
-                [mask_tensor, cnn_output_tensor]
+                cnn_output_tensor
             )
 
             self.cnn_feature_extractor = tf.keras.Model(
@@ -4760,7 +5389,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             mask_input = kops.cast(mask_input, dtype="bool")
 
             masked_features_layer = MaskingLayer(name="masking_layer_transformer")
-            allFeatures = masked_features_layer([mask_input, input_to_posEncoding])
+            input_to_posEncoding._keras_mask = mask_input
+            allFeatures = masked_features_layer(input_to_posEncoding)
 
             latent_output = self.transformer_encoder(allFeatures)
             x = self.transformer_decoder(latent_output)
@@ -4806,7 +5436,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             mask_input = kops.cast(mask_input, dtype="bool")
 
             masked_features_layer = MaskingLayer(name="masking_layer_transformer")
-            allFeatures = masked_features_layer([mask_input, input_to_posEncoding])
+            input_to_posEncoding._keras_mask = mask_input
+            allFeatures = masked_features_layer(input_to_posEncoding)
 
             latent_output = self.transformer_encoder(allFeatures)
             x = self.transformer_decoder(latent_output)
@@ -4833,12 +5464,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 name="latent_output", dtype="float32"
             )(latent_output)
             tmp_outputs = outputs.copy()
-            tmp_outputs.pop("latent_output")  # Remove latent_output from final outputs
 
             self.full_transformer = tf.keras.Model(
                 inputs=[input_to_posEncoding, mask_input],
                 outputs=tmp_outputs,
                 name="FullTransformerModel",
+            )
+            self.full_transformer.compile(
+                optimizer=self.optimizer,
+                loss=self.loss_dict,
+                loss_weights=self.loss_weights,
+                metrics=self.metrics_dict,
             )
 
         return self.full_transformer
