@@ -7,16 +7,18 @@ Created on Wed May 27 21:28:52 2020
 """
 
 import copy
+import gc
+import json
 import os
 import re
 from typing import Any, Dict, List, Literal, Optional, Union
 from warnings import warn
 
 import dill as pickle
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pynapple as nap
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
 from pynapple import (
@@ -25,9 +27,11 @@ from pynapple import (
     TsGroup,
     Tsd,
     TsdFrame,
+    TsdTensor,
+    compute_perievent,
 )
 from scipy.io import loadmat
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import (
     accuracy_score,
@@ -47,16 +51,24 @@ from neuroencoders.transformData.linearizer import UMazeLinearizer
 from neuroencoders.utils.PathForExperiments import path_for_experiments
 from neuroencoders.utils.func_wrappers import timing
 from neuroencoders.utils.global_classes import (
+    ZONEDEF,
     ZONELABELS,
+    ZONE_COLORS,
     Params,
     Project,
     SpatialConstraintsMixin,
     TuningCurvesPlotter,
     _compute_tuning_curves_for_result,
+    gaussian_filter_nan,
     get_max_nb_spikes,
 )
 from neuroencoders.utils.global_classes import DataHelper as DataHelperClass
-from neuroencoders.utils.wrappers import clean_mat_structure, compute_debiased_pv_corr
+from neuroencoders.utils.viz_params import (
+    ALL_STIMS_COLOR,
+    GROUPS_PALETTE,
+    RIPPLES_COLOR,
+)
+from neuroencoders.utils.wrappers import clean_mat_structure
 
 EXPORT_COLS = [
     "mouse",
@@ -515,8 +527,6 @@ def _restrict_by_group(df, filter_value):
 
 def _check_element_match(cell_value, filter_val):
     """Helper to check if a filter value matches or exists inside a cell's object."""
-    # 1. Handle Pynapple objects safely by extracting underlying numpy arrays
-    # (Pynapple objects usually have a .values or .d property)
     if hasattr(cell_value, "values") and not isinstance(
         cell_value, (pd.Series, pd.DataFrame)
     ):
@@ -848,8 +858,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
 
         # find all window directories in the results path
         self.find_window_size(**kwargs)
-        self.parameters = dict()
-        self.projects = dict()
+        self.parameters: Dict[str, Params] = dict()
+        self.projects: Dict[str, Project] = dict()
 
         for i, winMS in enumerate(self.windows):
             self._initialize_window(winMS, i, **kwargs)
@@ -876,6 +886,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             add_full_pre=add_full_pre,
             grid_size=self.Params.GaussianGridSize,
             maze_params=self.Linearizer.maze_params,
+            sleep=kwargs.get("sleep", False),
         )
 
     def _parse_init_args(self, args, kwargs):
@@ -944,8 +955,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         """Fallback to load Params from json or create new one."""
         params_path = os.path.join(self.folderResult, winMS, "params.json")
         if os.path.exists(params_path):
-            import json
-
             print(f"Loading saved params from {params_path}")
             with open(params_path, "r") as f:
                 saved_params = json.load(f)
@@ -1035,7 +1044,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             obj: Mouse_Results object to save
 
         """
-        import dill as pickle
 
         with open(path, "wb") as f:
             pickle.dump(cls, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1103,10 +1111,16 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             )
 
         if conditions.sum() > 1:
-            if self.exp_index is None:
-                raise ValueError(
-                    f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe}. Please specify exp_index to disambiguate and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
+            if self.exp_index is None or self.exp_index == 0:
+                manipe_in_path = self.Dir[conditions].path.str.contains(
+                    self.manipe, case=False
                 )
+                if manipe_in_path.sum() == 1:
+                    conditions = conditions & manipe_in_path
+                else:
+                    raise ValueError(
+                        f"Multiple paths found for mouse {self.mouse_name} with manipulation {self.manipe}. Please specify exp_index to disambiguate and choose one of the following paths:\n{self.Dir[conditions][['path']].to_string()}"
+                    )
             else:
                 # add as a condition that os.path.basename of path contains exp_index
                 suppl_conditions = self.Dir.path.str.contains(f"exp{self.exp_index}")
@@ -1289,7 +1303,11 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                         **kwargs,
                     )
             if i == 0 and which.lower() in ["bayes", "both"]:
-                if not hasattr(self, "bayes"):
+                if (
+                    not hasattr(self, "bayes")
+                    or self.bayes is None
+                    or kwargs.get("redo", False)
+                ):
                     self.bayes_config = DecoderConfig(**kwargs)
                     if kwargs.get("bayes_project_path", None) is not None:
                         self.bayes_config.extra_kwargs["project_path"] = kwargs.get(
@@ -2082,6 +2100,10 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             "cond": (self.cond, self.condMask),
             "post": (self.post, self.postMask),
             "sleep": (self.sleep, self.sleepMask),
+            "presleep": (self.presleep, self.presleepMask),
+            "postsleep": (self.postsleep, self.postsleepMask),
+            "pre_sleep": (self.presleep, self.presleepMask),
+            "post_sleep": (self.postsleep, self.postsleepMask),
         }
         if hasattr(self, "extinct") and hasattr(self, "extinctMask"):
             return_dict["extinction"] = (self.extinct, self.extinctMask)
@@ -2130,7 +2152,10 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         fullBehavior["Positions"] = positions
 
         if not hasattr(self, "waveform_comparators") or force:
-            self.waveform_comparators = dict()
+            if not hasattr(self, "bayes") or self.bayes is None:
+                self.load_trainers(which="both", **kwargs)
+
+            self.waveform_comparators: Dict[str, WaveFormComparator] = dict()
             for win, winValue in zip(self.windows, self.windows_values):
                 self.waveform_comparators[win] = WaveFormComparator(
                     self.projects[win],
@@ -2164,7 +2189,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         """
         Starting from base fullBehavior, simply return a fullBehavior with adapted train/test Epochs.
         """
-        if phase == self.phase:
+        if phase == self.phase or phase == "training":
             return self.data_helper.fullBehavior
 
         if "_" in phase:
@@ -2386,11 +2411,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         ep = time_epoch.intersect(not_nan_epoch)
 
         if kwargs.get("use_speed_filter", True):
-            speed_filter = Tsd(
-                t=self.DataHelper.fullBehavior["positionTime"].flatten(),
-                d=self.DataHelper.fullBehavior["Times"]["speedFilter"],
-            )
-            ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+            speed_ep = self.DataHelper.get_mov_epochs()
+            ep = ep.intersect(speed_ep)
 
         positions = positions.restrict(ep)
         linpos = np.linspace(0, 1, final1d.values.shape[1])
@@ -2475,11 +2497,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         ep = time_epoch.intersect(not_nan_epoch)
 
         if kwargs.get("use_speed_filter", True):
-            speed_filter = Tsd(
-                t=self.DataHelper.fullBehavior["positionTime"].flatten(),
-                d=self.DataHelper.fullBehavior["Times"]["speedFilter"],
-            )
-            ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+            speed_ep = self.DataHelper.get_mov_epochs()
+            ep = ep.intersect(speed_ep)
 
         positions = positions.restrict(ep)
         extent = (0, 1, 0, 1)
@@ -2539,9 +2558,6 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
     def plot_respi_spectro_during_immobility(
         self, which: str = "freezing", path: Optional[str] = None, **kwargs
     ):
-        from neuroencoders.utils.global_classes import ZONELABELS, ZONE_COLORS
-        from neuroencoders.utils.viz_params import ALL_STIMS_COLOR, RIPPLES_COLOR
-
         try:
             respi = self.DataHelper.get_respi_data()
         except FileNotFoundError:
@@ -2782,9 +2798,10 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         self, wi=2.0, bin_size=0.05, smooth_sigma=0.05, count_thresh=200
     ) -> Optional[Dict[str, Any]]:
         """
-        Identifies ON and OFF modulated freezing neurons using raw count/firing rates.
-        Filters out quiet neurons below count_thresh (total spikes in conditioning epoch).
+        Identifies ON, OFF, Uninfluenced, and NAN (below threshold) freezing neurons
+        using raw count/firing rates.
         """
+        print("Computing freeze ON/OFF counts...")
         try:
             spikes = self.DataHelper.get_spike_data()
         except FileNotFoundError:
@@ -2799,7 +2816,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             else:
                 raise
 
-        cond_epoch = nap.IntervalSet(self.cond)
+        cond_epoch = IntervalSet(self.cond)
         freeze_epochs = self.DataHelper.get_freeze_epochs().intersect(cond_epoch)
         if len(freeze_epochs) == 0:
             return None
@@ -2810,11 +2827,14 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
 
         # Calculate the total integrated spike count for each neuron across the entire epoch
         total_counts_per_neuron = np.array(counts.restrict(freeze_epochs).sum(axis=0))
-        # Keep only well-sampled neurons (matching the tuning curve count thresholding rule)
+
+        # 1. IDENTIFY NAN NEURONS (Below count threshold)
         valid_mask = total_counts_per_neuron >= count_thresh
+        nan_neurons_mask = ~valid_mask
         n_neurons_raw = len(valid_mask)
+
         print(
-            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {valid_mask.shape[0]}"
+            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {n_neurons_raw}"
         )
 
         if valid_mask.sum() == 0:
@@ -2824,13 +2844,13 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         fr = counts / bin_size
         smoothed_fr = fr.smooth(smooth_sigma)
 
-        onsets = nap.Ts(freeze_epochs.start)
-        offsets = nap.Ts(freeze_epochs.end)
+        onsets = Ts(freeze_epochs.start)
+        offsets = Ts(freeze_epochs.end)
 
-        peth_on = nap.compute_perievent(
+        peth_on = compute_perievent(
             smoothed_fr, onsets, window=(-wi, wi), epochs=cond_epoch
         )
-        peth_off = nap.compute_perievent(
+        peth_off = compute_perievent(
             smoothed_fr, offsets, window=(-wi, wi), epochs=cond_epoch
         )
 
@@ -2841,15 +2861,10 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         mean_on[np.isinf(mean_on)] = np.nan
         mean_off[np.isinf(mean_off)] = np.nan
 
-        # Force low-count/invalid neurons to NaN in raw outputs so they drop cleanly
-        # mean_on[:, invalid_mask] = np.nan
-        # mean_off[:, invalid_mask] = np.nan
-
         t_on = peth_on.times()
         t_off = peth_off.times()
 
         # Define baseline vs active freezing windows
-        # here we force the response mask to the full freezing episode, from onset to offset
         baseline_mask = t_on <= -0.5
         response_mask_on = (t_on >= 0.0) & (t_on <= wi)
         response_mask_off = t_off <= 0
@@ -2863,9 +2878,22 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         # Absolute difference in firing rate (Hz)
         modulation = response_avg - base_line_avg
 
-        # Classify active subpopulations using raw Hz delta thresholds
-        on_neurons = (modulation > 0.75) & valid_mask
-        off_neurons = (modulation < -1.5) & valid_mask
+        # 2. CLASSIFY ON & OFF NEURONS (Must be valid)
+        on_neurons_mask = (modulation > 0.5) & valid_mask
+        off_neurons_mask = (modulation < -1) & valid_mask
+
+        # 3. IDENTIFY UNINFLUENCED NEURONS
+        # (Valid, but modulation doesn't cross either threshold boundary)
+        uninfluenced_neurons_mask = (
+            valid_mask & (~on_neurons_mask) & (~off_neurons_mask)
+        )
+
+        # 4. EXTRACT INTEGER EXPERIMENTAL IDs/INDICES
+        all_indices = np.arange(n_neurons_raw)
+        on_ids = all_indices[on_neurons_mask]
+        off_ids = all_indices[off_neurons_mask]
+        uninfluenced_ids = all_indices[uninfluenced_neurons_mask]
+        nan_ids = all_indices[nan_neurons_mask]
 
         # Sort map layout calculation based on mean activation trajectory
         sort_idx = np.argsort(np.nanmean(mean_on, axis=0))
@@ -2875,11 +2903,19 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             "peth_off": peth_off,
             "mean_on_raw": mean_on,
             "mean_off_raw": mean_off,
-            "on_neurons_mask": on_neurons,
-            "off_neurons_mask": off_neurons,
             "sort_idx": sort_idx,
             "n_neurons_raw": n_neurons_raw,
-            "valid_mask": valid_mask,  # Retained to ensure clean sub-indexing
+            "valid_mask": valid_mask,
+            # Boolean logical masks (same length as the original spike object)
+            "on_neurons_mask": on_neurons_mask,
+            "off_neurons_mask": off_neurons_mask,
+            "uninfluenced_neurons_mask": uninfluenced_neurons_mask,
+            "nan_neurons_mask": nan_neurons_mask,
+            # Integer indices of specific subpopulations
+            "on_ids": on_ids,
+            "off_ids": off_ids,
+            "uninfluenced_ids": uninfluenced_ids,
+            "nan_ids": nan_ids,
         }
 
     def compute_event_onoff_counts(
@@ -2892,8 +2928,8 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         focus_on=0.5,
     ) -> Optional[Dict[str, Any]]:
         """
-        Identifies ON and OFF modulated neurons around single-point events (ripples/stims).
-        Filters out quiet neurons below count_thresh based on total spikes in the condition epoch.
+        Identifies ON, OFF, Neutral, and NAN modulated neurons around single-point events
+        (ripples/stims). If around="stims", extracts a 5th 'Delayed ON' population.
         """
         try:
             spikes = self.DataHelper.get_spike_data()
@@ -2909,24 +2945,20 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             else:
                 raise
 
-        cond_epoch = nap.IntervalSet(self.cond)
+        cond_epoch = IntervalSet(self.cond)
 
         # --- SINGLE POINT EVENT EXTRACTION ---
-        # Adjust attribute names below ('get_ripple_timestamps' or 'get_stim_timestamps')
-        # to match your DataHelper's actual API for discrete events.
         if around == "ripples":
-            event_ts = nap.Ts(self.DataHelper.get_ripples_epochs().start).restrict(
+            event_ts = Ts(self.DataHelper.get_ripples_epochs().start).restrict(
                 cond_epoch
             )
         elif around == "stims":
-            # Fallback placeholder if your event handles use a different method name
-            event_ts = nap.Ts(self.DataHelper.get_stim_epochs().start).restrict(
-                cond_epoch
-            )
+            event_ts = Ts(self.DataHelper.get_stim_epochs().start).restrict(cond_epoch)
         else:
             raise ValueError(
                 f"Undefined value {around}: choose between either 'ripples' or 'stims'"
             )
+
         if len(event_ts) == 0:
             return None
 
@@ -2934,12 +2966,14 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         spikes_cond = spikes.restrict(cond_epoch)
         counts = spikes_cond.count(bin_size)
 
-        # Filter out inactive neurons across the whole session frame
+        # 1. IDENTIFY NAN NEURONS (Below count threshold)
         total_counts_per_neuron = np.array(counts.sum(axis=0))
         valid_mask = total_counts_per_neuron >= count_thresh
+        nan_neurons_mask = ~valid_mask
         n_neurons_raw = len(valid_mask)
+
         print(
-            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {valid_mask.shape[0]}"
+            f"{valid_mask.sum()} neurons passed the {count_thresh} thresh out of {n_neurons_raw}"
         )
 
         if valid_mask.sum() == 0:
@@ -2950,7 +2984,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         smoothed_fr = fr.smooth(smooth_sigma)
 
         # --- SINGLE PETH COMPUTATION ---
-        peth_event = nap.compute_perievent(
+        peth_event = compute_perievent(
             smoothed_fr, event_ts, window=(-wi, wi), epochs=cond_epoch
         )
 
@@ -2958,29 +2992,63 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         mean_event = np.nanmean(peth_event.values, axis=1).astype(float)
         mean_event[np.isinf(mean_event)] = np.nan
 
-        # Zero out or invalidate low-count rows
-        invalid_mask = ~valid_mask
-        mean_event[:, invalid_mask] = np.nan
-
         t_event = peth_event.times()
 
-        # Define baseline vs sharp-transient response windows relative to single timestamp
-        baseline_mask = t_event <= -0.1  # e.g., pre-event baseline
-
-        response_mask = (t_event >= 0.0) & (
-            t_event <= focus_on
-        )  # post-event modulation window
-
-        # Compute raw average firing rates within windows
+        # Define baseline window
+        baseline_mask = t_event <= -0.1
         base_line_avg = np.nanmean(mean_event[baseline_mask, :], axis=0)
-        response_avg = np.nanmean(mean_event[response_mask, :], axis=0)
 
-        # Calculate difference in raw rates (Hz)
-        modulation = response_avg - base_line_avg
+        # Initialize empty placeholder masks for conditional delayed logic
+        delayed_on_neurons_mask = np.zeros(n_neurons_raw, dtype=bool)
 
-        # Classify active subpopulations using raw Hz delta thresholds (adjust thresholds for ripples/stims if needed)
-        on_neurons = (modulation > 1.0) & valid_mask
-        off_neurons = (modulation < -1.0) & valid_mask
+        # =========================================================
+        # TARGET POPULATION CLASSIFICATION
+        # =========================================================
+        if around == "stims":
+            # Window A: Immediate response window (0 to 250ms)
+            early_mask = (t_event >= 0.0) & (t_event <= 0.25)
+            early_avg = np.nanmean(mean_event[early_mask, :], axis=0)
+            early_mod = early_avg - base_line_avg
+
+            # Window B: Delayed response window (250ms to focus_on)
+            # Safe boundary catch: if focus_on is <= 250ms, fallback to look up to wi (2.0s)
+            late_end = focus_on if focus_on > 0.25 else wi
+            late_mask = (t_event > 0.25) & (t_event <= late_end)
+            late_avg = np.nanmean(mean_event[late_mask, :], axis=0)
+            late_mod = late_avg - base_line_avg
+
+            # Define immediate early responses
+            on_neurons_mask = (early_mod > 1.0) & valid_mask
+            off_neurons_mask = (early_mod < -1.0) & valid_mask
+
+            # Define delayed on: neutral early, but active late
+            was_early_neutral = (early_mod <= 1.0) & (early_mod >= -1.0)
+            delayed_on_neurons_mask = was_early_neutral & (late_mod > 1.0) & valid_mask
+
+        else:
+            # Standard Ripples Logic: Single unified focus_on window
+            response_mask = (t_event >= 0.0) & (t_event <= focus_on)
+            response_avg = np.nanmean(mean_event[response_mask, :], axis=0)
+            modulation = response_avg - base_line_avg
+
+            on_neurons_mask = (modulation > 1.0) & valid_mask
+            off_neurons_mask = (modulation < -1.0) & valid_mask
+
+        # Identify Uninfluenced/Neutral Neurons (Valid, but missed all active criteria)
+        uninfluenced_neurons_mask = (
+            valid_mask
+            & (~on_neurons_mask)
+            & (~off_neurons_mask)
+            & (~delayed_on_neurons_mask)
+        )
+
+        # --- EXTRACT ID INTEGER LISTS ---
+        all_indices = np.arange(n_neurons_raw)
+        on_ids = all_indices[on_neurons_mask]
+        off_ids = all_indices[off_neurons_mask]
+        delayed_on_ids = all_indices[delayed_on_neurons_mask]
+        uninfluenced_ids = all_indices[uninfluenced_neurons_mask]
+        nan_ids = all_indices[nan_neurons_mask]
 
         # Sort map layout calculation based on mean activation trajectory
         sort_idx = np.argsort(np.nanmean(mean_event, axis=0))
@@ -2988,12 +3056,53 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         return {
             "peth_event": peth_event,
             "mean_event_raw": mean_event,
-            "on_neurons_mask": on_neurons,
-            "off_neurons_mask": off_neurons,
             "sort_idx": sort_idx,
             "n_neurons_raw": n_neurons_raw,
             "valid_mask": valid_mask,
+            # Boolean logical masks (Full length of neuron arrays)
+            "on_neurons_mask": on_neurons_mask,
+            "off_neurons_mask": off_neurons_mask,
+            "delayed_on_neurons_mask": delayed_on_neurons_mask,
+            "uninfluenced_neurons_mask": uninfluenced_neurons_mask,
+            "nan_neurons_mask": nan_neurons_mask,
+            # Integer experimental identity IDs
+            "on_ids": on_ids,
+            "off_ids": off_ids,
+            "delayed_on_ids": delayed_on_ids,
+            "uninfluenced_ids": uninfluenced_ids,
+            "nan_ids": nan_ids,
         }
+
+    def add_sleep_scoring(self, force: bool = False) -> Dict[str, Any]:
+        if (
+            hasattr(self.DataHelper, "sleep_scoring")
+            and isinstance(self.DataHelper.sleep_scoring, dict)
+            and not force
+        ):
+            return self.DataHelper.sleep_scoring
+
+        from neuroencoders.utils.wrappers import loadSleepScoring
+
+        try:
+            if (
+                not os.path.exists(
+                    os.path.join(self.DataHelper.folder, "nnSleepScoring.mat")
+                )
+                and not os.path.exists(
+                    os.path.join(self.DataHelper.folder, "SleepScoring_OBGamma.mat")
+                )
+                and not os.path.exists(
+                    os.path.join(self.DataHelper.folder, "SleepScoring_Accelero.mat")
+                )
+            ):
+                raise FileNotFoundError(
+                    "Sleep scoring files not found in DataHelper folder. Attempting to load from network path."
+                )
+            self.DataHelper.sleep_scoring = loadSleepScoring(self.DataHelper.folder)
+        except FileNotFoundError:
+            self.DataHelper.sleep_scoring = loadSleepScoring(self.network_path)
+
+        return self.DataHelper.sleep_scoring
 
 
 class Results_Loader(TuningCurvesPlotter):
@@ -3136,9 +3245,15 @@ class Results_Loader(TuningCurvesPlotter):
                 window_tmp = []
                 if conditions.sum() > 1:
                     if exp_index is None or exp_index == 0:
-                        raise ValueError(
-                            f"Multiple entries found for mouse {mouse_nb} with manipe {manipe}. Please provide exp_index to disambiguate."
+                        manipe_in_path = self.Dir[conditions].path.str.contains(
+                            manipe, case=False
                         )
+                        if manipe_in_path.sum() == 1:
+                            conditions = conditions & manipe_in_path
+                        else:
+                            raise ValueError(
+                                f"Multiple entries found for mouse {mouse_nb} with manipe {manipe}. Please provide exp_index to disambiguate."
+                            )
                     else:
                         suppl_conditions = self.Dir.path.str.contains(f"exp{exp_index}")
                         conditions = conditions & suppl_conditions
@@ -3359,7 +3474,20 @@ class Results_Loader(TuningCurvesPlotter):
         Returns:
             Mouse_Results: The Mouse_Results object for the specified mouse and phase.
         """
-        mouse_name, phase = key.split("_")
+        try:
+            mouse_name, phase = key.split("_")
+        except ValueError:
+            # simply extract M + Number as mouse_name and the rest as phase
+            import re
+
+            mouse_name_match = re.match(r"(M\d+)(.*)", key)
+            if mouse_name_match:
+                mouse_name = mouse_name_match.group(1)
+                phase = mouse_name_match.group(2).lstrip("_")
+            else:
+                raise ValueError(
+                    f"Key '{key}' is not in the expected format 'mouse_name_phase'."
+                )
         if mouse_name in self.results_dict and phase in self.results_dict[mouse_name]:
             return self.results_dict[mouse_name][phase]
         else:
@@ -3783,7 +3911,7 @@ class Results_Loader(TuningCurvesPlotter):
                     f"Missing required column '{col}' to compute breathing."
                 )
         for _, df in self.results_df.groupby(level="mouse_name"):
-            res = df.iloc[0].results
+            res: Mouse_Results = df.iloc[0].results
             try:
                 respi = res.DataHelper.get_respi_data()
             except FileNotFoundError:
@@ -3794,11 +3922,13 @@ class Results_Loader(TuningCurvesPlotter):
             found_ekg = False
 
             if os.path.exists(
-                os.path.join(res.folder, "HeartBeatInfo.mat")
+                os.path.join(res.DataHelper.folder, "HeartBeatInfo.mat")
             ) or os.path.exists(os.path.join(res.network_path, "HeartBeatInfo.mat")):
                 folder = (
-                    res.folder
-                    if os.path.exists(os.path.join(res.folder, "HeartBeatInfo.mat"))
+                    res.DataHelper.folder
+                    if os.path.exists(
+                        os.path.join(res.DataHelper.folder, "HeartBeatInfo.mat")
+                    )
                     else res.network_path
                 )
                 heart_file = loadmat(os.path.join(folder, "HeartBeatInfo.mat"))
@@ -3976,7 +4106,10 @@ class Results_Loader(TuningCurvesPlotter):
         cols = [col_name_mapping.get(col, col) for col in cols]
         name_time_column = col_name_mapping.get(name_time_column, name_time_column)
 
-        # Determine whether any requested column needs pynapple time-remapping
+        assert name_time_column in df.columns, (
+            f"Time column '{name_time_column}' is not present in the DataFrame."
+        )
+
         restrict_targets = [
             "breathing_rate",
             "breathing_power",
@@ -3986,7 +4119,6 @@ class Results_Loader(TuningCurvesPlotter):
         restrict_cols_present = [c for c in cols if c in restrict_targets]
         need_to_restrict = len(restrict_cols_present) > 0
 
-        # Locate the target pynapple object whose timestamps we want to match
         which_restrictor = next((c for c in cols if c in restrict_targets), None)
 
         # 1. Configuration Mappings
@@ -4035,9 +4167,6 @@ class Results_Loader(TuningCurvesPlotter):
             if col == "mouse":
                 df[col] = df[col].astype(int)
 
-        # 3. Synchronize All Time Series via Pynapple from_value()
-        # We execute this row-by-row IN ONE PASS to prevent performance decay
-        # 3. Synchronize All Time Series via Pynapple value_from()
         if need_to_restrict:
             # Automatically detect any column that contains array data per row
             # This ensures features, speeds, and custom masks are ALL processed
@@ -4086,8 +4215,6 @@ class Results_Loader(TuningCurvesPlotter):
                                 row[c] = [np.full(fallback_len, np.nan)]
                     return row
 
-                # --- CASE 2: NORMAL ALIGNMENT PASS ---
-                # Run the Pynapple time-mapping on ALL array columns, including features!
                 for c in array_cols:
                     if c == which_restrictor:
                         row[c] = [target_tsd.values]
@@ -4331,13 +4458,7 @@ class Results_Loader(TuningCurvesPlotter):
         winMS_list=None,
         removeMice_list=None,
     ):
-        import os
-
         import cmcrameri.cm as cmc
-        import matplotlib.pyplot as plt
-        import numpy as np
-
-        print("this is even newer")
 
         folder = folder or getattr(self, "folderFigures", None)
         used_df = self.results_df.copy()
@@ -5559,13 +5680,6 @@ class Results_Loader(TuningCurvesPlotter):
         Global point-by-point correlation.
         If data exceeds max_points, it subsamples to keep plotting fast and meaningful.
         """
-        import os
-        import pickle
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import pandas as pd
-        import seaborn as sns
         from scipy.stats import linregress
 
         folder = folder or getattr(self, "folderFigures", None)
@@ -5710,13 +5824,6 @@ class Results_Loader(TuningCurvesPlotter):
         Correlate decoder values (entropy/maxp/error) with spike counts globally.
         Every point is one single prediction time-bin across all sessions.
         """
-        import os
-        import pickle
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import pandas as pd
-        import seaborn as sns
         from scipy.stats import linregress
 
         folder = folder or getattr(self, "folderFigures", None)
@@ -5902,13 +6009,6 @@ class Results_Loader(TuningCurvesPlotter):
         Instead of averaging R-values per mouse, it pools all time-bins for each
         category (Phase/WinMS) to get a true point-by-point global correlation.
         """
-        import os
-        import pickle
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import pandas as pd
-        import seaborn as sns
         from scipy.stats import spearmanr
 
         folder = folder or getattr(self, "folderFigures", None)
@@ -6110,13 +6210,6 @@ class Results_Loader(TuningCurvesPlotter):
             show (bool): show figure interactively.
             zscore (bool): z-score values before correlation.
         """
-        import os
-        import pickle
-
-        import matplotlib.pyplot as plt
-        import numpy as np
-        import pandas as pd
-        import seaborn as sns
         from scipy.stats import spearmanr
 
         folder = folder or getattr(self, "folderFigures", None)
@@ -6328,11 +6421,6 @@ class Results_Loader(TuningCurvesPlotter):
             show (bool): show interactively.
             normed (bool): normalize histogram to probability density.
         """
-        import os
-        import pickle
-
-        import matplotlib.pyplot as plt
-        import numpy as np
 
         folder = folder or getattr(self, "folderFigures", None)
         df = self.results_df.copy()
@@ -7682,7 +7770,7 @@ class Results_Loader(TuningCurvesPlotter):
                     bin_size=bin_size,
                     mode=mode,
                     epoch=kwargs.get("epoch", None),
-                    on=kwargs.get("on", None),
+                    half=kwargs.get("half", None),
                 )
             )
 
@@ -7752,15 +7840,17 @@ class Results_Loader(TuningCurvesPlotter):
         focus_on: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
-        Extracts PETH count properties, defines ON/OFF populations, and cross-references
-        them directly to Multi-Phase Spatial Tuning Curves aligned to your index rules.
+        Extracts PETH count properties, defines ON/OFF/Neutral/NAN populations,
+        and cross-references them to Multi-Phase Spatial Tuning Curves including
+        first/second session halves for split-half baseline control stability metrics
+        across ALL neurons and specific functional subpopulations.
         """
         phase_build = "_training"
         phases = ["cond", "post"]
         all_phases = [phase_build] + phases
 
         # 1. Base reference extraction to establish master arrays and id allocations
-        print("Extracting baseline tuning curve structures...")
+        print("Extracting baseline tuning curve structures for freezing...")
         concat_base, sort_map_base, id_neurons_base = (
             self.get_concatenated_tuning_curves(
                 suffix=phase_build,
@@ -7796,6 +7886,9 @@ class Results_Loader(TuningCurvesPlotter):
         global_neuron_offset = 0
         global_on_indices = []
         global_off_indices = []
+        global_uninfluenced_indices = []
+        global_nan_indices = []
+        global_delayed_on_indices = []
 
         for (mouse, manipe), group_df in phase_df.groupby(level=groupby_levels):
             if remove_mice is not None and str(mouse) in remove_mice:
@@ -7822,32 +7915,56 @@ class Results_Loader(TuningCurvesPlotter):
             if peth_res is not None:
                 mouse_peth_registry[str(mouse)] = peth_res
 
+                # Map local boolean masks to the cumulative global vector layout
                 local_on = (
                     np.where(peth_res["on_neurons_mask"])[0] + global_neuron_offset
                 )
                 local_off = (
                     np.where(peth_res["off_neurons_mask"])[0] + global_neuron_offset
                 )
+                local_uninfluenced = (
+                    np.where(peth_res["uninfluenced_neurons_mask"])[0]
+                    + global_neuron_offset
+                )
+                local_nan = (
+                    np.where(peth_res["nan_neurons_mask"])[0] + global_neuron_offset
+                )
+                # Safely handle delayed_on if it exists (returns an empty list if around="ripples")
+                local_delayed = []
+                if "delayed_on_neurons_mask" in peth_res:
+                    local_delayed = (
+                        np.where(peth_res["delayed_on_neurons_mask"])[0]
+                        + global_neuron_offset
+                    )
 
                 global_on_indices.extend(local_on)
                 global_off_indices.extend(local_off)
+                global_uninfluenced_indices.extend(local_uninfluenced)
+                global_nan_indices.extend(local_nan)
+                global_delayed_on_indices.extend(local_delayed)
                 global_neuron_offset += peth_res["n_neurons_raw"]
             else:
                 try:
-                    global_neuron_offset += len(
-                        mouse_results.DataHelper.get_spike_data()
-                    )
+                    n_raw = len(mouse_results.DataHelper.get_spike_data())
+                    global_nan_indices.extend(np.arange(n_raw) + global_neuron_offset)
+                    global_neuron_offset += n_raw
                 except Exception:
                     pass
 
         global_on_indices = np.array(global_on_indices)
         global_off_indices = np.array(global_off_indices)
+        global_uninfluenced_indices = np.array(global_uninfluenced_indices)
+        global_nan_indices = np.array(global_nan_indices)
+        global_delayed_on_indices = np.array(global_delayed_on_indices)
 
-        # 3. Dynamic multi-phase tracking loops for spatial tuning maps
+        # 3. Dynamic multi-phase tracking loops for spatial tuning maps (Full, 1st half, 2nd half)
         tuning_curves_by_phase = {}
+        tuning_curves_by_phase_1st = {}
+        tuning_curves_by_phase_2nd = {}
 
         print(f"Extracting spatial patterns for feature target: {feature_name}...")
         for suff in all_phases:
+            # Full phase block matrix extraction
             tc_matrix, _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
                 feature_name=feature_name,
@@ -7861,33 +7978,152 @@ class Results_Loader(TuningCurvesPlotter):
             )
             tuning_curves_by_phase[suff] = tc_matrix
 
+            # First half-block matrix extraction
+            tc_matrix_1st, _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                half="first",
+                add_colorbar=False,
+                count_thresh=None,
+                sort_map=sort_map_base,
+                list_neurons=id_neurons_base,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            tuning_curves_by_phase_1st[suff] = tc_matrix_1st
+
+            # Second half-block matrix extraction
+            tc_matrix_2nd, _, _ = self.get_concatenated_tuning_curves(
+                suffix=suff,
+                feature_name=feature_name,
+                half="second",
+                add_colorbar=False,
+                count_thresh=None,
+                sort_map=sort_map_base,
+                list_neurons=id_neurons_base,
+                plot=False,
+                remove_mice=remove_mice,
+                use_speed_filter=use_speed_filter,
+            )
+            tuning_curves_by_phase_2nd[suff] = tc_matrix_2nd
+
+        # Cross-reference tracking definitions against baseline template neurons
         on_neurons_aligned = np.intersect1d(id_neurons_base, global_on_indices)
         off_neurons_aligned = np.intersect1d(id_neurons_base, global_off_indices)
+        uninfluenced_neurons_aligned = np.intersect1d(
+            id_neurons_base, global_uninfluenced_indices
+        )
+        delayed_on_neurons_aligned = np.intersect1d(
+            id_neurons_base, global_delayed_on_indices
+        )
+        nan_neurons_aligned = np.intersect1d(id_neurons_base, global_nan_indices)
 
         on_locs_in_base = np.searchsorted(id_neurons_base, on_neurons_aligned)
         off_locs_in_base = np.searchsorted(id_neurons_base, off_neurons_aligned)
+        uninfluenced_locs_in_base = np.searchsorted(
+            id_neurons_base, uninfluenced_neurons_aligned
+        )
+        delayed_on_locs_in_base = np.searchsorted(
+            id_neurons_base, delayed_on_neurons_aligned
+        )
+        nan_locs_in_base = np.searchsorted(id_neurons_base, nan_neurons_aligned)
 
+        # Initialize multi-cohort containers
         tuning_curves_on_population = {}
         tuning_curves_off_population = {}
+        tuning_curves_uninfluenced_population = {}
+        tuning_curves_delayed_population = {}
+        tuning_curves_nan_population = {}
+
+        tuning_curves_on_population_1st = {}
+        tuning_curves_off_population_1st = {}
+        tuning_curves_delayed_population_1st = {}
+        tuning_curves_uninfluenced_population_1st = {}
+
+        tuning_curves_on_population_2nd = {}
+        tuning_curves_off_population_2nd = {}
+        tuning_curves_delayed_population_2nd = {}
+        tuning_curves_uninfluenced_population_2nd = {}
 
         for suff in all_phases:
+            # Slicing full session matrices
             tuning_curves_on_population[suff] = tuning_curves_by_phase[suff][
                 on_locs_in_base
             ]
             tuning_curves_off_population[suff] = tuning_curves_by_phase[suff][
                 off_locs_in_base
             ]
+            tuning_curves_uninfluenced_population[suff] = tuning_curves_by_phase[suff][
+                uninfluenced_locs_in_base
+            ]
+            tuning_curves_delayed_population[suff] = tuning_curves_by_phase[suff][
+                delayed_on_locs_in_base
+            ]
+
+            tuning_curves_nan_population[suff] = tuning_curves_by_phase[suff][
+                nan_locs_in_base
+            ]
+
+            # Slicing first-half session matrices
+            tuning_curves_on_population_1st[suff] = tuning_curves_by_phase_1st[suff][
+                on_locs_in_base
+            ]
+            tuning_curves_off_population_1st[suff] = tuning_curves_by_phase_1st[suff][
+                off_locs_in_base
+            ]
+            tuning_curves_uninfluenced_population_1st[suff] = (
+                tuning_curves_by_phase_1st[suff][uninfluenced_locs_in_base]
+            )
+            tuning_curves_delayed_population_1st[suff] = tuning_curves_by_phase_1st[
+                suff
+            ][delayed_on_locs_in_base]
+
+            # Slicing second-half session matrices
+            tuning_curves_on_population_2nd[suff] = tuning_curves_by_phase_2nd[suff][
+                on_locs_in_base
+            ]
+            tuning_curves_off_population_2nd[suff] = tuning_curves_by_phase_2nd[suff][
+                off_locs_in_base
+            ]
+            tuning_curves_uninfluenced_population_2nd[suff] = (
+                tuning_curves_by_phase_2nd[suff][uninfluenced_locs_in_base]
+            )
+            tuning_curves_delayed_population_2nd[suff] = tuning_curves_by_phase_2nd[
+                suff
+            ][delayed_on_locs_in_base]
 
         print("Pipeline run successfully completed.")
         return {
             "mouse_peths": mouse_peth_registry,
             "id_neurons_true_baseline": id_neurons_base,
             "sort_map_true_baseline": sort_map_base,
+            # Aligned Population ID lists
             "id_neurons_on": on_neurons_aligned,
             "id_neurons_off": off_neurons_aligned,
+            "id_neurons_uninfluenced": uninfluenced_neurons_aligned,
+            "id_neurons_nan": nan_neurons_aligned,
+            "id_neurons_delayed_on": delayed_on_neurons_aligned,
+            # Master Continuous Tuning Curve Block Lists
             "tuning_curves_all_phases": tuning_curves_by_phase,
+            "tuning_curves_all_phases_first_half": tuning_curves_by_phase_1st,
+            "tuning_curves_all_phases_second_half": tuning_curves_by_phase_2nd,
+            # Full Phase Subpopulations
             "tuning_curves_on_subset": tuning_curves_on_population,
             "tuning_curves_off_subset": tuning_curves_off_population,
+            "tuning_curves_uninfluenced_subset": tuning_curves_uninfluenced_population,
+            "tuning_curves_nan_subset": tuning_curves_nan_population,
+            "tuning_curves_delayed_on_subset": tuning_curves_delayed_population,
+            # First Half Subpopulations (Split Control)
+            "tuning_curves_on_subset_first_half": tuning_curves_on_population_1st,
+            "tuning_curves_off_subset_first_half": tuning_curves_off_population_1st,
+            "tuning_curves_uninfluenced_subset_first_half": tuning_curves_uninfluenced_population_1st,
+            "tuning_curves_delayed_on_subset_first_half": tuning_curves_delayed_population_1st,
+            # Second Half Subpopulations (Split Control)
+            "tuning_curves_on_subset_second_half": tuning_curves_on_population_2nd,
+            "tuning_curves_off_subset_second_half": tuning_curves_off_population_2nd,
+            "tuning_curves_uninfluenced_subset_second_half": tuning_curves_uninfluenced_population_2nd,
+            "tuning_curves_delayed_on_subset_second_half": tuning_curves_delayed_population_2nd,
         }
 
     def run_tuning_curve_analysis(
@@ -7906,11 +8142,11 @@ class Results_Loader(TuningCurvesPlotter):
             2, len(phases) + 1, figsize=(14, 10), sharex=True, sharey=True
         )
 
-        # Raw dictionary stores from the loader
-        raw_true, raw_true_odd, raw_true_even = dict(), dict(), dict()
-        raw_pred, raw_pred_odd, raw_pred_even = dict(), dict(), dict()
+        # Initializing containers for continuous blocks instead of odd/even
+        raw_true, raw_true_1st, raw_true_2nd = dict(), dict(), dict()
+        raw_pred, raw_pred_1st, raw_pred_2nd = dict(), dict(), dict()
 
-        # 1. Base extraction to lock in reference neuron IDs and sorting maps
+        # 1. Primary initialization to establish fixed mapping criteria
         unordered_true_training, sort_map, id_neurons = (
             self.get_concatenated_tuning_curves(
                 suffix=phase_build,
@@ -7926,10 +8162,11 @@ class Results_Loader(TuningCurvesPlotter):
             bin_edges=np.linspace(0, 1, unordered_true_training.shape[1] + 1),
         )
 
-        # 2. Extract every condition group (Full, Odd, Even) for True and Pred
+        # 2. Extract structured block components across experimental conditions
         for suff in all_phases:
-            print(f"Extracting tuning curves for phase: {suff}...")
-            # True Data Maps
+            print(f"Extracting Chronological Blocks for phase: {suff}...")
+
+            # Ground Truth Blocks
             raw_true[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
                 add_colorbar=False,
@@ -7937,24 +8174,24 @@ class Results_Loader(TuningCurvesPlotter):
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
-            raw_true_odd[suff], _, _ = self.get_concatenated_tuning_curves(
+            raw_true_1st[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
+                half="first",
                 add_colorbar=False,
-                on="odd",
                 plot=False,
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
-            raw_true_even[suff], _, _ = self.get_concatenated_tuning_curves(
+            raw_true_2nd[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
+                half="second",
                 add_colorbar=False,
-                on="even",
                 plot=False,
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
 
-            # Predicted Model Maps
+            # Model Predictions Blocks
             raw_pred[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
                 feature_name=feature_name,
@@ -7963,40 +8200,38 @@ class Results_Loader(TuningCurvesPlotter):
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
-            raw_pred_odd[suff], _, _ = self.get_concatenated_tuning_curves(
+            raw_pred_1st[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
                 feature_name=feature_name,
+                half="first",
                 add_colorbar=False,
-                on="odd",
                 plot=False,
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
-            raw_pred_even[suff], _, _ = self.get_concatenated_tuning_curves(
+            raw_pred_2nd[suff], _, _ = self.get_concatenated_tuning_curves(
                 suffix=suff,
                 feature_name=feature_name,
+                half="second",
                 add_colorbar=False,
-                on="even",
                 plot=False,
                 remove_mice=remove_mice,
                 use_speed_filter=use_speed_filter,
             )
 
-        # 3. Clean, sort, and slice matrices explicitly via the locked references
-        concat_true, concat_true_odd, concat_true_even = dict(), dict(), dict()
-        concat_pred, concat_pred_odd, concat_pred_even = dict(), dict(), dict()
+        # 3. Clean, coordinate alignment mapping across blocks
+        concat_true, concat_true_1st, concat_true_2nd = dict(), dict(), dict()
+        concat_pred, concat_pred_1st, concat_pred_2nd = dict(), dict(), dict()
 
         for i, suff in enumerate(all_phases):
-            # Explicit filtering and sorting applied uniformly across all datasets
             concat_true[suff] = raw_true[suff][id_neurons][sort_map]
-            concat_true_odd[suff] = raw_true_odd[suff][id_neurons][sort_map]
-            concat_true_even[suff] = raw_true_even[suff][id_neurons][sort_map]
+            concat_true_1st[suff] = raw_true_1st[suff][id_neurons][sort_map]
+            concat_true_2nd[suff] = raw_true_2nd[suff][id_neurons][sort_map]
 
             concat_pred[suff] = raw_pred[suff][id_neurons][sort_map]
-            concat_pred_odd[suff] = raw_pred_odd[suff][id_neurons][sort_map]
-            concat_pred_even[suff] = raw_pred_even[suff][id_neurons][sort_map]
+            concat_pred_1st[suff] = raw_pred_1st[suff][id_neurons][sort_map]
+            concat_pred_2nd[suff] = raw_pred_2nd[suff][id_neurons][sort_map]
 
-            # Explicitly plot the cleanly sliced/sorted matrices into their assigned axis
             axs[0, i].imshow(
                 self.normalize_tuning_curves(concat_true[suff]),
                 aspect="auto",
@@ -8007,6 +8242,7 @@ class Results_Loader(TuningCurvesPlotter):
                 aspect="auto",
                 cmap="cmc.batlow",
             )
+
             for ax in [axs[0, i], axs[1, i]]:
                 plt.setp(
                     ax.get_xticklabels(),
@@ -8016,343 +8252,445 @@ class Results_Loader(TuningCurvesPlotter):
                 )
                 ax.set_xlabel("Linear Position")
 
-        # --- Compute Debiased Correlations ---
-        corr_true_true = dict()
-        corr_pred_pred = dict()
-        corr_pred_true = dict()
+        # 4. Packaging the fully structured data dictionary for statistics
+        analysis_data = {
+            "true": concat_true,
+            "true_first_half": concat_true_1st,
+            "true_second_half": concat_true_2nd,
+            "pred": concat_pred,
+            "pred_first_half": concat_pred_1st,
+            "pred_second_half": concat_pred_2nd,
+        }
 
-        ref_true = concat_true[phase_build]
-        ref_true_odd = concat_true_odd[phase_build]
-        ref_true_even = concat_true_even[phase_build]
-
-        ref_pred = concat_pred[phase_build]
-        ref_pred_odd = concat_pred_odd[phase_build]
-        ref_pred_even = concat_pred_even[phase_build]
-
-        for i, suff in enumerate(all_phases):
-            # True vs True stability across phases
-            corr_true_true[suff] = compute_debiased_pv_corr(
-                ref_true,
-                concat_true[suff],
-                ref_true_odd,
-                ref_true_even,
-                concat_true_odd[suff],
-                concat_true_even[suff],
-            )
-
-            # Predicted vs Predicted consistency across phases
-            corr_pred_pred[suff] = compute_debiased_pv_corr(
-                ref_pred,
-                concat_pred[suff],
-                ref_pred_odd,
-                ref_pred_even,
-                concat_pred_odd[suff],
-                concat_pred_even[suff],
-            )
-
-            # Model Fit (Predicted vs True within the same phase)
-            corr_pred_true[suff] = compute_debiased_pv_corr(
-                concat_true[suff],
-                concat_pred[suff],
-                concat_true_odd[suff],
-                concat_true_even[suff],
-                concat_pred_odd[suff],
-                concat_pred_even[suff],
-            )
-
-            # Set labels on subplots safely
-            axs[0, i].set_title(
-                f"Debiased PV Stability = {corr_true_true[suff].mean():.3f}"
-            )
-            axs[1, i].set_title(
-                f"Pred vs Pred = {corr_pred_pred[suff].mean():.3f}\n"
-                f"Model Fit (Pred vs True) = {corr_pred_true[suff].mean():.3f}"
-            )
-
-        fig.suptitle(f"Tuning Curves & Debiased PV Correlations ({feature_name})")
+        fig.suptitle(f"Tuning Curves Half-Split Control Maps ({feature_name})")
         fig.tight_layout()
         if path is not None:
-            fig.savefig(os.path.join(path, f"tc_{feature_name}_{use_speed_filter}.png"))
-            fig.savefig(os.path.join(path, f"tc_{feature_name}_{use_speed_filter}.svg"))
+            fig.savefig(os.path.join(path, f"tc_{feature_name}_halfsplit.png"))
+            fig.savefig(os.path.join(path, f"tc_{feature_name}_halfsplit.svg"))
         plt.show()
 
-        return corr_true_true, corr_pred_pred, corr_pred_true
+        return analysis_data
 
-    def compute_chance_level(self, use_speed_filter=True):
-        true_position = self.results_df["results"].iloc[0].positions[:, :2]
+    def compute_all_chance_levels(
+        self, use_speed_filter: bool = True, num_shuffles: int = 5, redo: bool = False
+    ):
+        """
+        Computes 1D and 2D chance levels for EVERY row/mouse simultaneously.
+        Returns a clean DataFrame with the calculated chance values to join back.
+        """
+
+        if (
+            all(
+                col in self.results_df.columns
+                for col in [
+                    "chance_mean_1d",
+                    "chance_median_1d",
+                    "chance_mean_2d",
+                    "chance_median_2d",
+                ]
+            )
+            and not redo
+        ):
+            print("Chance levels already computed. Skipping recalculation.")
+            return self.results_df
+        flat_df = self.results_df.reset_index()
+
+        # 1. Define grouping keys to map rows back to their training baseline
+        group_keys = ["nameExp", "mouse_name", "manipe", "winMS"]
+        group_keys = [k if k in flat_df.columns else "mouse" for k in group_keys]
+
+        # 2. Build a high-speed lookup dictionary for the training coordinates
+        training_rows = flat_df[flat_df["phase"] == "training"]
+        train_pool_lookup = {}
+
+        for _, t_row in training_rows.iterrows():
+            m_key = tuple(t_row[k] for k in group_keys)
+            t_pos = t_row["featureTrue"]
+
+            if t_pos is not None and isinstance(t_pos, np.ndarray):
+                t_pos_2d = t_pos[:, :2]
+                # Apply speed mask if it exists
+                if (
+                    use_speed_filter
+                    and "speedMask" in t_row
+                    and t_row["speedMask"] is not None
+                ):
+                    s_mask = np.array(t_row["speedMask"]).astype(bool)
+                    t_pos_2d = t_pos_2d[s_mask]
+
+                # Drop NaNs so they don't corrupt the random pool
+                t_pos_2d = t_pos_2d[~np.isnan(t_pos_2d).any(axis=1)]
+                train_pool_lookup[m_key] = t_pos_2d
+
+        # 3. Storage for our fast calculation
+        chance_results = []
+        res_obj: Mouse_Results = self.results_df["results"].iloc[
+            0
+        ]  # Grab reference for l_function
+
+        # 4. Process every row using vectorized NumPy arrays
+        for idx, row in flat_df.iterrows():
+            m_key = tuple(row[k] for k in group_keys)
+
+            # Default fallbacks if data is missing
+            row_res = {
+                "chance_mean_1d": np.nan,
+                "chance_median_1d": np.nan,
+                "chance_mean_2d": np.nan,
+                "chance_median_2d": np.nan,
+            }
+
+            if row["featureTrue"] is not None and m_key in train_pool_lookup:
+                training_pool = train_pool_lookup[m_key]
+                pool_size = training_pool.shape[0]
+                full_len = row["featureTrue"].shape[0]
+
+                if pool_size > 0 and full_len > 0:
+                    # --- Vectorized Sampling Grid ---
+                    # Generate a 2D matrix of random indices (40 shuffles x timeline length)
+                    rand_idx = np.random.randint(
+                        0, pool_size, size=(num_shuffles, full_len)
+                    )
+                    random_positions = training_pool[
+                        rand_idx
+                    ]  # Shape: (40, full_len, 2)
+
+                    # --- 2D Euclidean Error Calculation ---
+                    true_pos_2d = row["featureTrue"][:, :2]
+                    # Subtract and compute norm across all 40 shuffles at the exact same time
+                    errors_2d_shuffled = np.linalg.norm(
+                        true_pos_2d - random_positions, axis=2
+                    )  # Shape: (40, full_len)
+
+                    row_res["chance_mean_2d"] = np.nanmean(
+                        np.nanmean(errors_2d_shuffled, axis=1)
+                    )
+                    row_res["chance_median_2d"] = np.nanmean(
+                        np.nanmedian(errors_2d_shuffled, axis=1)
+                    )
+
+                    # --- 1D Linear Error Calculation ---
+                    if row["linearTrue"] is not None:
+                        # Flatten the 3D random matrix to 2D to run the spatial function efficiently
+                        flat_rand = random_positions.reshape(-1, 2)
+                        flat_lin_rand = res_obj.l_function(flat_rand)[1]
+
+                        # Unpack back to (40, full_len)
+                        lin_random = flat_lin_rand.reshape(num_shuffles, full_len)
+                        errors_lin_shuffled = np.abs(row["linearTrue"] - lin_random)
+
+                        row_res["chance_mean_1d"] = np.nanmean(
+                            np.nanmean(errors_lin_shuffled, axis=1)
+                        )
+                        row_res["chance_median_1d"] = np.nanmean(
+                            np.nanmedian(errors_lin_shuffled, axis=1)
+                        )
+
+            chance_results.append(row_res)
+
+        # 5. Convert results to columns and assign them directly back to the DataFrame
+        chance_df = pd.DataFrame(chance_results, index=self.results_df.index)
+
+        for col in chance_df.columns:
+            self.results_df[col] = chance_df[col]
+
+        print("Mice-individualized chance levels successfully attached!")
+        return self.results_df
+
+    def compute_chance_level(
+        self, phase: str, use_speed_filter: bool = True, dim: int = 1
+    ):
+        res_obj: Mouse_Results = self.results_df["results"].iloc[0]
+
+        # 1. Get the target phase timeline interval mask
+        # get_epoch_interval returns a tuple: (epoch_data, phase_mask)
+        _, phase_mask = res_obj.get_epoch_interval(phase)
+        phase_mask = phase_mask.astype(bool)
+
+        # Slice the ground truth position to match just this phase's total duration
+        true_position_unfiltered = res_obj.DataHelper.positions[:, :2][phase_mask]
+        true_position_unfiltered = true_position_unfiltered[
+            ~np.isnan(true_position_unfiltered).any(axis=1)
+        ]
+        full_len = true_position_unfiltered.shape[0]
+
+        # 2. Isolate your universal "Training Distribution" pool (from the training mask)
+        train_mask = res_obj.trainMask.astype(bool)
         if use_speed_filter:
-            true_position = true_position[
-                self.results_df["results"].iloc[0].fullBehavior["Times"]["speedFilter"]
-            ]
-        true_position = true_position[~np.isnan(true_position).any(axis=1)]
+            speed_mask = res_obj.fullBehavior["Times"]["speedFilter"]
+            combined_train_mask = speed_mask & train_mask
+        else:
+            combined_train_mask = train_mask
 
-        # random chance by simply shuffling positions
-        random_position = np.random.permutation(true_position)
+        training_pool = res_obj.DataHelper.positions[:, :2][combined_train_mask]
+        training_pool = training_pool[~np.isnan(training_pool).any(axis=1)]
 
-        # apply lin function
-        lin_true = self.results_df["results"].iloc[0].l_function(true_position)[1]
-        lin_random = self.results_df["results"].iloc[0].l_function(random_position)[1]
-        # compute error
-        np.linalg.norm(true_position - random_position, axis=1)
-        error_lin = np.abs(lin_true - lin_random)
-        chance_level_mean = np.mean(error_lin)
-        chance_level_median = np.median(error_lin)
+        # 3. Handle base true dimensions for this phase
+        if dim == 1:
+            lin_true = res_obj.l_function(true_position_unfiltered)[1]
+        elif dim != 2:
+            raise ValueError("dim must be 1 or 2")
 
-        return chance_level_mean, chance_level_median
+        chance_level_mean = []
+        chance_level_median = []
+
+        # 4. Monte Carlo sampling from the training pool to match this phase's length
+        for _ in range(10):
+            random_indices = np.random.choice(
+                training_pool.shape[0], size=full_len, replace=True
+            )
+            random_position = training_pool[random_indices]
+
+            if dim == 1:
+                lin_random = res_obj.l_function(random_position)[1]
+                error_lin = np.abs(lin_true - lin_random)
+                chance_level_mean.append(np.nanmean(error_lin))
+                chance_level_median.append(np.nanmedian(error_lin))
+
+            elif dim == 2:
+                error_2d = np.linalg.norm(
+                    true_position_unfiltered - random_position, axis=1
+                )
+                chance_level_mean.append(np.nanmean(error_2d))
+                chance_level_median.append(np.nanmedian(error_2d))
+
+        # 5. Calculate means and standard deviations across shuffles for plotting spans
+        return (
+            np.mean(chance_level_mean),
+            np.mean(chance_level_median),
+            np.std(chance_level_mean),
+            np.std(chance_level_median),
+        )
 
     def plot_error_barplot(
         self,
         winMS: int,
+        dim: int = 1,
         use_speed_filter: bool = True,
         path: Optional[str] = None,
         reduce="mean",
         thresh=0.65,
+        split_by: Optional[str] = None,
+        redo: bool = False,
     ):
+        from statannotations.Annotator import Annotator
+
         phase_order = ["training", "pre", "cond", "post"]
-        chance_mean, chance_median = self.compute_chance_level()
-        if reduce == "median":
-            chance = chance_median
-        elif reduce == "mean":
-            chance = chance_mean
 
-        import numpy as np
-
-        # Dynamically fetch np.nanmedian or np.nanmean
         reduce_func = getattr(np, f"nan{reduce}")
 
-        def compute_row_errors(row):
-            # Convert to numpy arrays for masking
-            l_pred = np.array(row["linearPred"])
-            l_true = np.array(row["linearTrue"])
+        def compute_row_metrics(row):
+            # 1. Compute Model Prediction Errors
             p_loss = np.array(row["predLoss"])
-
-            # Calculate base linear error
-            lin_error = np.abs(l_pred - l_true)
-
-            # Generate masks
-            loss_mask = p_loss < thresh
-
-            if use_speed_filter:
-                s_mask = np.array(row["speedMask"])
-
-                err_unfiltered = reduce_func(lin_error[s_mask])
-                err_filtered = reduce_func(lin_error[s_mask & loss_mask])
+            if dim == 1:
+                l_pred = np.array(row["linearPred"])
+                l_true = np.array(row["linearTrue"])
+                error = np.abs(l_pred - l_true)
+            elif dim == 2:
+                p_pred = np.array(row["featurePred"][:, :2])
+                p_true = np.array(row["featureTrue"][:, :2])
+                error = np.linalg.norm(p_pred - p_true, axis=1)
             else:
-                err_unfiltered = reduce_func(lin_error)
-                err_filtered = reduce_func(lin_error[loss_mask])
+                warn("dim should be 1 or 2, will try with more")
+                p_pred = np.array(row["featurePred"][:, :dim])
+                p_true = np.array(row["featureTrue"][:, :dim])
+                error = np.linalg.norm(p_pred - p_true, axis=1)
 
+            loss_mask = p_loss < thresh
+            if use_speed_filter:
+                s_mask = np.array(row["speedMask"]).astype(bool)
+                err_unfiltered = reduce_func(error[s_mask])
+                err_filtered = reduce_func(error[s_mask & loss_mask])
+            else:
+                err_unfiltered = reduce_func(error)
+                err_filtered = reduce_func(error[loss_mask])
+
+            # # 2. Compute Chance level for this specific row/mouse
+            # ch_mean, ch_med = self.compute_chance_level_for_row(
+            #     row, use_speed_filter=use_speed_filter, dim=dim
+            # )
+            # row_chance = ch_med if reduce == "median" else ch_mean
+            #
             return err_unfiltered, err_filtered
 
         # Apply the function and split results into the dynamic columns
         result_cols = [
-            f"computed_{reduce}_error_{thresh}",
-            f"computed_{reduce}_error_filtered_{thresh}",
+            f"computed_{reduce}_error_{thresh}_{dim}d",
+            f"computed_{reduce}_error_filtered_{thresh}_{dim}d",
         ]
 
-        self.results_df[result_cols] = self.results_df.apply(
-            compute_row_errors, axis=1, result_type="expand"
+        if any(res not in self.results_df.columns for res in result_cols) or redo:
+            self.results_df[result_cols] = self.results_df.apply(
+                compute_row_metrics, axis=1, result_type="expand"
+            )
+
+        result_cols.append(
+            f"chance_{reduce}_{dim}d",
         )
 
-        value_name = f"{reduce.capitalize()} Linear Error"
+        if reduce == "mean":
+            prefix = "Mean"
+        else:
+            prefix = "Median"
+
+        if dim == 1:
+            value_name = f"{prefix} Linear Error"
+        else:
+            value_name = f"{prefix} Euclidean Error"
+
+        # Keep split_by column in dataframe if it exists
+        id_vars = ["mouse_name", "phase", "winMS"]
+        if (
+            split_by
+            and split_by in self.results_df.columns
+            or split_by in self.results_df.index.names
+        ):
+            id_vars.append(split_by)
+
         to_plot = pd.melt(
             self.results_df.xs(winMS, level="winMS", drop_level=False)
             .query("phase != 'full_pre'")
             .reset_index(),
-            id_vars=["mouse_name", "phase", "winMS"],
+            id_vars=id_vars,
             value_vars=result_cols,
-            var_name="Error Type",
+            var_name=f"Error Type {dim}d",
             value_name=value_name,
         ).copy()
 
-        fig, ax = plt.subplots(figsize=(16, 9))
-        sns.barplot(
-            data=to_plot,
-            x="phase",
-            y=value_name,
-            hue="Error Type",
-            palette="Set2",
-            order=phase_order,
-            ax=ax,
-        )
+        # Determine plotting layout based on split_by
+        if split_by and split_by in to_plot.columns:
+            unique_splits = sorted(to_plot[split_by].dropna().unique())
+            n_splits = len(unique_splits)
+            fig, axes = plt.subplots(
+                1, n_splits, figsize=(6 * n_splits, 9), sharey=True
+            )
+            if n_splits == 1:
+                axes = [axes]
+        else:
+            unique_splits = [None]
+            n_splits = 1
+            fig, ax = plt.subplots(figsize=(16, 9))
+            axes = [ax]
 
-        # add a black circle to the points (stripplot)
-        sns.stripplot(
-            data=to_plot,
-            x="phase",
-            y=value_name,
-            hue="Error Type",
-            palette="Set2",
-            order=phase_order,
-            dodge=True,
-            edgecolor="black",
-            linewidth=1,
-            alpha=0.7,
-            ax=ax,
-            marker="o",
-            size=10,
-        )
+        # Loop through each subplot group
+        for idx, split_val in enumerate(unique_splits):
+            ax = axes[idx]
 
-        ax.axhline(chance, linestyle="--", label="Chance level")
-        pairs = [
-            ((phase, result_cols[0]), (phase, result_cols[1])) for phase in phase_order
-        ]
+            if split_val is not None:
+                sub_data = to_plot[to_plot[split_by] == split_val].copy()
+                ax.set_title(
+                    f"{split_by}: {split_val} (n={sub_data[sub_data['phase'] == phase_order[0]].shape[0] / len(result_cols):.0f} mice)",
+                    fontsize=14,
+                    fontweight="bold",
+                )
+            else:
+                sub_data = to_plot.copy()
 
-        annotator = Annotator(
-            ax,
-            pairs,
-            data=to_plot,
-            x="phase",
-            y=value_name,
-            hue="Error Type",
-            order=phase_order,
-        )
+            if sub_data.empty:
+                continue
 
-        # Configure your test (e.g., 't-test_paired' or 'Wilcoxon' if data is non-normal)
-        annotator.configure(
-            test="Wilcoxon", text_format="star", loc="inside", verbose=False
-        )
-        annotator.apply_and_annotate()
+            # Plot main Barplot
+            sns.barplot(
+                data=sub_data,
+                x="phase",
+                y=value_name,
+                hue=f"Error Type {dim}d",
+                palette="Set2",
+                order=phase_order,
+                ax=ax,
+            )
 
-        connect_points(
-            ax=ax,
-            df=to_plot,
-            x_col="phase",
-            y_col=value_name,
-            hue_col="Error Type",
-            id_col="mouse_name",
-            x_order=phase_order,
-        )
+            # Superimpose Stripplot
+            sns.stripplot(
+                data=sub_data,
+                x="phase",
+                y=value_name,
+                hue=f"Error Type {dim}d",
+                palette="Set2",
+                order=phase_order,
+                dodge=True,
+                edgecolor="black",
+                linewidth=1,
+                alpha=0.7,
+                ax=ax,
+                marker="o",
+                size=10,
+            )
 
-        all_handles, all_labels = ax.get_legend_handles_labels()
-        unique_labels = []
-        unique_handles = []
+            # Statistical Annotations per subplot
+            pairs = [
+                ((phase, result_cols[0]), (phase, result_cols[1]))
+                for phase in phase_order
+            ]
+
+            try:
+                annotator = Annotator(
+                    ax,
+                    pairs,
+                    data=sub_data,
+                    x="phase",
+                    y=value_name,
+                    hue=f"Error Type {dim}d",
+                    order=phase_order,
+                )
+                annotator.configure(
+                    test="Wilcoxon", text_format="star", loc="inside", verbose=False
+                )
+                annotator.apply_and_annotate()
+            except Exception:
+                # Fallback if a specific subset doesn't have matching pairs for Wilcoxon
+                print(
+                    f"Skipping stats for {split_val} due to insufficient paired data."
+                )
+
+            # Custom line connections per mouse
+            connect_points(
+                ax=ax,
+                df=sub_data,
+                x_col="phase",
+                y_col=value_name,
+                hue_col=f"Error Type {dim}d",
+                id_col="mouse_name",
+                x_order=phase_order,
+            )
+
+            # Handle axis labels cleanly across shared-Y subplots
+            if idx > 0:
+                ax.set_ylabel("")
+
+            # Remove individual legends to avoid clutter; we will create one global legend
+            if ax.get_legend():
+                ax.get_legend().remove()
+
+        # Build clean global legend from the last active axis
+        all_handles, all_labels = axes[-1].get_legend_handles_labels()
+        unique_labels, unique_handles = [], []
         for handle, label in zip(all_handles, all_labels):
             if label not in unique_labels:
                 unique_labels.append(label)
                 unique_handles.append(handle)
 
-        # Assign the cleaned legend to the figure
         fig.legend(
             handles=unique_handles,
             labels=unique_labels,
             loc="upper left",
-            bbox_to_anchor=(0.95, 0.95),
+            bbox_to_anchor=(0.98, 0.95),
         )
+
         fig.tight_layout()
+
+        # Handle adaptive saving format
         if path is not None:
+            split_suffix = f"_split_by_{split_by}" if split_by else ""
+            filename_base = f"boxplot_{reduce}_lin_error_{thresh}_speed_{use_speed_filter}{split_suffix}_{winMS}_{dim}d"
+
             fig.savefig(
-                os.path.join(
-                    path,
-                    f"boxplot_{reduce}_lin_error_{thresh}_and_filtered_speed_{use_speed_filter}_{winMS}.png",
-                ),
-                dpi=300,
+                os.path.join(path, f"{filename_base}.png"), dpi=300, bbox_inches="tight"
             )
-            fig.savefig(
-                os.path.join(
-                    path,
-                    f"boxplot_{reduce}_lin_error_{thresh}_and_filtered_speed_{use_speed_filter}_{winMS}.svg",
-                )
-            )
+            fig.savefig(os.path.join(path, f"{filename_base}.svg"), bbox_inches="tight")
 
         plt.show()
-
         return to_plot
-
-    def plot_median_error_barplot_old(
-        self, winMS: int, use_speed_filter: bool = True, path: Optional[str] = None
-    ):
-        from neuroencoders.importData.gui_elements import connect_points
-
-        phase_order = ["training", "pre", "cond", "post"]
-        chance_mean, chance_median = self.compute_chance_level()
-        value_vars = ["median_error", "median_error_filtered"]
-
-        self.results_df["median_error"] = self.results_df.apply(
-            lambda row: np.nanmedian(row["lin_error"]), axis=1
-        )
-        self.results_df["median_error_filtered"] = self.results_df.apply(
-            lambda row: np.nanmedian(row["lin_error_selected"]), axis=1
-        )
-        to_plot = pd.melt(
-            self.results_df.xs(winMS, level="winMS", drop_level=False)
-            .query("phase != 'full_pre'")
-            .reset_index(),
-            id_vars=["mouse_name", "phase", "winMS"],
-            value_vars=value_vars,
-            var_name="Error Type",
-            value_name="Median Linear Error",
-        ).copy()
-
-        fig, ax = plt.subplots(figsize=(16, 9))
-        sns.barplot(
-            data=to_plot,
-            x="phase",
-            y="Median Linear Error",
-            hue="Error Type",
-            palette="Set2",
-            order=phase_order,
-            ax=ax,
-        )
-
-        # add a black circle to the points (stripplot)
-        sns.stripplot(
-            data=to_plot,
-            x="phase",
-            y="Median Linear Error",
-            hue="Error Type",
-            palette="Set2",
-            order=phase_order,
-            dodge=True,
-            edgecolor="black",
-            linewidth=1,
-            alpha=0.7,
-            ax=ax,
-            marker="o",
-            size=10,
-        )
-
-        ax.axhline(chance_median, linestyle="--", label="Chance level")
-
-        connect_points(
-            ax=ax,
-            df=to_plot,
-            x_col="phase",
-            y_col="Median Linear Error",
-            hue_col="Error Type",
-            id_col="mouse_name",
-            x_order=phase_order,
-        )
-
-        all_handles, all_labels = ax.get_legend_handles_labels()
-        unique_labels = []
-        unique_handles = []
-        for handle, label in zip(all_handles, all_labels):
-            if label not in unique_labels:
-                unique_labels.append(label)
-                unique_handles.append(handle)
-
-        # Assign the cleaned legend to the figure
-        fig.legend(
-            handles=unique_handles,
-            labels=unique_labels,
-            loc="upper left",
-            bbox_to_anchor=(0.95, 0.95),
-        )
-        fig.tight_layout()
-        if path is not None:
-            fig.savefig(
-                os.path.join(
-                    path, f"boxplot_mean_lin_error_and_filtered_with_lines_{winMS}.png"
-                ),
-                dpi=300,
-            )
-            fig.savefig(
-                os.path.join(
-                    path, f"boxplot_mean_lin_error_and_filtered_with_lines_{winMS}.svg"
-                )
-            )
-
-        plt.show()
 
     def compute_zone_classification_metrics(
         self, winMS: int, shock_threshold: float = 0.15, use_speed_filter: bool = True
@@ -8558,11 +8896,14 @@ class Results_Loader(TuningCurvesPlotter):
         shock_threshold: float = 0.15,
         n_bins: int = 10,
         use_speed_filter: bool = True,
+        manipe: Optional[str] = None,
     ):
         """
         Computes binary classification error binned by the true distance to the shock boundary.
         """
         df_subset = self.results_df.xs(winMS, level="winMS", drop_level=False).copy()
+        if manipe is not None:
+            df_subset = df_subset[df_subset.index.get_level_values("manipe") == manipe]
 
         # Track raw frame statistics across all mice/phases
         all_frames = []
@@ -8585,7 +8926,6 @@ class Results_Loader(TuningCurvesPlotter):
             y_pred = y_pred[valid_mask]
 
             # Calculate absolute distance to the decision boundary
-            distance_to_boundary = np.abs(y_true - shock_threshold)
             distance_to_boundary = y_true
 
             # Binary classifications
@@ -8642,7 +8982,13 @@ class Results_Loader(TuningCurvesPlotter):
         return binned_results
 
     def plot_error_vs_distance(
-        self, winMS: int, shock_threshold: float = 0.15, path: Optional[str] = None
+        self,
+        winMS: int,
+        shock_threshold: float = 0.15,
+        n_bins: int = 25,
+        use_speed_filter: bool = True,
+        path: Optional[str] = None,
+        manipe: Optional[str] = None,
     ):
         """
         Plots a line plot tracking how binary classification error rates drop
@@ -8652,7 +8998,11 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 1. Gather the binned data
         plot_df = self.compute_error_vs_distance_to_boundary(
-            winMS=winMS, shock_threshold=shock_threshold, n_bins=8
+            winMS=winMS,
+            shock_threshold=shock_threshold,
+            n_bins=n_bins,
+            use_speed_filter=use_speed_filter,
+            manipe=manipe,
         )
 
         if plot_df.empty:
@@ -8684,7 +9034,7 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 3. Aesthetics
         ax.set_title(
-            f"Classification Error Rate vs. Distance to Shock Boundary (Window: {winMS}ms)",
+            f"Classification Error Rate vs. Distance to Shock Boundary (Window: {winMS}ms {'manipe: ' + manipe if manipe else ''})",
             fontsize=14,
             fontweight="bold",
             pad=15,
@@ -8719,23 +9069,32 @@ class Results_Loader(TuningCurvesPlotter):
 
         plt.show()
 
-    def _compute_spatial_overprediction(self, winMS, during, compute_type):
-        from neuroencoders.utils.global_classes import ZONEDEF, gaussian_filter_nan
-
+    def _compute_spatial_overprediction(
+        self, winMS, during, compute_type, input_type="2d"
+    ):
         # Data collection list
         rows = []
-        bins = 50
+        bins = 30
+
+        if input_type.lower() == "2d":
+            results_attr = "resultsNN_phase"
+        elif input_type.lower() == "logits":
+            results_attr = "resultsNN_phase_pkl"
+        else:
+            raise ValueError("Invalid input_type. Use '2d' or 'logits'.")
 
         # Loop through your existing dataframe structure
         for (mouse_manipe, manipe), df in self.results_df.xs(
             (winMS, "cond"), level=("winMS", "phase")
         ).groupby(by=["mouse_name", "manipe"]):
             results = df.iloc[0].results
-            time = results.resultsNN_phase_pkl["_cond"]["times"][0].flatten()
+            idWindow = results.timeWindows.index(winMS)
+
+            time = getattr(results, results_attr)["_cond"]["times"][idWindow].flatten()
             if during == "ripples":
                 events = results.DataHelper.get_ripples_epochs()
             elif during == "freezing":
-                events = results.DataHelper.get_freezing_epochs()
+                events = results.DataHelper.get_freeze_epochs()
             elif during == "stims":
                 events = results.DataHelper.get_stim_epochs()
             else:
@@ -8744,23 +9103,35 @@ class Results_Loader(TuningCurvesPlotter):
                 )
 
             if compute_type == "percentage":
-                true_pos2d = nap.TsdFrame(
+                true_pos2d = TsdFrame(
                     t=time,
-                    d=results.resultsNN_phase_pkl["_cond"]["featureTrue"][0][:, :2],
+                    d=getattr(results, results_attr)["_cond"]["featureTrue"][idWindow][
+                        :, :2
+                    ],
                     columns=["x", "y"],
                 )
             elif compute_type == "overprediction":
-                true_pos2d = nap.TsdFrame(
+                true_pos2d = TsdFrame(
                     t=time,
-                    d=results.resultsNN_phase_pkl["_cond"]["featureTrue"][0][:, :2],
+                    d=getattr(results, results_attr)["_cond"]["featureTrue"][idWindow][
+                        :, :2
+                    ],
                     columns=["x", "y"],
                 ).restrict(events)
 
-            pred_pos2d = nap.TsdFrame(
-                t=time,
-                d=results.resultsNN_phase_pkl["_cond"]["featurePred"][0][:, :2],
-                columns=["x", "y"],
-            ).restrict(events)
+            if input_type.lower() == "2d":
+                pred_pos2d = TsdFrame(
+                    t=time,
+                    d=getattr(results, results_attr)["_cond"]["featurePred"][idWindow][
+                        :, :2
+                    ],
+                    columns=["x", "y"],
+                ).restrict(events)
+            elif input_type.lower() == "logits":
+                pred_pos2d = TsdTensor(
+                    t=time,
+                    d=getattr(results, results_attr)["_cond"]["logits_hw"][idWindow],
+                ).restrict(events)
 
             H_true, _, _ = np.histogram2d(
                 true_pos2d.values[:, 0],
@@ -8769,13 +9140,22 @@ class Results_Loader(TuningCurvesPlotter):
                 range=[[0, 1], [0, 1]],
                 density=True,
             )
-            H_pred, _, _ = np.histogram2d(
-                pred_pos2d.values[:, 0],
-                pred_pos2d.values[:, 1],
-                bins=bins,
-                range=[[0, 1], [0, 1]],
-                density=True,
-            )
+            if input_type.lower() == "2d":
+                H_pred, _, _ = np.histogram2d(
+                    pred_pos2d.values[:, 0],
+                    pred_pos2d.values[:, 1],
+                    bins=bins,
+                    range=[[0, 1], [0, 1]],
+                    density=True,
+                )
+            elif input_type.lower() == "logits":
+                # we already have a 2D matrix of logits, so we can just use it directly its mean across the time dimension
+                H_pred = np.nanmean(pred_pos2d.values, axis=0)
+                total_sum = np.nansum(H_pred)
+                if total_sum > 0:
+                    H_pred = (
+                        H_pred / total_sum
+                    )  # Normalize to make it a probability distribution
 
             smooth_true = gaussian_filter_nan(H_true, (1.5, 2.5))
             smooth_pred = gaussian_filter_nan(H_pred, (1.5, 2.5))
@@ -8835,132 +9215,253 @@ class Results_Loader(TuningCurvesPlotter):
         compute_type="percentage",
         text_format="star",
         path: Optional[str] = None,
+        interactive: bool = False,
     ):
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-        from statannotations.Annotator import Annotator
-
-        from neuroencoders.utils.viz_params import GROUPS_PALETTE
-
         df_zones = self._compute_spatial_overprediction(
             winMS=winMS, compute_type=compute_type, during=during
         )
 
-        # Make sure your unique groups are sorted cleanly (e.g., Control first, PAG last)
         group_order = sorted(df_zones["Group"].unique())
-
-        # Create a row or column of subplots (1 row, 5 columns)
-        fig, axs = plt.subplots(1, 5, figsize=(20, 8), sharey=True)
         zones = df_zones["Zone"].unique()
 
-        for i, zone in enumerate(zones):
-            ax = axs[i]
-            zone_data = df_zones[df_zones["Zone"] == zone]
+        # ----------------------------------------------------------------------
+        # PATH A: INTERACTIVE PLOTLY PIPELINE
+        # ----------------------------------------------------------------------
+        if interactive:
+            import plotly.graph_objects as go
+            from plotly.subplots import make_subplots
 
-            # 1. Boxplot per zone
-            sns.boxplot(
-                data=zone_data,
-                x="Group",
-                y="Overprediction",
-                order=group_order,
-                palette=GROUPS_PALETTE,
-                width=0.6,
-                fliersize=0,
-                boxprops=dict(alpha=0.6),
-                ax=ax,
-                linewidth=3,
+            # Create a 1-row, N-column layout dynamically matching your zones count
+            fig = make_subplots(
+                rows=1,
+                cols=len(zones),
+                subplot_titles=[f"<b>{z} Zone</b>" for z in zones],
+                shared_yaxes=True,
+                horizontal_spacing=0.03,
             )
 
-            # 2. Stripplot per zone
-            sns.stripplot(
-                data=zone_data,
-                x="Group",
-                y="Overprediction",
-                order=group_order,
-                palette=GROUPS_PALETTE,
-                size=8,
-                jitter=0.2,
-                linewidth=1.5,
-                edgecolor="black",
-                ax=ax,
-                alpha=0.7,
+            # Detect mouse identifier column safely
+            mouse_col = "Mouse" if "Mouse" in df_zones.columns else df_zones.columns[0]
+
+            for i, zone in enumerate(zones):
+                col_idx = i + 1
+                zone_data = df_zones[df_zones["Zone"] == zone]
+
+                # Plot traces for each experimental group
+                for group in group_order:
+                    g_data = zone_data[zone_data["Group"] == group]
+                    if g_data.empty:
+                        continue
+
+                    raw_color = GROUPS_PALETTE.get(group, "xkcd:gray")
+                    g_color = mcolors.to_hex(raw_color)
+
+                    # 1. Overlay Box plot underlying architecture
+                    fig.add_trace(
+                        go.Box(
+                            y=g_data["Overprediction"],
+                            name=group,
+                            marker_color=g_color,
+                            boxpoints=False,  # We use explicit jitter/stripplot points below
+                            line=dict(width=2.5),
+                            fillcolor=g_color,
+                            opacity=0.5,
+                            showlegend=(i == 0),  # Avoid legendary duplicate pollution
+                        ),
+                        row=1,
+                        col=col_idx,
+                    )
+
+                    # 2. Add Jittered Scatter markers for Interactive Mouse auditing
+                    hover_text = [
+                        f"Mouse: {row[mouse_col]}<br>Group: {group}<br>Value: {row['Overprediction']:.3f}"
+                        for _, row in g_data.iterrows()
+                    ]
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[group]
+                            * len(g_data),  # Aligns horizontally with the Box trace
+                            y=g_data["Overprediction"],
+                            mode="markers",
+                            name=group,
+                            text=hover_text,
+                            hoverinfo="text",
+                            marker=dict(
+                                color=g_color,
+                                size=8,
+                                opacity=0.85,
+                                line=dict(width=1, color="black"),
+                            ),
+                            showlegend=False,
+                        ),
+                        row=1,
+                        col=col_idx,
+                    )
+
+                # Add baseline horizontal threshold trace marker at y=0
+                fig.add_shape(
+                    type="line",
+                    x0=-0.5,
+                    x1=len(group_order) - 0.5,
+                    y0=0,
+                    y1=0,
+                    line=dict(color="gray", width=1.5, dash="dash"),
+                    row=1,
+                    col=col_idx,
+                )
+
+            # Global Layout Customization
+            fig.update_layout(
+                title_text=f"Spatial Overprediction Bias during Ripples ({winMS} ms)",
+                title_x=0.5,
+                title_font=dict(size=16),
+                template="plotly_white",
+                height=600,
+                width=300 * len(zones),
+                yaxis_title="Δ of Overprediction (Δ=Pred - True)",
+                showlegend=True,
+                legend_title_text="Group",
             )
 
-            # --- STATS PER ZONE ---
-            # Compare PAG to every other group within this specific zone
-            # (Assuming "PAG" is the exact string name of your PAG group)
-            other_groups = [g for g in group_order if g != "PAG"]
-            box_pairs = [("PAG", other) for other in other_groups] + [("MFB", "Known")]
+            # Clean up interactive tick angles across subplots
+            for col_idx in range(1, len(zones) + 1):
+                fig.update_xaxes(tickangle=45, row=1, col=col_idx)
 
-            if len(zone_data) > 0:
-                annotator = Annotator(
-                    ax,
-                    box_pairs,
+            fig.show()
+
+        # ----------------------------------------------------------------------
+        # PATH B: STATIC MATPLOTLIB + SEABORN PIPELINE (ORIGINAL)
+        # ----------------------------------------------------------------------
+        else:
+            from statannotations.Annotator import Annotator
+
+            # Create a row or column of subplots (1 row, 5 columns)
+            fig, axs = plt.subplots(1, len(zones), figsize=(20, 8), sharey=True)
+            if len(zones) == 1:
+                axs = [axs]
+
+            for i, zone in enumerate(zones):
+                ax = axs[i]
+                zone_data = df_zones[df_zones["Zone"] == zone]
+
+                # 1. Boxplot per zone
+                sns.boxplot(
                     data=zone_data,
                     x="Group",
                     y="Overprediction",
                     order=group_order,
+                    palette=GROUPS_PALETTE,
+                    width=0.6,
+                    fliersize=0,
+                    boxprops=dict(alpha=0.6),
+                    ax=ax,
+                    linewidth=3,
                 )
-                annotator.configure(
-                    test="t-test_ind",
-                    text_format=text_format,
-                    loc="inside",
-                    comparisons_correction="Bonferroni",  # Crucial now that you have 5 groups!
-                    hide_non_significant=True,
-                )
-                annotator.apply_and_annotate()
 
-            # Styling tweaks
-            ax.set_title(f"{zone} Zone", fontsize=12, fontweight="bold")
-            ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
-            ax.set_xlabel("")
-            if i > 0:
-                ax.set_ylabel(
-                    ""
-                )  # Hide y-label for inner plots since they share limits
-            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
-            ax.set_ylabel(r"$\Delta$ of Overprediction ($\Delta$=Pred - True)")
-            # ax.set_ylim(-6,12)
-
-        plt.suptitle("Spatial Overprediction Bias during Ripples", fontsize=16, y=1.05)
-        sns.despine()
-        plt.tight_layout()
-        if path is not None:
-            plt.savefig(
-                os.path.join(
-                    path,
-                    f"bias_during_{during}_by_manipe_{text_format}_{compute_type}_{winMS}ms.png",
+                # 2. Stripplot per zone
+                sns.stripplot(
+                    data=zone_data,
+                    x="Group",
+                    y="Overprediction",
+                    order=group_order,
+                    palette=GROUPS_PALETTE,
+                    size=8,
+                    jitter=0.2,
+                    linewidth=1.5,
+                    edgecolor="black",
+                    ax=ax,
+                    alpha=0.7,
                 )
+
+                # --- STATS PER ZONE ---
+                other_groups = [g for g in group_order if g != "PAG"]
+                box_pairs = [("PAG", other) for other in other_groups] + [
+                    ("MFB", "Known")
+                ]
+
+                if len(zone_data) > 0:
+                    try:
+                        annotator = Annotator(
+                            ax,
+                            box_pairs,
+                            data=zone_data,
+                            x="Group",
+                            y="Overprediction",
+                            order=group_order,
+                        )
+                        annotator.configure(
+                            test="t-test_ind",
+                            text_format=text_format,
+                            loc="inside",
+                            comparisons_correction="Bonferroni",
+                            hide_non_significant=True,
+                        )
+                        annotator.apply_and_annotate()
+                    except Exception:
+                        pass  # Handle edge cases gracefully if specific pairs are missing
+
+                # Styling tweaks
+                ax.set_title(f"{zone} Zone", fontsize=12, fontweight="bold")
+                ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+                ax.set_xlabel("")
+                ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+
+                if i == 0:
+                    ax.set_ylabel(r"$\Delta$ of Overprediction ($\Delta$=Pred - True)")
+                else:
+                    ax.set_ylabel("")
+
+            plt.suptitle(
+                f"Spatial Overprediction Bias during Ripples ({winMS} ms)",
+                fontsize=16,
+                y=1.05,
             )
-            plt.savefig(
-                os.path.join(
-                    path,
-                    f"bias_during_{during}_by_manipe_{text_format}_{compute_type}_{winMS}ms.png",
-                )
-            )
-        plt.show()
+            sns.despine()
+            plt.tight_layout()
 
-    def _compute_spatial_proportion(self, winMS: int, during: str):
+            if path is not None:
+                os.makedirs(path, exist_ok=True)
+                plt.savefig(
+                    os.path.join(
+                        path,
+                        f"bias_during_{during}_by_manipe_{text_format}_{compute_type}_{winMS}ms.png",
+                    ),
+                    bbox_inches="tight",
+                )
+            plt.show()
+
+    def _compute_spatial_proportion(
+        self, winMS: int, during: str, input_type: str = "2d"
+    ):
         """Computes the proportion of discrete events (e.g., individual ripples)
 
         whose average neural predictions fall within each defined spatial zone.
         """
-        from neuroencoders.utils.global_classes import ZONEDEF, ZONELABELS
 
         rows = []
+
+        if input_type.lower() == "2d":
+            results_attr = "resultsNN_phase"
+        elif input_type.lower() == "logits":
+            results_attr = "resultsNN_phase_pkl"
+        else:
+            raise ValueError("Invalid input_type. Use '2d' or 'logits'.")
 
         # Loop through your existing dataframe structure grouped by mouse and manipulation
         for (mouse_manipe, manipe), df in self.results_df.xs(
             (winMS, "cond"), level=("winMS", "phase")
         ).groupby(by=["mouse_name", "manipe"]):
             results = df.iloc[0].results
-            time = results.resultsNN_phase_pkl["_cond"]["times"][0].flatten()
+            idWindow = results.timeWindows.index(winMS)
+
+            time = getattr(results, results_attr)["_cond"]["times"][idWindow].flatten()
 
             # Isolate the targeted event epochs
             if during == "ripples":
                 events = results.DataHelper.get_ripples_epochs()
             elif during == "freezing":
-                events = results.DataHelper.get_freezing_epochs()
+                events = results.DataHelper.get_freeze_epochs()
             elif during == "stims":
                 events = results.DataHelper.get_stim_epochs()
             else:
@@ -8969,9 +9470,11 @@ class Results_Loader(TuningCurvesPlotter):
                 )
 
             # Extract full 2D predicted positions array
-            pred_pos2d = nap.TsdFrame(
+            pred_pos2d = TsdFrame(
                 t=time,
-                d=results.resultsNN_phase_pkl["_cond"]["featurePred"][0][:, :2],
+                d=getattr(results, results_attr)["_cond"]["featurePred"][idWindow][
+                    :, :2
+                ],
                 columns=["x", "y"],
             )
 
@@ -9036,7 +9539,6 @@ class Results_Loader(TuningCurvesPlotter):
 
         across zones and animal groups.
         """
-        from neuroencoders.utils.viz_params import GROUPS_PALETTE
 
         # Fetch data processed by the updated event-counting logic
         df_zones = self._compute_spatial_proportion(winMS=winMS, during=during)
@@ -9150,6 +9652,2439 @@ class Results_Loader(TuningCurvesPlotter):
             )
 
         plt.show()
+
+    def compute_kudrimoti_variance(
+        self,
+        winMS=36,
+        task_phase: str = "cond",
+        subtask: Optional[str] = None,
+        subsleep: Optional[str] = None,
+    ):
+        """Computes Explained Variance (EV) and Reverse Explained Variance (REV)
+
+        based on the Kudrimoti et al. 1999 pairwise correlation design.
+        """
+        rows = []
+        bin_size_sec = winMS / 1000.0
+
+        # Grouping sessions via your dataframe loop architecture
+        for (mouse_name, manipe), df in self.results_df.groupby(
+            by=["mouse_name", "manipe"]
+        ):
+            results: Mouse_Results = df.iloc[0].results
+
+            # 1. Fetch Spike trains (TsGroup)
+            spike_group = results.DataHelper.get_spike_data()
+            if len(spike_group) < 4:  # Minimum cells required for reliable matrix math
+                continue
+
+            try:
+                pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+                task_epoch, _ = results.get_epoch_interval(task_phase)
+                post_epoch, _ = results.get_epoch_interval("post_sleep")
+            except Exception as e:
+                # Fallback wrapper if explicitly designated within your helper setup
+                print(
+                    f"Could not retrieve epochs for {mouse_name} ({manipe}): {e}. Skipping session."
+                )
+                continue
+
+            if subtask is not None:
+                subtask = subtask.lower()
+                try:
+                    if "ripple" in subtask:
+                        sub_intervals = results.DataHelper.get_ripples_epochs()
+                    elif "freeze" in subtask:
+                        sub_intervals = results.DataHelper.get_freeze_epochs()
+                    elif "mov" in subtask:
+                        sub_intervals = results.DataHelper.get_mov_epochs()
+                    elif "sws" in subtask or "nrem" in subtask:
+                        try:
+                            sub_intervals = results.DataHelper.get_sws_epochs()
+                        except FileNotFoundError:
+                            sub_intervals = results.DataHelper.get_sws_epochs(
+                                folder=results.network_path
+                            )
+                    elif "rem" in subtask:
+                        try:
+                            sub_intervals = results.DataHelper.get_rem_epochs()
+                        except FileNotFoundError:
+                            sub_intervals = results.DataHelper.get_rem_epochs(
+                                folder=results.network_path
+                            )
+                    else:
+                        raise ValueError(f"Unknown subtask: {subtask}")
+
+                    task_epoch = task_epoch.intersect(sub_intervals)
+                except AttributeError as e:
+                    print(
+                        f"Warning: DataHelper missing sub-epoch generator for '{subtask}': {e}. Using raw phase."
+                    )
+
+            if subsleep is not None:
+                subsleep = subsleep.lower()
+                try:
+                    if "ripple" in subsleep:
+                        subsleep_intervals = results.DataHelper.get_ripples_epochs()
+                    elif "freeze" in subsleep:
+                        subsleep_intervals = results.DataHelper.get_freeze_epochs()
+                    elif "mov" in subsleep:
+                        subsleep_intervals = results.DataHelper.get_mov_epochs()
+                    elif "sws" in subsleep or "nrem" in subsleep:
+                        try:
+                            subsleep_intervals = results.DataHelper.get_sws_epochs()
+                        except FileNotFoundError:
+                            subsleep_intervals = results.DataHelper.get_sws_epochs(
+                                folder=results.network_path
+                            )
+                    elif "rem" in subsleep:
+                        try:
+                            subsleep_intervals = results.DataHelper.get_rem_epochs()
+                        except FileNotFoundError:
+                            subsleep_intervals = results.DataHelper.get_rem_epochs(
+                                folder=results.network_path
+                            )
+                    else:
+                        raise ValueError(f"Unknown subsleep: {subsleep}")
+
+                    pre_epoch = pre_epoch.intersect(subsleep_intervals)
+                    post_epoch = post_epoch.intersect(subsleep_intervals)
+                except AttributeError as e:
+                    print(
+                        f"Warning: DataHelper missing sub-epoch generator for '{subsleep}': {e}. Using raw phase."
+                    )
+
+            # 3. Bin spike data across the entire session to ensure shared structural alignments
+            # Quantize neural spike times into uniform temporal bin counts (Q-Matrix)
+            q_matrix = spike_group.count(bin_size_sec)
+
+            # 4. Restrict Q-matrices to their respective behavioral phases
+            q_pre = q_matrix.restrict(pre_epoch).values
+            q_task = q_matrix.restrict(task_epoch).values
+            q_post = q_matrix.restrict(post_epoch).values
+
+            # Filter out completely silent cells within these segments to avoid NaN covariances
+            active_cells = (
+                (np.std(q_pre, axis=0) > 0)
+                & (np.std(q_task, axis=0) > 0)
+                & (np.std(q_post, axis=0) > 0)
+            )
+
+            if np.sum(active_cells) < 4:
+                continue
+
+            q_pre = q_pre[:, active_cells]
+            q_task = q_task[:, active_cells]
+            q_post = q_post[:, active_cells]
+
+            # 5. Compute Cell-by-Cell Pearson Correlation Matrices
+            corr_pre = np.corrcoef(q_pre, rowvar=False)
+            corr_task = np.corrcoef(q_task, rowvar=False)
+            corr_post = np.corrcoef(q_post, rowvar=False)
+
+            # 6. Extract Upper Triangular Indices (excluding the identity self-correlation diagonal)
+            iu = np.triu_indices(corr_pre.shape[0], k=1)
+            v_pre = corr_pre[iu]
+            v_task = corr_task[iu]
+            v_post = corr_post[iu]
+
+            # Replace any residual interior NaNs with 0
+            v_pre = np.nan_to_num(v_pre)
+            v_task = np.nan_to_num(v_task)
+            v_post = np.nan_to_num(v_post)
+
+            # 7. Compute Inter-epoch Similarity Coefficients (R-values)
+            r_task_pre = np.corrcoef(v_task, v_pre)[0, 1]
+            r_task_post = np.corrcoef(v_task, v_post)[0, 1]
+            r_post_pre = np.corrcoef(v_post, v_pre)[0, 1]
+
+            # Handle potential correlation boundary edge issues
+            eps = 1e-6
+            denom_ev = np.sqrt((1 - r_task_pre**2) * (1 - r_post_pre**2))
+            denom_rev = np.sqrt((1 - r_task_post**2) * (1 - r_post_pre**2))
+
+            # 8. Compute final Partial Variances
+            if denom_ev > eps and denom_rev > eps:
+                ev_val = ((r_task_post - (r_task_pre * r_post_pre)) / denom_ev) ** 2
+                rev_val = ((r_task_pre - (r_task_post * r_post_pre)) / denom_rev) ** 2
+            else:
+                ev_val, rev_val = np.nan, np.nan
+
+            rows.append(
+                {
+                    "Mouse": mouse_name,
+                    "Group": manipe,
+                    "EV": ev_val
+                    * 100,  # Scale to percentage to match your MATLAB output
+                    "REV": rev_val * 100,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    def plot_kudrimoti_results(
+        self,
+        winMS=36,
+        task_phase="cond",
+        subtask: Optional[str] = None,
+        subsleep: Optional[str] = None,
+        save_path: Optional[str] = None,
+    ):
+        # Run the core computation
+        df_results = self.compute_kudrimoti_variance(
+            winMS=winMS, task_phase=task_phase, subtask=subtask, subsleep=subsleep
+        )
+
+        # Convert to long-form for seaborn grouping by Metric type (EV vs REV)
+        df_melted = df_results.melt(
+            id_vars=["Mouse", "Group"],
+            value_vars=["EV", "REV"],
+            var_name="Metric",
+            value_name="Percentage",
+        )
+
+        unique_groups = df_melted["Group"].unique()
+        fig, axs = plt.subplots(
+            1, len(unique_groups), figsize=(5 * len(unique_groups), 6), sharey=True
+        )
+
+        if len(unique_groups) == 1:
+            axs = [axs]
+
+        for idx, group in enumerate(unique_groups):
+            ax = axs[idx]
+            group_data = df_melted[df_melted["Group"] == group]
+
+            sns.boxplot(
+                data=group_data,
+                x="Metric",
+                y="Percentage",
+                palette="Set2",
+                width=0.5,
+                ax=ax,
+                boxprops=dict(alpha=0.6),
+            )
+            sns.stripplot(
+                data=group_data,
+                x="Metric",
+                y="Percentage",
+                color="black",
+                size=6,
+                jitter=0.15,
+                ax=ax,
+            )
+
+            # Paired Comparison test: EV vs REV within group
+            box_pairs = [("EV", "REV")]
+            annotator = Annotator(
+                ax, box_pairs, data=group_data, x="Metric", y="Percentage"
+            )
+            annotator.configure(
+                test="Wilcoxon", text_format="star", loc="inside"
+            )  # Matching your MATLAB Wilcoxon choice
+            annotator.apply_and_annotate()
+
+            ax.set_title(f"Group: {group}")
+            ax.set_xlabel("")
+            if idx > 0:
+                ax.set_ylabel("")
+            else:
+                ax.set_ylabel("% Variance Explained")
+
+        plt.suptitle(
+            f"Pairwise Coupling Reactivation ({task_phase.upper()} {subtask or ''} {subsleep or ''})\nWindow Size: {winMS} ms",
+            fontsize=14,
+            y=1.02,
+        )
+        sns.despine()
+        plt.tight_layout()
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            filename = f"kudrimoti_reactivation_{task_phase}_{subtask or 'all'}_{subsleep or 'all'}_{winMS}ms"
+            plt.savefig(
+                os.path.join(save_path, filename + ".png"),
+                bbox_inches="tight",
+                dpi=300,
+            )
+            plt.savefig(
+                os.path.join(save_path, filename + ".svg"),
+            )
+        plt.show()
+
+    def compute_ev_behavior_correlation(
+        self,
+        winMS=36,
+        task_phase="cond",
+        subtask: Optional[str] = None,
+        subsleep: Optional[str] = None,
+        zone: str = "Shock",
+        compute_type: str = "relative",
+    ):
+        """Extracts Kudrimoti EV metrics and correlates them with differences
+
+        in Shock Zone (SZ) occupancy and first entry latency between Pre and Post tests.
+        """
+
+        rows = []
+
+        # 1. Reuse our previously defined Kudrimoti function to collect raw EV metrics per session
+        df_ev = self.compute_kudrimoti_variance(
+            winMS=winMS, task_phase=task_phase, subtask=subtask, subsleep=subsleep
+        )
+
+        # 2. Gather behavioral parameters alongside neural metrics per session
+        for idx, row in df_ev.iterrows():
+            mouse_name = row["Mouse"]
+            group_label = row["Group"]
+            ev_val = row["EV"]
+
+            if np.isnan(ev_val):
+                continue
+
+            # Isolate target dataset dataframe structures for specific session info
+            df_session = self.results_df.xs(
+                (mouse_name, group_label), level=("mouse_name", "manipe")
+            )
+            if df_session.empty:
+                continue
+
+            results: Mouse_Results = df_session.iloc[0].results
+
+            try:
+                occup_pre = results.DataHelper.get_zone_occupancy(
+                    session_type="TestPre", zone=zone
+                )
+                occup_post = results.DataHelper.get_zone_occupancy(
+                    session_type="TestPost", zone=zone
+                )
+
+                latency_pre = results.DataHelper.get_first_entry_latency(
+                    session_type="TestPre",
+                    zone=zone,
+                    max_duration=500,
+                )
+                latency_post = results.DataHelper.get_first_entry_latency(
+                    session_type="TestPost", zone=zone, max_duration=500
+                )
+
+                pos_xy = results.DataHelper.old_positions[:, :2]
+                pos_pre_test = pos_xy[results.full_preMask, :2]
+                pos_cond_test = pos_xy[results.condMask, :2]
+                pos_post_test = pos_xy[results.postMask, :2]
+
+                thigmo_pre = results.DataHelper.compute_distance_weighted_thigmo(
+                    pos_pre_test
+                )
+                thigmo_cond = results.DataHelper.compute_distance_weighted_thigmo(
+                    pos_cond_test
+                )
+                thigmo_post = results.DataHelper.compute_distance_weighted_thigmo(
+                    pos_post_test
+                )
+
+                diff_latency = latency_post - latency_pre
+
+                if compute_type == "relative":
+                    diff_occup = ((occup_post - occup_pre) / occup_pre) * 100.0
+                    diff_thigmo_post = (
+                        (thigmo_post - thigmo_cond) / thigmo_cond
+                    ) * 100.0
+                    diff_thigmo_cond = ((thigmo_cond - thigmo_pre) / thigmo_pre) * 100.0
+                elif compute_type == "absolute":
+                    diff_occup = occup_post - occup_pre
+                    diff_thigmo_post = thigmo_post - thigmo_cond
+                    diff_thigmo_cond = thigmo_cond - thigmo_pre
+                else:
+                    raise ValueError(
+                        "Invalid type specified. Use 'relative' or 'absolute'."
+                    )
+
+                rows.append(
+                    {
+                        "Mouse": mouse_name,
+                        "Group": group_label,
+                        "EV": ev_val,
+                        "Delta_Occupancy": diff_occup,
+                        "Delta_Latency": diff_latency,
+                        "Delta_Thigmotaxis_Cond": diff_thigmo_cond,
+                        "Delta_Thigmotaxis_Post": diff_thigmo_post,
+                    }
+                )
+            except ValueError as e:
+                # Fallback if your helper uses direct properties or raw tracking frames
+                print(
+                    f"Could not compute behavioral deltas for {mouse_name} ({group_label}): {e}. Skipping session."
+                )
+                continue
+
+        return pd.DataFrame(rows)
+
+    def inspect_mouse_trajectories(
+        self, zone: str = "Shock", max_duration=2000, save_path: Optional[str] = None
+    ):
+        """Generates trajectory plots for each mouse across TestPre and TestPost sessions.
+        Includes a localized sequential colormap showing ±10 frames around the first entry
+        to distinguish real behavioral entries from tracking artifacts.
+        """
+        import matplotlib.patches as patches
+
+        try:
+            zone_idx = ZONELABELS.index(zone)
+            x_lim, y_lim = ZONEDEF[zone_idx]
+        except NameError:
+            print(
+                "Error: ZONELABELS or ZONEDEF parameters are not accessible within scope."
+            )
+            return
+
+        for (mouse_name, group_label), df_session in self.results_df.groupby(
+            level=["mouse_name", "manipe"]
+        ):
+            if df_session.empty:
+                continue
+
+            results: Mouse_Results = df_session.iloc[0].results
+            data_helper = results.DataHelper
+
+            # Setup subplots for side-by-side session inspection (Pre vs Post)
+            fig, axs = plt.subplots(1, 3, figsize=(15, 6.5), sharex=True, sharey=True)
+            sessions = ["TestPre", "Cond", "TestPost"]
+
+            print(
+                f"Generating diagnostic trajectory verification for mouse: {mouse_name}..."
+            )
+
+            # Keep track of session-specific metrics to compute overall Delta at the end
+            session_metrics = {
+                "TestPre": {"occ": np.nan, "lat": np.nan, "thigmo": np.nan},
+                "Cond": {"occ": np.nan, "lat": np.nan, "thigmo": np.nan},
+                "TestPost": {"occ": np.nan, "lat": np.nan, "thigmo": np.nan},
+            }
+
+            for col_idx, session_type in enumerate(sessions):
+                ax = axs[col_idx]
+
+                # --- Exact replication of underlying slicing logic ---
+                session_names = data_helper.fullBehavior["Times"].get(
+                    "sessionNames", []
+                )
+                starts = data_helper.fullBehavior["Times"].get("sessionStart", [])
+                stops = data_helper.fullBehavior["Times"].get("sessionStop", [])
+
+                session_id = [
+                    idx
+                    for idx, name in enumerate(session_names)
+                    if session_type.lower() in name.lower()
+                ]
+                if not session_id:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "Session Not Found",
+                        ha="center",
+                        va="center",
+                        transform=ax.transAxes,
+                    )
+                    continue
+
+                full_latency = []
+                full_occupancy = []
+                full_thigmotaxis = []
+                for i, sess_id in enumerate(session_id):
+                    if i >= 2:
+                        continue
+
+                    session_interval = IntervalSet(
+                        start=starts[sess_id], end=stops[sess_id]
+                    )
+                    pos_tsd = TsdFrame(
+                        t=data_helper.fullBehavior["positionTime"].flatten(),
+                        d=data_helper.fullBehavior["Positions"],
+                    ).restrict(session_interval)
+
+                    my_data = pos_tsd.values
+                    my_data = my_data[~np.isnan(my_data).any(axis=1)]  # Remove NaNs
+                    ax.scatter(
+                        my_data[0, 0],
+                        my_data[0, 1],
+                        color="green",
+                        s=50,
+                    )
+
+                    if len(pos_tsd) == 0:
+                        ax.text(
+                            0.5,
+                            0.5,
+                            "Empty Position Data",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
+                        )
+                        continue
+
+                    x_coords = pos_tsd.values[:, 0]
+                    y_coords = pos_tsd.values[:, 1]
+                    t_coords = pos_tsd.times()
+
+                    # Calculate mask vectors for global visualization
+                    in_zone_mask = (
+                        (x_coords >= x_lim[0])
+                        & (x_coords <= x_lim[1])
+                        & (y_coords >= y_lim[0])
+                        & (y_coords <= y_lim[1])
+                    )
+
+                    # Fetch computed scalars using your helper functions
+                    try:
+                        computed_occup = (
+                            data_helper.get_zone_occupancy(
+                                session_type=session_type, zone=zone
+                            )
+                            * 100.0
+                        )
+                        computed_latency = data_helper.get_first_entry_latency(
+                            session_type=session_type,
+                            zone=zone,
+                            max_duration=max_duration,
+                        )
+                        computed_thigmo = data_helper.compute_distance_weighted_thigmo(
+                            pos_tsd.values[:, :2]
+                        )
+                        full_occupancy.append(computed_occup)
+                        full_latency.append(computed_latency)
+                        full_thigmotaxis.append(computed_thigmo)
+                    except Exception:
+                        computed_occup, computed_latency = np.nan, np.nan
+
+                    # 1. Plot entire session path background (lightgray)
+                    ax.plot(
+                        x_coords,
+                        y_coords,
+                        color="lightgray",
+                        alpha=0.5,
+                        linewidth=1,
+                        # label="Full Path",
+                    )
+
+                    # 2. Highlight all points detected inside the zone natively (crimson dots)
+                    ax.scatter(
+                        x_coords[in_zone_mask],
+                        y_coords[in_zone_mask],
+                        color="crimson",
+                        s=3,
+                        alpha=0.2,
+                        #     label="In-Zone",
+                    )
+
+                    # 3. --- TIME-WINDOW CMAP AROUND FIRST ENTRY ---
+                    # Replicate the drop_short_intervals(1.0) logic to find the exact true entry frame
+                    in_zone_intervalset = (
+                        Tsd(t=t_coords, d=in_zone_mask.astype(int))
+                        .threshold(0.5, "above")
+                        .time_support
+                    )
+                    in_zone_intervalset = in_zone_intervalset.drop_short_intervals(1.0)
+
+                    if in_zone_intervalset.tot_length() > 1:
+                        first_entry_time = in_zone_intervalset.as_units("s").start[0]
+                        # Find closest index matching this specific timestamps
+                        entry_idx = np.argmin(
+                            np.abs(pos_tsd.times("s") - first_entry_time)
+                        )
+
+                        # Window slice bounds: safely bounded by array limits
+                        start_w = max(0, entry_idx - 10)
+                        end_w = min(len(pos_tsd), entry_idx + 11)
+
+                        x_window = x_coords[start_w:end_w]
+                        y_window = y_coords[start_w:end_w]
+                        time_steps = np.arange(
+                            start_w - entry_idx, end_w - entry_idx
+                        )  # Relative to entry (0)
+
+                        # Plot window path as a connected dark line to track chronological vector direction
+                        ax.plot(
+                            x_window,
+                            y_window,
+                            color="dimgray",
+                            linewidth=1.5,
+                            linestyle="-",
+                            alpha=0.8,
+                        )
+
+                        # Scatter plot colored by relative step index (-10 to +10)
+                        sc = ax.scatter(
+                            x_window,
+                            y_window,
+                            c=time_steps,
+                            cmap="viridis",
+                            s=50,
+                            edgecolor="black",
+                            linewidth=0.6,
+                            zorder=5,
+                            # label="Entry Window",
+                        )
+
+                        if sess_id == session_id[-1]:
+                            cbar = plt.colorbar(sc, ax=ax, shrink=0.6, pad=0.02)
+                            cbar.set_label("Relative Frame (0=Entry)", fontsize=9)
+                            cbar.ax.tick_params(labelsize=8)
+
+                computed_occup = (
+                    np.nanmedian(full_occupancy) if full_occupancy else np.nan
+                )
+                session_metrics[session_type]["occ"] = computed_occup
+                computed_latency = (
+                    np.nanmedian(full_latency) if full_latency else np.nan
+                )
+                session_metrics[session_type]["lat"] = computed_latency
+                computed_thigmo = (
+                    np.nanmedian(full_thigmotaxis) if full_thigmotaxis else np.nan
+                )
+                session_metrics[session_type]["thigmo"] = computed_thigmo
+                # 4. Draw explicit ZONEDEF bounding box patch
+                zone_width = x_lim[1] - x_lim[0]
+                zone_height = y_lim[1] - y_lim[0]
+                rect = patches.Rectangle(
+                    (x_lim[0], y_lim[0]),
+                    zone_width,
+                    zone_height,
+                    linewidth=2,
+                    edgecolor="blue",
+                    facecolor="blue",
+                    alpha=0.08,
+                    linestyle="--",
+                )
+                ax.add_patch(rect)
+
+                # Axis layout titles
+                ax.set_title(
+                    f"{session_type}\nOccupancy: {computed_occup:.2f}%\nLatency: {f'{computed_latency:.1f}s' if not np.isnan(computed_latency) else 'None'}\nThigmotaxis: {computed_thigmo:.3f}",
+                    fontsize=11,
+                    fontweight="bold",
+                )
+                ax.set_xlabel("X Tracking Coordinates")
+                if col_idx == 0:
+                    ax.set_ylabel("Y Tracking Coordinates")
+                    ax.legend(loc="lower left", fontsize=9)
+                ax.grid(True, linestyle=":", alpha=0.5)
+
+            # Compute delta evaluations for output verification banner
+            d_occ = (
+                100
+                * (
+                    session_metrics["TestPost"]["occ"]
+                    - session_metrics["TestPre"]["occ"]
+                )
+                / session_metrics["TestPre"]["occ"]
+            )
+            d_lat = (
+                session_metrics["TestPost"]["lat"] - session_metrics["TestPre"]["lat"]
+            )
+
+            plt.suptitle(
+                f"Spatial Trajectory Verification & Entry Entry Audit\n"
+                f"Mouse: {mouse_name} | Group: {group_label}\n"
+                f"Delta Occupancy: {d_occ:+.2f}% | Delta Latency: {d_lat:+.1f}s",
+                fontsize=13,
+                fontweight="bold",
+                y=1.03,
+            )
+            plt.tight_layout()
+            if save_path:
+                os.makedirs(save_path, exist_ok=True)
+                filename = f"trajectory_audit_{mouse_name}_{group_label}_{zone}_{max_duration}s"
+                plt.savefig(
+                    os.path.join(save_path, filename + ".png"),
+                    dpi=300,
+                    bbox_inches="tight",
+                )
+            plt.show()
+
+    def plot_ev_behavior_correlation(
+        self,
+        winMS=36,
+        task_phase="cond",
+        zone: str = "Shock",
+        subtask: Optional[str] = None,
+        subsleep: Optional[str] = None,
+        compute_type: str = "relative",
+        model_name: str = "TheilSen",  # or Huber
+        save_path=None,
+    ):
+        """Plots individual correlation lines per Group/manipe to observe differential
+
+        impacts of manipulations on the EV vs Behavior relationship.
+        """
+        from scipy.stats import spearmanr
+
+        df_corr = self.compute_ev_behavior_correlation(
+            winMS=winMS,
+            task_phase=task_phase,
+            zone=zone,
+            subtask=subtask,
+            subsleep=subsleep,
+            compute_type=compute_type,
+        )
+
+        if df_corr.empty or len(df_corr) < 3:
+            print("Insufficient paired data found to calculate trends.")
+            return
+
+        # Initialize subplots
+        fig, axs = plt.subplots(1, 4, figsize=(21, 7))
+
+        # Get unique experimental manipulations (groups)
+        unique_groups = df_corr["Group"].unique()
+
+        # Define metrics to plot on the Y axes
+        y_metrics = [
+            "Delta_Occupancy",
+            "Delta_Latency",
+            "Delta_Thigmotaxis_Cond",
+            "Delta_Thigmotaxis_Post",
+        ]
+        y_labels = [
+            rf"{compute_type.capitalize()} $\Delta$ {zone.capitalize()} Zone Occupancy {'(Post - Pre %)' if compute_type == 'absolute' else '((Post - Pre) / Pre * 100%)'}",
+            rf"$\Delta$ {zone.capitalize()} Entry Latency (Post - Pre sec)",
+            r"$\Delta$ Thigmotaxis Cond (Cond - Pre)",
+            r"$\Delta$ Thigmotaxis Post (Post - Cond)",
+        ]
+
+        # Loop over both behavioral metric axes
+        for col_idx, metric in enumerate(y_metrics):
+            ax = axs[col_idx]
+
+            # 1. Base scatter plot colored cleanly by group using your palette
+            sns.scatterplot(
+                data=df_corr,
+                x="EV",
+                y=metric,
+                hue="Group",
+                palette=GROUPS_PALETTE,
+                s=140,
+                edgecolor="black",
+                linewidth=1.2,
+                alpha=0.85,
+                ax=ax,
+                legend=(col_idx == 0),  # Only draw legend on first plot
+            )
+
+            mouse_col = "Mouse" if "Mouse" in df_corr.columns else df_corr.columns[0]
+
+            y_range = df_corr[metric].max() - df_corr[metric].min()
+            y_offset = y_range * 0.02 if y_range > 0 else 0.1
+
+            for _, row in df_corr.iterrows():
+                ax.text(
+                    x=row["EV"],
+                    y=row[metric] + y_offset,
+                    s=str(row[mouse_col]),
+                    fontsize=8,
+                    color="black",
+                    alpha=0.75,
+                    ha="center",
+                    va="bottom",
+                )
+            # --------------------------------------
+
+            text_box_lines = []
+
+            from sklearn.linear_model import HuberRegressor, TheilSenRegressor
+
+            for group in unique_groups:
+                group_df = df_corr[df_corr["Group"] == group]
+
+                # Check if group has enough sample variance to calculate a correlation line
+                if len(group_df) < 3:
+                    continue
+
+                x_g = group_df["EV"].values
+                y_g = group_df[metric].values
+
+                rho, p_val = spearmanr(x_g, y_g)
+                g_color = GROUPS_PALETTE.get(group, "black")
+
+                X_fit = x_g.reshape(-1, 1)
+                if model_name == "Huber":
+                    model = HuberRegressor()
+                elif model_name == "TheilSen":
+                    model = TheilSenRegressor()
+                else:
+                    raise ValueError("Invalid model_name. Use 'Huber' or 'TheilSen'.")
+
+                model.fit(X_fit, y_g)
+                x_vals = np.linspace(x_g.min(), x_g.max(), 100).reshape(-1, 1)
+                y_pred = model.predict(x_vals)
+
+                ax.plot(
+                    x_vals.flatten(),
+                    y_pred,
+                    color=g_color,
+                    linewidth=2.5,
+                )
+
+                # Construct clean string for the statistics display box
+                text_box_lines.append(f"{group}: $\\rho$ = {rho:.3f} (p = {p_val:.3f})")
+
+            # Formatting labels and display markers
+            ax.set_xlabel("Explained Variance (EV %)", fontsize=13, fontweight="bold")
+            ax.set_ylabel(y_labels[col_idx], fontsize=13, fontweight="bold")
+            ax.tick_params(labelsize=11)
+
+            # Add descriptive statistical box in the corner
+            ax.text(
+                0.05,
+                0.95,
+                "\n".join(text_box_lines),
+                transform=ax.transAxes,
+                fontsize=11,
+                verticalalignment="top",
+                bbox=dict(
+                    boxstyle="round,pad=0.5",
+                    facecolor="white",
+                    alpha=0.85,
+                    edgecolor="gray",
+                ),
+            )
+
+        # Put legend safely outside or standard internal positioning
+        axs[0].legend(
+            title="Experimental Group", title_fontsize=11, fontsize=10, loc="lower left"
+        )
+
+        plt.suptitle(
+            f"Relationship between neural reactivations and {zone} behaviour (Phase: {task_phase.upper()} {subtask if subtask else ''} {subsleep if subsleep else ''})",
+            fontsize=15,
+            fontweight="bold",
+            y=1.02,
+        )
+        sns.despine()
+        plt.tight_layout()
+
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            filename = f"EV_behavior_group_corr_{task_phase}{'_' + subtask if subtask else ''}{'_' + subsleep if subsleep else ''}"
+            fig.savefig(
+                os.path.join(save_path, filename + ".png"),
+                dpi=300,
+                bbox_inches="tight",
+            )
+            fig.savefig(
+                os.path.join(save_path, filename + ".svg"),
+            )
+        plt.show()
+
+    def compute_pca_reactivation(
+        self, winMS=36, template_period="cond", num_templates=2
+    ):
+        """Computes population reactivation strength (Peyrache et al. 2010 style)
+
+        using PCA template projection across behavioral blocks.
+        """
+        bin_size_sec = winMS / 1000.0
+        all_session_data = {}
+
+        for (mouse_name, manipe), df in self.results_df.groupby(
+            by=["mouse_name", "manipe"]
+        ):
+            results: Mouse_Results = df.iloc[0].results
+
+            # 1. Fetch Spike Trains
+            spike_group = results.DataHelper.get_spike_data()
+            if len(spike_group) < 5:
+                continue
+
+            # 2. Extract Macro Phase Intervals
+            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            cond_epoch, _ = results.get_epoch_interval("cond")
+            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            hab_epoch, _ = results.get_epoch_interval("hab")
+
+            # Secondary physiological sub-epoch layers
+            sws_epochs = results.DataHelper.get_sws_epochs()
+            ripples_epochs = results.DataHelper.get_ripples_epochs()
+
+            try:
+                freeze_epochs = results.DataHelper.get_freeze_epochs()
+            except AttributeError:
+                freeze_epochs = IntervalSet(start=[], end=[])
+
+            # 3. Bin full session spike activity (Q-Matrix)
+            q_tsd = spike_group.count(bin_size_sec)
+
+            # 4. Map the requested Template Interval Configuration
+            if template_period == "wake":
+                template_interval = cond_epoch  # Full task / conditioning wake block
+            elif template_period == "cond":
+                template_interval = cond_epoch
+            elif template_period == "condFree":
+                template_interval = cond_epoch.intersect(freeze_epochs)
+            elif template_period == "postRip":
+                template_interval = post_epoch.intersect(sws_epochs).intersect(
+                    ripples_epochs
+                )
+            elif template_period == "condRip":
+                template_interval = cond_epoch.intersect(ripples_epochs)
+            else:
+                raise ValueError(f"Unknown template period paradigm: {template_period}")
+
+            # 5. Build PCA Template via Covariance Matrix
+            q_template = q_tsd.restrict(template_interval).values
+            if q_template.shape[0] < 10:
+                continue
+
+            # Compute Pearson Correlation Matrix of the population template
+            corr_matrix = np.corrcoef(q_template, rowvar=False)
+            corr_matrix = np.nan_to_num(corr_matrix)
+            np.fill_diagonal(corr_matrix, 0)  # Clear out self-correlation diagonals
+
+            # Singular Value Decomposition / Eigendecomposition wrapper
+            eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
+
+            # Sort in descending order to match MATLAB's pcacov outputs
+            idx_sorted = np.argsort(eigenvalues)[::-1]
+            eigenvectors = eigenvectors[:, idx_sorted]
+            eigenvalues = eigenvalues[idx_sorted]
+
+            # 6. Project templates onto full session frames to calculate Reactivation Strength (RS)
+            q_full_normalized = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
+                np.std(q_tsd.values, axis=0) + 1e-12
+            )
+            q_full_normalized = np.nan_to_num(q_full_normalized)
+
+            pc_scores = {}
+            rs_templates = {}
+            n_comp = min(num_templates, eigenvectors.shape[1])
+
+            for idx_t in range(n_comp):
+                v_i = eigenvectors[:, idx_t]
+
+                # Peyrache Formulation: Score^2 minus single neuron contributions
+                score_t = np.dot(q_full_normalized, v_i)
+                pc_scores[idx_t] = Tsd(t=q_tsd.index, d=score_t)
+
+                single_neuron_contribution = np.dot(q_full_normalized**2, v_i**2)
+                rs_vector = (score_t**2) - single_neuron_contribution
+                rs_templates[idx_t] = Tsd(t=q_tsd.index, d=rs_vector)
+
+            # 7. Collect structural metadata dictionary package for this session slice
+            all_session_data[f"{mouse_name}_{manipe}"] = {
+                "rs": rs_templates,
+                "pc_scores": pc_scores,
+                "eigenvectors": eigenvectors[:, :n_comp],
+                "eigenvalues": eigenvalues[:n_comp],
+                "cell_ids": list(spike_group.keys()),
+                "q_tsd": q_tsd,
+                "epochs": {
+                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "hab": hab_epoch,
+                    "cond": cond_epoch,
+                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                    "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "ripples": ripples_epochs,
+                },
+                "positions": {
+                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
+                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
+                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                    "linear": results.l_function(
+                        results.DataHelper.fullBehavior["Positions"][:, :2],
+                    )[1].flatten(),
+                },
+            }
+
+        return all_session_data
+
+    def map_reactivation_space(self, session_dict, template_idx=0, bins=10):
+        """Bins continuous 2D position space to map mean reactivation distribution profiles."""
+        x_pos = session_dict["positions"]["x"]
+        y_pos = session_dict["positions"]["y"]
+        t_pos = session_dict["positions"]["time"]
+        rs_tsd = session_dict["rs"][template_idx]
+
+        pos_tsd = TsdFrame(t=t_pos, d=np.vstack([x_pos, y_pos]).T, columns=["x", "y"])
+
+        # Grid allocation steps
+        edges = np.linspace(0, 1, bins + 1)
+        hab_map = np.zeros((bins, bins))
+        cond_map = np.zeros((bins, bins))
+
+        for i in range(bins):
+            for j in range(bins):
+                # Spatial masking
+                spatial_mask = (
+                    (pos_tsd.values[:, 0] >= edges[i])
+                    & (pos_tsd.values[:, 0] < edges[i + 1])
+                    & (pos_tsd.values[:, 1] >= edges[j])
+                    & (pos_tsd.values[:, 1] < edges[j + 1])
+                )
+                if not np.any(spatial_mask):
+                    continue
+
+                intervals_xy = (
+                    Tsd(t=t_pos, d=spatial_mask.astype(bool))
+                    .threshold(0.5, "above")
+                    .time_support
+                )
+
+                # Extract mean RS values targeting this pixel coordinates frame
+                hab_map[i, j] = np.nanmean(
+                    rs_tsd.restrict(
+                        session_dict["epochs"]["hab"].intersect(intervals_xy)
+                    ).values
+                )
+                cond_map[i, j] = np.nanmean(
+                    rs_tsd.restrict(
+                        session_dict["epochs"]["cond"].intersect(intervals_xy)
+                    ).values
+                )
+
+        # Apply standard Gaussian smoothing matching MATLAB's smooth2a logic
+        hab_map = gaussian_filter(np.nan_to_num(hab_map), sigma=0.8)
+        cond_map = gaussian_filter(np.nan_to_num(cond_map), sigma=0.8)
+
+        return hab_map, cond_map
+
+    def plot_pca_master_results(
+        self,
+        winMS=36,
+        template_period="cond",
+        num_templates=1,
+        save_path=None,
+        session_data: Optional[dict] = None,
+        spike_data: bool = True,
+    ):
+        """Executes computation loops and draws macro bar plots alongside 2D tracking matrices."""
+
+        if session_data is None:
+            if spike_data:
+                session_data = self.compute_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+            else:
+                session_data = self.compute_latent_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+
+        if not session_data:
+            print("No valid session matrices computed.")
+            return
+
+        unique_manipes = self.results_df.index.get_level_values("manipe").unique()
+
+        for manipe in unique_manipes:
+            bar_rows = []
+            spatial_hab_list, spatial_cond_list = [], []
+            print(f"looking at {manipe}")
+            # Filter data for the current manipe
+            # Loop to parse scalar summary statistics for category comparisons
+            for s_key, data in session_data.items():
+                if manipe.lower() not in s_key.lower():
+                    continue
+
+                print(f"adding {s_key} to summary")
+
+                for t_idx in range(num_templates):
+                    rs_tsd = data["rs"][t_idx]
+                    epochs = data["epochs"]
+
+                    # Pull mean configurations
+                    m_pre = np.nanmean(rs_tsd.restrict(epochs["pre_sleep_sws"]).values)
+                    m_hab = np.nanmean(rs_tsd.restrict(epochs["hab"]).values)
+                    m_cond = np.nanmean(rs_tsd.restrict(epochs["cond"]).values)
+                    m_post = np.nanmean(
+                        rs_tsd.restrict(epochs["post_sleep_sws"]).values
+                    )
+
+                    bar_rows.append(
+                        {"Session": s_key, "Epoch": "PreSleep", "Score": m_pre}
+                    )
+                    bar_rows.append(
+                        {"Session": s_key, "Epoch": "FreeExplo", "Score": m_hab}
+                    )
+                    bar_rows.append(
+                        {"Session": s_key, "Epoch": "Learning", "Score": m_cond}
+                    )
+                    bar_rows.append(
+                        {"Session": s_key, "Epoch": "PostSleep", "Score": m_post}
+                    )
+
+                    # Map spatial elements
+                    h_map, c_map = self.map_reactivation_space(
+                        data, template_idx=t_idx, bins=20
+                    )
+                    spatial_hab_list.append(h_map)
+                    spatial_cond_list.append(c_map)
+
+            df_bars = pd.DataFrame(bar_rows)
+
+            # Initialize multi-panel visualization framework
+            fig = plt.figure(figsize=(18, 5))
+            gs = fig.add_gridspec(1, 4, width_ratios=[1.5, 1, 1, 1])
+
+            # Panel 1: Main Population Trend Bars
+            ax0 = fig.add_subplot(gs[0])
+            sns.barplot(
+                data=df_bars,
+                x="Epoch",
+                y="Score",
+                ax=ax0,
+                palette=["#7F7F7F", "#C9E62F", "#E60000", "#000000"],
+                alpha=0.7,
+                edgecolor="black",
+                linewidth=1.5,
+                errorbar="se",
+            )
+            sns.stripplot(
+                data=df_bars,
+                x="Epoch",
+                y="Score",
+                ax=ax0,
+                color="black",
+                alpha=0.6,
+                jitter=0.15,
+                size=5,
+            )
+            ax0.set_ylabel("PC Reactivation Score", fontweight="bold")
+            ax0.set_xlabel("")
+            ax0.set_title("Global Assembly Reactivation Profile")
+
+            # Compute averaged matrices for 2D spatial layouts
+            mean_hab_spatial = np.nanmean(np.array(spatial_hab_list), axis=0)
+            mean_cond_spatial = np.nanmean(np.array(spatial_cond_list), axis=0)
+
+            # Panel 2: 2D Hab Map
+            ax1 = fig.add_subplot(gs[1])
+            im1 = ax1.imshow(
+                mean_hab_spatial.T, origin="lower", cmap="hot", extent=[0, 1, 0, 1]
+            )
+            ax1.set_title("Mean Score: Hab")
+            plt.colorbar(im1, ax=ax1, shrink=0.7)
+
+            # Panel 3: 2D Cond Map
+            ax2 = fig.add_subplot(gs[2])
+            im2 = ax2.imshow(
+                mean_cond_spatial.T, origin="lower", cmap="hot", extent=[0, 1, 0, 1]
+            )
+            ax2.set_title("Mean Score: Cond")
+            plt.colorbar(im2, ax=ax2, shrink=0.7)
+
+            # Panel 4: 2D Differential Map (Cond - Hab Topology)
+            ax3 = fig.add_subplot(gs[3])
+            im3 = ax3.imshow(
+                (mean_cond_spatial - mean_hab_spatial).T,
+                origin="lower",
+                cmap="jet",
+                extent=[0, 1, 0, 1],
+            )
+            ax3.set_title(r"$\Delta$ Topology (Cond - Hab)")
+            fig.suptitle(
+                f"PCA reactivations for {manipe} (n = {len(spatial_hab_list) / num_templates:.0f} sessions, {num_templates} templates)",
+            )
+            plt.colorbar(im3, ax=ax3, shrink=0.7)
+
+            sns.despine()
+            plt.tight_layout()
+            if save_path:
+                os.makedirs(save_path, exist_ok=True)
+                filename = f"pca_reactivation_summary_{template_period}_{winMS}ms_{'wLSpikeData' if spike_data else 'wLatentData'}_{manipe}"
+                plt.savefig(
+                    os.path.join(save_path, filename + ".png"),
+                    dpi=300,
+                    bbox_inches="tight",
+                )
+                plt.savefig(
+                    os.path.join(save_path, filename + ".svg"),
+                )
+            plt.show()
+
+    def plot_pc_cell_weights_and_spatial_fields(
+        self, session_dict, pc_idx=0, phase="cond"
+    ):
+        """
+        Reproduces Peyrache Fig 1a/c for the U-Maze:
+        1. Sorts cells by their loading (weight) in PC `pc_idx`.
+        2. Plots a sorted Peri-Shock PETH / Spatial Rate Map for all neurons.
+        3. Plots the signed PC score across the linearized U-Maze track.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        from scipy.ndimage import gaussian_filter1d
+
+        weights = session_dict["eigenvectors"][:, pc_idx]  # [N_cells]
+        q_tsd = session_dict["q_tsd"].restrict(session_dict["epochs"][phase])
+
+        # 1. Sort cells by PC Weight (Descending: large positive to large negative)
+        sort_idx = np.argsort(weights)[::-1]
+        sorted_weights = weights[sort_idx]
+        sorted_q = q_tsd.values[:, sort_idx]
+
+        # 2. Compute Spatial Tuning / Linearized Rate Maps for Sorted Cells
+        lin_pos = session_dict["positions"]["linear"]
+        pos_time = session_dict["positions"]["time"]
+
+        # Bin positions (0 = Shock Zone, 1 = Safe Zone)
+        bins = np.linspace(0, 1, 50)
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+
+        # Interpolate linearized position onto Q-matrix timestamps
+        lin_tsd = Tsd(t=pos_time, d=lin_pos).restrict(session_dict["epochs"][phase])
+
+        # Spatial rate map array: [N_cells, N_spatial_bins]
+        spatial_rate_maps = np.zeros((len(sort_idx), len(bins) - 1))
+
+        for i, cell_idx in enumerate(sort_idx):
+            spk_counts = sorted_q[:, i]
+            # Calculate mean firing rate per spatial bin
+            bin_idx = np.digitize(lin_tsd.values, bins) - 1
+            for b in range(len(bins) - 1):
+                mask = bin_idx == b
+                if np.any(mask):
+                    spatial_rate_maps[i, b] = np.mean(spk_counts[mask])
+
+            # Smooth spatial tuning curve
+            spatial_rate_maps[i, :] = gaussian_filter1d(
+                spatial_rate_maps[i, :], sigma=1.5
+            )
+
+        # --- PLOTTING ---
+        fig, axs = plt.subplots(
+            1, 3, figsize=(18, 8), gridspec_kw={"width_ratios": [0.5, 2, 2]}
+        )
+
+        # Panel A: PC Weights
+        axs[0].barh(range(len(sorted_weights)), sorted_weights, color="black")
+        axs[0].axvline(0, color="red", linestyle="--")
+        axs[0].set_ylabel("Cells (Sorted by Weight)")
+        axs[0].set_xlabel(f"Weight in PC {pc_idx + 1}")
+        axs[0].invert_yaxis()
+
+        # Panel B: Sorted Spatial Rate Maps (Peyrache Fig 1a analog)
+        im = axs[1].imshow(
+            spatial_rate_maps,
+            aspect="auto",
+            cmap="viridis",
+            extent=[0, 1, len(sort_idx), 0],
+        )
+        axs[1].axvline(0.2, color="red", linestyle="--", label="Shock Zone Boundary")
+        axs[1].set_xlabel("Linearized Position (0=Shock, 1=Safe)")
+        axs[1].set_ylabel("Cells (Sorted by Weight)")
+        axs[1].set_title(f"Cell Spatial Firing Sorted by PC {pc_idx + 1} Weight")
+        plt.colorbar(im, ax=axs[1], label="Normalized Firing Rate")
+
+        # Panel C: Signed PC Score vs Spatial Position (Peyrache Fig 1c analog)
+        pc_score_tsd = session_dict["pc_scores"][pc_idx].restrict(
+            session_dict["epochs"][phase]
+        )
+
+        # Average PC score across spatial bins
+        mean_pc_score = np.zeros(len(bins) - 1)
+        bin_idx = np.digitize(lin_tsd.values, bins) - 1
+        for b in range(len(bins) - 1):
+            mask = bin_idx == b
+            if np.any(mask):
+                mean_pc_score[b] = np.mean(pc_score_tsd.values[mask])
+
+        axs[2].plot(bin_centers, mean_pc_score, color="purple", linewidth=2.5)
+        axs[2].axhline(0, color="gray", linestyle="--")
+        axs[2].axvline(0.2, color="red", linestyle="--", label="Shock Zone")
+        axs[2].set_xlabel("Linearized Position (0=Shock, 1=Safe)")
+        axs[2].set_ylabel(f"Mean Signed PC {pc_idx + 1} Score")
+        axs[2].set_title("Assembly Reactivation Profile Across Track")
+
+        sns.despine()
+        plt.tight_layout()
+        plt.show()
+
+    def compute_assembly_zone_migration(
+        self, winMS=36, template_period="cond", num_templates=1
+    ):
+        """Calculates the specific mean reactivation strength within each ZONEDEF arena
+
+        sub-slice across Hab, Cond, and SWR periods to look for spatial re-tuning.
+        """
+
+        # 1. Compute the raw PCA continuous traces using our previous method
+        session_data = self.compute_pca_reactivation(
+            winMS=winMS, template_period=template_period, num_templates=num_templates
+        )
+
+        migration_rows = []
+
+        for s_key, data in session_data.items():
+            # Deconstruct session keys back to metadata parameters
+            try:
+                mouse_name, group_label = s_key.split("_")
+            except ValueError:
+                mouse_name, expindex, group_label = s_key.split("_")
+                mouse_name = f"{mouse_name}_{expindex}"
+
+            for t_idx in range(num_templates):
+                rs_tsd = data["rs"][t_idx]
+                epochs = data["epochs"]
+
+                # Align continuous RS values with actual coordinate positions
+                pos_tsd = TsdFrame(
+                    t=data["positions"]["time"],
+                    d=np.vstack([data["positions"]["x"], data["positions"]["y"]]).T,
+                )
+
+                # 2. Iterate through your physical U-Maze zones
+                for z_idx, zone_name in enumerate(ZONELABELS):
+                    x_lim, y_lim = ZONEDEF[z_idx]
+
+                    # Create a spatial interval mask where the mouse is physically inside this zone
+                    in_zone_mask = (
+                        (pos_tsd.values[:, 0] >= x_lim[0])
+                        & (pos_tsd.values[:, 0] <= x_lim[1])
+                        & (pos_tsd.values[:, 1] >= y_lim[0])
+                        & (pos_tsd.values[:, 1] <= y_lim[1])
+                    )
+
+                    if not np.any(in_zone_mask):
+                        continue
+
+                    zone_intervals = (
+                        Tsd(t=data["positions"]["time"], d=in_zone_mask.astype(int))
+                        .threshold(0.5, "above")
+                        .time_support
+                    )
+
+                    # 3. Calculate mean reactivation strength under different combined conditions
+                    # Active exploration in this physical zone during Habituation
+                    hab_zone_rs = np.nanmean(
+                        rs_tsd.restrict(epochs["hab"].intersect(zone_intervals)).values
+                    )
+
+                    # Active exploration in this physical zone during Conditioning
+                    cond_zone_rs = np.nanmean(
+                        rs_tsd.restrict(epochs["cond"].intersect(zone_intervals)).values
+                    )
+
+                    # Micro-state intersection: SWRs that occur while the animal is awake on the maze inside this zone
+                    awake_ripple_zone_rs = np.nanmean(
+                        rs_tsd.restrict(
+                            epochs["cond_ripples"].intersect(zone_intervals)
+                        ).values
+                    )
+
+                    migration_rows.append(
+                        {
+                            "Mouse": mouse_name,
+                            "Group": group_label,
+                            "Template": t_idx,
+                            "Zone": zone_name,
+                            "RS_Hab": hab_zone_rs,
+                            "RS_Cond": cond_zone_rs,
+                            "RS_Awake_SWR": awake_ripple_zone_rs,
+                        }
+                    )
+
+        return pd.DataFrame(migration_rows)
+
+    def plot_assembly_migration(self, winMS=36, template_period="cond"):
+        """Plots a comparison of assembly expression during Habituation vs Conditioning
+
+        broken down by your physical ZONEDEF boundaries.
+        """
+
+        df_mig = self.compute_assembly_zone_migration(
+            winMS=winMS, template_period=template_period
+        )
+        if df_mig.empty:
+            print("No migration data compiled.")
+            return
+
+        # Reshape to long-form for clean comparison plotting
+        df_melted = df_mig.melt(
+            id_vars=["Mouse", "Group", "Zone"],
+            value_vars=["RS_Hab", "RS_Cond"],
+            var_name="Phase",
+            value_name="Reactivation_Strength",
+        )
+        df_melted["Phase"] = df_melted["Phase"].map(
+            {"RS_Hab": "Habituation", "RS_Cond": "Conditioning"}
+        )
+
+        # Plot the data
+        g = sns.catplot(
+            data=df_melted,
+            x="Phase",
+            y="Reactivation_Strength",
+            hue="Group",
+            col="Zone",
+            kind="point",
+            palette=GROUPS_PALETTE,
+            dodge=0.25,
+            markers=["o", "s", "D", "X", "*"][: len(df_melted["Group"].unique())],
+            linestyles=["-", "--", ":", "-.", "."][: len(df_melted["Group"].unique())],
+            capsize=0.1,
+            errorbar="se",
+            height=5,
+            aspect=0.8,
+        )
+
+        g.set_axis_labels("", "Mean Reactivation Strength")
+        g.set_titles("{col_name} Zone", weight="bold")
+        plt.suptitle(
+            f"Spatial Migration of PCA Assemblies ({template_period.upper()} Template)",
+            y=1.05,
+            fontsize=14,
+            weight="bold",
+        )
+        plt.show()
+
+    def plot_comprehensive_summary_matrix(self, winMS=36, save_path=None):
+        """Generates a multi-panel production figure matching the complete
+        3x4 macro dashboard of group-specific boxplots and robust behavior regressions.
+        """
+        from scipy.stats import spearmanr, wilcoxon
+        from sklearn.linear_model import TheilSenRegressor
+
+        # Initialize a 3 rows by 4 columns figure layout
+        fig, axs = plt.subplots(3, 4, figsize=(24, 15), sharex=False, sharey=False)
+
+        # Grid parameter dictionary setup
+        row_configs = [
+            {
+                "phase": "pre",
+                "subtask": "mov",
+                "label": "Free exploration\nbefore learning",
+            },
+            {
+                "phase": "cond",
+                "subtask": "mov",
+                "label": "Moving periods\nduring conditioning",
+            },
+            {
+                "phase": "cond",
+                "subtask": "ripples",
+                "label": "Ripples\nduring conditioning",
+            },
+        ]
+
+        for row_idx, cfg in enumerate(row_configs):
+            phase = cfg["phase"]
+            subtask = cfg["subtask"]
+
+            # ==========================================
+            # COLUMNS 1 & 2: EV vs REV BOXPLOTS PER GROUP
+            # ==========================================
+            df_ev = self.compute_kudrimoti_variance(
+                winMS=winMS, task_phase=phase, subtask=subtask
+            )
+
+            if not df_ev.empty:
+                df_melt = df_ev.melt(
+                    id_vars=["Mouse", "Group"],
+                    value_vars=["EV", "REV"],
+                    var_name="Metric",
+                    value_name="Percentage",
+                )
+
+                # Plot MFB/Control on Column 0, PAG/Aversive on Column 1
+                for g_col_idx, group_name in enumerate(["MFB", "PAG"]):
+                    ax_box = axs[row_idx, g_col_idx]
+                    g_data = df_melt[df_melt["Group"] == group_name]
+
+                    if not g_data.empty:
+                        box_color = GROUPS_PALETTE.get(group_name, "#7F7F7F")
+
+                        sns.boxplot(
+                            data=g_data,
+                            x="Metric",
+                            y="Percentage",
+                            ax=ax_box,
+                            color=box_color,
+                            width=0.4,
+                            fliersize=0,
+                            boxprops=dict(alpha=0.6),
+                        )
+                        sns.stripplot(
+                            data=g_data,
+                            x="Metric",
+                            y="Percentage",
+                            ax=ax_box,
+                            color="black",
+                            size=6,
+                            jitter=0.15,
+                            edgecolor="black",
+                            linewidth=1,
+                        )
+
+                        # Calculate Wilcoxon Signed-Rank Test between EV and REV pairs
+                        ev_vals = g_data[g_data["Metric"] == "EV"]["Percentage"].values
+                        rev_vals = g_data[g_data["Metric"] == "REV"][
+                            "Percentage"
+                        ].values
+
+                        if len(ev_vals) >= 3 and not np.all(ev_vals == rev_vals):
+                            stat, p_w = wilcoxon(ev_vals, rev_vals)
+
+                            # Standard alpha threshold string generation
+                            sig_label = (
+                                "***"
+                                if p_w < 0.001
+                                else "**"
+                                if p_w < 0.01
+                                else "*"
+                                if p_w < 0.05
+                                else "n.s."
+                            )
+
+                            # Annotate stats inside the boxplot window
+                            ax_box.text(
+                                0.5,
+                                0.90,
+                                f"Wilcoxon: {sig_label}\np = {p_w:.3f}",
+                                transform=ax_box.transAxes,
+                                fontsize=9,
+                                ha="center",
+                                bbox=dict(
+                                    boxstyle="round,pad=0.2",
+                                    facecolor="white",
+                                    alpha=0.7,
+                                ),
+                            )
+
+                    ax_box.set_title(
+                        f"{cfg['label']}\n({group_name})", fontsize=10, weight="bold"
+                    )
+                    ax_box.set_ylabel("% explained" if g_col_idx == 0 else "")
+                    ax_box.set_xlabel("")
+                    ax_box.set_ylim(-5, 45)
+
+            # ==========================================
+            # COLUMNS 3 & 4: GROUP-SPECIFIC CORRELATIONS
+            # ==========================================
+            df_corr = self.compute_ev_behavior_correlation(
+                winMS=winMS, task_phase=phase, subtask=subtask
+            )
+
+            if not df_corr.empty and len(df_corr) >= 3:
+                metrics = ["Delta_Latency", "Delta_Occupancy"]
+                y_labels = [
+                    "Latency delta (Post-Pre sec)",
+                    "Occupancy delta (Post-Pre %)",
+                ]
+                unique_groups = df_corr["Group"].unique()
+
+                for m_idx, metric_name in enumerate(metrics):
+                    ax_scat = axs[row_idx, 2 + m_idx]
+
+                    # Base scatter colored by Group matching our earlier functions
+                    sns.scatterplot(
+                        data=df_corr,
+                        x="EV",
+                        y=metric_name,
+                        hue="Group",
+                        palette=GROUPS_PALETTE,
+                        s=100,
+                        edgecolor="black",
+                        alpha=0.85,
+                        ax=ax_scat,
+                        legend=(row_idx == 0 and m_idx == 0),
+                    )
+
+                    text_box_lines = []
+
+                    # Fit separate lines and calculate individual correlations per group
+                    for group in unique_groups:
+                        group_df = df_corr[df_corr["Group"] == group]
+
+                        if len(group_df) < 3:
+                            continue
+
+                        x_g = group_df["EV"].values
+                        y_g = group_df[metric_name].values
+
+                        # Spearman stats per isolated configuration
+                        rho, p_val = spearmanr(x_g, y_g)
+                        g_color = GROUPS_PALETTE.get(group, "black")
+
+                        # Apply Theil-Sen Robust Regression
+                        try:
+                            reg = TheilSenRegressor(random_state=42).fit(
+                                x_g.reshape(-1, 1), y_g
+                            )
+                            x_line = np.linspace(x_g.min(), x_g.max(), 100).reshape(
+                                -1, 1
+                            )
+                            y_line = reg.predict(x_line)
+                            ax_scat.plot(
+                                x_line.flatten(), y_line, color=g_color, linewidth=2.5
+                            )
+                        except Exception:
+                            slope, intercept = np.polyfit(x_g, y_g, 1)
+                            x_line = np.linspace(x_g.min(), x_g.max(), 100)
+                            ax_scat.plot(
+                                x_line,
+                                slope * x_line + intercept,
+                                color=g_color,
+                                linewidth=1.5,
+                                linestyle="--",
+                            )
+
+                        text_box_lines.append(
+                            f"{group}: $\\rho$={rho:.2f} (p={p_val:.2f})"
+                        )
+
+                    # Annotate robust line metrics
+                    ax_scat.text(
+                        0.05,
+                        0.95,
+                        "\n".join(text_box_lines),
+                        transform=ax_scat.transAxes,
+                        fontsize=9,
+                        verticalalignment="top",
+                        bbox=dict(facecolor="white", alpha=0.8, edgecolor="gray"),
+                    )
+
+                    ax_scat.set_ylabel(y_labels[m_idx], fontweight="bold")
+                    ax_scat.set_xlabel(f"EV ({subtask} epoch %)")
+
+        # Legend styling adjustments
+        if axs[0, 2].get_legend() is not None:
+            axs[0, 2].legend(loc="upper right", fontsize=8, title="Groups")
+
+        sns.despine()
+        plt.tight_layout()
+
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            plt.savefig(
+                os.path.join(save_path, "comprehensive_summary_matrix.png"),
+                dpi=300,
+                bbox_inches="tight",
+            )
+
+        plt.show()
+
+    def plot_spatial_similarity_summary(
+        self,
+        winMS=36,
+        template_period="cond",
+        num_templates=1,
+        save_path: Optional[str] = None,
+        session_data: Optional[dict] = None,
+        spike_data: bool = True,
+    ):
+        """Generates a comprehensive multi-panel spatial topology dashboard matching
+        the U-Maze activation maps, differential matrices, and cross-zone bar plots,
+        filtered for MFB and PAG groups with group-specific occupancy tracking.
+        """
+        from scipy.ndimage import gaussian_filter
+
+        # 1. Compute the raw PCA continuous traces using your existing method
+        if session_data is None:
+            if spike_data:
+                session_data = self.compute_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+            else:
+                session_data = self.compute_latent_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+
+        if not session_data:
+            print("No valid session matrices computed.")
+            return
+
+        # Target only specified groups
+        target_groups = ["MFB", "PAG"]
+
+        # Initialize group-specific storage dictionaries
+        group_spatial_hab = {g: [] for g in target_groups}
+        group_spatial_cond = {g: [] for g in target_groups}
+        group_occupancy_hab = {g: [] for g in target_groups}
+        group_occupancy_cond = {g: [] for g in target_groups}
+
+        zone_rows = []
+
+        # 2. Iterate through sessions and group maps by manipulation type
+        for s_key, data in session_data.items():
+            try:
+                mouse_name, group_label = s_key.split("_")
+            except ValueError:
+                mouse_name, expindex, group_label = s_key.split("_")
+                mouse_name = f"{mouse_name}_{expindex}"
+
+            # Filter out non-target groups (e.g., Controls or other manipulations)
+            if group_label not in target_groups:
+                continue
+
+            for t_idx in range(num_templates):
+                rs_tsd = data["rs"][t_idx]
+                epochs = data["epochs"]
+
+                x_pos = data["positions"]["x"]
+                y_pos = data["positions"]["y"]
+                t_pos = data["positions"]["time"]
+                pos_tsd = TsdFrame(
+                    t=t_pos, d=np.vstack([x_pos, y_pos]).T, columns=["x", "y"]
+                )
+
+                # --- 2D Matrix Computations ---
+                h_map, c_map = self.map_reactivation_space(
+                    data, template_idx=t_idx, bins=20
+                )
+                group_spatial_hab[group_label].append(h_map)
+                group_spatial_cond[group_label].append(c_map)
+
+                # Compute behavioral occupancy density grids
+                edges = np.linspace(0, 1, 21)
+                h_occ, _, _ = np.histogram2d(
+                    pos_tsd.restrict(epochs["hab"]).values[:, 0],
+                    pos_tsd.restrict(epochs["hab"]).values[:, 1],
+                    bins=edges,
+                )
+                c_occ, _, _ = np.histogram2d(
+                    pos_tsd.restrict(epochs["cond"]).values[:, 0],
+                    pos_tsd.restrict(epochs["cond"]).values[:, 1],
+                    bins=edges,
+                )
+
+                group_occupancy_hab[group_label].append(
+                    gaussian_filter(h_occ / (np.sum(h_occ) + 1e-12), sigma=0.8)
+                )
+                group_occupancy_cond[group_label].append(
+                    gaussian_filter(c_occ / (np.sum(c_occ) + 1e-12), sigma=0.8)
+                )
+
+                # --- Discrete Zone Value Extractions ---
+                for z_idx, zone_name in enumerate(ZONELABELS):
+                    x_lim, y_lim = ZONEDEF[z_idx]
+
+                    in_zone_mask = (
+                        (pos_tsd.values[:, 0] >= x_lim[0])
+                        & (pos_tsd.values[:, 0] <= x_lim[1])
+                        & (pos_tsd.values[:, 1] >= y_lim[0])
+                        & (pos_tsd.values[:, 1] <= y_lim[1])
+                    )
+
+                    if np.any(in_zone_mask):
+                        zone_intervals = (
+                            Tsd(t=data["positions"]["time"], d=in_zone_mask.astype(int))
+                            .threshold(0.5, "above")
+                            .time_support
+                        )
+
+                        hab_val = np.nanmean(
+                            rs_tsd.restrict(
+                                epochs["hab"].intersect(zone_intervals)
+                            ).values
+                        )
+                        cond_val = np.nanmean(
+                            rs_tsd.restrict(
+                                epochs["cond"].intersect(zone_intervals)
+                            ).values
+                        )
+
+                        zone_rows.append(
+                            {
+                                "Mouse": mouse_name,
+                                "Group": group_label,
+                                "Zone": zone_name,
+                                "Delta_Score": cond_val - hab_val,
+                            }
+                        )
+
+        df_zones = pd.DataFrame(zone_rows)
+        if df_zones.empty:
+            print("No valid target group data matched.")
+            return
+
+        # 3. Calculate Group-Specific Averages
+        mean_maps = {}
+        for g in target_groups:
+            if len(group_spatial_hab[g]) > 0:
+                mean_maps[g] = {
+                    "spatial_diff": np.nanmean(np.array(group_spatial_cond[g]), axis=0)
+                    - np.nanmean(np.array(group_spatial_hab[g]), axis=0),
+                    "occupancy_diff": np.nanmean(
+                        np.array(group_occupancy_cond[g]), axis=0
+                    )
+                    - np.nanmean(np.array(group_occupancy_hab[g]), axis=0),
+                }
+
+        # 4. Construct Multi-Panel Grid Layout (3 Rows x 3 Columns)
+        # Column 0: MFB Neural/Behav Maps, Column 1: PAG Neural/Behav Maps, Column 2: Occupancy Deltas
+        fig = plt.figure(figsize=(20, 16), facecolor="white")
+        gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1.2])
+
+        heatmap_axes = []
+
+        # --- ROW 0: Neural Assembly Reactivation Difference (Cond - Hab) ---
+        for g_idx, g in enumerate(target_groups):
+            ax = fig.add_subplot(gs[0, g_idx])
+            heatmap_axes.append(ax)
+            if g in mean_maps:
+                im = ax.imshow(
+                    mean_maps[g]["spatial_diff"].T,
+                    origin="lower",
+                    cmap="bwr",
+                    extent=[0, 1, 0, 1],
+                    vmin=-1.5,
+                    vmax=1.5,
+                )
+                plt.colorbar(im, ax=ax, shrink=0.7, label=r"$\Delta$ Similarity")
+            ax.set_title(
+                rf"Neural Assembly $\Delta$ Matrix\n({g} Group)",
+                weight="bold",
+                fontsize=11,
+            )
+
+        # --- ROW 1: Behavioral Occupancy Difference (Cond - Hab) ---
+        for g_idx, g in enumerate(target_groups):
+            ax = fig.add_subplot(gs[1, g_idx])
+            heatmap_axes.append(ax)
+            if g in mean_maps:
+                # Using 'bwr' or 'coolwarm' to capture areas of avoidance (blue) vs preference (red)
+                im = ax.imshow(
+                    mean_maps[g]["occupancy_diff"].T,
+                    origin="lower",
+                    cmap="bwr",
+                    extent=[0, 1, 0, 1],
+                )
+                plt.colorbar(im, ax=ax, shrink=0.7, label=r"$\Delta$ Density")
+            ax.set_title(
+                rf"Behavioral Occupancy $\Delta$ Map\n({g} Group)",
+                weight="bold",
+                fontsize=11,
+            )
+
+        # --- ROW 2: Combined Downstream Quantitative Analysis Panels ---
+        # Panel E: Consolidated Bar Plot across regions
+        ax_e = fig.add_subplot(gs[2, 0:2])  # Spans across columns 0 and 1
+        sns.barplot(
+            data=df_zones,
+            x="Zone",
+            y="Delta_Score",
+            hue="Group",
+            order=ZONELABELS,
+            palette=GROUPS_PALETTE,
+            edgecolor="black",
+            linewidth=1.5,
+            errorbar="se",
+            alpha=0.85,
+            ax=ax_e,
+        )
+        sns.stripplot(
+            data=df_zones,
+            x="Zone",
+            y="Delta_Score",
+            hue="Group",
+            order=ZONELABELS,
+            palette=GROUPS_PALETTE,
+            size=5,
+            jitter=0.15,
+            edgecolor="black",
+            linewidth=0.8,
+            alpha=0.7,
+            dodge=True,
+            ax=ax_e,
+            legend=False,
+        )
+        ax_e.axhline(0, color="gray", linestyle="--", alpha=0.6)
+        ax_e.set_title(
+            r"E. Learning Effects: $\Delta$ Similarity Score across Zones",
+            weight="bold",
+            fontsize=12,
+        )
+        ax_e.set_ylabel(r"$\Delta$ Similarity Score (Cond - Hab)")
+        ax_e.set_xlabel("")
+        ax_e.set_xticklabels(ZONELABELS, rotation=15, ha="right")
+        ax_e.legend(title="Group", loc="upper right")
+
+        # Hide empty remaining grids or place customized schematic info
+        for col in [2]:
+            ax_hide = fig.add_subplot(gs[2, col])
+            ax_hide.axis("off")
+
+        # Formatting maps
+        for ax in heatmap_axes:
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        sns.despine(left=False, bottom=False)
+        plt.tight_layout()
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            filename = f"spatial_similarity_summary_{template_period}_{winMS}ms_{'wSpikeData' if spike_data else 'wLatentData'}"
+            plt.savefig(
+                os.path.join(save_path, filename + ".png"),
+                dpi=300,
+                bbox_inches="tight",
+            )
+            plt.savefig(
+                os.path.join(save_path, filename + ".svg"),
+            )
+
+        plt.show()
+
+    def compute_latent_pca_reactivation(
+        self, winMS=36, template_period="cond", num_templates=2
+    ):
+        """Smarter full-session latent manager. Dynamically stitches together latent spaces
+        from all behavioral phases (pre, hab, cond, post) to ensure continuous monitoring
+        across sleep and active exploration.
+        """
+        all_session_data = {}
+
+        for (mouse_name, manipe), df in self.results_df.groupby(
+            by=["mouse_name", "manipe"]
+        ):
+            results: Mouse_Results = df.iloc[0].results
+            idWindow = results.timeWindows.index(winMS)
+            base_results_path = os.path.join(
+                results.projectPath.experimentPath, "results"
+            )
+
+            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            cond_epoch, _ = results.get_epoch_interval("cond")
+            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            hab_epoch, _ = results.get_epoch_interval("hab")
+
+            sws_epochs = results.DataHelper.get_sws_epochs()
+            ripples_epochs = results.DataHelper.get_ripples_epochs()
+
+            try:
+                freeze_epochs = results.DataHelper.get_freeze_epochs()
+            except AttributeError:
+                freeze_epochs = IntervalSet(start=[], end=[])
+
+            # 2. STITCHING LAYER: Load and combine latents across all available phases
+            # This ensures we have coverage for Pre-Sleep, Hab, Cond, and Post-Sleep
+            phases_to_load = [
+                "_pre",
+                "_cond",
+                "_post",
+                "_training",
+            ]
+
+            stitched_times = []
+            stitched_latents = []
+
+            for p_suffix in phases_to_load:
+                # Check if it's already in memory first
+                if (
+                    hasattr(results, "resultsNN_phase_pkl")
+                    and p_suffix in results.resultsNN_phase_pkl
+                ):
+                    pkl_data = results.resultsNN_phase_pkl[p_suffix]
+                    if (
+                        "latent" in pkl_data
+                        and len(pkl_data["latent"]) >= idWindow + 1
+                        and pkl_data["latent"][idWindow] is not None
+                        and "times" in results.resultsNN_phase[p_suffix]
+                    ):
+                        stitched_times.append(
+                            results.resultsNN_phase[p_suffix]["times"][
+                                idWindow
+                            ].flatten()
+                        )
+                        stitched_latents.append(pkl_data["latent"][idWindow])
+                        continue
+
+                # Fallback: Read file dynamically from disk folder
+                pkl_path = os.path.join(
+                    base_results_path, str(winMS), f"decoding_results{p_suffix}.pkl"
+                )
+                if os.path.exists(pkl_path):
+                    try:
+                        with open(pkl_path, "rb") as f:
+                            temp_pkl = pickle.load(f)
+                            if "times" in temp_pkl:
+                                t_steps = temp_pkl["times"]
+                            else:
+                                raise ValueError(f"Missing 'times' key in {pkl_path}")
+
+                            l_mat = temp_pkl.get("latent", None)
+                            if isinstance(l_mat, list):
+                                l_mat = np.array(l_mat)
+
+                            stitched_times.append(t_steps.flatten())
+                            stitched_latents.append(l_mat)
+
+                            del temp_pkl
+                            gc.collect()
+                    except Exception as e:
+                        print(f"Failed loading phase {p_suffix} for {mouse_name}: {e}")
+                else:
+                    print(
+                        f"Phase file {pkl_path} not found for {mouse_name}. Skipping this phase."
+                    )
+
+            base_results_path_sleep = os.path.join(
+                results.projectPath.experimentPath, "results_Sleep"
+            )
+            for sleep_name in results.DataHelper.fullBehavior["Times"].get(
+                "sleepNames", []
+            ):
+                pkl_path = os.path.join(
+                    base_results_path_sleep,
+                    str(winMS),
+                    sleep_name,
+                    "decoding_results.pkl",
+                )
+
+                if os.path.exists(pkl_path):
+                    try:
+                        with open(pkl_path, "rb") as f:
+                            temp_pkl = pickle.load(f)
+                            if "times" in temp_pkl:
+                                t_steps = temp_pkl["times"]
+                            else:
+                                raise ValueError(
+                                    f"Sleep file {pkl_path} missing 'times' key."
+                                )
+
+                            l_mat = temp_pkl.get("latent", None)
+                            if isinstance(l_mat, list):
+                                l_mat = np.array(l_mat)
+
+                            stitched_times.append(t_steps.flatten())
+                            stitched_latents.append(l_mat)
+
+                            del temp_pkl
+                            phases_to_load.append(sleep_name)
+                            gc.collect()
+                    except Exception as e:
+                        print(
+                            f"Failed loading sleep {sleep_name} for {mouse_name}: {e}"
+                        )
+                else:
+                    print(
+                        f"Sleep file {pkl_path} not found for {mouse_name}. Skipping this sleep phase."
+                    )
+
+            if not stitched_latents:
+                print(
+                    f"Skipping {mouse_name}: No latent data could be collected across phases."
+                )
+                continue
+
+            flat_times = np.concatenate(stitched_times)
+            flat_latents = np.concatenate(stitched_latents, axis=0)
+
+            full_latent_tsd = TsdFrame(t=flat_times, d=flat_latents)
+
+            # 5. Define template interval mapping windows
+            if template_period == "wake":
+                template_interval = cond_epoch
+            elif template_period == "cond":
+                template_interval = cond_epoch
+            elif template_period == "condFree":
+                template_interval = cond_epoch.intersect(freeze_epochs)
+            elif template_period == "postRip":
+                template_interval = post_epoch.intersect(sws_epochs).intersect(
+                    ripples_epochs
+                )
+            elif template_period == "condRip":
+                template_interval = cond_epoch.intersect(ripples_epochs)
+            else:
+                raise ValueError(f"Unknown template period paradigm: {template_period}")
+
+            # 6. Build Eigenvectors from the Conditioning/Target template window
+            lat_template = full_latent_tsd.restrict(template_interval).values
+            if lat_template.shape[0] < 10:
+                print(
+                    f"Skipping {mouse_name}: Template window has insufficient data frames."
+                )
+                continue
+
+            cov_matrix = np.cov(lat_template, rowvar=False)
+            cov_matrix = np.nan_to_num(cov_matrix)
+
+            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+            idx_sorted = np.argsort(eigenvalues)[::-1]
+            eigenvectors = eigenvectors[:, idx_sorted]
+
+            # 7. Project full continuous session timeline onto the learning manifold
+            lat_full_norm = (
+                full_latent_tsd.values - np.mean(full_latent_tsd.values, axis=0)
+            ) / (np.std(full_latent_tsd.values, axis=0) + 1e-12)
+            lat_full_norm = np.nan_to_num(lat_full_norm)
+
+            rs_templates = {}
+            for idx_t in range(num_templates):
+                v_i = eigenvectors[:, idx_t]
+                score_t = np.dot(lat_full_norm, v_i)
+                rs_templates[idx_t] = Tsd(t=full_latent_tsd.index, d=score_t**2)
+
+            # 8. Return structured metadata package
+            all_session_data[f"{mouse_name}_{manipe}"] = {
+                "rs": rs_templates,
+                "epochs": {
+                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "hab": hab_epoch,
+                    "cond": cond_epoch,
+                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                    "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "ripples": ripples_epochs,
+                },
+                "positions": {
+                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
+                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
+                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                },
+            }
+
+        return all_session_data
+
+    def compute_assembly_reactivation_advanced(
+        self,
+        winMS=25,
+        template_period="cond",
+        num_templates=3,
+        calc_type="PCA",  # "PCA" or "ICA"
+        keep_mua=False,
+        keep_interneurons=True,
+        force=False,
+    ):
+        """Advanced assembly reactivation tracker replicating react_pca_ica_AG.
+
+        Supports PCA/ICA forks, neuron layer sub-filtering, and computes shuffling
+        controls alongside the Marčenko-Pastur noise floor.
+        """
+        from sklearn.decomposition import FastICA
+
+        bin_size_sec = winMS / 1000.0
+        all_session_data = {}
+
+        for (mouse_name, manipe), df in self.results_df.groupby(
+            by=["mouse_name", "manipe"]
+        ):
+            results: Mouse_Results = df.iloc[0].results
+            print(
+                f"Processing {mouse_name} ({manipe}) for {calc_type} reactivation analysis..."
+            )
+
+            # 1. Fetch Spike trains and corresponding cell layer classifications
+            spike_group = results.DataHelper.get_spike_data()
+            if len(spike_group) < 5:
+                continue
+
+            # Extract classification masks from your existing DataHelper structures
+            # (Assuming your pipeline logs 'neuroclass' or firing properties)
+            try:
+                try:
+                    neuron_types = results.DataHelper.get_neuron_classifications(
+                        force=force
+                    )
+                except FileNotFoundError:
+                    neuron_types = results.DataHelper.get_neuron_classifications(
+                        folder=results.network_path, force=force
+                    )
+            except AttributeError:
+                # Fallback mock classification if array is missing from session file
+                warn(
+                    f"Neuron classification data missing for {mouse_name}. Defaulting to 'Pyramidal' for all units."
+                )
+                neuron_types = np.array(["Pyramidal"] * len(spike_group))
+
+            # 2. Filter neuron vectors based on multiU and interN parameters
+            valid_indices = []
+            for idx, n_type in enumerate(neuron_types):
+                if "mua" in n_type.lower() and not keep_mua:
+                    continue
+                if "interneuron" in n_type.lower() and not keep_interneurons:
+                    continue
+                valid_indices.append(idx)
+
+            if len(valid_indices) < 4:
+                continue
+
+            valid_indices = np.array(valid_indices)
+
+            # Slice the TsGroup to isolate the requested single-unit sub-population
+            filtered_spikes = TsGroup({i: spike_group[i] for i in valid_indices})
+
+            # 3. Extract behavioral intervals
+            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            cond_epoch, _ = results.get_epoch_interval("cond")
+            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            hab_epoch, _ = results.get_epoch_interval("hab")
+
+            sws_epochs = results.DataHelper.get_sws_epochs()
+            ripples_epochs = results.DataHelper.get_ripples_epochs()
+
+            try:
+                freeze_epochs = results.DataHelper.get_freeze_epochs()
+            except AttributeError:
+                freeze_epochs = IntervalSet(start=[], end=[])
+
+            # 4. Generate the main binned matrix (Q-Matrix)
+            q_tsd = filtered_spikes.count(bin_size_sec)
+
+            # Map template period configuration
+            if template_period == "wake":
+                template_interval = cond_epoch
+            elif template_period == "cond":
+                template_interval = cond_epoch
+            elif template_period == "condFree":
+                template_interval = cond_epoch.intersect(freeze_epochs)
+            elif template_period == "postRip":
+                template_interval = post_epoch.intersect(sws_epochs).intersect(
+                    ripples_epochs
+                )
+            elif template_period == "condRip":
+                template_interval = cond_epoch.intersect(ripples_epochs)
+            else:
+                raise ValueError(f"Unknown template window: {template_period}")
+
+            # 5. Extract template frames and compute Z-scores
+            q_template_raw = q_tsd.restrict(template_interval).values
+            if q_template_raw.shape[0] < 10:
+                continue
+
+            # Replicating MATLAB's zscore(Qtemplate) normalization step
+            mean_t = np.mean(q_template_raw, axis=0)
+            std_t = np.std(q_template_raw, axis=0) + 1e-12
+            q_template = (q_template_raw - mean_t) / std_t
+
+            num_bins, num_neurons = q_template.shape
+
+            # ==========================================
+            # FORK A: PRINCIPAL COMPONENT ANALYSIS (PCA)
+            # ==========================================
+            if calc_type.upper() == "PCA":
+                # Generate cell-by-cell Pearson correlation matrix
+                corr_matrix = np.corrcoef(q_template, rowvar=False)
+                corr_matrix = np.nan_to_num(corr_matrix)
+                np.fill_diagonal(corr_matrix, 0)  # Drop diagonal dependencies
+
+                # Compute eigenvalues and eigenvectors
+                eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
+                sort_idx = np.argsort(eigenvalues)[::-1]
+                eigenvalues = eigenvalues[sort_idx]
+                assemblies = eigenvectors[:, sort_idx]
+
+                # Calculate Marčenko-Pastur noise floor threshold limit
+                lambda_max = (1 + np.sqrt(num_neurons / num_bins)) ** 2
+
+                # Perform shuffling control by shuffling frames independently per neuron
+                shuffled_q = q_template.copy()
+                for col in range(num_neurons):
+                    shuffled_q[:, col] = np.random.permutation(shuffled_q[:, col])
+
+                shuff_corr = np.corrcoef(shuffled_q, rowvar=False)
+                np.fill_diagonal(shuff_corr, 0)
+                shuff_values, _ = np.linalg.eigh(np.nan_to_num(shuff_corr))
+                percentile_shuff = np.percentile(shuff_values, 100)
+
+            # ==========================================
+            # FORK B: INDEPENDENT COMPONENT ANALYSIS (ICA)
+            # ==========================================
+            elif calc_type.upper() == "ICA":
+                # Extract independent weights using FastICA
+                ica = FastICA(n_components=num_templates, random_state=42, max_iter=500)
+                ica.fit(q_template)
+                # assemblies shape: (n_neurons, n_components)
+                assemblies = ica.components_.T
+                eigenvalues = np.ones(num_templates)  # Standard placeholder
+                lambda_max, percentile_shuff = np.nan, np.nan
+
+            else:
+                raise ValueError("calc_type must be either 'PCA' or 'ICA'")
+
+            # 6. Project full recording timeline onto the template matrices
+            # Standardize full session data vector stream
+            q_full_normalized = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
+                np.std(q_tsd.values, axis=0) + 1e-12
+            )
+            q_full_normalized = np.nan_to_num(q_full_normalized)
+
+            rs_templates = {}
+            for idx_t in range(num_templates):
+                v_i = assemblies[:, idx_t]
+
+                # Calculate projection vector stream using the linear outer product formulation
+                # react = zscore(Qf) * (v_i * v_i' - diag)
+                outer_product = np.outer(v_i, v_i)
+                np.fill_diagonal(outer_product, 0)
+
+                react_matrix = np.dot(q_full_normalized, outer_product)
+                rs_vector = np.sum(react_matrix * q_full_normalized, axis=1)
+                rs_vector = Tsd(t=q_tsd.times(), d=rs_vector)
+
+                mean_pre = np.mean(
+                    rs_vector.restrict(
+                        IntervalSet(q_tsd.time_support).intersect(pre_epoch)
+                    ).values
+                )
+                mean_post = np.mean(
+                    rs_vector.restrict(
+                        IntervalSet(q_tsd.time_support).intersect(post_epoch)
+                    ).values
+                )
+
+                if (
+                    max(abs(mean_pre), abs(mean_post)) != max(mean_pre, mean_post)
+                    and calc_type.upper() == "PCA"
+                ):
+                    rs_vector = rs_vector * -1.0
+
+                rs_templates[idx_t] = rs_vector
+
+            try:
+                neuron_types[valid_indices]
+            except Exception:
+                print(
+                    f"could not create this lovely array with {neuron_types} and {valid_indices}"
+                )
+                print(
+                    f"neuron types has shape {np.array(neuron_types).shape} and valid indices has length {np.array(valid_indices).shape}"
+                )
+
+            # Pack structured parameters dictionary
+            all_session_data[f"{mouse_name}_{manipe}"] = {
+                "rs": rs_templates,
+                "weights": assemblies[:, :num_templates],
+                "neuron_labels": [f"Cell_{i}" for i in valid_indices],
+                "neuron_types": neuron_types[valid_indices],
+                "stats": {
+                    "eigenvalues": eigenvalues[:num_templates],
+                    "marcenko_pastur": lambda_max,
+                    "shuffle_max": percentile_shuff,
+                },
+                "epochs": {
+                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "hab": hab_epoch,
+                    "cond": cond_epoch,
+                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "ripples": ripples_epochs,
+                },
+                "positions": {
+                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
+                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
+                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                },
+            }
+
+        return all_session_data
+
+    def plot_advanced_diagnostics(self, all_session_data, session_key, calc_type="PCA"):
+        """Plots the eigenvalues against Marčenko-Pastur lines and renders stem
+
+        diagrams mapping unit contribution weights across single assemblies.
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        if session_key not in all_session_data:
+            print(f"Session '{session_key}' not found.")
+            return
+
+        data = all_session_data[session_key]
+        weights = data["weights"]
+        n_labels = data["neuron_labels"]
+        n_types = data["neuron_types"]
+        stats = data["stats"]
+        num_templates = weights.shape[1]
+
+        # Plot 1: Scree Plot / Marčenko-Pastur law checking (Only applicable for PCA mode)
+        if calc_type.upper() == "PCA":
+            plt.figure(figsize=(6, 4))
+            plt.plot(stats["eigenvalues"], "o-", color="red", label="Eigenvalues")
+            plt.axhline(
+                stats["marcenko_pastur"],
+                color="orange",
+                linestyle="--",
+                label="Marcenko-Pastur Limit",
+            )
+            plt.axhline(
+                stats["shuffle_max"],
+                color="blue",
+                linestyle=":",
+                label="Shuffle Max Limit",
+            )
+            plt.xlabel("Component Index")
+            plt.ylabel("Eigenvalue Magnitude")
+            plt.title(f"Manifold Dimensionality check ({session_key})")
+            plt.legend()
+            sns.despine()
+            plt.show()
+
+        # Plot 2: Neuron Component Contribution Weights Diagrams
+        color_map = {
+            "Pyramidal": "#76A92F",
+            "interNeuron": "#0072BA",
+            "MultiUnit": "#EDB119",
+        }
+
+        for t_idx in range(num_templates):
+            _, ax = plt.subplots(figsize=(12, 4))
+            w_vector = weights[:, t_idx]
+            x_indices = np.arange(len(w_vector))
+
+            # Compute threshold bounds (+/- 2 Standard Deviations)
+            th_upper = np.mean(w_vector) + 2 * np.std(w_vector)
+            th_lower = np.mean(w_vector) - 2 * np.std(w_vector)
+
+            # Draw stem lines color-coded by cell subcategory
+            for idx, cell_type in enumerate(n_types):
+                if "pyramidal" in cell_type.lower():
+                    color = color_map["Pyramidal"]
+                elif "interneuron" in cell_type.lower():
+                    color = color_map["interNeuron"]
+                elif "multiunit" in cell_type.lower() or "mua" in cell_type.lower():
+                    color = color_map["MultiUnit"]
+                else:
+                    color = "gray"  # Default color for unclassified types
+
+                markerline, _, _ = ax.stem(
+                    [x_indices[idx]],
+                    [w_vector[idx]],
+                    linefmt=color,
+                    basefmt="gray",
+                )
+                plt.setp(markerline, color=color, markersize=5)
+
+            # Draw upper/lower outlier limits
+            ax.axhline(
+                th_upper,
+                color="red",
+                linestyle="--",
+                alpha=0.7,
+                label=r"2$\sigma$ Threshold",
+            )
+            ax.axhline(th_lower, color="red", linestyle="--", alpha=0.7)
+
+            ax.set_xticks(x_indices)
+            ax.set_xticklabels(n_labels, rotation=90, fontsize=7)
+
+            # Highlight cells crossing the significance boundaries in red
+            for idx, val in enumerate(w_vector):
+                if val >= th_upper or val <= th_lower:
+                    ax.get_xticklabels()[idx].set_color("red")
+                    ax.get_xticklabels()[idx].set_weight("bold")
+
+            ax.set_ylabel("Assembly Loading Weight")
+            ax.set_title(
+                f"{calc_type} Component Assembly Matrix Element #{t_idx + 1} ({session_key})"
+            )
+            ax.set_ylim(-0.6, 0.6)
+            sns.despine()
+            plt.tight_layout()
+            plt.show()
 
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):

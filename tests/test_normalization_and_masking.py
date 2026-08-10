@@ -137,8 +137,11 @@ def test_groupwise_preprocessing_normalization_preserves_padding():
     }
     means = [np.array([10.0, 20.0]), np.array([3.0, 6.0, 9.0])]
     stds = [np.array([2.0, 4.0]), np.array([3.0, 6.0, 9.0])]
+    max_nb_spikes = None
 
-    normalized = standardize_group_tensors(tensors, (means, stds), params)
+    normalized = standardize_group_tensors(
+        tensors, (means, stds, max_nb_spikes), params
+    )
 
     # Group0, Spike0: [[12.0, 12.0], [28.0, 28.0]]
     # Standardized: [[(12-10)/2, (12-10)/2], [(28-20)/4, (28-20)/4]] = [[1.0, 1.0], [2.0, 2.0]]

@@ -84,6 +84,7 @@ def test_model_instantiation(mock_params, mock_project, mock_linearizer):
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
         jit_compile=False,
+        max_nb_spikes=128,
         max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
     assert model.model is not None
@@ -109,6 +110,7 @@ def test_model_forward(mock_params, mock_project, mock_linearizer):
         params=mock_params,
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
+        max_nb_spikes=128,
         jit_compile=False,
         max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
@@ -171,6 +173,7 @@ def test_train_step(mock_params, mock_project, mock_linearizer):
         params=mock_params,
         behaviorData=behavior_data,
         linearizer=mock_linearizer,
+        max_nb_spikes=128,
         jit_compile=False,
         max_spikes_per_group=mock_params.max_nb_spikes_per_group,
     )
@@ -206,6 +209,7 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
         linearizer=mock_linearizer,
         jit_compile=False,
         max_spikes_per_group=mock_params.max_nb_spikes_per_group,
+        max_nb_spikes=128,
     )
 
     def generate_data():
@@ -239,4 +243,7 @@ def test_model_fit(mock_params, mock_project, mock_linearizer):
     # Check that individual losses and metrics are reported
     keys = history.history.keys()
     for target_name in model_obj.target_structure.keys():
-        assert any(target_name in k for k in keys)
+        if model_obj.loss_dict.get(target_name, None) is not None:
+            assert any(target_name in k for k in keys)
+        else:
+            assert not any(target_name in k for k in keys)

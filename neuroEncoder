@@ -191,46 +191,51 @@ def main(args):
             isPredLoss=isPL,
             load_at_init=False,  # we load a new params
         )
-        # adding post test helper
-        rawdata_parser.speed_filter(
-            ProjectPath.folder,
-            overWrite=args.redo and overWrite_speed_filter_and_linearization,
-            phase="post",
-            template=args.phase,
-            window_range=2000,
-            force=True
-            if (args.phase is not None and not show_figures and not args.redo)
-            else False,
-            threshold=speedThresh,
-        )
-        rawdata_parser.select_epochs(
-            ProjectPath.folder,
-            overWrite=(
-                True
-                if (
-                    args.redo
-                    and args.phase is not None
-                    and redo_params
-                    and redo_all_params
-                )
-                else False
-            ),
-            phase="post",
-            force=True if (args.phase is not None and not show_figures) else False,
-            find_best_sets=True,
-        )
-        DataHelper_post = DataHelperClass(
-            ProjectPath.xml,
-            mode=mode,
-            target=args.target,
-            phase="post",
-            nameExp=args.name,
-            windowSize=windowSizeMS / 1000,
-            force_ref=False,
-            isPredLoss=isPL,
-            load_at_init=False,  # we load a new params
-        )
-        helpers = [DataHelper_cond, DataHelper_post, DataHelper]
+        try:
+            # adding post test helper
+            rawdata_parser.speed_filter(
+                ProjectPath.folder,
+                overWrite=args.redo and overWrite_speed_filter_and_linearization,
+                phase="post",
+                template=args.phase,
+                window_range=2000,
+                force=True
+                if (args.phase is not None and not show_figures and not args.redo)
+                else False,
+                threshold=speedThresh,
+            )
+            rawdata_parser.select_epochs(
+                ProjectPath.folder,
+                overWrite=(
+                    True
+                    if (
+                        args.redo
+                        and args.phase is not None
+                        and redo_params
+                        and redo_all_params
+                    )
+                    else False
+                ),
+                phase="post",
+                force=True if (args.phase is not None and not show_figures) else False,
+                find_best_sets=True,
+            )
+            DataHelper_post = DataHelperClass(
+                ProjectPath.xml,
+                mode=mode,
+                target=args.target,
+                phase="post",
+                nameExp=args.name,
+                windowSize=windowSizeMS / 1000,
+                force_ref=False,
+                isPredLoss=isPL,
+                load_at_init=False,  # we load a new params
+            )
+            helpers = [DataHelper_cond, DataHelper_post, DataHelper]
+        except Exception as e:
+            print(f"Failed to create DataHelper post : {e}")
+            DataHelper_post = None
+            helpers = [DataHelper_cond, DataHelper]
     for helper in helpers:
         # Create linearization function
         Linearizer = UMazeLinearizer(
@@ -532,7 +537,7 @@ def main(args):
                     )
                 )
                 or args.redo
-            ):
+            ) and DataHelper_post is not None:
                 print("\nTesting post set")
                 timeStepPred = np.squeeze(
                     np.array(
@@ -662,21 +667,22 @@ def main(args):
             TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
         )
 
-        ### Compare and align PostTests waveforms
-        WFCPost = WaveFormComparator(
-            ProjectPath,
-            Parameters,
-            DataHelper_post.fullBehavior,
-            useTrain=True,
-            useTest=True,
-            useAll=True,
-            windowSizeMS=windowSizeMS,
-            phase="post",
-            strideFactor=strideFactor,
-        )
-        WFCPost.save_alignment_tools(
-            TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
-        )
+        if DataHelper_post is not None:
+            ### Compare and align PostTests waveforms
+            WFCPost = WaveFormComparator(
+                ProjectPath,
+                Parameters,
+                DataHelper_post.fullBehavior,
+                useTrain=True,
+                useTest=True,
+                useAll=True,
+                windowSizeMS=windowSizeMS,
+                phase="post",
+                strideFactor=strideFactor,
+            )
+            WFCPost.save_alignment_tools(
+                TrainerBayes, l_function, windowSizeMS=windowSizeMS, redo=True
+            )
     elif mode == "ann":
         # Create data
         import neuroencoders.importData.juliaData as jD
@@ -757,12 +763,15 @@ def main(args):
                         "errorFig_2d_NN_training_inferring.png",
                     )
                 )
-                and os.path.exists(
-                    os.path.join(
-                        NNTrainer.folderResult,
-                        str(windowSizeMS),
-                        "errorFig_2d_NN_post_inferring.png",
+                and (
+                    os.path.exists(
+                        os.path.join(
+                            NNTrainer.folderResult,
+                            str(windowSizeMS),
+                            "errorFig_2d_NN_post_inferring.png",
+                        )
                     )
+                    and DataHelper_post is not None
                 )
                 and os.path.exists(
                     os.path.join(
@@ -914,7 +923,7 @@ def main(args):
                 )
             )
             or args.redo
-        ):
+        ) and DataHelper_post is not None:
             print("Testing PostTest set")
             NNTrainer.test(
                 DataHelper_post.fullBehavior,
@@ -953,12 +962,22 @@ def main(args):
                     "featurePred.csv",
                 )
             )
-            or not os.path.exists(
-                os.path.join(
-                    NNTrainer.folderResultSleep,
-                    str(windowSizeMS),
-                    "PreSleep",
-                    "featurePred.csv",
+            or (
+                not os.path.exists(
+                    os.path.join(
+                        NNTrainer.folderResultSleep,
+                        str(windowSizeMS),
+                        "BaselineSleep",
+                        "featurePred.csv",
+                    )
+                )
+                and not os.path.exists(
+                    os.path.join(
+                        NNTrainer.folderResultSleep,
+                        str(windowSizeMS),
+                        "PreSleep",
+                        "featurePred.csv",
+                    )
                 )
             )
             or args.redo
@@ -999,12 +1018,28 @@ def main(args):
 
             parts = mouse_full_name.split("_")
             if len(parts) < 2:
-                warn(
-                    f"Unexpected mouse_full_name format '{mouse_full_name}'. "
-                    "Expected at least one underscore to separate mouse_name and manipe."
-                )
-                mouse_name = mouse_full_name.strip("M")
-                manipe = ""
+                # try to split by number, before & after
+                try:
+                    if any(char.isdigit() for char in mouse_full_name):
+                        mouse_name = "".join(filter(str.isdigit, mouse_full_name))
+                        # if mouse_nb is not empty, get the part right after the number as mouse name
+                        if mouse_name and mouse_name in mouse_full_name:
+                            manipe = mouse_full_name.split(mouse_name)[-1]
+                        else:
+                            raise ValueError(
+                                "Mouse full name does not contain an underscore or a number to split on."
+                            )
+                    else:
+                        raise ValueError(
+                            "Mouse full name does not contain an underscore or a number to split on."
+                        )
+                except ValueError:
+                    warn(
+                        f"Unexpected mouse_full_name format '{mouse_full_name}'. "
+                        "Expected at least one underscore to separate mouse_name and manipe."
+                    )
+                    mouse_name = mouse_full_name.strip("M")
+                    manipe = ""
             else:
                 mouse_name = parts[0].strip("M")
                 manipe = parts[1]
@@ -1028,13 +1063,16 @@ def main(args):
                 isPredLoss=isPL,
                 GaussianHeatmap=Parameters.GaussianHeatmap,
             )
+            suffixes = ["_pre", "_cond", "_training"]
+            if DataHelper_post is not None:
+                suffixes.insert(2, "_post")
             curr.load_data(
-                suffixes=["_pre", "_cond", "_post", "_training"],
+                suffixes=suffixes,
                 load_pickle=True,
                 extract_spikes_counts=True,
             )
             curr.load_bayes(
-                suffixes=["_pre", "_cond", "_post", "_training"],
+                suffixes=suffixes,
                 load_pickle=True,
                 target="pos",
                 redo=windowSizeMS == 36,
@@ -1505,6 +1543,23 @@ if __name__ == "__main__":
                 os.path.join(os.path.dirname(__file__), "getTsdFeature.sh"),
                 os.path.abspath(os.path.expanduser(args.path.strip("'"))),
                 "'" + args.target + "'",
+            ]
+        )
+    if not (
+        os.path.isfile(
+            os.path.abspath(
+                os.path.expanduser(
+                    os.path.join(os.path.split(args.path)[0], "nnBehavior.mat")
+                )
+            )
+        )
+    ):
+        # Get the tsd feature, i.e. a nnBehavior.mat file from the tsd feature.
+        # The target is the name of the feature to be decoded, will default to the position.
+        subprocess.run(
+            [
+                os.path.join(os.path.dirname(__file__), "getRipple.sh"),
+                os.path.abspath(os.path.expanduser(args.path.strip("'"))),
             ]
         )
     if not (

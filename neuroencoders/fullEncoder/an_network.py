@@ -1238,8 +1238,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
 
                 if "train" in ds_stats and ds_stats["train"] is not None:
-                    means, stds = self.compute_normalization_stats(ds_stats["train"])
-                    self.normalization_stats = (means, stds)
+                    means, stds, max_nb_spikes = self.compute_normalization_stats(
+                        ds_stats["train"]
+                    )
+                    self.normalization_stats = (means, stds, max_nb_spikes)
                     with open(norm_filename, "wb") as f:
                         pickle.dump(self.normalization_stats, f)
 
@@ -1973,7 +1975,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     # wandb.tensorboard.unpatch()
                     run.finish()
 
-    def compute_normalization_stats(self, dataset, max_samples=5000):
+    def compute_normalization_stats(self, dataset, max_samples=15000):
         """
         Compute mean and std for each channel of each group in the dataset.
         Uses a subset of the dataset to estimate statistics.
@@ -1995,6 +1997,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 }
 
         processed_samples = 0
+        max_observed_global_spikes = 0
 
         # Iterate over the dataset (may be batched or unbatched)
         for input, target in dataset:
@@ -2018,6 +2021,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             else:
                 batch_size_curr = 1
             processed_samples += batch_size_curr
+
+            if "length" in input:
+                batch_max = int(tf.reduce_max(input["length"]).numpy())
+                if batch_max > max_observed_global_spikes:
+                    max_observed_global_spikes = batch_max
+            else:
+                if "groups" in input:
+                    # Look at the 'groups' matrix where valid data >= 0 and padding is -1
+                    is_valid_slot = tf.not_equal(input["groups"], -1)
+                    per_sample_counts = tf.reduce_sum(
+                        tf.cast(is_valid_slot, tf.int32), axis=-1
+                    )
+                    batch_max = int(tf.reduce_max(per_sample_counts).numpy())
+                    if batch_max > max_observed_global_spikes:
+                        max_observed_global_spikes = batch_max
 
             # Process all groups for the current batch
             for g in range(self.params.nGroups):
@@ -2105,7 +2123,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 means.append(np.zeros(n_ch, dtype=np.float32))
                 stds.append(np.ones(n_ch, dtype=np.float32))
 
-        return means, stds
+        # Save back the empirical ceiling straight to your parameter space
+        print(
+            f"✓ Empirical max spikes detected in subset scan: {max_observed_global_spikes} while current max number spikes is set to {self.max_nb_spikes}"
+        )
+        self.empirical_max_spikes = max_observed_global_spikes
+
+        return means, stds, max_observed_global_spikes
 
     def _dataset_loading_pipeline(
         self,

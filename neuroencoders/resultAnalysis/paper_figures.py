@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 import pandas as pd
-import pynapple as nap
 import seaborn as sns
 import sklearn as ml
 import tqdm
@@ -24,6 +23,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from pynapple import IntervalSet, Ts, Tsd, TsdFrame, compute_mutual_information
 from scipy import stats
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import binned_statistic_2d, sem, zscore
@@ -33,6 +33,7 @@ from statsmodels.stats.proportion import proportions_ztest
 
 from neuroencoders.importData.epochs_management import find_closest_index, inEpochsMask
 from neuroencoders.importData.rawdata_parser import get_params
+from neuroencoders.resultAnalysis import ripple_analysis_utils
 from neuroencoders.resultAnalysis.print_results import overview_fig
 from neuroencoders.simpleBayes.decode_bayes import (
     Trainer as TrainerBayes,
@@ -78,7 +79,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         projectPath: Project,
         behaviorData: dict,
         bayes: Optional[TrainerBayes],
-        l_function: Optional[Callable],
+        l_function: Callable,
         bayesMatrices: Optional[dict] = {},
         timeWindows=[36],
         phase=None,
@@ -132,6 +133,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         self.resultsBayes_phase = dict()
         self.resultsNN_phase_pkl = dict()
         self.resultsBayes_phase_pkl = dict()
+        self.ripples = {}
         # Define consistent figure geometry across pages for homogeneous PDF output.
         self.PDF_FIGSIZE = tuple(kwargs.get("pdf_figsize", (12, 16)))
         self.PDF_DPI = int(kwargs.get("pdf_dpi", 300))
@@ -147,6 +149,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 l_function,
                 bayesMatrices=bayesMatrices if bayesMatrices is not None else {},
                 timeWindows=timeWindows,
+                sleepNames=behaviorData["Times"].get("sleepNames", None),
             )
 
     def find_session_epochs(self):
@@ -154,13 +157,13 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         Find session epochs from the fullBehavior data.
         This method extracts the pre, hab, cond, post, and extinct epochs from the fullBehavior data.
         """
-        self.training = nap.IntervalSet(
+        self.training = IntervalSet(
             np.array(self.behaviorData["Times"]["trainEpochs"]).reshape(-1, 2)
         )
         self.trainMask = inEpochsMask(
             self.behaviorData["positionTime"][:, 0], self.training
         )
-        self.testing = nap.IntervalSet(
+        self.testing = IntervalSet(
             np.array(self.behaviorData["Times"]["testEpochs"]).reshape(-1, 2)
         )
         self.testMask = inEpochsMask(
@@ -169,7 +172,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
         try:
             # WARNING: "pre" is actually pre|hab, see rawdata_parser.py, get_behavior
-            self.pre = nap.IntervalSet(
+            self.pre = IntervalSet(
                 np.array(self.behaviorData["Times"]["SessionEpochs"]["pre"]).reshape(
                     -1, 2
                 )
@@ -182,7 +185,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 "Pre epoch not found in fullBehavior. Is your Data MultiSession ? If so, there was an issue."
             )
         try:
-            self.hab = nap.IntervalSet(
+            self.hab = IntervalSet(
                 np.array(self.behaviorData["Times"]["SessionEpochs"]["hab"]).reshape(
                     -1, 2
                 )
@@ -193,7 +196,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         except KeyError:
             pass
         try:
-            self.cond = nap.IntervalSet(
+            self.cond = IntervalSet(
                 np.array(self.behaviorData["Times"]["SessionEpochs"]["cond"]).reshape(
                     -1, 2
                 )
@@ -211,7 +214,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         except AttributeError:
             pass
         try:
-            self.post = nap.IntervalSet(
+            self.post = IntervalSet(
                 np.array(self.behaviorData["Times"]["SessionEpochs"]["post"]).reshape(
                     -1, 2
                 )
@@ -222,7 +225,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         except KeyError:
             pass
         try:
-            self.extinct = nap.IntervalSet(
+            self.extinct = IntervalSet(
                 np.array(
                     self.behaviorData["Times"]["SessionEpochs"]["extinct"]
                 ).reshape(-1, 2)
@@ -234,7 +237,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             pass
 
         try:
-            self.sleep = nap.IntervalSet(
+            self.sleep = IntervalSet(
                 np.array(self.behaviorData["Times"]["sleepEpochs"]).reshape(-1, 2)
             )
             self.sleepMask = inEpochsMask(
@@ -242,6 +245,156 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             )
         except KeyError:
             pass
+
+        if (
+            np.array(self.behaviorData["Times"]["sleepEpochs"]).reshape(-1, 2).shape[0]
+            != 2
+        ):
+            warnings.warn(
+                f"Found more than two (actually found {np.array(self.behaviorData['Times']['sleepEpochs']).reshape(-1, 2).shape[0]}) sleep epochs. Available were {self.behaviorData['Times']['sleepNames']} for mouse {self.projectPath.folder}."
+            )
+        try:
+            idx_pre = [
+                i
+                for i, name in enumerate(self.behaviorData["Times"]["sleepNames"])
+                if "pre" in name.lower()
+            ]
+            idx_post = [
+                i
+                for i, name in enumerate(self.behaviorData["Times"]["sleepNames"])
+                if "post" in name.lower()
+            ]
+            self.presleep = IntervalSet(
+                np.array(self.behaviorData["Times"]["sleepEpochs"]).reshape(-1, 2)[
+                    idx_pre, :
+                ]
+            )
+            self.presleepMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.presleep
+            )
+            self.postsleep = IntervalSet(
+                np.array(self.behaviorData["Times"]["sleepEpochs"]).reshape(-1, 2)[
+                    idx_post, :
+                ]
+            )
+            self.postsleepMask = inEpochsMask(
+                self.behaviorData["positionTime"][:, 0], self.postsleep
+            )
+        except KeyError:
+            pass
+
+    def load_ripples(self, ripCol=1, redo=False, **kwargs):
+        """Load ripple timestamps from the behavior dictionary when available."""
+        from pathlib import Path
+
+        if (
+            hasattr(self, "ripples")
+            and self.ripples.get("times", None) is not None
+            and not redo
+        ):
+            return self.ripples
+
+        import pykeops
+        import tables
+
+        def run_getRipple():
+            import subprocess
+
+            current_dir = Path(__file__).resolve().parent
+
+            repo_root = current_dir
+            for parent in [current_dir] + list(current_dir.parents):
+                if (parent / "pyproject.toml").exists():
+                    repo_root = parent
+                    break
+
+            subprocess.run(
+                [
+                    os.path.abspath(os.path.join(repo_root, "getRipple.sh")),
+                    os.path.abspath(os.path.expanduser(self.projectPath.folder)),
+                ]
+            )
+
+        if not os.path.exists(os.path.join(self.projectPath.folder, "nnSWR.mat")):
+            run_getRipple()
+
+        try:
+            with tables.open_file(
+                os.path.join(self.projectPath.folder, "nnSWR.mat"), "r"
+            ) as f:
+                ripples = f.root.ripple[:, :].transpose()
+        except Exception as e:
+            self.logger.warning(
+                f"Error loading ripples: {e}. Attempting to run getRipple.sh..."
+            )
+            run_getRipple()
+            with tables.open_file(
+                os.path.join(self.projectPath.folder, "nnSWR.mat"), "r"
+            ) as f:
+                ripples = f.root.ripple[:, :].transpose()
+        ripple_timestamps = ripples[:, ripCol]
+        ripple_timestamps_float = ripple_timestamps.astype(dtype=np.float64)[:, None]
+
+        timesRipples = {}
+        idCloseRipples = {}
+        idCloseRipplesInWake = {}
+        timeDistToRipples = {}
+
+        rippleTimeJ = pykeops.numpy.Vj(ripple_timestamps_float)
+        rippleTimeI = pykeops.numpy.Vi(ripple_timestamps_float)
+
+        for suffix in list(self.suffixes):
+            phase_data = self.resultsNN_phase.get(suffix, {})
+            sess_times_list = phase_data.get("times", None)
+
+            if (
+                not sess_times_list
+                or len(sess_times_list) == 0
+                or sess_times_list[0] is None
+            ):
+                self.logger.warning(
+                    f"No results found for suffix {suffix}. Skipping ripple analysis for this phase."
+                )
+                self.suffixes.remove(suffix)
+                continue
+
+            timesRipples[suffix] = []
+            idCloseRipples[suffix] = []
+            idCloseRipplesInWake[suffix] = []
+            timeDistToRipples[suffix] = []
+
+            for i in range(len(self.timeWindows)):
+                # Static ripple data assignment (no need to slice inside loop)
+                timesRipples[suffix].append(ripple_timestamps)
+
+                sess_times = sess_times_list[i]
+                sess_times_float = sess_times.astype(dtype=np.float64)[:, None]
+
+                # PyKeOps matrix calculations
+                predTimeVi = pykeops.numpy.Vi(sess_times_float)
+                closest_idx = ((predTimeVi - rippleTimeJ).abs().argmin(axis=0))[:, 0]
+                idCloseRipples[suffix].append(closest_idx)
+
+                # Filter ripple indices within tracking epochs (Wake)
+                wake_mask = inEpochsMask(
+                    ripple_timestamps,
+                    [np.min(sess_times), np.max(sess_times)],
+                )
+                idCloseRipplesInWake[suffix].append(closest_idx[wake_mask])
+
+                # Distance calculation using inverse KeOps vector mapping
+                predTimeVj = pykeops.numpy.Vj(sess_times_float)
+                min_distances = ((predTimeVj - rippleTimeI).abs().min(axis=0))[:, 0]
+                timeDistToRipples[suffix].append(min_distances)
+
+        # 5. Output and Cache
+        self.ripples = {
+            "times": ripple_timestamps,
+            "idCloseRipples": idCloseRipples,
+            "idCloseRipplesInWake": idCloseRipplesInWake,
+            "timeDistToRipples": timeDistToRipples,
+        }
+        return self.ripples
 
     def _load_csv_result(
         self, base_path: str, ws: int, prefix: str, suffix: str, dtype=np.float32
@@ -283,100 +436,106 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         self.suffixes = suffixes
         return suffixes
 
-    def add_full_pre_results(self, redo=False):
-        """
-        Simply based on already loaded training and pre results, create mock full pre results by concatenating pre and training, then selecting based on test Pre mask.
-        """
-        if (
-            self.resultsNN_phase.get("_training", None) is None
-            or self.resultsNN_phase.get("_pre", None) is None
-        ):
-            self.logger.warning(
-                "Training or pre results not loaded, cannot create full pre."
-            )
+    def _update_full_pre_dict(self, results_dict, redo=False):
+        """Helper to create _full_pre results in a dictionary by concatenating _training and _pre."""
+        if "_full_pre" in results_dict and not redo:
             return
 
-        if "_full_pre" in self.resultsNN_phase and not redo:
-            self.logger.info("Full pre results already exist, skipping creation.")
+        # We need existence of training and pre to continue
+        if "_training" not in results_dict or "_pre" not in results_dict:
             return
 
-        self.resultsNN_phase["_full_pre"] = copy.deepcopy(self.resultsNN_phase["_pre"])
-        for key in self.resultsNN_phase["_training"]:
+        results_dict["_full_pre"] = copy.deepcopy(results_dict["_pre"])
+
+        for key in results_dict["_training"]:
             if (
-                len(self.resultsNN_phase["_training"][key]) == 0
-                or len(self.resultsNN_phase["_pre"][key]) == 0
+                key not in results_dict["_pre"]
+                or results_dict["_training"][key] is None
+                or results_dict["_pre"][key] is None
+                or len(results_dict["_training"][key]) == 0
+                or len(results_dict["_pre"][key]) == 0
             ):
-                self.logger.warning(
-                    f"Skipping full pre for {key} due to missing training or pre results."
-                )
                 continue
-            for idWin in range(len(self.resultsNN_phase["_training"][key])):
-                if (
-                    len(self.resultsNN_phase["_training"][key][idWin]) == 0
-                    or len(self.resultsNN_phase["_pre"][key][idWin]) == 0
-                ):
-                    self.logger.warning(
-                        f"Skipping full pre for {key} window {idWin} due to missing training or pre results."
-                    )
+
+            for idWin in range(len(results_dict["_training"][key])):
+                if idWin >= len(results_dict["_pre"][key]):
                     continue
-                times_train = self.resultsNN_phase["_training"]["times"][idWin]
+
+                val_train = results_dict["_training"][key][idWin]
+                val_pre = results_dict["_pre"][key][idWin]
+
+                # Type checks to avoid errors on non-array data
+                if (
+                    val_train is None
+                    or val_pre is None
+                    or isinstance(val_train, (float, str, dict))
+                    or isinstance(val_pre, (float, str, dict))
+                    or len(val_train) == 0
+                    or len(val_pre) == 0
+                ):
+                    continue
+
+                # Ensure we have times to compute the selection mask
+                if (
+                    "times" not in results_dict["_training"]
+                    or "times" not in results_dict["_pre"]
+                ):
+                    continue
+
+                times_train = results_dict["_training"]["times"][idWin]
+                times_pre = results_dict["_pre"]["times"][idWin]
+
+                if times_train is None or times_pre is None:
+                    continue
+
                 train_in_pre = (inEpochsMask(times_train, self.pre)) & (
                     ~inEpochsMask(times_train, self.hab)
                 )
-
-                times_pre = self.resultsNN_phase["_pre"]["times"][idWin]
                 pre_in_pre = inEpochsMask(times_pre, self.pre) & ~inEpochsMask(
                     times_pre, self.hab
                 )
                 final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
-                self.resultsNN_phase["_full_pre"][key][idWin] = np.concatenate(
-                    [
-                        self.resultsNN_phase["_training"][key][idWin],
-                        self.resultsNN_phase["_pre"][key][idWin],
-                    ]
+
+                results_dict["_full_pre"][key][idWin] = np.concatenate(
+                    [val_train, val_pre]
                 )[final_mask]
 
-        self.resultsNN_phase_pkl["_full_pre"] = copy.deepcopy(
-            self.resultsNN_phase_pkl["_pre"]
-        )
-        for key in self.resultsNN_phase_pkl["_training"]:
+    def add_full_pre_results(self, redo=False, which="ann"):
+        """
+        Simply based on already loaded training and pre results, create mock full pre results by concatenating pre and training, then selecting based on test Pre mask.
+        """
+        print("Creating full pre results from training and pre...")
+        if which in ["ann", "both"]:
+            # ANN results
             if (
-                self.resultsNN_phase_pkl["_training"][key] is None
-                or len(self.resultsNN_phase_pkl["_training"][key]) == 0
-                or len(self.resultsNN_phase_pkl["_pre"][key]) == 0
+                self.resultsNN_phase.get("_training", None) is not None
+                and self.resultsNN_phase.get("_pre", None) is not None
             ):
-                continue
-            for idWin in range(len(self.resultsNN_phase_pkl["_training"][key])):
-                if (
-                    self.resultsNN_phase_pkl["_training"][key][idWin] is None
-                    or isinstance(
-                        self.resultsNN_phase_pkl["_training"][key][idWin], float
-                    )
-                    or isinstance(
-                        self.resultsNN_phase_pkl["_training"][key][idWin], str
-                    )
-                    or isinstance(
-                        self.resultsNN_phase_pkl["_training"][key][idWin], dict
-                    )
-                    or len(self.resultsNN_phase_pkl["_training"][key][idWin]) == 0
-                    or len(self.resultsNN_phase_pkl["_pre"][key][idWin]) == 0
-                ):
-                    continue
-                times_train = self.resultsNN_phase_pkl["_training"]["times"][idWin]
-                train_in_pre = (inEpochsMask(times_train, self.pre)) & (
-                    ~inEpochsMask(times_train, self.hab)
+                self._update_full_pre_dict(self.resultsNN_phase, redo=redo)
+            else:
+                self.logger.warning(
+                    "ANN training or pre results not loaded, cannot create full pre."
                 )
-                times_pre = self.resultsNN_phase_pkl["_pre"]["times"][idWin]
-                pre_in_pre = (inEpochsMask(times_pre, self.pre)) & (
-                    ~inEpochsMask(times_pre, self.hab)
-                )
-                final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
-                self.resultsNN_phase_pkl["_full_pre"][key][idWin] = np.concatenate(
-                    [
-                        self.resultsNN_phase_pkl["_training"][key][idWin],
-                        self.resultsNN_phase_pkl["_pre"][key][idWin],
-                    ]
-                )[final_mask]
+
+            if (
+                self.resultsNN_phase_pkl.get("_training", None) is not None
+                and self.resultsNN_phase_pkl.get("_pre", None) is not None
+            ):
+                self._update_full_pre_dict(self.resultsNN_phase_pkl, redo=redo)
+
+        if which in ["bayes", "both"]:
+            # Bayesian results
+            if (
+                self.resultsBayes_phase.get("_training", None) is not None
+                and self.resultsBayes_phase.get("_pre", None) is not None
+            ):
+                self._update_full_pre_dict(self.resultsBayes_phase, redo=redo)
+
+            if (
+                self.resultsBayes_phase_pkl.get("_training", None) is not None
+                and self.resultsBayes_phase_pkl.get("_pre", None) is not None
+            ):
+                self._update_full_pre_dict(self.resultsBayes_phase_pkl, redo=redo)
 
     def _extract_bayes_spike_counts(self, times, ws):
         """Internal helper for spike count extraction in load_bayes."""
@@ -400,6 +559,17 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
     def _perform_bayes_test_fallback(self, suffix, ws, i, kwargs):
         """Helper to perform Bayesian testing if results are missing."""
+        if (
+            suffix not in self.resultsNN_phase
+            or self.resultsNN_phase[suffix] is None
+            or "times" not in self.resultsNN_phase[suffix]
+            or len(self.resultsNN_phase[suffix]["times"]) <= i
+            or self.resultsNN_phase[suffix]["times"][i] is None
+        ):
+            self.logger.warning(
+                f"Results for suffix {suffix} not found in resultsNN_phase. Cannot perform fallback Bayesian test."
+            )
+            return
         timesToPredict = self.resultsNN_phase[suffix]["times"][i][:, np.newaxis].astype(
             np.float64
         )
@@ -491,7 +661,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         for suffix in self.suffixes:
             if suffix == "_full_pre":
                 if kwargs.get("add_full_pre", False):
-                    self.add_full_pre_results()
+                    self.add_full_pre_results(which="ann")
                 continue
             phase_results = {
                 "lPredPos": [],
@@ -633,18 +803,22 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             if kwargs.get("load_pickle", False):
                 self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
+        self.load_ripples(**kwargs)
+
     def load_bayes(self, suffixes=None, **kwargs):
         """
         Quickly load the bayesian decoding on the data, using the trainerBayes.
         """
-        if self.bayes is None:
-            raise ValueError(
-                "Bayes trainer not loaded. Please load the bayes trainer first."
-            )
 
-        if kwargs.get(
-            "load_bayesMatrices", False
-        ) or self.bayes.config.extra_kwargs.get("load_bayesMatrices", False):
+        if kwargs.get("load_bayesMatrices", False) or (
+            self.bayes is not None
+            and hasattr(self.bayes, "config")
+            and self.bayes.config.extra_kwargs.get("load_bayesMatrices", False)
+        ):
+            if self.bayes is None:
+                raise ValueError(
+                    "Bayes trainer not loaded. Please load the bayes trainer first."
+                )
             combined_kwargs = {**self.bayes.config.extra_kwargs, **kwargs}
             self.bayesMatrices = self.bayes.train_order_by_pos(
                 self.behaviorData,
@@ -668,9 +842,13 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 add_full_pre=kwargs.get("add_full_pre", False),
             )
 
-        base_results_path = self.bayes.folderResult
+        base_results_path = self.projectPath.folderResult
 
         for suffix in self.suffixes:
+            if suffix == "_full_pre":
+                if kwargs.get("add_full_pre", False):
+                    self.add_full_pre_results(which="bayes")
+                continue
             phase_results = {
                 "lPredPos": [],
                 "lTruePos": [],
@@ -733,7 +911,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                         != self.resultsNN_phase[suffix]["featurePred"][i].shape[0]
                     ):
                         self.logger.warning(
-                            f"Shape mismatch for window {ws}ms. Bayesian: {phase_results['fPred'][-1].shape}, NN: {self.resultsNN_phase[suffix]['fullPred'][i].shape}"
+                            f"Shape mismatch for window {ws}ms. Bayesian: {phase_results['fPred'][-1].shape}, NN: {self.resultsNN_phase[suffix]['featurePred'][i].shape}"
                         )
                 else:
                     self.logger.info(
@@ -742,13 +920,19 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                     test_results = self._perform_bayes_test_fallback(
                         suffix, ws, i, kwargs
                     )
-                    phase_results["lPredPos"].append(test_results["lPredPos"])
-                    phase_results["lTruePos"].append(test_results["lTruePos"])
-                    phase_results["proba"].append(test_results["proba"])
-                    phase_results["fPred"].append(test_results["fPred"])
-                    phase_results["fTrue"].append(test_results["fTrue"])
-                    phase_results["posLoss"].append(test_results["posLoss"])
-                    phase_results["times"].append(test_results["times"])
+                    if test_results is None:
+                        self.logger.warning(
+                            f"Bayesian test fallback failed for {ws}ms and suffix {suffix}. Results will be None."
+                        )
+                        continue
+                    else:
+                        phase_results["lPredPos"].append(test_results["lPredPos"])
+                        phase_results["lTruePos"].append(test_results["lTruePos"])
+                        phase_results["proba"].append(test_results["proba"])
+                        phase_results["fPred"].append(test_results["fPred"])
+                        phase_results["fTrue"].append(test_results["fTrue"])
+                        phase_results["posLoss"].append(test_results["posLoss"])
+                        phase_results["times"].append(test_results["times"])
 
                 if kwargs.get("load_pickle", False):
                     pkl_path = os.path.join(
@@ -4355,6 +4539,209 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             )
         )
 
+    def fig_ripples_hist_and_out(self, suffixes=None):
+        """Plot histogram of time-to-ripple and out-of-ripple loss."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        ripple_analysis_utils.plot_ripple_losspredict_distribution(
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            ripple_indices_dict=self.ripples["idCloseRipplesInWake"],
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+            filename_prefix="distr_lossPred_wake_during_ripples",
+        )
+
+    def fig_ripples_hist_pred_during_ripples(self, duringRipples=True, suffixes=None):
+        """Plot histogram of predicted loss during ripples."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        ripple_analysis_utils.plot_ripple_linear_pred_distribution(
+            linpred_dict={
+                suffix: self.resultsNN_phase[suffix]["linearPred"]
+                for suffix in suffix_list
+            },
+            ripple_indices_dict=self.ripples["idCloseRipplesInWake"],
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+            during_ripples=duringRipples,
+        )
+
+    def fig_ripples_scatter_position_lossPred_during_ripples(self, suffixes=None):
+        """Scatter plot of linear predicted position vs predicted loss during ripples."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        ripple_analysis_utils.plot_ripple_position_vs_losspredict(
+            linpred_dict={
+                suffix: self.resultsNN_phase[suffix]["linearPred"]
+                for suffix in suffix_list
+            },
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            ripple_indices_dict=self.ripples["idCloseRipplesInWake"],
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+        )
+
+    def fig_ripples_scatter_time_lossPred_during_ripples(self, suffixes=None):
+        """Scatter plot of time vs predicted loss during ripples."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        ripple_analysis_utils.plot_ripple_time_vs_losspredict(
+            time_dict={
+                suffix: self.resultsNN_phase[suffix]["times"] for suffix in suffix_list
+            },
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            ripple_indices_dict=self.ripples["idCloseRipplesInWake"],
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+        )
+
+    def fig_ripples_final_figure(self, suffixes=None, window=0.4):
+        """Plot predicted loss as function of time-to-ripple for sleep decoding."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        ripple_analysis_utils.plot_ripple_time_distance_vs_losspredict(
+            time_distance_dict=self.ripples["timeDistToRipples"],
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+            window=window,
+            filename_prefix="lossWakeRipples",
+        )
+
+    def fig_ripple_density_vs_confidence(self, suffixes=None):
+        """Analyze correlation between predicted confidence and ripple density using linear regression."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        # Create binary ripple indicators for each sleep period and window
+        ripple_indicators = {}
+        for phase in suffix_list:
+            ripple_indicators[phase] = []
+            for i in range(len(self.timeWindows)):
+                idCloseRipplesInWake = self.ripples["idCloseRipplesInWake"][phase][i]
+                isRipple = np.zeros(
+                    len(self.resultsNN_phase[phase]["predLoss"][i]), dtype=bool
+                )
+                isRipple[idCloseRipplesInWake] = True
+                ripple_indicators[phase].append(isRipple)
+
+        ripple_analysis_utils.plot_ripple_density_vs_confidence(
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            ripple_indicators_dict=ripple_indicators,
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+        )
+
+    def fig_ripple_density_log_vs_confidence(self, suffixes=None):
+        """Analyze correlation between predicted confidence and ripple density using linear regression."""
+        if not getattr(self, "ripples", None):
+            self.load_ripples()
+
+        suffix_list = (
+            suffixes
+            if suffixes is not None
+            else getattr(self, "suffixes", [self.suffix])
+        )
+        if isinstance(suffix_list, str):
+            suffix_list = [suffix_list]
+
+        # Create binary ripple indicators for each sleep period and window
+        ripple_indicators = {}
+        for phase in suffix_list:
+            ripple_indicators[phase] = []
+            for i in range(len(self.timeWindows)):
+                idCloseRipplesInWake = self.ripples["idCloseRipplesInWake"][phase][i]
+                isRipple = np.zeros(
+                    len(self.resultsNN_phase[phase]["predLoss"][i]), dtype=bool
+                )
+                isRipple[idCloseRipplesInWake] = True
+                ripple_indicators[phase].append(isRipple)
+
+        ripple_analysis_utils.plot_ripple_density_log_vs_confidence(
+            predloss_dict={
+                suffix: self.resultsNN_phase[suffix]["predLoss"]
+                for suffix in suffix_list
+            },
+            ripple_indicators_dict=ripple_indicators,
+            time_windows=self.timeWindows,
+            epoch_labels=suffix_list,
+            folder_figures=self.folderFigures,
+        )
+
     def predLoss_linError(
         self,
         suffix=None,
@@ -7212,7 +7599,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
     def _plot_single_place_field(self, ax, neuron_idx, pos_x, pos_y, epoch, title):
         """Helper to plot a single place field on a specific axis."""
-        spike_time = nap.Ts(
+        spike_time = Ts(
             self.bayes.spikeMatTimes[
                 self.bayes.spikeMatLabels[:, neuron_idx] == 1
             ].flatten()
@@ -7229,7 +7616,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             size_map=50,
             limit_maze=(0, 1, 0, 1),
             large_matrix=True,
-            epoch=nap.IntervalSet(epoch),
+            epoch=IntervalSet(epoch),
         )
 
         # Plot Heatmap
@@ -7411,16 +7798,16 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             )
 
         # --- Data Prep for Place Fields (Do once) ---
-        pos_x = nap.Tsd(
+        pos_x = Tsd(
             d=self.behaviorData[position_key][:, 0],
             t=self.behaviorData["positionTime"].flatten(),
         )
-        pos_y = nap.Tsd(
+        pos_y = Tsd(
             d=self.behaviorData[position_key][:, 1],
             t=self.behaviorData["positionTime"].flatten(),
         )
-        epoch = nap.IntervalSet(self.behaviorData["Times"]["trainEpochs"]).union(
-            nap.IntervalSet(self.behaviorData["Times"]["testEpochs"])
+        epoch = IntervalSet(self.behaviorData["Times"]["trainEpochs"]).union(
+            IntervalSet(self.behaviorData["Times"]["testEpochs"])
         )
 
         # --- Panel 0: First Ordered Place Field ---
@@ -7434,12 +7821,12 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             spike_count = np.sum(self.bayes.spikeMatLabels[:, neuron_first])
             if (
                 spike_count > 100
-                and nap.Ts(
+                and Ts(
                     self.bayes.spikeMatTimes[
                         self.bayes.spikeMatLabels[:, neuron_first] == 1
                     ].flatten()
                 )
-                .restrict(nap.IntervalSet(epoch))
+                .restrict(IntervalSet(epoch))
                 .shape[0]
                 > 50
             ):
@@ -7725,7 +8112,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
         self.spikeData = spike_data
 
-        mutual_info = nap.compute_mutual_information(final2d)
+        mutual_info = compute_mutual_information(final2d)
         ordered_mi = mutual_info.to_numpy()[:, 1][id_neurons1d][sort_map]
 
         thresh = 80
@@ -7768,16 +8155,14 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             data_helper = kwargs["data_helper"]
             spike_data = data_helper.get_spike_data()
 
-            positions = nap.TsdFrame(
+            positions = TsdFrame(
                 t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
                 d=self.resultsNN_phase_pkl[suffix]["featureTrue"][idWindow][:, :2],
             )
-            times = nap.Ts(
-                self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
-            )
+            times = Ts(self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten())
 
             not_nan_epoch = (
-                nap.Tsd(
+                Tsd(
                     t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
                     d=np.isnan(
                         self.resultsNN_phase_pkl[suffix]["featureTrue"][idWindow][:, :2]
@@ -7789,11 +8174,15 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
             ep = times.time_support.intersect(not_nan_epoch)
             if use_speed_filter:
-                speed_filter = nap.Tsd(
-                    t=self.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten(),
-                    d=self.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten(),
+                speed_filter = Tsd(
+                    t=self.resultsNN_phase[suffix]["times"][idWindow].flatten(),
+                    d=self.resultsNN_phase[suffix]["speedMask"][idWindow].flatten(),
                 )
-                ep = ep.intersect(speed_filter.threshold(0.5, "above").time_support)
+                ep = ep.intersect(
+                    speed_filter.threshold(
+                        0.5, "above"
+                    ).time_support.merge_close_intervals(0.2)
+                )
 
             positions = positions.restrict(ep)
             spike_pos = spike_data[id_neurons1d[sort_map][idx_to_plot]].value_from(

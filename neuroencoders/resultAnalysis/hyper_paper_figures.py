@@ -334,3 +334,45 @@ def fig_average_predLoss_vs_euclError(
     if dirSave is not None:
         fig.savefig(os.path.join(dirSave, f"euclError_vs_predLoss{suffix}.png"))
         fig.savefig(os.path.join(dirSave, f"euclError_vs_predLoss{suffix}.svg"))
+
+
+def barplot_sleep_predLoss(
+    predLossBySleep,
+    timeWindows=[36, 108, 252, 504],
+    sleepNames=("PreSleep", "PostSleep"),
+    dirSave=None,
+    suffix="",
+):
+    records = []
+    for sleepName in sleepNames:
+        for i, timeWindow in enumerate(timeWindows):
+            values = predLossBySleep.get(sleepName, [])
+            if i >= len(values) or values[i] is None:
+                continue
+            for value in np.asarray(values[i]).flatten():
+                records.append(
+                    {
+                        "predLoss": value,
+                        "timeWindow (ms)": timeWindow,
+                        "sleep type": sleepName,
+                    }
+                )
+
+    datToPlot = pd.DataFrame.from_records(records)
+    fig, ax = plt.subplots(figsize=(9, 9))
+    palette = {sleepNames[0]: colorsForSNS[0]}
+    if len(sleepNames) > 1:
+        palette[sleepNames[1]] = colorsForSNS[1]
+    sns.barplot(
+        data=datToPlot,
+        x="timeWindow (ms)",
+        y="predLoss",
+        hue="sleep type",
+        orient="v",
+        ax=ax,
+        palette=palette,
+    )
+
+    if dirSave is not None:
+        fig.savefig(os.path.join(dirSave, f"sleepPredLossBarPlot{suffix}.png"))
+        fig.savefig(os.path.join(dirSave, f"sleepPredLossBarPlot{suffix}.svg"))

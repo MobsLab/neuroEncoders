@@ -49,6 +49,10 @@ dependencies = [
     "jupyter",
     "ipykernel>=7.2.0",
     "pyside6>=6.11.1",
+    "ephyviewer>=1.8.0",
+    "pyqt6>=6.11.0",
+    "ipympl>=0.10.0",
+    "qtpy>=2.4.3",
 ]
 
 [project.optional-dependencies]
@@ -113,7 +117,12 @@ dev = [
     "pyside6>=6.11.1",
     "matlab>=0.1",
     "pip>=26.1.2",
-    "matlabengine>=26.1.12",
+    "matlabengine==24.2.2",
+    "beautifulsoup4>=4.15.0",
+    "lxml>=6.1.1",
+    "cssutils>=2.15.0",
+    "plotly>=6.8.0",
+    "docker>=7.2.0",
 ]
 
 [tool.ruff]

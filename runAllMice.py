@@ -31,7 +31,7 @@ mice_nb = [
     "M1239_PAG",
     "M1162_PAG",
     "M1186_PAG",
-    "M905",
+    "M905_PAG",
     "M1239_MFB",
     "M1162_MFB",
     "M1117_MFB",
@@ -40,21 +40,24 @@ mice_nb = [
     "M1230_Known",
     "M1230_Novel",
     "M1199_reversal",
+    "M1334_MFB",
+    "M1317MFB",
+    "M1257MFB",
+    "M1161PAG",
+    "M1124PAG",
+    "M1336_known",
+    "M1334_Known",
+    "M1168_Novel",
+    "M1161_Novel",
+    "M1336_MFB",
+    "M1281_MFB",
+    "M994_reversal",
+    "M906_PAG",
+    "M911_PAG",
 ]
-mice_nb = [
-    # "1162_PAG", 252 left!!!!
-    "1186_PAG",
-    "1239_PAG",
-    # "905_PAG",
-    "1162_MFB",
-    "1168_MFB",
-    "1199_reversal",
-]
-mice_nb = [
-    "1168_MFB",
-]
+
 ####
-nameExp = "consensus_high_speed_mask_posandheaddirection"
+nameExp = "highmask_high_speed_mask_posandheaddirection_contrastiveLoss_DenseLayer"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"
@@ -106,102 +109,29 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
 
     win_tmp = win if not isinstance(win, list) else max(win)
 
+    def result_ready(result_dir, suffix=""):
+        return os.path.exists(
+            os.path.join(result_dir, f"featurePred{suffix}.csv")
+        ) and os.path.exists(os.path.join(result_dir, f"latent_output{suffix}.csv"))
+
+    main_result_dir = os.path.join(dir, nameExp, "results", str(int(win_tmp * 1000)))
+    lstm_result_dir = os.path.join(
+        dir, nameExp + "_LSTM", "results", str(int(win_tmp * 1000))
+    )
+    transformer_result_dir = os.path.join(
+        dir, nameExp + "_Transformer", "results", str(int(win_tmp * 1000))
+    )
+
     if (
-        os.path.exists(
-            os.path.join(
-                dir, nameExp, "results", str(int(win_tmp * 1000)), "featurePred.csv"
-            )
-        )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp,
-                "results",
-                str(int(win_tmp * 1000)),
-                f"featurePred_{phase}.csv",
-            )
-        )
-        or os.path.exists(
-            os.path.join(
-                dir,
-                nameExp,
-                "results",
-                str(int(win_tmp * 1000)),
-                "featurePred_training.csv",
-            )
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_LSTM",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    "featurePred.csv",
-                )
-            )
-            and lstmAndTransfo
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_LSTM",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    f"featurePred_{phase}.csv",
-                )
-            )
-            and lstmAndTransfo
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_LSTM",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    "featurePred_training.csv",
-                )
-            )
-            and lstmAndTransfo
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_Transformer",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    "featurePred_training.csv",
-                )
-            )
-            and not lstmAndTransfo
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_Transformer",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    "featurePred.csv",
-                )
-            )
-            and not lstmAndTransfo
-        )
-        or (
-            os.path.exists(
-                os.path.join(
-                    dir,
-                    nameExp + "_Transformer",
-                    "results",
-                    str(int(win_tmp * 1000)),
-                    f"featurePred_{phase}.csv",
-                )
-            )
-            and not lstmAndTransfo
-        )
+        result_ready(main_result_dir, "")
+        or result_ready(main_result_dir, f"_{phase}")
+        or result_ready(main_result_dir, "_training")
+        or (result_ready(lstm_result_dir, "") and lstmAndTransfo)
+        or (result_ready(lstm_result_dir, f"_{phase}") and lstmAndTransfo)
+        or (result_ready(lstm_result_dir, "_training") and lstmAndTransfo)
+        or (result_ready(transformer_result_dir, "_training") and not lstmAndTransfo)
+        or (result_ready(transformer_result_dir, "") and not lstmAndTransfo)
+        or (result_ready(transformer_result_dir, f"_{phase}") and not lstmAndTransfo)
     ) and (
         not force
         and (
@@ -239,11 +169,11 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 target,
                 "--early_stop",
                 "--n_features",
-                "64",
+                "32",
                 "--dim_factor",
                 "4",
                 "--n_transformers",
-                "3",
+                "2",
                 "--loss_type",
                 "wasserstein",
                 "--reduce_dense",
@@ -355,7 +285,7 @@ if __name__ == "__main__":
     lstm = False
     redo = "--redo" in sys.argv
     rsync = "--rsync" in sys.argv
-    sleep = "--sleep" in sys.argv
+    sleep = "--no-sleep" not in sys.argv
     force = "--force" in sys.argv or "--redo" in sys.argv
     lstm = "--lstm" in sys.argv
     run_bayes = "--bayes" in sys.argv
@@ -487,6 +417,10 @@ if __name__ == "__main__":
                     # Exception is expected when mouse directory structure is non-standard
                     # or when mouse is not found in PathForExperiments
                     print(f"Error finding mouse in PathForExperiments: {e}")
+        else:
+            print(
+                f"Skipping directory {directory} as it does not match any mouse in mice_nb"
+            )
 
     if mode == "sequential":
         run_commands_sequentially(mouse_commands)

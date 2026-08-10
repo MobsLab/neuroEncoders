@@ -3,7 +3,20 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <excludeFolder url="file://$MODULE_DIR$/.ipynb_checkpoints" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/.virtual_documents" />
+      <excludeFolder url="file://$MODULE_DIR$/.vscode" />
+      <excludeFolder url="file://$MODULE_DIR$/MagicMock" />
+      <excludeFolder url="file://$MODULE_DIR$/Network" />
+      <excludeFolder url="file://$MODULE_DIR$/dummy_path" />
+      <excludeFolder url="file://$MODULE_DIR$/mock_experiment" />
+      <excludeFolder url="file://$MODULE_DIR$/mock_models" />
+      <excludeFolder url="file://$MODULE_DIR$/mock_results" />
+      <excludeFolder url="file://$MODULE_DIR$/neuroencoders.egg-info" />
+      <excludeFolder url="file://$MODULE_DIR$/notebooks" />
+      <excludeFolder url="file://$MODULE_DIR$/tsdPackage" />
+      <excludeFolder url="file://$MODULE_DIR$/wandb" />
     </content>
     <orderEntry type="jdk" jdkName="uv (neuroEncoders)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

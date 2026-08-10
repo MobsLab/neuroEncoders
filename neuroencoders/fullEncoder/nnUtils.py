@@ -396,7 +396,7 @@ def standardize_group_tensors(
     if normalization_stats is None:
         return tensors
 
-    means, stds = normalization_stats
+    means, stds, _ = normalization_stats
     result = dict(tensors)
     for g in range(params.nGroups):
         key = f"group{g}"

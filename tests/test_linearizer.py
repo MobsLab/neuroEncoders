@@ -100,8 +100,16 @@ def test_apply_linearization_empty_points_returns_nan():
 
 def test_target_linear_values_are_normalized_and_monotonic():
     """Interpolation should sanitize malformed target values."""
+    orig_exists = os.path.exists
+
+    def mock_exists(path):
+        # Only return True for the specific dummy/folder path being tested
+        if "/dummy/path" in str(path):
+            return True
+        return orig_exists(path)
+
     with (
-        patch("os.path.exists", return_value=True),
+        patch("os.path.exists", side_effect=mock_exists),
         patch("tables.open_file") as mock_open,
     ):
         mock_file = MagicMock()
@@ -129,6 +137,9 @@ def test_target_linear_values_are_normalized_and_monotonic():
 )
 def test_pykeops_linearization():
     """Test KeOps-based linearization if available."""
+
+    orig_exists = os.path.exists
+
     try:
         import pykeops
 
@@ -138,8 +149,14 @@ def test_pykeops_linearization():
     except ImportError:
         pytest.skip("PyKeOps not installed")
 
+    def mock_exists(path):
+        # Only return True for the specific dummy/folder path being tested
+        if "/dummy/path" in str(path):
+            return True
+        return orig_exists(path)
+
     with (
-        patch("os.path.exists", return_value=True),
+        patch("os.path.exists", side_effect=mock_exists),
         patch("tables.open_file") as mock_open,
     ):
         mock_file = MagicMock()
