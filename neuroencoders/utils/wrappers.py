@@ -1,22 +1,163 @@
 import os
 import sys
+import warnings
 from typing import Optional, Tuple
 
 import mat73
 import numpy as np
 import pandas as pd
-import pynapple as nts
 import scipy.io
 import scipy.signal
+from pynapple import IntervalSet, Ts, TsGroup, Tsd, TsdFrame
 
 """
 Wrappers should be able to distinguish between raw data or matlab processed data
 """
 
 
+def loadSleepScoring(path: str):
+    """
+    load the sleep scoring contained in path
+    If the path contains a folder analysis, the function will load either the SleepScoring.mat or the SleepScoring.h5
+    Run makeSleepScoring(data_directory, ['sws', 'rem', 'wake', 'sws'], file='SleepScoring_TS.csv') to create the SleepScoring.h5
+
+    Args:
+    path: str, path to the folder containing the SleepScoring file
+
+    Returns:
+    Dict of pynapple.IntervalSet
+    """
+    import copy
+
+    resolved_path = os.path.abspath(os.path.expanduser(path))
+
+    # If path is a file, get its directory
+    if os.path.isfile(resolved_path):
+        dir_path = os.path.dirname(resolved_path)
+    else:
+        dir_path = resolved_path
+    sleep_scoring_file = os.path.join(dir_path, "nnSleepScoring.mat")
+    if not os.path.exists(sleep_scoring_file) and any(
+        [
+            os.path.exists(
+                os.path.join(os.path.expanduser(path), "SleepScoring_OBGamma.mat")
+            ),
+            os.path.exists(
+                os.path.join(os.path.expanduser(path), "SleepScoring_Accelero.mat")
+            ),
+        ]
+    ):
+        import subprocess
+        from pathlib import Path
+
+        current_dir = Path(__file__).resolve().parent
+
+        repo_root = current_dir
+        for parent in [current_dir] + list(current_dir.parents):
+            if (parent / "pyproject.toml").exists():
+                repo_root = parent
+                break
+
+        subprocess.run(
+            [
+                os.path.abspath(os.path.join(repo_root, "getSleepState.sh")),
+                os.path.abspath(os.path.expanduser(path)),
+            ],
+            check=True,
+        )
+
+    if not os.path.exists(sleep_scoring_file):
+        raise FileNotFoundError(
+            f"Sleep scoring file not found in {dir_path}. Please ensure that the sleep scoring has been generated."
+        )
+
+    sleep_scoring = mat73.loadmat(sleep_scoring_file)
+    copy_sleep_scoring = copy.copy(sleep_scoring)
+    for k, v in copy_sleep_scoring.items():
+        sleep_scoring[f"{k}_dict"] = v
+        start = v.get(f"{k}Start", [])
+        stop = v.get(f"{k}Stop", [])
+        if start is not None and stop is not None and sum(start) > 0 and sum(stop) > 0:
+            sleep_scoring[f"{k}_epochs"] = IntervalSet(start, stop, time_units="s")
+
+    return sleep_scoring
+
+
+def loadNeuronClassifications(path: str) -> Tuple[dict, list]:
+    if os.path.exists(path):
+        files = os.listdir(path)
+        if "SpikeData.mat" in files:
+            # using mat73 to load the SpikeData.mat file
+
+            try:
+                spikedata = mat73.loadmat(
+                    os.path.join(path, "SpikeData.mat"), use_attrdict=True
+                )
+            except TypeError:
+                spikedata = scipy.io.loadmat(os.path.join(path, "SpikeData.mat"))
+                try:
+                    cleaned = clean_mat_structure(spikedata["BasicNeuronInfo"])
+                except KeyError:
+                    warnings.warn(
+                        "The 'BasicNeuronInfo' field is missing in the 'SpikeData' structure. Returning a dummy array."
+                    )
+                    cleaned = {
+                        "neuroclass": [np.arange(1, len(spikedata["TT"]) + 1)],
+                        "idx_MUA": [],
+                        "idx_SUA": [],
+                    }
+
+                cleaned_neuroclass = clean_mat_structure(cleaned["neuroclass"])
+                cleaned["neuroclass"] = cleaned_neuroclass
+                spikedata["BasicNeuronInfo"] = cleaned
+
+            try:
+                basic_neuron_info = spikedata["BasicNeuronInfo"]
+            except KeyError:
+                warnings.warn(
+                    "The 'neuroclass' field is missing in the 'BasicNeuronInfo' structure. Returning the original structure."
+                )
+                basic_neuron_info = {
+                    "neuroclass": np.full(len(spikedata["TT"]), 0),
+                    "idx_MUA": [],
+                    "idx_SUA": [],
+                }
+                spikedata["BasicNeuronInfo"] = basic_neuron_info
+
+            neuron_classifications = basic_neuron_info["neuroclass"]
+            idx_mua = basic_neuron_info["idx_MUA"]
+            idx_sua = basic_neuron_info["idx_SUA"]
+            unit_type = [
+                "MUA"
+                if i + 1 in idx_mua
+                else "SUA"
+                if i + 1 in idx_sua
+                else "unclassified"
+                for i in range(len(neuron_classifications))
+            ]
+            neuron_class_map = {
+                1: "pyramidal",
+                -1: "interneuron",
+                0.5: "ambig_pyramidal",
+                -0.5: "ambig_interneuron",
+            }
+            neuron_classifications_name = [
+                f"{unit}_{neuron_class_map.get(int(nc), 'unclassified')}"
+                for unit, nc in zip(unit_type, neuron_classifications)
+            ]
+            return basic_neuron_info, neuron_classifications_name
+
+        else:
+            raise FileNotFoundError(
+                f"Couldn't find any SpikeData file in {path}; Exiting ..."
+            )
+    else:
+        raise FileNotFoundError(f"The path {path}  doesn't exist; Exiting ...")
+
+
 def loadSpikeData(
     path: str, index: Optional[int] = None, fs: int = 20000, force: bool = False
-) -> Tuple[nts.TsGroup | dict, np.ndarray, dict]:
+) -> Tuple[TsGroup | dict, np.ndarray, dict]:
     """
     if the path contains a folder named /Analysis,
     the script will look into it to load either
@@ -65,13 +206,13 @@ def loadSpikeData(
             spikes = {}
             for i in shankIndex:
                 # go from 1e-4 seconds to us
-                spikes[i] = nts.Ts(spikedata["S"]["C"][i]["t"] * 100, time_units="us")
+                spikes[i] = Ts(spikedata["S"]["C"][i]["t"] * 100, time_units="us")
 
             a = spikes[0].as_units("s").index.values
             if ((a[-1] - a[0]) / 60.0) / 60.0 > 20.0:  # VERY BAD
                 spikes = {}
                 for i in shankIndex:
-                    spikes[i] = nts.Ts(
+                    spikes[i] = Ts(
                         spikedata["S"][0][0][0][i][0][0][0][1][0][0][2] * 0.0001,
                         time_units="s",
                     )
@@ -86,7 +227,7 @@ def loadSpikeData(
                 # Returning a dictionnary | can be changed to return a dataframe
                 toreturn = {}
                 for i, j in spikes:
-                    toreturn[j] = nts.Ts(
+                    toreturn[j] = Ts(
                         t=spikes[(i, j)].replace(0, np.nan).dropna().index.values,
                         time_units="s",
                     )
@@ -97,7 +238,7 @@ def loadSpikeData(
                 shanks = spikes["/shanks"]
                 toreturn = {}
                 for j in shanks.index:
-                    toreturn[j] = nts.Ts(spikes["/spikes/s" + str(j)])
+                    toreturn[j] = Ts(spikes["/spikes/s" + str(j)])
                 shank = shanks.values
                 spikes.close()
                 del spikes
@@ -164,7 +305,7 @@ def loadSpikeData(
         shank.append(s.columns.get_level_values(0).values)
         np.unique(shank[-1])[0]
         for i, j in s:
-            toreturn[j] = nts.Ts(
+            toreturn[j] = Ts(
                 t=s[(i, j)].replace(0, np.nan).dropna().index.values, time_units="s"
             )
 
@@ -191,7 +332,7 @@ def loadSpikeData(
     # Returning a dictionnary
     # toreturn = {}
     # for i,j in spikes:
-    # 	toreturn[j] = nts.Ts(t=spikes[(i,j)].replace(0,np.nan).dropna().index.values, time_units = 's')
+    # 	toreturn[j] = Ts(t=spikes[(i,j)].replace(0,np.nan).dropna().index.values, time_units = 's')
 
     # shank = spikes.columns.get_level_values(0).values[:,np.newaxis].flatten()
 
@@ -219,7 +360,7 @@ def loadSpikeData_falllback(path: str, index: Optional = None, fs: int = 20000):
         if len(to_add) == 1:
             to_add = spikedata["S"]["C"][0][0][0][i][0][0][0][1][0][0][2].flatten()
 
-        spikes[i] = nts.Ts(to_add * 100, time_units="us")
+        spikes[i] = Ts(to_add * 100, time_units="us")
     a = spikes[0].as_units("s").index.values
     if ((a[-1] - a[0]) / 60.0) / 60.0 > 20.0:  # VERY BAD
         spikes = {}
@@ -228,7 +369,7 @@ def loadSpikeData_falllback(path: str, index: Optional = None, fs: int = 20000):
             if len(to_add) == 1:
                 to_add = spikedata["S"]["C"][0][0][0][i][0][0][0][1][0][0][2].flatten()
 
-            spikes[i] = nts.Ts(
+            spikes[i] = Ts(
                 to_add * 0.0001,
                 time_units="s",
             )
@@ -266,18 +407,18 @@ def loadXML(path):
 
     xmldoc = minidom.parse(path)
     nChannels = (
-        xmldoc.getElementsByTagName("acquisitionSystem")[0]
-        .getElementsByTagName("nChannels")[0]
+        xmldoc.getElemenapByTagName("acquisitionSystem")[0]
+        .getElemenapByTagName("nChannels")[0]
         .firstChild.data
     )
     fs_dat = (
-        xmldoc.getElementsByTagName("acquisitionSystem")[0]
-        .getElementsByTagName("samplingRate")[0]
+        xmldoc.getElemenapByTagName("acquisitionSystem")[0]
+        .getElemenapByTagName("samplingRate")[0]
         .firstChild.data
     )
     fs_eeg = (
-        xmldoc.getElementsByTagName("fieldPotentials")[0]
-        .getElementsByTagName("lfpSamplingRate")[0]
+        xmldoc.getElemenapByTagName("fieldPotentials")[0]
+        .getElemenapByTagName("lfpSamplingRate")[0]
         .firstChild.data
     )
     if os.path.splitext(xmlfiles[0])[0] + ".dat" in listdir:
@@ -288,15 +429,15 @@ def loadXML(path):
         fs = fs_eeg
     shank_to_channel = {}
     groups = (
-        xmldoc.getElementsByTagName("anatomicalDescription")[0]
-        .getElementsByTagName("channelGroups")[0]
-        .getElementsByTagName("group")
+        xmldoc.getElemenapByTagName("anatomicalDescription")[0]
+        .getElemenapByTagName("channelGroups")[0]
+        .getElemenapByTagName("group")
     )
     for i in range(len(groups)):
         shank_to_channel[i] = np.sort(
             [
                 int(child.firstChild.data)
-                for child in groups[i].getElementsByTagName("channel")
+                for child in groups[i].getElemenapByTagName("channel")
             ]
         )
     return int(nChannels), int(fs), shank_to_channel
@@ -411,7 +552,7 @@ def makeEpochs(path, order, file=None, start=None, end=None, time_units="s"):
     epoch = np.unique(order)
     for i, n in enumerate(epoch):
         idx = np.where(np.array(order) == n)[0]
-        ep = nts.IntervalSet(
+        ep = IntervalSet(
             start=epochs.loc[idx, 0], end=epochs.loc[idx, 1], time_units=time_units
         )
         store[n] = pd.DataFrame(ep)
@@ -432,7 +573,7 @@ def makePositions(
     """
     Assuming that makeEpochs has been runned and a file BehavEpochs.h5 can be
     found in /Analysis/, this function will look into path  for analogin file
-    containing the TTL pulses. The position time for all events will thus be
+    containing the TTL pulses. The position time for all evenap will thus be
     updated and saved in Analysis/Position.h5.
     BehavEpochs.h5 will although be updated to match the time between optitrack
     and intan
@@ -500,7 +641,7 @@ def makePositions(
         frames.append(position)
 
     position = pd.concat(frames)
-    # position = nts.TsdFrame(t = position.index.values, d = position.values, time_units = 's', columns = names)
+    # position = TsdFrame(t = position.index.values, d = position.values, time_units = 's', columns = names)
     position.columns = names
     position[["ry", "rx", "rz"]] *= np.pi / 180
     position[["ry", "rx", "rz"]] += 2 * np.pi
@@ -549,7 +690,7 @@ def loadEpoch(path, epoch, episodes=None):
         if "/" + epoch in store.keys():
             ep = store[epoch]
             store.close()
-            return nts.IntervalSet(ep)
+            return IntervalSet(ep)
         else:
             print(
                 "The file BehavEpochs.h5 does not contain the key "
@@ -563,7 +704,7 @@ def loadEpoch(path, epoch, episodes=None):
             wake_ep = np.hstack(
                 [behepochs["wakeEp"][0][0][1], behepochs["wakeEp"][0][0][2]]
             )
-            return nts.IntervalSet(
+            return IntervalSet(
                 wake_ep[:, 0], wake_ep[:, 1], time_units="s"
             ).drop_short_intervals(0.0)
         elif epoch == "sleep":
@@ -582,7 +723,7 @@ def loadEpoch(path, epoch, episodes=None):
                 sleep_ep = sleep_pre_ep
             elif len(sleep_post_ep):
                 sleep_ep = sleep_post_ep
-            return nts.IntervalSet(sleep_ep[:, 0], sleep_ep[:, 1], time_units="s")
+            return IntervalSet(sleep_ep[:, 0], sleep_ep[:, 1], time_units="s")
         ###################################
         # WORKS ONLY FOR MATLAB FROM HERE #
         ###################################
@@ -592,8 +733,8 @@ def loadEpoch(path, epoch, episodes=None):
             for file in new_listdir:
                 if "sts.SWS" in file:
                     sws = np.genfromtxt(os.path.join(path, file)) / float(sampling_freq)
-                    return nts.IntervalSet.drop_short_intervals(
-                        nts.IntervalSet(sws[:, 0], sws[:, 1], time_units="s"), 0.0
+                    return IntervalSet.drop_short_intervals(
+                        IntervalSet(sws[:, 0], sws[:, 1], time_units="s"), 0.0
                     )
 
                 elif "-states.mat" in file:
@@ -602,8 +743,8 @@ def loadEpoch(path, epoch, episodes=None):
                     index = index[1:] - index[0:-1]
                     start = np.where(index == 1)[0] + 1
                     stop = np.where(index == -1)[0]
-                    return nts.IntervalSet.drop_short_intervals(
-                        nts.IntervalSet(start, stop, time_units="s", expect_fix=True),
+                    return IntervalSet.drop_short_intervals(
+                        IntervalSet(start, stop, time_units="s", expect_fix=True),
                         0.0,
                     )
 
@@ -613,7 +754,7 @@ def loadEpoch(path, epoch, episodes=None):
             for file in new_listdir:
                 if "sts.REM" in file:
                     rem = np.genfromtxt(os.path.join(path, file)) / float(sampling_freq)
-                    return nts.IntervalSet(
+                    return IntervalSet(
                         rem[:, 0], rem[:, 1], time_units="s"
                     ).drop_short_intervals(0.0)
 
@@ -623,7 +764,7 @@ def loadEpoch(path, epoch, episodes=None):
                     index = index[1:] - index[0:-1]
                     start = np.where(index == 1)[0] + 1
                     stop = np.where(index == -1)[0]
-                    return nts.IntervalSet(
+                    return IntervalSet(
                         start,
                         stop,
                         time_units="s",
@@ -632,7 +773,7 @@ def loadEpoch(path, epoch, episodes=None):
 
 def loadPosition(
     path,
-    events=None,
+    evenap=None,
     episodes=None,
     n_ttl_channels=1,
     optitrack_ch=None,
@@ -661,7 +802,7 @@ def loadPosition(
     if not os.path.exists(file):
         makePositions(
             path,
-            events,
+            evenap,
             episodes,
             n_ttl_channels,
             optitrack_ch,
@@ -672,7 +813,7 @@ def loadPosition(
         store = pd.HDFStore(file, "r")
         position = store["position"]
         store.close()
-        position = nts.TsdFrame(
+        position = TsdFrame(
             t=position.index.values,
             d=position.values,
             columns=position.columns,
@@ -766,7 +907,14 @@ def clean_mat_structure(element):
     """
     Recursively unpacks nested numpy structured arrays into clean Python dicts/lists.
     """
-    # 1. Handle NumPy structured arrays (they have dtype fields)
+    if isinstance(element, (bytes, str)):
+        val = element.decode("utf-8") if isinstance(element, bytes) else element
+        return val.strip()
+
+    if isinstance(element, np.generic):
+        # Convert numpy types (uint16, uint8, etc.) to standard Python types
+        return element.item()
+
     if isinstance(element, np.ndarray) and element.dtype.names is not None:
         # If it's an array of structs, we usually just want the first record
         # or a list of dicts if it has multiple entries.
@@ -788,16 +936,6 @@ def clean_mat_structure(element):
             return clean_mat_structure(element.item())
         # If it's a 1D or multi-D array/list of data (like your folder paths)
         return [clean_mat_structure(x) for x in element.flatten()]
-
-    # 3. Clean up specific data types (bytes, numpy scalars)
-    if isinstance(element, (bytes, str)):
-        # Decode bytes to string if necessary, strip whitespace
-        val = element.decode("utf-8") if isinstance(element, bytes) else element
-        return val.strip()
-
-    if isinstance(element, np.generic):
-        # Convert numpy types (uint16, uint8, etc.) to standard Python types
-        return element.item()
 
     return element
 
@@ -829,7 +967,7 @@ def loadRespiData(path):
                     "Could not compute spectro from matlab for respiration data. Error: ",
                     e,
                 )
-        raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
+                raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
 
     if not os.path.isfile(path):
         path = os.path.join(os.path.dirname(path), "Bulb_deep_low_Spectrum.mat")
@@ -970,8 +1108,6 @@ def loadHDCellInfo(path, index):
 
 
 def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"):
-    import pynapple as nts
-
     if type(channel) is not list:
         f = open(path, "rb")
         startoffile = f.seek(0, 0)
@@ -984,7 +1120,7 @@ def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"
         with open(path, "rb") as f:
             data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]
         timestep = np.arange(0, len(data)) / frequency
-        return nts.Tsd(timestep, data, time_units="s")
+        return Tsd(timestep, data, time_units="s")
     elif type(channel) is list:
         f = open(path, "rb")
         startoffile = f.seek(0, 0)
@@ -997,14 +1133,12 @@ def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"
         with open(path, "rb") as f:
             data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]
         timestep = np.arange(0, len(data)) / frequency
-        return nts.TsdFrame(timestep, data, time_units="s")
+        return TsdFrame(timestep, data, time_units="s")
 
 
 def loadBunch_Of_LFP(
     path, start, stop, n_channels=90, channel=64, frequency=1250.0, precision="int16"
 ):
-    import pynapple as nts
-
     bytes_size = 2
     start_index = int(start * frequency * n_channels * bytes_size)
     stop_index = int(stop * frequency * n_channels * bytes_size)
@@ -1015,10 +1149,10 @@ def loadBunch_Of_LFP(
 
     if type(channel) is not list:
         timestep = np.arange(0, len(data)) / frequency
-        return nts.Tsd(timestep, data[:, channel], time_units="s")
+        return Tsd(timestep, data[:, channel], time_units="s")
     elif type(channel) is list:
         timestep = np.arange(0, len(data)) / frequency
-        return nts.TsdFrame(timestep, data[:, channel], time_units="s")
+        return TsdFrame(timestep, data[:, channel], time_units="s")
 
 
 def compute_matrix_correlation(matrix_A, matrix_B):

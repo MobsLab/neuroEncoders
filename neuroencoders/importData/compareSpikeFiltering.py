@@ -452,12 +452,16 @@ class WaveFormComparator:
 
     def get_data(self):
         # Get names
-        filPath = self.projectPath.fil
-        datPath = self.projectPath.dat
-        xmlPath = self.projectPath.xml
+        filPath = os.path.realpath(self.projectPath.fil)
+        datPath = os.path.realpath(self.projectPath.dat)
+        xmlPath = os.path.realpath(self.projectPath.xml)
         # Map the data
         _, self.samplingRate, nChannels = get_params(xmlPath)
         self.number_timeSteps = os.stat(datPath).st_size // (2 * nChannels)
+        return datPath, filPath, nChannels
+
+    def load_memmap(self):
+        datPath, filPath, nChannels = self.get_data()
         self.memmapData = np.memmap(
             datPath, dtype=np.int16, mode="r", shape=(self.number_timeSteps, nChannels)
         )

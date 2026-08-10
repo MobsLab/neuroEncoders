@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pynapple as nap
+from pynapple import IntervalSet, Ts, Tsd
 from scipy import signal
 from scipy.ndimage import label
 
@@ -236,10 +236,10 @@ def poisson_kb(lambda_rate: float, t_max: float) -> np.ndarray:
 
 
 def PlaceField_DB(
-    spike_times: nap.Ts,
-    pos_x: nap.Tsd,
-    pos_y: nap.Tsd,
-    epoch: Optional[nap.IntervalSet] = None,
+    spike_times: Ts,
+    pos_x: Tsd,
+    pos_y: Tsd,
+    epoch: Optional[IntervalSet] = None,
     smoothing: Union[int, List] = 3,
     freq_video: Optional[float | int] = None,
     threshold: float = 0.7,  # Default to 0.7 like MATLAB version
@@ -316,7 +316,7 @@ def PlaceField_DB(
         poisson_times_abs = poisson_times + t_start
 
         # Create neuroseries object if possible
-        poisson_spike_times = nap.Ts(t=poisson_times_abs)
+        poisson_spike_times = Ts(t=poisson_times_abs)
 
         # Run analysis on Poisson data
         poisson_results = _run_place_field_analysis(
@@ -374,16 +374,16 @@ def PlaceField_DB(
 
 
 def _run_place_field_analysis(
-    spike_times: nap.Ts,
-    pos_x: nap.Tsd,
-    pos_y: nap.Tsd,
+    spike_times: Ts,
+    pos_x: Tsd,
+    pos_y: Tsd,
     smoothing: Union[int, List],
     freq_video: float | int,
     threshold: float,
     size_map: int,
     limit_maze,
     large_matrix: bool,
-    epoch: Optional[nap.IntervalSet] = None,
+    epoch: Optional[IntervalSet] = None,
 ) -> Dict:
     """
     Core place field analysis function
@@ -709,10 +709,10 @@ def calculate_place_field_stats(maps: Dict, threshold: float) -> Dict:
 
 def plot_place_field_results(
     results: Dict,
-    pos_x: nap.Tsd,
-    pos_y: nap.Tsd,
-    spike_times: nap.Ts,
-    epoch: Optional[nap.IntervalSet] = None,
+    pos_x: Tsd,
+    pos_y: Tsd,
+    spike_times: Ts,
+    epoch: Optional[IntervalSet] = None,
 ) -> None:
     """Plot place field analysis results - epoch-restricted data only"""
 
@@ -881,11 +881,11 @@ def plot_place_field_results(
 def plot_poisson_comparison(
     results: Dict,
     poisson_results: Dict,
-    pos_x: nap.Tsd,
-    pos_y: nap.Tsd,
-    spike_times: nap.Ts,
-    poisson_spike_times: nap.Ts,
-    epoch: Optional[nap.IntervalSet] = None,
+    pos_x: Tsd,
+    pos_y: Tsd,
+    spike_times: Ts,
+    poisson_spike_times: Ts,
+    epoch: Optional[IntervalSet] = None,
 ) -> None:
     """Plot comparison between original and Poisson control analysis"""
 

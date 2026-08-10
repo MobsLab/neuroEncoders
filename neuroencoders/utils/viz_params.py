@@ -65,6 +65,7 @@ MAX_NUM_STARS = 5
 GROUPS_PALETTE = {
     "MFB": "xkcd:green",
     "PAG": "xkcd:red",
+    "WeirdPAG": "xkcd:purple",
     "Novel": "xkcd:blue",
     "Known": "xkcd:grey",
     "reversal": "xkcd:orange",

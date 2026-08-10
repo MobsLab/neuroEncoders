@@ -40,6 +40,7 @@ from pynapple import (
 )
 from scipy.ndimage import gaussian_filter1d
 from shapely import MultiPoint, Polygon
+from statannotations.Annotator import Annotator
 
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
@@ -166,7 +167,7 @@ class Project:
         self.fil = self.dat[:-4] + ".fil"
 
         # Folders
-        def findFolder(path):
+        def findFolder(path: str) -> str:
             return path if path[-1] == "/" or len(path) == 0 else findFolder(path[:-1])
 
         self.folder = findFolder(self.dat)
@@ -886,8 +887,27 @@ class DataHelper(Project):
         dist_to_wall = np.array(
             [point.distance(boundary) for point in list(self.shapePoints.geoms)]
         )
+        dist_to_wall = np.clip(
+            dist_to_wall, 0, max(1 - self.upper_x, self.lower_x, 1 - self.ylim) / 2
+        )
         self.thigmo = dist_to_wall
         return dist_to_wall
+
+    def compute_distance_weighted_thigmo(
+        self, positions, max_dist: Optional[float] = None
+    ):
+        # 1. Fetch distances using your existing Shapely boundary function
+        dist_to_wall = self.dist2wall(positions)
+        if not max_dist:
+            max_dist = max(self.lower_x, 1 - self.upper_x, 1 - self.ylim) / 2
+            print(f"max_dist not provided, using default: {max_dist}")
+
+        # Clean tracking dropouts
+        valid_mask = ~np.isnan(dist_to_wall) & ~np.isinf(dist_to_wall)
+        if not np.any(valid_mask):
+            return np.nan
+
+        return 1 - (np.nanmedian(dist_to_wall[valid_mask]) / max_dist)
 
     def get_maze_limits(self, show=False):
         """
@@ -1006,10 +1026,13 @@ class DataHelper(Project):
         self.maze_coords = np.array(self.maze_coords)
         self.create_polygon()
 
-    def create_polygon(self):
+    def create_polygon(self, redo: bool = False):
         """
         Creates the polygon of the maze.
         """
+        if hasattr(self, "polygon") and not redo:
+            return
+
         self.polygon = Polygon(self.maze_coords)
 
     def create_zone_polygon_from_borders(self, zonedef):
@@ -1893,9 +1916,8 @@ class DataHelper(Project):
 
         """
         import pandas as pd
-        import pynapple as nap
 
-        MovAccTsd = nap.Tsd(
+        MovAccTsd = Tsd(
             t=self.fullBehavior["MovTimes"].flatten(),
             d=self.fullBehavior["MovAcc"].flatten(),
         )
@@ -1908,7 +1930,7 @@ class DataHelper(Project):
             .mean()
             .to_numpy()
         )
-        NewMovAccTsd = nap.Tsd(t=MovAccTsd.index, d=smoothed_data)
+        NewMovAccTsd = Tsd(t=MovAccTsd.index, d=smoothed_data)
 
         self.mov_acc = NewMovAccTsd
 
@@ -1937,7 +1959,7 @@ class DataHelper(Project):
         self.ripples_epochs = ripples_epochs
         return self.ripples_epochs
 
-    def get_stim_epochs(self, before=0.1, after=0.1):
+    def get_stim_epochs(self, before=0, after=0.1):
         start_stim = self.fullBehavior["Times"].get("start_stim", None)
         stop_stim = self.fullBehavior["Times"].get("stop_stim", None)
         if start_stim is None and stop_stim is None:
@@ -1958,6 +1980,40 @@ class DataHelper(Project):
                 )
             )
             return self.stim_epochs
+
+    def get_mov_epochs(self):
+        speed_filter = Tsd(
+            t=self.fullBehavior["positionTime"].flatten(),
+            d=self.fullBehavior["Times"]["speedFilter"],
+        )
+        mov_epoch = speed_filter.threshold(
+            0.5, "above"
+        ).time_support.merge_close_intervals(0.2)
+        return mov_epoch
+
+    def get_sws_epochs(self, force: bool = False, folder: Optional[str] = None):
+        if (
+            hasattr(self, "sleep_scoring")
+            and isinstance(self.sleep_scoring, dict)
+            and not force
+        ):
+            return self.sleep_scoring["sws_epochs"]
+        from neuroencoders.utils.wrappers import loadSleepScoring
+
+        self.sleep_scoring = loadSleepScoring(self.folder if folder is None else folder)
+        return self.sleep_scoring["sws_epochs"]
+
+    def get_rem_epochs(self, force: bool = False, folder: Optional[str] = None):
+        if (
+            hasattr(self, "sleep_scoring")
+            and isinstance(self.sleep_scoring, TsGroup)
+            and not force
+        ):
+            return self.sleep_scoring["sws_epochs"]
+        from neuroencoders.utils.wrappers import loadSleepScoring
+
+        self.sleep_scoring = loadSleepScoring(self.folder if folder is None else folder)
+        return self.sleep_scoring["sws_epochs"]
 
     def get_spike_data(self, folder=None, add_to_attr=True, force=False) -> TsGroup:
         """
@@ -1980,6 +2036,30 @@ class DataHelper(Project):
             self.spikeData = spike_group
 
         return spike_group
+
+    def get_neuron_classifications(
+        self,
+        folder: Optional[str] = None,
+        add_to_attr: bool = True,
+        force: bool = False,
+    ):
+        """
+        Get neuron classifications from the DataHelper and store it in the fullBehavior dict for later use.
+        """
+        from neuroencoders.utils.wrappers import loadNeuronClassifications
+
+        if hasattr(self, "neuronClassifications") and not force:
+            return self.neuronClassifications
+
+        if folder is None:
+            folder = self.folder
+
+        basic_neuron_info, neuron_classifications = loadNeuronClassifications(folder)
+        if add_to_attr:
+            self.neuronClassifications = np.array(neuron_classifications)
+            self.basicNeuronInfo = basic_neuron_info
+
+        return np.array(neuron_classifications)
 
     def get_respi_data(
         self, folder: Optional[str] = None, add_to_attr=True, force=False
@@ -2185,6 +2265,132 @@ class DataHelper(Project):
         firing_rates_smoothed = gaussian_filter1d(firing_rates, sigma=1)
 
         return firing_rates_smoothed
+
+    def get_zone_occupancy(self, session_type="TestPre", zone: str = "Shock"):
+        """Calculates the ratio of time spent in a specific zone during a given
+
+        behavioral session epoch (matching the original CalculateZoneOccupancy logic).
+
+        Parameters
+        ----------
+        session_type : str
+            The target session identifier, e.g., 'TestPre' or 'TestPost'
+        zone_idx : int
+            The index of the zone. Currently, zone_idx=0 represents the Shock Zone.
+
+        Returns
+        -------
+        occupancy_ratio : float
+            The ratio of total frames/time spent in the zone relative to the session.
+        """
+
+        # 1. Dynamically locate the targeted session interval from sessionNames
+        session_names = self.fullBehavior["Times"].get("sessionNames", [])
+        starts = self.fullBehavior["Times"].get("sessionStart", [])
+        stops = self.fullBehavior["Times"].get("sessionStop", [])
+
+        # Find matching session index
+        session_id = []
+        for idx, name in enumerate(session_names):
+            if session_type.lower() in name.lower():
+                session_id.append(idx)
+
+        if not session_id:
+            # Fallback tracking indicator if name matching fails
+            raise ValueError(
+                f"Session type '{session_type}' not found in recording metadata."
+            )
+
+        # 2. Restrict global spatial tracking vectors to our explicit session time window
+        session_interval = IntervalSet(start=starts[session_id], end=stops[session_id])
+
+        # Reconstruct positions frame tracking array
+        pos_tsd = TsdFrame(
+            t=self.fullBehavior["positionTime"].flatten(),
+            d=self.fullBehavior["Positions"],
+        ).restrict(session_interval)
+
+        if len(pos_tsd) == 0:
+            return 0.0
+
+        # 3. Apply exact spatial limits from ZONEDEF
+        # ZONEDEF structure: [[x_min, x_max], [y_min, y_max]]
+        zone_idx = ZONELABELS.index(zone)
+        x_lim, y_lim = ZONEDEF[zone_idx]
+
+        in_zone_mask = (
+            (pos_tsd.values[:, 0] >= x_lim[0])
+            & (pos_tsd.values[:, 0] <= x_lim[1])
+            & (pos_tsd.values[:, 1] >= y_lim[0])
+            & (pos_tsd.values[:, 1] <= y_lim[1])
+        )
+
+        return np.sum(in_zone_mask) / len(pos_tsd)
+
+    def get_first_entry_latency(
+        self, session_type="TestPre", zone: str = "Shock", max_duration=None
+    ):
+        """Calculates the entry latency (in seconds) using exact ZONEDEF bounds."""
+        # 1. Match session name tracking intervals
+        session_names = self.fullBehavior["Times"].get("sessionNames", [])
+        starts = self.fullBehavior["Times"].get("sessionStart", [])
+        stops = self.fullBehavior["Times"].get("sessionStop", [])
+
+        # Find matching session index
+        session_id = []
+        for idx, name in enumerate(session_names):
+            if session_type.lower() in name.lower():
+                session_id.append(idx)
+
+        if not session_id:
+            # Fallback tracking indicator if name matching fails
+            raise ValueError(
+                f"Session type '{session_type}' not found in recording metadata."
+            )
+
+        # 2. Slice specific spatial tracking frame epochs
+        session_interval = IntervalSet(start=starts[session_id], end=stops[session_id])
+        pos_tsd = TsdFrame(
+            t=self.fullBehavior["positionTime"].flatten(),
+            d=self.fullBehavior["Positions"],
+        ).restrict(session_interval)
+
+        if len(pos_tsd) == 0:
+            if max_duration is not None:
+                return float(max_duration)
+            return None
+
+        # 3. Apply boundary check using ZONEDEF limits
+        zone_idx = ZONELABELS.index(zone)
+        x_lim, y_lim = ZONEDEF[zone_idx]
+
+        in_zone_mask = (
+            (pos_tsd.values[:, 0] >= x_lim[0])
+            & (pos_tsd.values[:, 0] <= x_lim[1])
+            & (pos_tsd.values[:, 1] >= y_lim[0])
+            & (pos_tsd.values[:, 1] <= y_lim[1])
+        )
+        in_zone_intervalset = (
+            Tsd(t=pos_tsd.times(), d=in_zone_mask.astype(int))
+            .threshold(0.5, "above")
+            .time_support
+        )
+        # drop short intervals that are less than 1 seconds
+        in_zone_intervalset = in_zone_intervalset.drop_short_intervals(1.5)
+
+        if in_zone_intervalset.tot_length() <= 1:
+            if max_duration is not None:
+                return float(max_duration)
+            return None
+
+        # Latency calculation based on tracking timeline
+        first_entry_time = in_zone_intervalset.as_units("s").start[0]
+        session_start_time = pos_tsd.start_time()
+        latency = first_entry_time - session_start_time
+
+        if max_duration is not None:
+            return float(np.minimum(latency, max_duration))
+        return float(latency)
 
     def get_config(self):
         """
@@ -3189,6 +3395,10 @@ class TuningCurvesPlotter:
             method = "minmax"
         method = method.lower()
         matrix = np.array(matrix)
+        is_flat = matrix.sum(1) == 0
+        matrix[is_flat] = (
+            np.nan
+        )  # Set flat neurons to NaN to avoid affecting normalization
         find_nans = np.isnan(matrix)
         if method == "z-score":
             # Safe Z-score normalization per neuron (row-wise)
@@ -3251,7 +3461,7 @@ class TuningCurvesPlotter:
         else:
             fields = ordered_lin_place_fields
             cmap = "viridis"
-            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.max(fields))
+            norm = mcolors.Normalize(vmin=np.min(fields), vmax=np.nanmax(fields))
             cb_label = "Firing Rate"
             if isclose(np.nanmin(fields), -1) and isclose(np.nanmax(fields), 1):
                 cmap = "RdBu_r"
@@ -3259,7 +3469,9 @@ class TuningCurvesPlotter:
                 cb_label = "Normalized Firing Rate (-1 to 1)"
             elif isclose(np.nanmin(fields), 0) and isclose(np.nanmax(fields), 1):
                 cmap = "cmc.batlow"
-                norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.median(fields), vmax=1)
+                norm = mcolors.TwoSlopeNorm(
+                    vmin=0, vcenter=np.nanmedian(fields), vmax=1
+                )
                 cb_label = "Normalized Firing Rate (0-1)"
 
         fields = fields[mask] if mask is not None else fields
@@ -3300,30 +3512,52 @@ class TuningCurvesPlotter:
     def _compute_tuning_curves(self, **kwargs):
         return _compute_tuning_curves_for_result(self, **kwargs)
 
-    def plot_on_off_stability_stats(
+    def plot_global_vs_subpop_stability(
         self,
-        analysis_data: Dict[str, np.ndarray],
+        analysis_data: dict,
         around: str,
         spatial_smooth_sigma: float = 1.5,
         path: Optional[str] = None,
     ):
-        from statannotations.Annotator import Annotator
-
         from neuroencoders.utils.wrappers import get_raw_pv_corr
 
         phase_build = "_training"
 
-        # --- CRITICAL FIX: Extract true neuron counts (axis 0) ---
+        # Check dynamically if the delayed subpopulation exists in this dataset
+        has_delayed = (
+            "tuning_curves_delayed_on_subset" in analysis_data
+            and "id_neurons_delayed_on" in analysis_data
+        )
+        if has_delayed:
+            n_delayed = analysis_data["tuning_curves_delayed_on_subset"][
+                phase_build
+            ].shape[0]
+            has_delayed = n_delayed > 0  # ensure it's not empty
+
+        # 1. Extract exact neuron counts per sub-population (axis 0)
         n_on = analysis_data["tuning_curves_on_subset"][phase_build].shape[0]
+        n_neutral = analysis_data["tuning_curves_uninfluenced_subset"][
+            phase_build
+        ].shape[0]
         n_off = analysis_data["tuning_curves_off_subset"][phase_build].shape[0]
+        n_all = analysis_data["tuning_curves_all_phases"][phase_build].shape[0]
 
-        # Define custom descriptive labels dynamically
+        # Define descriptive category labels for the plot
         on_label = f"ON Cells (n={n_on})"
+        neutral_label = f"Neutral Cells (n={n_neutral})"
         off_label = f"OFF Cells (n={n_off})"
+        all_label = f"ALL Neurons (n={n_all})"
+        if has_delayed:
+            delayed_label = f"Delayed ON Cells (n={n_delayed})"
 
-        # 1. Isolate and smooth ground-truth True Training baselines
+        # Smooth ground-truth full-session baselines
         tc_on_base = gaussian_filter1d(
             analysis_data["tuning_curves_on_subset"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+        tc_neu_base = gaussian_filter1d(
+            analysis_data["tuning_curves_uninfluenced_subset"][phase_build],
             sigma=spatial_smooth_sigma,
             axis=1,
         )
@@ -3332,13 +3566,73 @@ class TuningCurvesPlotter:
             sigma=spatial_smooth_sigma,
             axis=1,
         )
+        tc_all_base = gaussian_filter1d(
+            analysis_data["tuning_curves_all_phases"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+        if has_delayed:
+            tc_del_base = gaussian_filter1d(
+                analysis_data["tuning_curves_delayed_on_subset"][phase_build],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
 
         data_rows = []
 
-        # 2. Extract PV stability vectors across phases
+        # =========================================================
+        # INTRA-SESSION TRAIN SPLIT CONTROL (The Natural Drift Anchor)
+        # =========================================================
+        tc_all_h1 = gaussian_filter1d(
+            analysis_data["tuning_curves_all_phases_first_half"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+        tc_all_h2 = gaussian_filter1d(
+            analysis_data["tuning_curves_all_phases_second_half"][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+
+        stab_all_ctrl = get_raw_pv_corr(tc_all_h1, tc_all_h2) if n_all > 0 else []
+        for val in stab_all_ctrl:
+            data_rows.append(
+                {
+                    "Phase": "TRAIN SPLIT",
+                    "Cell Type": all_label,
+                    "Stability (PV R)": val,
+                }
+            )
+
+        # Optional: Calculate split control stability metrics for delayed subset if requested
+        if has_delayed:
+            tc_del_h1 = gaussian_filter1d(
+                analysis_data["tuning_curves_delayed_on_subset_first_half"][
+                    phase_build
+                ],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            tc_del_h2 = gaussian_filter1d(
+                analysis_data["tuning_curves_delayed_on_subset_second_half"][
+                    phase_build
+                ],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            get_raw_pv_corr(tc_del_h1, tc_del_h2)
+
+        # =========================================================
+        # EXPERIMENTAL LONGITUDINAL PHASES (Inter Stability Evaluation)
+        # =========================================================
         for phase in ["cond", "post"]:
             tc_on_curr = gaussian_filter1d(
                 analysis_data["tuning_curves_on_subset"][phase],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            tc_neu_curr = gaussian_filter1d(
+                analysis_data["tuning_curves_uninfluenced_subset"][phase],
                 sigma=spatial_smooth_sigma,
                 axis=1,
             )
@@ -3347,16 +3641,110 @@ class TuningCurvesPlotter:
                 sigma=spatial_smooth_sigma,
                 axis=1,
             )
+            tc_all_curr = gaussian_filter1d(
+                analysis_data["tuning_curves_all_phases"][phase],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            if has_delayed:
+                tc_del_curr = gaussian_filter1d(
+                    analysis_data["tuning_curves_delayed_on_subset"][phase],
+                    sigma=spatial_smooth_sigma,
+                    axis=1,
+                )
 
-            stab_on = get_raw_pv_corr(tc_on_base, tc_on_curr)
-            stab_off = get_raw_pv_corr(tc_off_base, tc_off_curr)
+            stab_on = get_raw_pv_corr(tc_on_base, tc_on_curr) if n_on > 0 else []
+            stab_neu = (
+                get_raw_pv_corr(tc_neu_base, tc_neu_curr) if n_neutral > 0 else []
+            )
+            stab_off = get_raw_pv_corr(tc_off_base, tc_off_curr) if n_off > 0 else []
+            stab_all = get_raw_pv_corr(tc_all_base, tc_all_curr) if n_all > 0 else []
+            if has_delayed:
+                stab_del = get_raw_pv_corr(tc_del_base, tc_del_curr)
 
-            # Build DataFrame rows with the updated group labels
+            # ---------------------------------------------------------
+            # Dynamic Independent "All Minus Self" Combinations Setup
+            # ---------------------------------------------------------
+            # Dynamic builder lists to cleanly isolate independent network sets
+            neu_list_b, neu_list_c = (
+                [analysis_data["tuning_curves_uninfluenced_subset"][phase_build]],
+                [analysis_data["tuning_curves_uninfluenced_subset"][phase]],
+            )
+            on_list_b, on_list_c = (
+                [analysis_data["tuning_curves_on_subset"][phase_build]],
+                [analysis_data["tuning_curves_on_subset"][phase]],
+            )
+            off_list_b, off_list_c = (
+                [analysis_data["tuning_curves_off_subset"][phase_build]],
+                [analysis_data["tuning_curves_off_subset"][phase]],
+            )
+
+            del_list_b, del_list_c = [], []
+            if has_delayed:
+                del_list_b = [
+                    analysis_data["tuning_curves_delayed_on_subset"][phase_build]
+                ]
+                del_list_c = [analysis_data["tuning_curves_delayed_on_subset"][phase]]
+
+            # Rest excl. ON (Combine Neutral + OFF + Delayed)
+            tc_minus_on_base = np.vstack(neu_list_b + off_list_b + del_list_b)
+            tc_minus_on_curr = np.vstack(neu_list_c + off_list_c + del_list_c)
+            stab_minus_on = get_raw_pv_corr(
+                gaussian_filter1d(tc_minus_on_base, sigma=spatial_smooth_sigma, axis=1),
+                gaussian_filter1d(tc_minus_on_curr, sigma=spatial_smooth_sigma, axis=1),
+            )
+
+            # Rest excl. OFF (Combine Neutral + ON + Delayed)
+            tc_minus_off_base = np.vstack(neu_list_b + on_list_b + del_list_b)
+            tc_minus_off_curr = np.vstack(neu_list_c + on_list_c + del_list_c)
+            stab_minus_off = get_raw_pv_corr(
+                gaussian_filter1d(
+                    tc_minus_off_base, sigma=spatial_smooth_sigma, axis=1
+                ),
+                gaussian_filter1d(
+                    tc_minus_off_curr, sigma=spatial_smooth_sigma, axis=1
+                ),
+            )
+
+            # Rest excl. Neutral (Combine ON + OFF + Delayed)
+            tc_minus_neu_base = np.vstack(on_list_b + off_list_b + del_list_b)
+            tc_minus_neu_curr = np.vstack(on_list_c + off_list_c + del_list_c)
+            stab_minus_neu = get_raw_pv_corr(
+                gaussian_filter1d(
+                    tc_minus_neu_base, sigma=spatial_smooth_sigma, axis=1
+                ),
+                gaussian_filter1d(
+                    tc_minus_neu_curr, sigma=spatial_smooth_sigma, axis=1
+                ),
+            )
+
+            # Rest excl. Delayed ON (Combine Neutral + ON + OFF)
+            if has_delayed:
+                tc_minus_del_base = np.vstack(neu_list_b + on_list_b + off_list_b)
+                tc_minus_del_curr = np.vstack(neu_list_c + on_list_c + off_list_c)
+                stab_minus_del = get_raw_pv_corr(
+                    gaussian_filter1d(
+                        tc_minus_del_base, sigma=spatial_smooth_sigma, axis=1
+                    ),
+                    gaussian_filter1d(
+                        tc_minus_del_curr, sigma=spatial_smooth_sigma, axis=1
+                    ),
+                )
+
+            # Populate dataframe rows
             for val in stab_on:
                 data_rows.append(
                     {
                         "Phase": phase.upper(),
                         "Cell Type": on_label,
+                        "Stability (PV R)": val,
+                    }
+                )
+            for val in stab_neu:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": neutral_label,
                         "Stability (PV R)": val,
                     }
                 )
@@ -3368,69 +3756,574 @@ class TuningCurvesPlotter:
                         "Stability (PV R)": val,
                     }
                 )
+            for val in stab_all:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": all_label,
+                        "Stability (PV R)": val,
+                    }
+                )
+            for val in stab_minus_on:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": "Rest excl. ON",
+                        "Stability (PV R)": val,
+                    }
+                )
+            for val in stab_minus_off:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": "Rest excl. OFF",
+                        "Stability (PV R)": val,
+                    }
+                )
+            for val in stab_minus_neu:
+                data_rows.append(
+                    {
+                        "Phase": phase.upper(),
+                        "Cell Type": "Rest excl. Neutral",
+                        "Stability (PV R)": val,
+                    }
+                )
+            if has_delayed:
+                for val in stab_del:
+                    data_rows.append(
+                        {
+                            "Phase": phase.upper(),
+                            "Cell Type": delayed_label,
+                            "Stability (PV R)": val,
+                        }
+                    )
+                for val in stab_minus_del:
+                    data_rows.append(
+                        {
+                            "Phase": phase.upper(),
+                            "Cell Type": "Rest excl. Delayed ON",
+                            "Stability (PV R)": val,
+                        }
+                    )
 
         df_stab = pd.DataFrame(data_rows)
 
-        # 3. Create the Plot
-        fig, ax = plt.subplots(figsize=(10, 7))
+        # 3. Figure Layout Setup
+        fig, ax = plt.subplots(figsize=(16, 8))
 
-        # Draw grouped boxplot comparing ON vs OFF per Phase
+        # Construct hue sorting order dynamically based on feature detection flags
+        hue_order = [all_label, on_label, "Rest excl. ON"]
+        if has_delayed:
+            hue_order.extend([delayed_label, "Rest excl. Delayed ON"])
+        hue_order.extend(
+            [off_label, "Rest excl. OFF", neutral_label, "Rest excl. Neutral"]
+        )
+
+        palette_dict = {
+            all_label: "#4d4d4d",
+            on_label: "#ffcc00",
+            "Rest excl. ON": "#ffe680",
+            off_label: "#00ccff",
+            "Rest excl. OFF": "#80e5ff",
+            neutral_label: "#b3b3b3",
+            "Rest excl. Neutral": "#d9d9d9",
+        }
+        if has_delayed:
+            palette_dict[delayed_label] = "#ff6600"
+            palette_dict["Rest excl. Delayed ON"] = "#ff9955"
+
         sns.boxplot(
             data=df_stab,
             x="Phase",
             y="Stability (PV R)",
             hue="Cell Type",
-            palette={on_label: "#ffcc00", off_label: "#00ccff"},
+            hue_order=hue_order,
+            palette=palette_dict,
             ax=ax,
-            width=0.5,
+            width=0.75,
         )
 
-        # Define our targeted pairwise statistical comparisons using the dynamic labels
+        # =========================================================
+        # 4. CONFIGURING PAIRWISE STATISTICS (Option A + Option B)
+        # =========================================================
+        pairs = []
+
+        for phase_id in ["COND", "POST"]:
+            # --- OPTION A: Within-Phase Independent Pairings ---
+            pairs.extend(
+                [
+                    ((phase_id, on_label), (phase_id, "Rest excl. ON")),
+                    ((phase_id, off_label), (phase_id, "Rest excl. OFF")),
+                    ((phase_id, neutral_label), (phase_id, "Rest excl. Neutral")),
+                ]
+            )
+            if has_delayed:
+                pairs.append(
+                    ((phase_id, delayed_label), (phase_id, "Rest excl. Delayed ON"))
+                )
+
+            # --- OPTION B: Longitudinal Deviations vs Baseline Drift Floor ---
+            pairs.extend(
+                [
+                    (("TRAIN SPLIT", all_label), (phase_id, on_label)),
+                    (("TRAIN SPLIT", all_label), (phase_id, off_label)),
+                    (("TRAIN SPLIT", all_label), (phase_id, neutral_label)),
+                ]
+            )
+            if has_delayed:
+                pairs.append((("TRAIN SPLIT", all_label), (phase_id, delayed_label)))
+
+        # Validate categories exist in the dataframe slice
+        valid_groups = df_stab["Cell Type"].unique()
         pairs = [
-            (("COND", on_label), ("COND", off_label)),
-            (("POST", on_label), ("POST", off_label)),
+            p for p in pairs if p[0][1] in valid_groups and p[1][1] in valid_groups
         ]
 
-        # 4. Apply Statannotations
-        annotator = Annotator(
-            ax, pairs, data=df_stab, x="Phase", y="Stability (PV R)", hue="Cell Type"
-        )
-        # Using 'Mann-Whitney' as a non-parametric alternative to t-tests for bounded R values
-        annotator.configure(test="Mann-Whitney", text_format="star", loc="inside")
-        annotator.apply_and_annotate()
+        if len(pairs) > 0:
+            annotator = Annotator(
+                ax,
+                pairs,
+                data=df_stab,
+                x="Phase",
+                y="Stability (PV R)",
+                hue="Cell Type",
+                hue_order=hue_order,
+            )
+            annotator.configure(test="Mann-Whitney", text_format="star", loc="inside")
+            annotator.apply_and_annotate()
 
-        # Customization styling
         ax.set_title(
-            f"Place Map Representational Stability: ON vs OFF {around.upper()} Neurons",
-            fontsize=14,
+            f"Dual-Dimension Representational Stability Analysis ({around.upper()})",
+            fontsize=13,
             pad=15,
         )
         ax.set_xlabel(
-            f"Stability of Population coding for ON and OFF {around.capitalize()}\nwith respect to Habituation.",
-            fontsize=12,
+            "Experimental Phases (Brackets denote targeted Within-Phase or Longitudinal baseline tests)",
+            fontsize=11,
         )
         ax.set_ylabel("Population Vector Correlation (R)", fontsize=12)
         ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.set_ylim(-0.4, 1.55)
+
+        plt.tight_layout()
+        if path is not None:
+            fig.savefig(
+                os.path.join(path, f"dual_stability_stats_{around}.png"), dpi=300
+            )
+        plt.show()
+
+    def plot_pv_correlation_with_block_control(
+        self,
+        analysis_data: Dict[str, Dict[str, np.ndarray]],
+        spatial_smooth_sigma: float = 1.5,
+        use_speed_filter: bool = True,
+        path: Optional[str] = None,
+    ):
+        """Plots PV correlations across phases, using a middle-split block design
+
+        on the training phase to control for intra-phase drift without temporal leakage.
+
+        Assumes analysis_data contains the full spatial tuning matrices:
+            analysis_data['true'][phase] -> shape: (neurons, spatial_bins)
+            analysis_data['pred'][phase] -> shape: (neurons, spatial_bins)
+        """
+        from statannotations.Annotator import Annotator
+
+        from neuroencoders.utils.wrappers import get_raw_pv_corr
+
+        phase_build = "_training"
+        phases = ["cond", "post"]
+
+        # --- 1. Smooth the Full Active Phase Data ---
+        smoothed_data = {}
+        for key in ["true", "pred"]:
+            smoothed_data[key] = {}
+            for phase in [phase_build] + phases:
+                smoothed_matrix = gaussian_filter1d(
+                    analysis_data[key][phase], sigma=spatial_smooth_sigma, axis=1
+                )
+                # CRITICAL FIX: Replace lingering NaNs with 0
+                if np.isnan(smoothed_matrix).any():
+                    smoothed_matrix = np.nan_to_num(smoothed_matrix, nan=0.0)
+
+                smoothed_data[key][phase] = smoothed_matrix
+
+        data_rows = []
+
+        # --- 2. Calculate Intra-Phase Baseline Stability (Block Control) ---
+        # Instead of odd/even, we assume you have or can extract the first half and
+        # second half of the training block to measure clean, un-leaked representational drift.
+        # Note: If your dictionary already has 'true_first_half'/'true_second_half', use them.
+        # Otherwise, ensure they are extracted from your loader without interleaving.
+
+        # --- 2. Calculate Intra-Phase Baseline Stability (Unified Control Column) ---
+        if (
+            "true_first_half" in analysis_data
+            and phase_build in analysis_data["true_first_half"]
+        ):
+            tc_true_1st = gaussian_filter1d(
+                analysis_data["true_first_half"][phase_build],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+            tc_true_2nd = gaussian_filter1d(
+                analysis_data["true_second_half"][phase_build],
+                sigma=spatial_smooth_sigma,
+                axis=1,
+            )
+
+            if np.isnan(tc_true_1st).any():
+                tc_true_1st = np.nan_to_num(tc_true_1st, nan=0.0)
+            if np.isnan(tc_true_2nd).any():
+                tc_true_2nd = np.nan_to_num(tc_true_2nd, nan=0.0)
+        else:
+            raise KeyError("Please provide non-interleaved 'true_first_half' blocks.")
+
+        baseline_label = "INTRA-TRAIN (Block Split)"
+        intra_drift = get_raw_pv_corr(tc_true_1st, tc_true_2nd)
+
+        for val in intra_drift:
+            # A. True Baseline
+            data_rows.append(
+                {
+                    "Comparison": "True Stability",
+                    "Phase": baseline_label,
+                    "PV Correlation (R)": val,
+                }
+            )
+            # B. Pred Baseline (Assumed equal to true baseline drift)
+            data_rows.append(
+                {
+                    "Comparison": "Pred Stability",
+                    "Phase": baseline_label,
+                    "PV Correlation (R)": val,
+                }
+            )
+
+        # C. Model Fit Baseline (How well the model fits during non-remapping training)
+        intra_fit = get_raw_pv_corr(
+            smoothed_data["true"][phase_build], smoothed_data["pred"][phase_build]
+        )
+        for val in intra_fit:
+            data_rows.append(
+                {
+                    "Comparison": "Model Fit",
+                    "Phase": baseline_label,
+                    "PV Correlation (R)": val,
+                }
+            )
+
+        # --- 3. Compute Cross-Phase Stability and Fit ---
+        ref_true = smoothed_data["true"][phase_build]
+        ref_pred = smoothed_data["pred"][phase_build]
+
+        for phase in phases:
+            phase_label = phase.upper()
+
+            # A. True vs True (Stability relative to full baseline phase)
+            stab_true = get_raw_pv_corr(ref_true, smoothed_data["true"][phase])
+            for val in stab_true:
+                data_rows.append(
+                    {
+                        "Comparison": "True Stability",
+                        "Phase": phase_label,
+                        "PV Correlation (R)": val,
+                    }
+                )
+
+            # B. Pred vs Pred (Model Prediction Stability)
+            stab_pred = get_raw_pv_corr(ref_pred, smoothed_data["pred"][phase])
+            for val in stab_pred:
+                data_rows.append(
+                    {
+                        "Comparison": "Pred Stability",
+                        "Phase": phase_label,
+                        "PV Correlation (R)": val,
+                    }
+                )
+
+            # C. Model Fit (Pred vs True within active phase)
+            model_fit = get_raw_pv_corr(
+                smoothed_data["true"][phase], smoothed_data["pred"][phase]
+            )
+            for val in model_fit:
+                data_rows.append(
+                    {
+                        "Comparison": "Model Fit",
+                        "Phase": phase_label,
+                        "PV Correlation (R)": val,
+                    }
+                )
+
+        df_plot = pd.DataFrame(data_rows)
+
+        # --- 4. Plotting ---
+        fig, ax = plt.subplots(figsize=(12, 10))
+        palette = {
+            "True Stability": "#2ca02c",
+            "Pred Stability": "#9467bd",
+            "Model Fit": "#ff7f0e",
+        }
+
+        sns.boxplot(
+            data=df_plot,
+            x="Phase",
+            y="PV Correlation (R)",
+            hue="Comparison",
+            palette=palette,
+            ax=ax,
+        )
+        # Superimpose Stripplot
+        sns.stripplot(
+            data=df_plot,
+            x="Phase",
+            y="PV Correlation (R)",
+            hue="Comparison",
+            palette=palette,
+            dodge=True,
+            edgecolor="black",
+            linewidth=1,
+            alpha=0.7,
+            ax=ax,
+            marker="o",
+            size=10,
+        )
+
+        # --- 5. Pure Statistical Testing Against Block Control ---
+        baseline_label = "INTRA-TRAIN (Block Split)"
+        # --- 5. Corrected Statistical Testing Across All Categories ---
+        pairs = [
+            # Did biological tracking drop below normal session drift?
+            ((baseline_label, "True Stability"), ("COND", "True Stability")),
+            ((baseline_label, "True Stability"), ("POST", "True Stability")),
+            # Did model prediction stability drop below expected drift?
+            ((baseline_label, "Pred Stability"), ("COND", "Pred Stability")),
+            ((baseline_label, "Pred Stability"), ("POST", "Pred Stability")),
+            # Did the model's spatial fit get significantly worse during conditioning/post?
+        ]
+
+        annotator = Annotator(
+            ax,
+            pairs,
+            data=df_plot,
+            x="Phase",
+            y="PV Correlation (R)",
+            hue="Comparison",
+        )
+        annotator.configure(test="Mann-Whitney", text_format="star", loc="inside")
+        annotator.apply_and_annotate()
+
+        # --- 6. Styling ---
+        ax.set_title(
+            "PV Correlations Across Phases (Corrected for Block-Split Drift)",
+            fontsize=14,
+            pad=15,
+        )
+        ax.set_xlabel("Experimental Phase", fontsize=12)
+        ax.set_ylabel("Population Vector Correlation (R)", fontsize=12)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.set_ylim(-0.1, 1.2)
 
         plt.tight_layout()
 
         if path is not None:
-            fig.savefig(os.path.join(path, f"stability_stats_{around}.png"), dpi=300)
-            fig.savefig(os.path.join(path, f"stability_stats_{around}.svg"))
+            fig.savefig(
+                os.path.join(
+                    path, f"pv_block_stability_stats_speed_{use_speed_filter}.png"
+                ),
+                dpi=300,
+            )
+            fig.savefig(
+                os.path.join(
+                    path, f"pv_block_stability_stats_speed_{use_speed_filter}.svg"
+                )
+            )
 
         plt.show()
 
-        # Console summary output
-        for ph in ["COND", "POST"]:
-            on_mean = df_stab[
-                (df_stab["Phase"] == ph) & (df_stab["Cell Type"] == on_label)
-            ]["Stability (PV R)"].mean()
-            off_mean = df_stab[
-                (df_stab["Phase"] == ph) & (df_stab["Cell Type"] == off_label)
-            ]["Stability (PV R)"].mean()
-            print(
-                f"[{ph}] Mean Stability -> {on_label}: {on_mean:.3f} | {off_label}: {off_mean:.3f}"
+    def plot_pv_correlation_vs_training_baseline(
+        self,
+        analysis_data: Dict[str, Dict[str, np.ndarray]],
+        target_map: str = "true",  # Either 'true' or 'pred'
+        group_by: str = "Phase",  # Can be swapped out for 'manipe', 'nameExp', etc.
+        metadata: Optional[Dict[str, any]] = None,
+        spatial_smooth_sigma: float = 1.5,
+        path: Optional[str] = None,
+    ):
+        """Compares cross-phase PV stability (Training vs. Next Phases) against the
+
+        neutral baseline representational drift (Training 1st half vs. Training 2nd half).
+        """
+        from statannotations.Annotator import Annotator
+
+        from neuroencoders.utils.wrappers import get_raw_pv_corr
+
+        if target_map not in ["true", "pred"]:
+            raise ValueError("target_map must be either 'true' or 'pred'")
+
+        phase_build = "_training"
+        phases = ["cond", "post"]
+
+        meta_dict = metadata if metadata is not None else {}
+        data_rows = []
+
+        # --- 1. Establish the Neutral Control Baseline (Intra-Training Drift) ---
+        first_half_key = f"{target_map}_first_half"
+        second_half_key = f"{target_map}_second_half"
+
+        tc_train_1st = gaussian_filter1d(
+            analysis_data[first_half_key][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+        tc_train_2nd = gaussian_filter1d(
+            analysis_data[second_half_key][phase_build],
+            sigma=spatial_smooth_sigma,
+            axis=1,
+        )
+
+        # Patch NaNs to prevent computational failure
+        if np.isnan(tc_train_1st).any():
+            tc_train_1st = np.nan_to_num(tc_train_1st, nan=0.0)
+        if np.isnan(tc_train_2nd).any():
+            tc_train_2nd = np.nan_to_num(tc_train_2nd, nan=0.0)
+
+        # Compute internal baseline drift
+        baseline_label = "BASELINE (Intra-Train)"
+        intra_train_corr = get_raw_pv_corr(tc_train_1st, tc_train_2nd)
+
+        for val in intra_train_corr:
+            row = {"Phase": baseline_label, "PV Correlation (R)": val}
+            row.update(meta_dict)
+            data_rows.append(row)
+
+        # --- 2. Compute Cross-Phase Stability (Full Training vs. Next Phases) ---
+        tc_train_full = gaussian_filter1d(
+            analysis_data[target_map][phase_build], sigma=spatial_smooth_sigma, axis=1
+        )
+        if np.isnan(tc_train_full).any():
+            tc_train_full = np.nan_to_num(tc_train_full, nan=0.0)
+
+        for phase in phases:
+            if phase not in analysis_data[target_map]:
+                continue
+            phase_display = phase.upper()
+
+            tc_next_full = gaussian_filter1d(
+                analysis_data[target_map][phase], sigma=spatial_smooth_sigma, axis=1
             )
+            if np.isnan(tc_next_full).any():
+                tc_next_full = np.nan_to_num(tc_next_full, nan=0.0)
+
+            # Calculate cross-phase remapping relative to full training profile
+            cross_corr = get_raw_pv_corr(tc_train_full, tc_next_full)
+
+            for val in cross_corr:
+                row = {"Phase": phase_display, "PV Correlation (R)": val}
+                row.update(meta_dict)
+                data_rows.append(row)
+
+        df_plot = pd.DataFrame(data_rows)
+
+        if group_by not in df_plot.columns:
+            raise KeyError(
+                f"Group attribute '{group_by}' missing from metadata mapping."
+            )
+
+        # --- 3. Render the Comparison Visualization ---
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        palette = {
+            "true": "#2ca02c",
+            "pred": "#9467bd",
+            "Model Fit": "#ff7f0e",
+        }
+
+        sns.boxplot(
+            data=df_plot,
+            x="Phase",
+            y="PV Correlation (R)",
+            hue=group_by if group_by != "Phase" else None,
+            palette=None,
+            color=palette[target_map],
+            ax=ax,
+            width=0.5,
+        )
+        sns.stripplot(
+            data=df_plot,
+            x="Phase",
+            y="PV Correlation (R)",
+            hue=group_by if group_by != "Phase" else None,
+            palette=None,
+            color=palette[target_map],
+            dodge=False,
+            edgecolor="black",
+            linewidth=1,
+            alpha=0.7,
+            ax=ax,
+            marker="o",
+            size=10,
+        )
+
+        # --- 4. Statistical Verification: Are the active phases significantly below Baseline? ---
+        pairs = []
+        target_phases = [
+            p.upper() for p in phases if p.upper() in df_plot["Phase"].values
+        ]
+
+        for target_phase in target_phases:
+            if group_by != "Phase":
+                for grp in df_plot[group_by].unique():
+                    pairs.append(((baseline_label, grp), (target_phase, grp)))
+            else:
+                pairs.append((baseline_label, target_phase))
+
+        if len(pairs) > 0:
+            try:
+                annotator = Annotator(
+                    ax,
+                    pairs,
+                    data=df_plot,
+                    x="Phase",
+                    y="PV Correlation (R)",
+                    hue=group_by if group_by != "Phase" else None,
+                )
+                # Using 'less' as the alternative hypothesis explicitly checks if cross-phase R is UNDER baseline
+                annotator.configure(
+                    test="Mann-Whitney-Greater-Lower", text_format="star", loc="inside"
+                )
+                # Note: If your statannotations version expects standard 'Mann-Whitney', swap back to it
+                # and it will run a two-sided test.
+                annotator.apply_and_annotate()
+            except Exception as e:
+                # Fallback for older statannotations setups
+                try:
+                    annotator.configure(
+                        test="Mann-Whitney", text_format="star", loc="inside"
+                    )
+                    annotator.apply_and_annotate()
+                except Exception:
+                    print(f"Skipping annotations: {e}")
+
+        # --- 5. Custom Styling & File Save Handling ---
+        ax.set_title(
+            f"Loss of Population Vector correlation vs. Training ({target_map.upper()})",
+            fontsize=13,
+            pad=15,
+        )
+        ax.set_xlabel("Experimental Target Phase Block", fontsize=11)
+        ax.set_ylabel("Population Vector Correlation (R)", fontsize=11)
+        ax.grid(axis="y", linestyle="--", alpha=0.4)
+        ax.set_ylim(-0.1, 1.2)
+
+        plt.tight_layout()
+
+        if path is not None:
+            fn = f"cross_phase_vs_baseline_{target_map}_by_{group_by}"
+            fig.savefig(os.path.join(path, f"{fn}.png"), dpi=300)
+            fig.savefig(os.path.join(path, f"{fn}.svg"))
+
+        plt.show()
 
 
 def _compute_tuning_curves_for_result(
@@ -3444,11 +4337,13 @@ def _compute_tuning_curves_for_result(
     mode: str = "closest",
     **kwargs,
 ):
-    """Shared tuning-curve computation for a single results object."""
+    """Shared tuning-curve computation using non-interleaved half-splitting."""
 
     n_dims = kwargs.get("n_dims", 2)
     normalize = kwargs.get("normalize", "linear" in feature_name)
-    on = kwargs.get("on", None)
+    half = kwargs.get(
+        "half", None
+    )  # Replaces 'on'. Expected values: 'first', 'second', or None
 
     if suffix is None:
         suffix = f"_{results_obj.phase}" if results_obj.phase != "all" else "_training"
@@ -3469,23 +4364,9 @@ def _compute_tuning_curves_for_result(
     if data_helper is None:
         raise ValueError("Results object does not expose a data helper.")
 
-    feature = results_obj.resultsNN_phase_pkl[suffix].get(feature_name)[idWindow]
-    time = results_obj.resultsNN_phase_pkl[suffix]["times"][idWindow].flatten()
-    speedMask = results_obj.resultsNN_phase_pkl[suffix]["speedMask"][idWindow].flatten()
-
-    if on is not None:
-        print(f"Will use {on} indices only.")
-        posIndex = results_obj.resultsNN_phase_pkl[suffix]["posIndex"][
-            idWindow
-        ].flatten()
-        if on == "odd":
-            is_cond = posIndex % 2 != 0
-        elif on == "even":
-            is_cond = posIndex % 2 == 0
-        else:
-            raise ValueError(
-                f"Invalid value for 'on': {on}. Must be 'odd', 'even', or None."
-            )
+    feature = results_obj.resultsNN_phase[suffix].get(feature_name)[idWindow]
+    time = results_obj.resultsNN_phase[suffix]["times"][idWindow].flatten()
+    speedMask = results_obj.resultsNN_phase[suffix]["speedMask"][idWindow].flatten()
 
     try:
         if hasattr(data_helper, "get_spike_data"):
@@ -3507,17 +4388,20 @@ def _compute_tuning_curves_for_result(
         .threshold(0.5, "below")
         .time_support
     )
+
     data_to_use = spike_data.restrict(Ts(t=time).time_support).count(bin_size)
     features = (
         Tsd(t=time, d=feature)
         if len(feature.shape) == 1
         else TsdFrame(t=time, d=feature[:, :n_dims])
     )
+
     epochs_to_use = (
         not_nan_epoch.intersect(above_speed_epoch)
         if use_speed_filter
         else not_nan_epoch
     )
+
     bin_edges = kwargs.pop("nb_bins", 50 if len(feature.shape) == 1 else 30)
     range_feature = kwargs.pop(
         "feat_range", (0, 1) if len(feature.shape) == 1 else None
@@ -3530,9 +4414,29 @@ def _compute_tuning_curves_for_result(
         my_epoch = kwargs.get("epoch")
         epochs_to_use = epochs_to_use.intersect(my_epoch)
 
-    if on is not None:
-        epochs_cond = Tsd(t=time, d=is_cond).threshold(1, "aboveequal").time_support
-        epochs_to_use = epochs_to_use.intersect(epochs_cond)
+    # --- NO LEAKAGE CHRONOLOGICAL SPLIT ---
+    if half is not None:
+        print(f"Isolating the {half} half of the session timestamps to block leakage.")
+        median_time = np.median(time)
+        if half == "first":
+            is_half = time <= median_time
+        elif half == "second":
+            is_half = time > median_time
+        elif half == "odd" or half == "even":
+            posIndex = results_obj.resultsNN_phase[suffix]["posIndex"][
+                idWindow
+            ].flatten()
+            if half == "odd":
+                is_half = posIndex % 2 != 0
+            elif half == "even":
+                is_half = posIndex % 2 == 0
+        else:
+            raise ValueError(
+                f"Invalid value for 'half': {half}. Must be 'first', 'second', or None."
+            )
+
+        epochs_half = Tsd(t=time, d=is_half).threshold(1, "aboveequal").time_support
+        epochs_to_use = epochs_to_use.intersect(epochs_half)
 
     tuning_curves = compute_tuning_curves(
         data=data_to_use,
@@ -3550,13 +4454,9 @@ def _compute_tuning_curves_for_result(
     sigma = kwargs.pop("sigma", None)
     if sigma is None:
         if len(features.values.shape) == 1 or features.values.shape[1] == 1:
-            sigma = (0, 2)  # No smoothing across neurons, only across position bin_size
+            sigma = (0, 2)
         elif features.values.shape[1] == 2:
-            sigma = (
-                0,
-                2.5,
-                2.5,
-            )
+            sigma = (0, 2.5, 2.5)
         else:
             sigma = 1
 
@@ -3606,12 +4506,32 @@ def smooth_signal(signal, N):
     return signal
 
 
-def gaussian_filter_nan(a, sigma):
+def gaussian_filter_nan(a, sigma, mode="nearest", cval=0.0):
+    """
+    Smoothes a 1D or ND array ignoring NaNs using normalized convolution.
+
+    Parameters:
+        a (array_like): Input array to smooth.
+        sigma (scalar or sequence): Standard deviation for Gaussian kernel.
+        mode (str): Strategy for handling boundaries ('nearest', 'reflect', 'wrap').
+                    Use 'wrap' for circular tuning curves (e.g., orientation/direction).
+    """
     from scipy.ndimage import gaussian_filter
 
-    v = np.where(np.isnan(a), 0, a)
-    w = gaussian_filter((~np.isnan(a)).astype(float), sigma)
-    return gaussian_filter(v, sigma) / w
+    a = np.asarray(a)
+    nan_mask = np.isnan(a)
+
+    # Replace NaNs with 0 in-place on a copy to save memory/time
+    v = np.where(nan_mask, 0.0, a)
+
+    # Calculate the denominator (the smoothed validity mask)
+    w = gaussian_filter((~nan_mask).astype(float), sigma=sigma, mode=mode, cval=cval)
+
+    # Calculate the numerator
+    v_smoothed = gaussian_filter(v, sigma=sigma, mode=mode, cval=cval)
+
+    # Avoid Divide-by-Zero warnings; where w == 0, result becomes NaN
+    return np.divide(v_smoothed, w, out=np.full_like(a, np.nan), where=w > 0)
 
 
 def convert_spectrum_in_frequencies(f, t, data_spectro, **kwargs):

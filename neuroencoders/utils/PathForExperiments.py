@@ -32,17 +32,21 @@ def path_for_experiments(
         - 'name': List of mouse names
         - 'group': List of group classifications (for UMazePAG)
 
-     Currently used mice 29/06/2025
+     Currently used mice 30/06/2026
      -----------------------------------------------------------------------------------------------
      |      Known       |        MFB         |        UMazePAG        |    Reversal     |   Novel   |
      -----------------------------------------------------------------------------------------------
      |  M1336_known     |  M1336_MFB         |  M1186_PAG             |  M1199_reversal | M1230_Novel |
-     |  M1230_Known     |  M1117             |  M1199_PAG             |  M994_reversal  |             |
-     |                  |  M1281_MFB         |  M1182_PAG             |                 |             |
+     |  M1230_Known     |  M1117             |  M1199_PAG             |  M994_reversal  | M1161_Novel |
+     |  M1334_known     |  M1281_MFB         |  M1182_PAG             |                 | M1168_Novel |
      |                  |  M1168MFB          |  M994_PAG              |                 |             |
      |                  |  M1239MFB          |  M1239_PAG             |                 |             |
      |                  |  M1162_MFB         |  M1162_PAG             |                 |             |
      |                  |  M1199_MFB         |  M905_PAG              |                 |             |
+     |                  |  M1334_MFB         |  M1161_PAG             |                 |             |
+     |                  |  M1317_MFB         |  M906_PAG              |                 |             |
+     |                  |  M1257_MFB         |  M911_PAG              |                 |             |
+     |                  |                    |  M1124_PAG             |                 |             |
      -----------------------------------------------------------------------------------------------
 
     Exemple:
@@ -83,6 +87,9 @@ def path_for_experiments(
         "m1162_mfb",
         "m1199_mfb1",
         "m1199_mfb2",
+        "M1334MFB",
+        "M1317MFB",
+        "M1257MFB",
     ]
     UMazePAG_keys = [
         "m1186_pag",
@@ -92,10 +99,16 @@ def path_for_experiments(
         "m1239_PAG",
         "m1162_PAG",
         "m905_pag",
+        "M1161PAG",
+        "M1124PAG",
+        "M906_PAG",
+        "M911_PAG",
     ]
     Reversal_keys = ["m1199_reversal", "m994_reversal"]
-    Known_keys = ["m1336_known", "m1230_Known"]
-    Novel_keys = ["m1230_Novel"]
+    Known_keys = ["m1336_known", "m1230_Known", "m1334_known"]
+    # 1230 is neutral. 1334-1 is MFB, while 1334-2 seems to be PAG??? 1336 is MFB
+    Novel_keys = ["m1230_Novel", "m1168_novel", "m1161_novel"]
+    # They are all MFB
 
     # Base path directory
     pathdir = "/media/mickey/DataTheotime210/DimaERC2"
@@ -122,6 +135,16 @@ def path_for_experiments(
         "m1230_Known": f"neuroencoders_1021/_work/M1230_Known/{training_name}",
         "m1230_Novel": f"neuroencoders_1021/_work/M1230_Novel/{training_name}",
         "m905_pag": f"neuroencoders_1021/_work/M905_PAG/{training_name}",
+        "M1334MFB": f"neuroencoders_1021/_work/M1334_MFB/{training_name}",
+        "M1317MFB": f"neuroencoders_1021/_work/M1317MFB/{training_name}",
+        "M1257MFB": f"neuroencoders_1021/_work/M1257MFB/{training_name}",
+        "M1161PAG": f"neuroencoders_1021/_work/M1161PAG/{training_name}",
+        "M1124PAG": f"neuroencoders_1021/_work/M1124PAG/{training_name}",
+        "m1334_known": f"neuroencoders_1021/_work/M1334_Known/{training_name}",
+        "m1168_novel": f"neuroencoders_1021/_work/M1168_Novel/{training_name}",
+        "m1161_novel": f"neuroencoders_1021/_work/M1161_Novel/{training_name}",
+        "M906_PAG": f"neuroencoders_1021/_work/M906_PAG/{training_name}",
+        "M911_PAG": f"neuroencoders_1021/_work/M911_PAG/{training_name}",
     }
 
     # Define the second dictionary (subpython_REAL equivalent)
@@ -146,6 +169,16 @@ def path_for_experiments(
         "m1230_Known": "/media/nas6/ProjetERC1/Known/M1230/",
         "m1230_Novel": "/media/nas6/ProjetERC1/Novel/M1230/",
         "m905_pag": "/media/nas5/ProjetERC2/Mouse-905/20190404/PAGExp/_Concatenated/",
+        "M1334MFB": "/media/nas7/ProjetERC1/StimMFBWake/M1334/",
+        "M1317MFB": "/media/nas7/ProjetERC1/StimMFBWake/M1317/1/",
+        "M1257MFB": "/media/nas7/ProjetERC1/StimMFBWake/M1257/",
+        "M1161PAG": "/media/nas5/ProjetERC2/Mouse-K161/20201224/_Concatenated/",
+        "M1124PAG": "/media/nas5/ProjetERC2/Mouse-K124/20201120/_Concatenated/",
+        "m1334_known": "/media/nas7/ProjetERC1/Known/M1334/1",
+        "m1168_novel": "/media/nas6/ProjetERC1/Novel/M1168/",
+        "m1161_novel": "/media/nas6/ProjetERC1/Novel/M1161/",
+        "M911_PAG": "/media/nas5/ProjetERC2/Mouse-911/20190508/_Concatenated/",
+        "M906_PAG": "/media/nas5/ProjetERC2/Mouse-906/20190418/PAGExp/_Concatenated/",
     }
 
     # Select appropriate keys based on experiment name.lower()
@@ -436,17 +469,22 @@ def path_for_experiments(
                 prefix = ""
             session_type = str(Dir["manipe"][i]).lower()
             if "mfb" in session_type:
-                Dir["manipe"][i] = f"{prefix}MFB"
+                prefix = f"{prefix}MFB"
             elif "reversal" in session_type:
-                Dir["manipe"][i] = f"{prefix}Reversal"
+                prefix = f"{prefix}Reversal"
             elif "known" in session_type:
-                Dir["manipe"][i] = f"{prefix}Known"
+                prefix = f"{prefix}Known"
             elif "novel" in session_type:
-                Dir["manipe"][i] = f"{prefix}Novel"
+                prefix = f"{prefix}Novel"
             elif "umaze" in session_type or "pag" in session_type:
-                Dir["manipe"][i] = f"{prefix}PAG"
-            else:
-                Dir["manipe"][i] = f"{prefix}{session_type.capitalize()}"
+                prefix = f"{prefix}PAG"
+
+            if "known" in Dir["path"][i].lower():
+                prefix = f"{prefix}Known"
+            if "novel" in Dir["path"][i].lower():
+                prefix = f"{prefix}Novel"
+
+            Dir["manipe"][i] = prefix
 
         # Extract mouse name from path
         if "Mouse-" in path:

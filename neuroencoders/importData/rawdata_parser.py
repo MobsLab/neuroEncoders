@@ -1000,10 +1000,11 @@ def select_epochs(
                 [positionTime[0, 0], positionTime[-1, 0]]
             )  # if no sleeps, or session names, or hab take everything
 
-        maskToShow = ep.inEpochsMask(positionTime[:, 0], epochToShow)
+        positionTime = np.array(positionTime).reshape(-1)
+        maskToShow = ep.inEpochsMask(positionTime, epochToShow).flatten()
         maskToShowPRE = maskToShow.copy()  # copy the mask to show for pre selection
         behToShow = positions[maskToShow, :]
-        timeToShow = positionTime[maskToShow, 0]
+        timeToShow = positionTime[maskToShow]
         speedsToShow = speeds[maskToShow, :]
         speedMaskToShow = speedMask[maskToShow]
         speedMaskToShowPRE = speedMaskToShow
@@ -1012,8 +1013,8 @@ def select_epochs(
         sessionValue_toshow = sessionValue[maskToShow]
 
         if phase is not None:
-            maskToShowPRE = ep.inEpochsMask(positionTime[:, 0], epochToSelectPRE)
-            timeToShowPRE = positionTime[maskToShowPRE, 0]
+            maskToShowPRE = ep.inEpochsMask(positionTime, epochToSelectPRE).flatten()
+            timeToShowPRE = positionTime[maskToShowPRE]
             speeds[maskToShowPRE]
             speedMaskToShowPRE = speedMask[maskToShowPRE]
             xmin, xmax = timeToShowPRE[0], timeToShowPRE[-1]

@@ -1,18 +1,22 @@
 function extractTsd=extractTsd(folderData)
 % the function should receive the folder ending by a /
-    %%%%%%%%%%%--- load the tsd file to read tsds array ---%%%%%%%%%%%
-    addpath('./tsdPackage/')
+%%%%%%%%%%%--- load the tsd file to read tsds array ---%%%%%%%%%%%
+addpath('./tsdPackage/')
+cd(folderData)
+%%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%
 
-	%%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%
-
-	 try
-        SWR = importdata(strcat(folderData,'SWR.mat'));
+try
+    SWR = importdata('SWR.mat');
+catch
+    try
+        SWR = importdata('ripples.mat');
     catch
-        SWR = importdata(strcat(folderData,'ripples.mat'));
+        SWR = importdata('Ripples.mat');
     end
-	disp('Data Loaded.')
+end
+disp('Data Loaded.')
 
-    ripple = SWR.("ripples");
+ripple = SWR.("ripples");
 
-    save(strcat(folderData,'nnSWR.mat'),'ripple','-v7.3');
+save('nnSWR.mat','ripple','-v7.3');
 end

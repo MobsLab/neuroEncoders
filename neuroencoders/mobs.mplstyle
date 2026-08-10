@@ -104,6 +104,7 @@ text.hinting_factor: 8
 text.kerning_factor: 0
 text.antialiased: True
 text.parse_math: True
+svg.fonttype: "none"
 
 ## ***************************************************************************
 ## * LaTeX & MathText                                                        *

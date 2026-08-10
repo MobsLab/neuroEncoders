@@ -121,6 +121,7 @@ def getSpikesfromClu(
         "Spike_times": spikeTime,
         "Spike_positions": spikePositions,
         "Spike_speed": spikeSpeed,
+        "Spike_pos_index": spikePosIndex,
     }
     if savedata:
         cluster_save_path = os.path.join(projectPath.folder, "dataset", "clusterData")

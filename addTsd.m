@@ -37,9 +37,14 @@ catch
 end
 
 try
-    SWR=importdata(strcat(folderData,'SWR.mat'));
+    try
+        SWR=importdata(strcat(folderData,'SWR.mat'));
 
-    optional.tRipples = Range(SWR.tRipples, 's');
+        optional.tRipples = Range(SWR.tRipples, 's');
+    catch
+        SWR=importdata(strcat(folderData,'Ripples.mat'));
+        optional.tRipples = Range(SWR.tRipples, 's');
+    end
 catch
     disp('No SWR data found, skipping tRipples extraction.');
 end
