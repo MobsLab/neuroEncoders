@@ -2,8 +2,12 @@ import os
 from unittest.mock import MagicMock
 
 import numpy as np
+import scipy.io
+from pynapple import Tsd
 
+from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 from neuroencoders.utils.global_classes import ZONEDEF, DataHelper, Project, is_in_zone
+from neuroencoders.utils.wrappers import loadLFPData
 
 
 def test_project_init(temp_project_dir):
@@ -126,3 +130,81 @@ def test_project_paths(temp_project_dir):
     assert prj.experimentPath == os.path.join(project_dir, "TestExp")
     # Verify subfolders are set
     assert hasattr(prj, "experimentPath")
+
+
+def test_load_lfp_data_lazy(tmp_path):
+    session_dir = tmp_path / "session"
+    lfp_dir = session_dir / "LFPData"
+    channels_dir = session_dir / "ChannelsToAnalyse"
+    lfp_dir.mkdir(parents=True)
+    channels_dir.mkdir(parents=True)
+
+    scipy.io.savemat(channels_dir / "Bulb_deep.mat", {"channel": np.array([1])})
+
+    time = np.linspace(0.0, 4.0, 5, endpoint=False)
+    data = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
+    scipy.io.savemat(lfp_dir / "LFP1.mat", {"LFP": {"t": time * 1e4, "data": data}})
+
+    loaded, channels = loadLFPData(str(session_dir), lazy=True)
+
+    assert channels["Bulb_deep"] == "LFP1.mat"
+    signal = loaded["Bulb_deep"]
+    if hasattr(signal, "as_tsd"):
+        signal = signal.as_tsd()
+
+    assert isinstance(signal, Tsd)
+    assert np.allclose(signal.index.values[:3], time[:3])
+    assert np.allclose(signal.values[:3], data[:3])
+
+
+def test_waveform_comparator_lazy_memmap(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    xml_path = session_dir / "test.xml"
+    xml_path.write_text(
+        """
+        <root>
+          <spikeDetection>
+            <channelGroups>
+              <group>
+                <channels>
+                  <channel>0</channel>
+                  <channel>1</channel>
+                </channels>
+              </group>
+            </channelGroups>
+          </spikeDetection>
+          <acquisitionSystem>
+            <samplingRate>20000</samplingRate>
+            <nChannels>2</nChannels>
+          </acquisitionSystem>
+        </root>
+        """
+    )
+    dat_path = session_dir / "test.dat"
+    fil_path = session_dir / "test.fil"
+    dat_values = np.arange(20, dtype=np.int16).reshape(10, 2)
+    dat_values.tofile(dat_path)
+    fil_values = dat_values + 1
+    fil_values.tofile(fil_path)
+
+    project = Project(str(xml_path), datPath=str(dat_path), nameExp="Network")
+    comparator = WaveFormComparator.__new__(WaveFormComparator)
+    comparator.projectPath = project
+    comparator.samplingRate = 20000.0
+    comparator.number_timeSteps = dat_values.shape[0]
+    comparator.memmapData = None
+    comparator.memmapFil = None
+
+    comparator.load_memmap()
+    first_window = comparator.read_window(0.0, 0.0005, channels=[0, 1])
+    assert first_window.shape[0] > 0
+    assert first_window.shape[1] == 2
+    assert first_window[0, 0] == 0
+    assert np.allclose(first_window[:, 0], dat_values[: first_window.shape[0], 0])
+
+    filtered_window = comparator.read_window(
+        0.0, 0.0005, channels=[0], use_filtered=True
+    )
+    assert filtered_window.shape[1] == 1
+    assert filtered_window[0, 0] == 1

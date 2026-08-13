@@ -402,6 +402,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         """Helper to load a CSV result file and return as numpy array."""
         filepath = os.path.join(base_path, str(ws), f"{prefix}{suffix}.csv")
         if not os.path.exists(filepath):
+            self.logger.warning(f"{filepath} does not exist. Returning None.")
             return None
         try:
             data = pd.read_csv(filepath).to_numpy()[:, 1:]
@@ -1337,7 +1338,15 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 warnings.warn(
                     f"Session {sess_name} has no time epochs, skipping plotting and analysis for this session."
                 )
+                # remove this session from the axes to avoid empty plots
+                map_axs[i].set_xticks([])
+                map_axs[i].set_yticks([])
+                bar_axs[i].set_xticks([])
+                bar_axs[i].set_yticks([])
+                map_axs[i].axis("off")
+                bar_axs[i].axis("off")
                 continue  # skip empty sessions
+
             if sess_name.lower() == "cond":
                 after_cond = True
             # 1. Data Filtering
@@ -1356,6 +1365,19 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             nan_mask = ~np.any(np.isnan(pos), axis=1)
             pos = pos[nan_mask]
             total_time_points = len(pos)
+
+            if total_time_points <= 0:
+                warnings.warn(
+                    f"No valid position data found for session {sess_name}. Skipping occupancy calculation."
+                )
+                # remove this session from the axes to avoid empty plots
+                map_axs[i].set_xticks([])
+                map_axs[i].set_yticks([])
+                bar_axs[i].set_xticks([])
+                bar_axs[i].set_yticks([])
+                map_axs[i].axis("off")
+                bar_axs[i].axis("off")
+                continue  # skip empty sessions
 
             # 2. Occupancy Calculation and Z-Test for Proportions
             shock_mask = is_in_zone(pos, ZONEDEF[ZONELABELS.index("Shock")])

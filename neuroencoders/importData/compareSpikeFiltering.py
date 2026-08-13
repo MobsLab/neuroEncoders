@@ -17,6 +17,7 @@ from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochs
 from neuroencoders.importData.rawdata_parser import get_params
 from neuroencoders.simpleBayes.decode_bayes import Trainer
 from neuroencoders.utils.global_classes import Params, Project
+from neuroencoders.utils.wrappers import LazyDatReader
 
 ## Different strategies are used for spike filtering in the case of the NN and of spike sorting.
 # To make sure we end up with a fair comparison between the bayesian algorithm
@@ -461,13 +462,48 @@ class WaveFormComparator:
         return datPath, filPath, nChannels
 
     def load_memmap(self):
+        """Load lazy mmap readers for the raw dat and filtered files.
+
+        This keeps the file on disk and only reads the requested time windows instead of
+        materializing the entire recording array in memory.
+        """
         datPath, filPath, nChannels = self.get_data()
-        self.memmapData = np.memmap(
-            datPath, dtype=np.int16, mode="r", shape=(self.number_timeSteps, nChannels)
+        self.memmapData = LazyDatReader(
+            datPath,
+            n_channels=nChannels,
+            dtype=np.int16,
+            fs=self.samplingRate,
         )
-        self.memmapFil = np.memmap(
-            filPath, dtype=np.int16, mode="r", shape=(self.number_timeSteps, nChannels)
+        self.memmapFil = LazyDatReader(
+            filPath,
+            n_channels=nChannels,
+            dtype=np.int16,
+            fs=self.samplingRate,
         )
+
+    def read_window(self, start_s, stop_s, channels=None, use_filtered=False):
+        """Read a contiguous time window from the raw dat or fil stream."""
+        reader = self.memmapFil if use_filtered else self.memmapData
+        if reader is None:
+            self.load_memmap()
+            reader = self.memmapFil if use_filtered else self.memmapData
+        return reader.read_window(start_s, stop_s, channels=channels)
+
+    def iter_windows(
+        self, window_s=1.0, step_s=None, channels=None, use_filtered=False
+    ):
+        """Yield successive windows from the dat/fil file without loading the full recording."""
+        if step_s is None:
+            step_s = window_s
+        total_time = self.number_timeSteps / self.samplingRate
+        for start_s in np.arange(0.0, total_time, step_s):
+            stop_s = min(start_s + window_s, total_time)
+            yield self.read_window(
+                start_s,
+                stop_s,
+                channels=channels,
+                use_filtered=use_filtered,
+            )
 
     def get_batched_dataset(self, batch_size=None, shuffle=True):
         """

@@ -1,7 +1,7 @@
 import os
 import sys
 import warnings
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import mat73
 import numpy as np
@@ -9,6 +9,118 @@ import pandas as pd
 import scipy.io
 import scipy.signal
 from pynapple import IntervalSet, Ts, TsGroup, Tsd, TsdFrame
+
+
+class LazyLFPData:
+    """Lazy wrapper around a single LFP .mat file.
+
+    It keeps the public Tsd-like interface but defers the expensive `scipy.io.loadmat`
+    call until the object is actually used. This is useful for large recordings where
+    we do not want to load every LFP channel eagerly into memory.
+    """
+
+    def __init__(self, path: str, channel_name: str = "", time_units: str = "s"):
+        self.path = os.path.abspath(path)
+        self.channel_name = channel_name
+        self.time_units = time_units
+        self._tsd = None
+
+    def _materialize(self) -> Tsd:
+        if self._tsd is None:
+            loaded_lfp = scipy.io.loadmat(self.path)
+            time = loaded_lfp["LFP"]["t"][0][0].flatten().astype(float) / 1e4
+            data = loaded_lfp["LFP"]["data"][0][0].flatten().astype(float)
+            self._tsd = Tsd(time, data, time_units=self.time_units)
+        return self._tsd
+
+    @property
+    def index(self):
+        return self._materialize().index
+
+    @property
+    def values(self):
+        return self._materialize().values
+
+    def __len__(self):
+        return len(self._materialize())
+
+    def __array__(self, dtype=None):
+        arr = self._materialize().values
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        return np.asarray(arr)
+
+    def as_tsd(self):
+        return self._materialize()
+
+    def __getattr__(self, name):
+        return getattr(self._materialize(), name)
+
+
+class LazyDatReader:
+    """Lightweight mmap-backed reader for large .dat/.eeg recordings.
+
+    This keeps the file on disk and reads only the requested time window, which is
+    typically much more memory-efficient than creating a full in-memory array.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        n_channels: int,
+        dtype: type = np.int16,
+        fs: float = 20000.0,
+    ):
+        self.path = os.path.abspath(path)
+        self.n_channels = int(n_channels)
+        self.dtype = np.dtype(dtype)
+        self.fs = float(fs)
+        self._mmap = np.memmap(self.path, mode="r", dtype=self.dtype)
+        self.n_samples = self._mmap.size // self.n_channels
+
+    def read_window(self, start_s: float, stop_s: float, channels=None):
+        start_idx = max(0, int(start_s * self.fs))
+        stop_idx = min(self.n_samples, int(stop_s * self.fs))
+        if stop_idx <= start_idx:
+            return np.empty(
+                (0, len(channels) if channels is not None else self.n_channels)
+            )
+
+        row_start = start_idx * self.n_channels
+        row_stop = stop_idx * self.n_channels
+        data = self._mmap[row_start:row_stop].reshape(
+            stop_idx - start_idx, self.n_channels
+        )
+
+        if channels is not None:
+            if np.isscalar(channels):
+                return data[:, int(channels)]
+            data = data[:, list(channels)]
+        return data
+
+    def read_channel(
+        self, channel: int, start_s: float = 0.0, stop_s: Optional[float] = None
+    ):
+        if stop_s is None:
+            stop_s = self.n_samples / self.fs
+        return self.read_window(start_s, stop_s, channels=[channel])
+
+
+def read_dat_window(
+    path: str,
+    n_channels: int,
+    start_s: float,
+    stop_s: Optional[float] = None,
+    channels=None,
+    dtype: type = np.int16,
+    fs: float = 20000.0,
+):
+    """Read a time window from a raw binary recording without materializing the whole file."""
+    reader = LazyDatReader(path=path, n_channels=n_channels, dtype=dtype, fs=fs)
+    if stop_s is None:
+        stop_s = reader.n_samples / reader.fs
+    return reader.read_window(start_s, stop_s, channels=channels)
+
 
 """
 Wrappers should be able to distinguish between raw data or matlab processed data
@@ -1051,6 +1163,63 @@ def compute_spectro_from_matlab(path):
         print("MATLAB engine closed.")
 
 
+def loadLFPData(path: str, lazy: bool = False) -> Tuple[Dict[str, Tsd], Dict[str, str]]:
+    """
+    Extract the LFP data from the LFPData folder for each relevant Channel.
+
+    When ``lazy=True``, the underlying `.mat` files are deferred until a slice is
+    actually requested, which avoids eagerly allocating all LFP channels in memory.
+    """
+
+    from pathlib import Path
+
+    from scipy.io import loadmat
+
+    lfp_dir = os.path.join(path, "LFPData")
+    channels_to_analyse_dir = os.path.join(path, "ChannelsToAnalyse")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
+
+    if not os.path.exists(lfp_dir):
+        raise FileNotFoundError(f"The path {lfp_dir} doesn't exist; Exiting ...")
+
+    if not os.path.exists(channels_to_analyse_dir):
+        raise FileNotFoundError(
+            f"The path {channels_to_analyse_dir} doesn't exist; Exiting ..."
+        )
+
+    lfp_data = {}
+    lfp_channel = {}
+
+    mat_files = Path(channels_to_analyse_dir).glob("*.mat")
+
+    for mat_file in mat_files:
+        channel_name = mat_file.stem
+        loaded_file = loadmat(mat_file)
+        chan_number = int(loaded_file["channel"].flatten()[0])
+        lfp_file = Path(lfp_dir) / f"LFP{chan_number}.mat"
+
+        if not lfp_file.exists():
+            print(
+                f"Warning: LFP file for channel {chan_number} not found at {lfp_file}. Skipping."
+            )
+            continue
+
+        if lazy:
+            lfp_data[channel_name] = LazyLFPData(
+                str(lfp_file), channel_name=channel_name
+            )
+        else:
+            loaded_lfp = loadmat(lfp_file)
+            time = loaded_lfp["LFP"]["t"][0][0].flatten().astype(float) / 1e4
+            data = loaded_lfp["LFP"]["data"][0][0].flatten().astype(float)
+            lfp_data[channel_name] = Tsd(time, data, time_units="s")
+
+        lfp_channel[channel_name] = f"LFP{chan_number}.mat"
+
+    return lfp_data, lfp_channel
+
+
 ##########################################################################################################
 # TODO
 ##########################################################################################################
@@ -1108,51 +1277,39 @@ def loadHDCellInfo(path, index):
 
 
 def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision="int16"):
-    if type(channel) is not list:
-        f = open(path, "rb")
-        startoffile = f.seek(0, 0)
-        endoffile = f.seek(0, 2)
-        bytes_size = 2
-        n_samples = int((endoffile - startoffile) / n_channels / bytes_size)
-        n_samples / frequency
-        1 / frequency
-        f.close()
-        with open(path, "rb") as f:
-            data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]
-        timestep = np.arange(0, len(data)) / frequency
-        return Tsd(timestep, data, time_units="s")
-    elif type(channel) is list:
-        f = open(path, "rb")
-        startoffile = f.seek(0, 0)
-        endoffile = f.seek(0, 2)
-        bytes_size = 2
+    dtype = np.dtype(precision)
+    reader = LazyDatReader(path=path, n_channels=n_channels, dtype=dtype, fs=frequency)
+    data = reader.read_window(0.0, reader.n_samples / reader.fs, channels=channel)
 
-        n_samples = int((endoffile - startoffile) / n_channels / bytes_size)
-        n_samples / frequency
-        f.close()
-        with open(path, "rb") as f:
-            data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:, channel]
-        timestep = np.arange(0, len(data)) / frequency
+    if isinstance(channel, list):
+        timestep = np.arange(0, data.shape[0]) / frequency
         return TsdFrame(timestep, data, time_units="s")
+
+    timestep = np.arange(0, len(data)) / frequency
+    return Tsd(timestep, data, time_units="s")
 
 
 def loadBunch_Of_LFP(
     path, start, stop, n_channels=90, channel=64, frequency=1250.0, precision="int16"
 ):
-    bytes_size = 2
-    start_index = int(start * frequency * n_channels * bytes_size)
-    stop_index = int(stop * frequency * n_channels * bytes_size)
-    fp = np.memmap(
-        path, np.int16, "r", start_index, shape=(stop_index - start_index) // bytes_size
+    """Read a time-slice of a large raw binary recording without materializing the whole file."""
+    dtype = np.dtype(precision)
+    data = read_dat_window(
+        path,
+        n_channels=n_channels,
+        start_s=start,
+        stop_s=stop,
+        channels=channel,
+        dtype=dtype,
+        fs=frequency,
     )
-    data = np.array(fp).reshape(len(fp) // n_channels, n_channels)
 
-    if type(channel) is not list:
-        timestep = np.arange(0, len(data)) / frequency
-        return Tsd(timestep, data[:, channel], time_units="s")
-    elif type(channel) is list:
-        timestep = np.arange(0, len(data)) / frequency
-        return TsdFrame(timestep, data[:, channel], time_units="s")
+    if isinstance(channel, list):
+        timestep = np.arange(0, data.shape[0]) / frequency
+        return TsdFrame(timestep, data, time_units="s")
+
+    timestep = np.arange(0, len(data)) / frequency
+    return Tsd(timestep, data, time_units="s")
 
 
 def compute_matrix_correlation(matrix_A, matrix_B):

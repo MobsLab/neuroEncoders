@@ -103,6 +103,7 @@ def path_for_experiments(
         "M1124PAG",
         "M906_PAG",
         "M911_PAG",
+        "M1168_PAG",
     ]
     Reversal_keys = ["m1199_reversal", "m994_reversal"]
     Known_keys = ["m1336_known", "m1230_Known", "m1334_known"]
@@ -145,6 +146,7 @@ def path_for_experiments(
         "m1161_novel": f"neuroencoders_1021/_work/M1161_Novel/{training_name}",
         "M906_PAG": f"neuroencoders_1021/_work/M906_PAG/{training_name}",
         "M911_PAG": f"neuroencoders_1021/_work/M911_PAG/{training_name}",
+        "M1168_PAG": f"neuroencoders_1021/_work/M1168_PAG/{training_name}",
     }
 
     # Define the second dictionary (subpython_REAL equivalent)
@@ -179,6 +181,7 @@ def path_for_experiments(
         "m1161_novel": "/media/nas6/ProjetERC1/Novel/M1161/",
         "M911_PAG": "/media/nas5/ProjetERC2/Mouse-911/20190508/_Concatenated/",
         "M906_PAG": "/media/nas5/ProjetERC2/Mouse-906/20190418/PAGExp/_Concatenated/",
+        "M1168_PAG": "/media/nas6/ProjetERC2/Mouse-K168/20210122/_Concatenated",
     }
 
     # Select appropriate keys based on experiment name.lower()

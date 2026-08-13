@@ -4,6 +4,8 @@ The Project class is used to store the paths of the project, while the DataHelpe
 It also provides methods to compute the true target of interest, the distance to the wall, and the reference and xy coordinates.
 """
 
+from __future__ import annotations
+
 # Load libs
 import copy
 import json
@@ -17,7 +19,7 @@ os.environ.setdefault(
 import os.path
 import warnings
 from datetime import date
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 from warnings import warn
 
 import dill as pickle
@@ -45,6 +47,9 @@ from statannotations.Annotator import Annotator
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
 from neuroencoders.utils.management import get_git_info
+
+if TYPE_CHECKING:
+    from neuroencoders.utils.MOBS_Functions import Mouse_Results
 from neuroencoders.utils.viz_params import (
     MIDDLE_COLOR,
     SAFE_CENTER_COLOR,
@@ -2006,14 +2011,14 @@ class DataHelper(Project):
     def get_rem_epochs(self, force: bool = False, folder: Optional[str] = None):
         if (
             hasattr(self, "sleep_scoring")
-            and isinstance(self.sleep_scoring, TsGroup)
+            and isinstance(self.sleep_scoring, dict)
             and not force
         ):
-            return self.sleep_scoring["sws_epochs"]
+            return self.sleep_scoring["rem_epochs"]
         from neuroencoders.utils.wrappers import loadSleepScoring
 
         self.sleep_scoring = loadSleepScoring(self.folder if folder is None else folder)
-        return self.sleep_scoring["sws_epochs"]
+        return self.sleep_scoring["rem_epochs"]
 
     def get_spike_data(self, folder=None, add_to_attr=True, force=False) -> TsGroup:
         """
@@ -2036,6 +2041,69 @@ class DataHelper(Project):
             self.spikeData = spike_group
 
         return spike_group
+
+    def get_lfp_data(
+        self,
+        folder=None,
+        channel_type=None,
+        network_path=None,
+        add_to_attr=True,
+        force=False,
+    ) -> Dict:
+        """
+        Get LFP data from the DataHelper and store it as a dict for every relevant channel in ChannelsToAnalyse.
+        """
+        from neuroencoders.utils.wrappers import loadLFPData
+
+        alias_dict = {
+            "ripple": "dHPC_rip",
+            "ripples": "dHPC_rip",
+            "theta": "ThetaREM",
+            "respi": "Bulb_deep",
+            "delta": "PFCx_deltadeep",
+            "hpc": ["dHPC_rip", "dHPC_sup", "dHPC_deep", "nonrip"],
+            "pfc": [
+                "PFCx_deltadeep",
+                "PFCx_deltasup",
+                "PFCx_deep",
+                "PFCx_sup",
+                "PFCx_spindle",
+            ],
+        }
+
+        if (
+            hasattr(self, "lfpData")
+            and hasattr(self, "lfpChannels")
+            and isinstance(self.lfpData, dict)
+            and not force
+        ):
+            lfp_data = self.lfpData
+            channels = self.lfpChannels
+        else:
+            if folder is None:
+                folder = self.folder
+
+            try:
+                lfp_data, channels = loadLFPData(folder, lazy=True)
+            except FileNotFoundError:
+                lfp_data, channels = loadLFPData(network_path, lazy=True)
+            if add_to_attr:
+                self.lfpData = lfp_data
+                self.lfpChannels = channels
+
+        if channel_type is not None:
+            channel_type = alias_dict.get(channel_type.lower(), channel_type)
+            if not isinstance(channel_type, list):
+                channel_type = [channel_type]
+
+            filtered_lfp_data = {
+                ch: lfp_data[ch] for ch in channel_type if ch in lfp_data
+            }
+            if len(list(filtered_lfp_data.keys())) == 1:
+                return filtered_lfp_data[list(filtered_lfp_data.keys())[0]]
+            return filtered_lfp_data if filtered_lfp_data else lfp_data
+
+        return lfp_data
 
     def get_neuron_classifications(
         self,
@@ -3400,30 +3468,37 @@ class TuningCurvesPlotter:
             np.nan
         )  # Set flat neurons to NaN to avoid affecting normalization
         find_nans = np.isnan(matrix)
-        if method == "z-score":
-            # Safe Z-score normalization per neuron (row-wise)
-            mean_vals = np.nanmean(matrix, axis=1, keepdims=True)
-            std_val = np.nanstd(matrix, axis=1, keepdims=True)
-            fields = (matrix - mean_vals) / (std_val + 1e-8)
+        try:
+            if method == "z-score":
+                # Safe Z-score normalization per neuron (row-wise)
+                mean_vals = np.nanmean(matrix, axis=1, keepdims=True)
+                std_val = np.nanstd(matrix, axis=1, keepdims=True)
+                fields = (matrix - mean_vals) / (std_val + 1e-8)
 
-            # Plotting Setup for Z-Score
-            cmap = "RdBu_r"
-            v_lim = np.nanmin([np.nanpercentile(np.abs(fields), 99), 4])
-            norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
-            cb_label = "Z-Scored FR"
-        elif method == "minmax":
-            # Min-Max normalization per neuron (row-wise)
-            min_vals = np.nanmin(matrix, axis=1, keepdims=True)
-            max_vals = np.nanmax(matrix, axis=1, keepdims=True)
-            fields = (matrix - min_vals) / (max_vals - min_vals + 1e-8)
+                # Plotting Setup for Z-Score
+                cmap = "RdBu_r"
+                v_lim = np.nanmin([np.nanpercentile(np.abs(fields), 99), 4])
+                norm = mcolors.TwoSlopeNorm(vmin=-v_lim, vcenter=0, vmax=v_lim)
+                cb_label = "Z-Scored FR"
+            elif method == "minmax":
+                # Min-Max normalization per neuron (row-wise)
+                min_vals = np.nanmin(matrix, axis=1, keepdims=True)
+                max_vals = np.nanmax(matrix, axis=1, keepdims=True)
+                fields = (matrix - min_vals) / (max_vals - min_vals + 1e-8)
 
-            # Plotting Setup for Min-Max
-            cmap = "cmc.batlow"
-            norm = mcolors.TwoSlopeNorm(vmin=0, vcenter=np.nanmedian(fields), vmax=1)
-            cb_label = "Normalized Firing Rate (0-1)"
-        else:
+                # Plotting Setup for Min-Max
+                cmap = "cmc.batlow"
+                norm = mcolors.TwoSlopeNorm(
+                    vmin=0, vcenter=np.nanmedian(fields), vmax=1
+                )
+                cb_label = "Normalized Firing Rate (0-1)"
+            else:
+                raise ValueError(
+                    f"Unknown scaling method: {method}. Use 'z-score' or 'minmax'."
+                )
+        except Exception as e:
             raise ValueError(
-                f"Unknown scaling method: {method}. Use 'z-score' or 'minmax'."
+                f"Normalization failed. Check the input matrix for NaNs or constant rows. Method: {method}. Error: {e}"
             )
         fields[find_nans] = np.nan
 
@@ -4327,7 +4402,7 @@ class TuningCurvesPlotter:
 
 
 def _compute_tuning_curves_for_result(
-    results_obj,
+    results_obj: "Mouse_Results",
     suffix: Optional[str] = None,
     feature_name: str = "linearTrue",
     idWindow: int = 0,
@@ -4369,15 +4444,9 @@ def _compute_tuning_curves_for_result(
     speedMask = results_obj.resultsNN_phase[suffix]["speedMask"][idWindow].flatten()
 
     try:
-        if hasattr(data_helper, "get_spike_data"):
-            spike_data = data_helper.get_spike_data()
-        else:
-            spike_data = results_obj.get_spike_data()
+        spike_data = data_helper.get_spike_data()
     except FileNotFoundError:
-        if hasattr(data_helper, "get_spike_data"):
-            spike_data = data_helper.get_spike_data(folder=results_obj.network_path)
-        else:
-            spike_data = results_obj.get_spike_data(folder=results_obj.network_path)
+        spike_data = data_helper.get_spike_data(folder=results_obj.network_path)
 
     above_speed_epoch = Tsd(t=time, d=speedMask).threshold(1, "aboveequal").time_support
     not_nan_epoch = (
@@ -4469,11 +4538,17 @@ def _compute_tuning_curves_for_result(
         id_neurons = id_neurons[~under_thresh]
 
     if normalize:
-        tuning_curves.values = results_obj.normalize_tuning_curves(
-            tuning_curves.values,
-            method=kwargs.get("scaling_method", "minmax"),
-            return_cmap=kwargs.get("return_cmap", False),
-        )
+        try:
+            tuning_curves.values = results_obj.normalize_tuning_curves(
+                tuning_curves.values,
+                method=kwargs.get("scaling_method", "minmax"),
+                return_cmap=kwargs.get("return_cmap", False),
+            )
+        except ValueError:
+            warn(
+                f"Normalization failed for {results_obj.mouse_name} in {results_obj.phase}. Ensure that the tuning curves have valid values and that the specified method is appropriate."
+            )
+            tuning_curves.values = np.ones_like(tuning_curves.values) * np.nan
 
     return tuning_curves, id_neurons, spike_data, phase
 

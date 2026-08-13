@@ -109,6 +109,52 @@ EPOCH_MAPPING = {f"{k}_epoch": i for i, k in enumerate(ZONELABELS)}
 
 plt.style.use("neuroencoders.mobs")
 
+
+def _normalize_phase_name(phase: Optional[str]) -> str:
+    """Normalize phase aliases used across reactivation analyses.
+
+    This disambiguates active pre/post tests from pre/post sleep and keeps the
+    original phase names intact when they already match the canonical names.
+    """
+    if phase is None:
+        return ""
+    if not isinstance(phase, str):
+        return str(phase)
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", phase.strip().lower()).strip("_")
+    aliases = {
+        "pretest": "pre_test",
+        "testpre": "pre_test",
+        "test_pre": "pre_test",
+        "pre_test": "pre_test",
+        "posttest": "post_test",
+        "testpost": "post_test",
+        "test_post": "post_test",
+        "post_test": "post_test",
+        "presleep": "pre_sleep",
+        "sleeppre": "pre_sleep",
+        "pre_sleep": "pre_sleep",
+        "postsleep": "post_sleep",
+        "sleeppost": "post_sleep",
+        "post_sleep": "post_sleep",
+        "presleep_sws": "pre_sleep_sws",
+        "postsleep_sws": "post_sleep_sws",
+        "presleepsw": "pre_sleep_sws",
+        "postsleepsw": "post_sleep_sws",
+        "pre_sws": "pre_sleep_sws",
+        "post_sws": "post_sleep_sws",
+        "pre_sleep_sws": "pre_sleep_sws",
+        "post_sleep_sws": "post_sleep_sws",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _parse_session_key(session_key: str) -> tuple[str, str]:
+    """Split a session key into mouse name and manipulation label."""
+    if not isinstance(session_key, str) or "_" not in session_key:
+        return session_key, ""
+    mouse_name, manipe = session_key.rsplit("_", 1)
+    return mouse_name, manipe
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
 
@@ -2089,31 +2135,50 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         return windows, windows_values
 
     def get_epoch_interval(self, phase):
-        if "_" in phase:
-            phase = phase.strip("_")
-
+        phase_name = _normalize_phase_name(phase)
         return_dict = {
-            "training": (self.training, self.trainMask),
-            "testing": (self.testing, self.testMask),
-            "pre": (self.pre, self.preMask),
-            "hab": (self.hab, self.habMask),
-            "cond": (self.cond, self.condMask),
-            "post": (self.post, self.postMask),
-            "sleep": (self.sleep, self.sleepMask),
-            "presleep": (self.presleep, self.presleepMask),
-            "postsleep": (self.postsleep, self.postsleepMask),
-            "pre_sleep": (self.presleep, self.presleepMask),
-            "post_sleep": (self.postsleep, self.postsleepMask),
+            "training": (
+                getattr(self, "training", None),
+                getattr(self, "trainMask", None),
+            ),
+            "testing": (
+                getattr(self, "testing", None),
+                getattr(self, "testMask", None),
+            ),
+            # pre is both Habituation and PreTests merged together
+            "pre": (getattr(self, "pre", None), getattr(self, "preMask", None)),
+            "pre_test": (getattr(self, "pre", None), getattr(self, "preMask", None)),
+            "hab": (getattr(self, "hab", None), getattr(self, "habMask", None)),
+            "cond": (getattr(self, "cond", None), getattr(self, "condMask", None)),
+            "post": (getattr(self, "post", None), getattr(self, "postMask", None)),
+            "post_test": (getattr(self, "post", None), getattr(self, "postMask", None)),
+            "sleep": (getattr(self, "sleep", None), getattr(self, "sleepMask", None)),
+            "presleep": (
+                getattr(self, "presleep", None),
+                getattr(self, "presleepMask", None),
+            ),
+            "postsleep": (
+                getattr(self, "postsleep", None),
+                getattr(self, "postsleepMask", None),
+            ),
+            "pre_sleep": (
+                getattr(self, "presleep", None),
+                getattr(self, "presleepMask", None),
+            ),
+            "post_sleep": (
+                getattr(self, "postsleep", None),
+                getattr(self, "postsleepMask", None),
+            ),
         }
         if hasattr(self, "extinct") and hasattr(self, "extinctMask"):
             return_dict["extinction"] = (self.extinct, self.extinctMask)
 
-        if phase not in return_dict:
+        if phase_name not in return_dict:
             raise ValueError(
                 f"Phase '{phase}' not recognized. Available phases: {list(return_dict.keys())}"
             )
 
-        return return_dict[phase]
+        return return_dict[phase_name]
 
     def run_spike_alignment(self, **kwargs):
         """

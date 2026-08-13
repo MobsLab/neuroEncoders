@@ -54,6 +54,7 @@ mice_nb = [
     "M994_reversal",
     "M906_PAG",
     "M911_PAG",
+    "M1168_PAG",
 ]
 
 ####
@@ -121,6 +122,27 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
     transformer_result_dir = os.path.join(
         dir, nameExp + "_Transformer", "results", str(int(win_tmp * 1000))
     )
+    sleep_result_dir = os.path.join(
+        dir,
+        nameExp + "_Transformer",
+        "results_Sleep",
+        str(int(win_tmp * 1000)),
+        "PostSleep",
+    )
+    presleep_result_dir = os.path.join(
+        dir,
+        nameExp + "_Transformer",
+        "results_Sleep",
+        str(int(win_tmp * 1000)),
+        "PreSleep",
+    )
+    baselinesleep_result_dir = os.path.join(
+        dir,
+        nameExp + "_Transformer",
+        "results_Sleep",
+        str(int(win_tmp * 1000)),
+        "BaselineSleep",
+    )
 
     if (
         result_ready(main_result_dir, "")
@@ -144,6 +166,16 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 )
             )
             and not lstmAndTransfo
+        )
+        and (
+            not sleep
+            or (
+                result_ready(sleep_result_dir, "")
+                and (
+                    result_ready(presleep_result_dir, "")
+                    or result_ready(baselinesleep_result_dir, "")
+                )
+            )
         )
     ):
         print(f"featurePred+-{phase}.csv already exists in {dir}. Skipping...")
