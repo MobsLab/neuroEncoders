@@ -71,6 +71,19 @@ GROUPS_PALETTE = {
     "reversal": "xkcd:orange",
 }
 
+EPOCHS_PALETTE = {
+    "pre_sleep": "xkcd:light gray",
+    "pre_sleep_sws": "xkcd:gray",
+    "pre": "xkcd:light blue",
+    "hab": "xkcd:dark blue",
+    "cond": "red",
+    "post": "black",
+    "post_sleep": "xkcd:light green",
+    "post_sleep_sws": "xkcd:green",
+    "post_sleep_rem": "xkcd:purple",
+    "pre_sleep_rem": "xkcd:purple",
+}
+
 
 # Helper function to get significance stars based on p-value
 def get_pvalue_stars(p_value):

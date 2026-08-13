@@ -19,6 +19,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
 import seaborn as sns
 from matplotlib.cbook import boxplot_stats
 from pynapple import (
@@ -33,6 +34,7 @@ from pynapple import (
 from scipy.io import loadmat
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
+from sklearn.decomposition import FastICA
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -155,6 +157,59 @@ def _parse_session_key(session_key: str) -> tuple[str, str]:
         return session_key, ""
     mouse_name, manipe = session_key.rsplit("_", 1)
     return mouse_name, manipe
+
+
+def _summarize_reactivation_strengths(
+    rs_tsd, epochs: Dict[str, Any], event_intervals=None
+):
+    """Create a compact summary of reactivation strength across behavioral epochs."""
+    summary: Dict[str, float] = {}
+
+    def _safe_mean(interval):
+        if interval is None:
+            return np.nan
+        try:
+            values = np.asarray(rs_tsd.restrict(interval).values, dtype=float)
+        except Exception:
+            return np.nan
+        values = values[np.isfinite(values)]
+        return float(np.mean(values)) if values.size else np.nan
+
+    for key in (
+        "pre_test",
+        "pre",
+        "pre_sleep",
+        "cond",
+        "post_test",
+        "post",
+        "post_sleep",
+        "hab",
+        "training",
+        "testing",
+        "sleep",
+    ):
+        if key in epochs and epochs[key] is not None:
+            summary[key] = _safe_mean(epochs[key])
+
+    if "pre_test" in summary and "cond" in summary:
+        summary["cond_minus_pre_test"] = summary["cond"] - summary["pre_test"]
+    if "post_test" in summary and "cond" in summary:
+        summary["cond_minus_post_test"] = summary["cond"] - summary["post_test"]
+    if "pre_sleep" in summary and "post_sleep" in summary:
+        summary["sleep_delta"] = summary["post_sleep"] - summary["pre_sleep"]
+    if "cond" in summary and "pre_sleep" in summary:
+        summary["cond_minus_pre_sleep"] = summary["cond"] - summary["pre_sleep"]
+    if "cond" in summary and "post_sleep" in summary:
+        summary["cond_minus_post_sleep"] = summary["cond"] - summary["post_sleep"]
+
+    if event_intervals:
+        for name, interval in event_intervals.items():
+            if interval is not None:
+                summary[name] = _safe_mean(interval)
+
+    return summary
+
+
 # %% Info_LFP -> load the InfoLFP.mat file in a DataFrame with the LFPs' path
 
 
@@ -4465,15 +4520,6 @@ class Results_Loader(TuningCurvesPlotter):
 
         plt.show()
 
-    def plot_2d_tuning_curves_during_events_from_pickle(
-        self,
-        feature_x: str = "linear",
-        feature_y: str = "angular",
-        phase="cond",
-        which: Union[str, List[str]] = "ripples",
-    ):
-        pass
-
     @classmethod
     def from_dict_and_df(
         cls,
@@ -7839,6 +7885,14 @@ class Results_Loader(TuningCurvesPlotter):
                 )
             )
 
+            if (
+                mouse_tuning_curves is None
+                or np.nansum(mouse_tuning_curves.values) == 0
+            ):
+                warn(
+                    f"Warning: Tuning curves or spike data could not be computed for {mouse_label}. Adding NaN only."
+                )
+
             mouse_spike_data.set_info(
                 metadata={
                     "phase": [phase] * len(mouse_spike_data),
@@ -8202,6 +8256,29 @@ class Results_Loader(TuningCurvesPlotter):
         phase_build = "_training"
         phases = ["cond", "post"]
         all_phases = [phase_build] + phases
+
+        # remove all mouse_name that dont have each of all_phases in the results_df
+        if remove_mice is None:
+            mice_with_all_phases = set(
+                self.results_df.index.get_level_values("mouse_name")
+            )
+            for phase in all_phases:
+                if "_" in phase:
+                    phase = phase.split("_")[1]
+                mice_with_phase = set(
+                    self.results_df.xs(phase, level="phase").index.get_level_values(
+                        "mouse_name"
+                    )
+                )
+                mice_with_all_phases.intersection_update(mice_with_phase)
+            remove_mice = list(
+                set(self.results_df.index.get_level_values("mouse_name"))
+                - mice_with_all_phases
+            )
+            if remove_mice:
+                print(
+                    f"Removing mice that do not have all phases {all_phases}: {remove_mice}"
+                )
 
         fig, axs = plt.subplots(
             2, len(phases) + 1, figsize=(14, 10), sharex=True, sharey=True
@@ -9720,7 +9797,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def compute_kudrimoti_variance(
         self,
-        winMS=36,
+        winMS=100,
         task_phase: str = "cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
@@ -9744,9 +9821,11 @@ class Results_Loader(TuningCurvesPlotter):
                 continue
 
             try:
-                pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+                pre_test, _ = results.get_epoch_interval("pre_test")
+                pre_sleep, _ = results.get_epoch_interval("pre_sleep")
                 task_epoch, _ = results.get_epoch_interval(task_phase)
-                post_epoch, _ = results.get_epoch_interval("post_sleep")
+                post_test, _ = results.get_epoch_interval("post_test")
+                post_sleep, _ = results.get_epoch_interval("post_sleep")
             except Exception as e:
                 # Fallback wrapper if explicitly designated within your helper setup
                 print(
@@ -9812,8 +9891,8 @@ class Results_Loader(TuningCurvesPlotter):
                     else:
                         raise ValueError(f"Unknown subsleep: {subsleep}")
 
-                    pre_epoch = pre_epoch.intersect(subsleep_intervals)
-                    post_epoch = post_epoch.intersect(subsleep_intervals)
+                    pre_sleep = pre_sleep.intersect(subsleep_intervals)
+                    post_sleep = post_sleep.intersect(subsleep_intervals)
                 except AttributeError as e:
                     print(
                         f"Warning: DataHelper missing sub-epoch generator for '{subsleep}': {e}. Using raw phase."
@@ -9824,28 +9903,34 @@ class Results_Loader(TuningCurvesPlotter):
             q_matrix = spike_group.count(bin_size_sec)
 
             # 4. Restrict Q-matrices to their respective behavioral phases
-            q_pre = q_matrix.restrict(pre_epoch).values
+            q_pre_test = q_matrix.restrict(pre_test).values
+            q_pre_sleep = q_matrix.restrict(pre_sleep).values
             q_task = q_matrix.restrict(task_epoch).values
-            q_post = q_matrix.restrict(post_epoch).values
+            q_post_test = q_matrix.restrict(post_test).values
+            q_post_sleep = q_matrix.restrict(post_sleep).values
 
             # Filter out completely silent cells within these segments to avoid NaN covariances
             active_cells = (
-                (np.std(q_pre, axis=0) > 0)
+                (np.std(q_pre_test, axis=0) > 0)
+                & (np.std(q_pre_sleep, axis=0) > 0)
                 & (np.std(q_task, axis=0) > 0)
-                & (np.std(q_post, axis=0) > 0)
+                & (np.std(q_post_test, axis=0) > 0)
+                & (np.std(q_post_sleep, axis=0) > 0)
             )
 
             if np.sum(active_cells) < 4:
                 continue
 
-            q_pre = q_pre[:, active_cells]
+            q_pre_test = q_pre_test[:, active_cells]
+            q_pre_sleep = q_pre_sleep[:, active_cells]
             q_task = q_task[:, active_cells]
-            q_post = q_post[:, active_cells]
+            q_post_test = q_post_test[:, active_cells]
+            q_post_sleep = q_post_sleep[:, active_cells]
 
             # 5. Compute Cell-by-Cell Pearson Correlation Matrices
-            corr_pre = np.corrcoef(q_pre, rowvar=False)
+            corr_pre = np.corrcoef(q_pre_sleep, rowvar=False)
             corr_task = np.corrcoef(q_task, rowvar=False)
-            corr_post = np.corrcoef(q_post, rowvar=False)
+            corr_post = np.corrcoef(q_post_sleep, rowvar=False)
 
             # 6. Extract Upper Triangular Indices (excluding the identity self-correlation diagonal)
             iu = np.triu_indices(corr_pre.shape[0], k=1)
@@ -9879,9 +9964,25 @@ class Results_Loader(TuningCurvesPlotter):
                 {
                     "Mouse": mouse_name,
                     "Group": manipe,
-                    "EV": ev_val
-                    * 100,  # Scale to percentage to match your MATLAB output
+                    "EV": ev_val * 100,
                     "REV": rev_val * 100,
+                    "R_Task_PreTest": r_task_pre,
+                    "R_Task_PostTest": r_task_post,
+                    "R_Post_Pre": r_post_pre,
+                    "MeanRate_PreTest": float(np.mean(q_pre_test))
+                    if q_pre_test.size
+                    else np.nan,
+                    "MeanRate_Task": float(np.mean(q_task)) if q_task.size else np.nan,
+                    "MeanRate_PostTest": float(np.mean(q_post_test))
+                    if q_post_test.size
+                    else np.nan,
+                    "MeanRate_PreSleep": float(np.mean(q_pre_sleep))
+                    if q_pre_sleep.size
+                    else np.nan,
+                    "MeanRate_PostSleep": float(np.mean(q_post_sleep))
+                    if q_post_sleep.size
+                    else np.nan,
+                    "N_ActiveCells": int(np.sum(active_cells)),
                 }
             )
 
@@ -9889,7 +9990,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def plot_kudrimoti_results(
         self,
-        winMS=36,
+        winMS=100,
         task_phase="cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
@@ -9978,7 +10079,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def compute_ev_behavior_correlation(
         self,
-        winMS=36,
+        winMS=100,
         task_phase="cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
@@ -10368,7 +10469,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def plot_ev_behavior_correlation(
         self,
-        winMS=36,
+        winMS=100,
         task_phase="cond",
         zone: str = "Shock",
         subtask: Optional[str] = None,
@@ -10541,7 +10642,7 @@ class Results_Loader(TuningCurvesPlotter):
         plt.show()
 
     def compute_pca_reactivation(
-        self, winMS=36, template_period="cond", num_templates=2
+        self, winMS=100, template_period="cond", num_templates=2
     ):
         """Computes population reactivation strength (Peyrache et al. 2010 style)
 
@@ -10561,28 +10662,41 @@ class Results_Loader(TuningCurvesPlotter):
                 continue
 
             # 2. Extract Macro Phase Intervals
-            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            pre_epoch, _ = results.get_epoch_interval("pre_test")
+            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
             cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            post_epoch, _ = results.get_epoch_interval("post_test")
+            post_sleep, _ = results.get_epoch_interval("post_sleep")
             hab_epoch, _ = results.get_epoch_interval("hab")
 
             # Secondary physiological sub-epoch layers
             sws_epochs = results.DataHelper.get_sws_epochs()
+            rem_epochs = results.DataHelper.get_rem_epochs()
             ripples_epochs = results.DataHelper.get_ripples_epochs()
+            mov_epochs = results.DataHelper.get_mov_epochs()
 
             try:
                 freeze_epochs = results.DataHelper.get_freeze_epochs()
             except AttributeError:
                 freeze_epochs = IntervalSet(start=[], end=[])
 
+            try:
+                stim_epochs = results.DataHelper.get_stim_epochs(before=0.1, after=0.1)
+            except AttributeError:
+                stim_epochs = IntervalSet(start=[], end=[])
+
             # 3. Bin full session spike activity (Q-Matrix)
             q_tsd = spike_group.count(bin_size_sec)
 
             # 4. Map the requested Template Interval Configuration
             if template_period == "wake":
-                template_interval = cond_epoch  # Full task / conditioning wake block
+                template_interval = (
+                    pre_epoch.union(hab_epoch).union(cond_epoch).union(post_epoch)
+                )  # Full task / conditioning wake block
             elif template_period == "cond":
                 template_interval = cond_epoch
+            elif template_period == "condMov":
+                template_interval = cond_epoch.intersect(mov_epochs)
             elif template_period == "condFree":
                 template_interval = cond_epoch.intersect(freeze_epochs)
             elif template_period == "postRip":
@@ -10634,6 +10748,32 @@ class Results_Loader(TuningCurvesPlotter):
                 rs_templates[idx_t] = Tsd(t=q_tsd.index, d=rs_vector)
 
             # 7. Collect structural metadata dictionary package for this session slice
+            event_intervals = {
+                "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                "cond_move": cond_epoch.intersect(mov_epochs),
+                "cond_stim": cond_epoch.intersect(stim_epochs),
+                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                "post_sleep_sws": post_sleep.intersect(sws_epochs),
+                "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
+                "post_sleep_rem": post_sleep.intersect(rem_epochs),
+            }
+            template_summaries = {}
+            for t_idx, rs_tsd in rs_templates.items():
+                template_summaries[t_idx] = _summarize_reactivation_strengths(
+                    rs_tsd,
+                    {
+                        "pre_test": pre_epoch,
+                        "pre_sleep": pre_sleep,
+                        "cond": cond_epoch,
+                        "post_test": post_epoch,
+                        "post_sleep": post_sleep,
+                        "hab": hab_epoch,
+                    },
+                    event_intervals,
+                )
+
             all_session_data[f"{mouse_name}_{manipe}"] = {
                 "rs": rs_templates,
                 "pc_scores": pc_scores,
@@ -10641,15 +10781,30 @@ class Results_Loader(TuningCurvesPlotter):
                 "eigenvalues": eigenvalues[:n_comp],
                 "cell_ids": list(spike_group.keys()),
                 "q_tsd": q_tsd,
+                "summaries": template_summaries,
                 "epochs": {
-                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "pre_test": pre_epoch,
+                    "pre_sleep": pre_sleep,
+                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                    "pre": pre_epoch,
                     "hab": hab_epoch,
                     "cond": cond_epoch,
                     "cond_freeze": cond_epoch.intersect(freeze_epochs),
                     "cond_ripples": cond_epoch.intersect(ripples_epochs),
                     "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "cond_move": cond_epoch.intersect(mov_epochs),
+                    "cond_stim": cond_epoch.intersect(stim_epochs),
+                    "post_test": post_epoch,
+                    "post": post_epoch,
+                    "post_sleep": post_sleep,
+                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
                     "ripples": ripples_epochs,
+                    "sws": sws_epochs,
+                    "rem": rem_epochs,
+                    "mov": mov_epochs,
+                    "freeze": freeze_epochs,
+                    "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
+                    "post_sleep_rem": post_sleep.intersect(rem_epochs),
                 },
                 "positions": {
                     "x": results.DataHelper.fullBehavior["Positions"][:, 0],
@@ -10659,6 +10814,7 @@ class Results_Loader(TuningCurvesPlotter):
                         results.DataHelper.fullBehavior["Positions"][:, :2],
                     )[1].flatten(),
                 },
+                "results": results,
             }
 
         return all_session_data
@@ -10676,6 +10832,9 @@ class Results_Loader(TuningCurvesPlotter):
         edges = np.linspace(0, 1, bins + 1)
         hab_map = np.zeros((bins, bins))
         cond_map = np.zeros((bins, bins))
+        pre_epoch = session_dict["epochs"].get(
+            "pre_test", session_dict["epochs"].get("pre")
+        )
 
         for i in range(bins):
             for j in range(bins):
@@ -10697,9 +10856,7 @@ class Results_Loader(TuningCurvesPlotter):
 
                 # Extract mean RS values targeting this pixel coordinates frame
                 hab_map[i, j] = np.nanmean(
-                    rs_tsd.restrict(
-                        session_dict["epochs"]["hab"].intersect(intervals_xy)
-                    ).values
+                    rs_tsd.restrict(pre_epoch.intersect(intervals_xy)).values
                 )
                 cond_map[i, j] = np.nanmean(
                     rs_tsd.restrict(
@@ -10715,7 +10872,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def plot_pca_master_results(
         self,
-        winMS=36,
+        winMS=100,
         template_period="cond",
         num_templates=1,
         save_path=None,
@@ -10759,27 +10916,66 @@ class Results_Loader(TuningCurvesPlotter):
                 for t_idx in range(num_templates):
                     rs_tsd = data["rs"][t_idx]
                     epochs = data["epochs"]
+                    summary = data.get("summaries", {}).get(t_idx, {})
 
-                    # Pull mean configurations
                     m_pre = np.nanmean(rs_tsd.restrict(epochs["pre_sleep_sws"]).values)
-                    m_hab = np.nanmean(rs_tsd.restrict(epochs["hab"]).values)
+                    m_hab = np.nanmean(rs_tsd.restrict(epochs["pre_test"]).values)
                     m_cond = np.nanmean(rs_tsd.restrict(epochs["cond"]).values)
                     m_post = np.nanmean(
                         rs_tsd.restrict(epochs["post_sleep_sws"]).values
                     )
 
                     bar_rows.append(
-                        {"Session": s_key, "Epoch": "PreSleep", "Score": m_pre}
+                        {
+                            "Session": s_key,
+                            "Epoch": "PreSleep",
+                            "Score": m_pre,
+                            "Template": t_idx,
+                        }
                     )
                     bar_rows.append(
-                        {"Session": s_key, "Epoch": "FreeExplo", "Score": m_hab}
+                        {
+                            "Session": s_key,
+                            "Epoch": "FreeExplo",
+                            "Score": m_hab,
+                            "Template": t_idx,
+                        }
                     )
                     bar_rows.append(
-                        {"Session": s_key, "Epoch": "Learning", "Score": m_cond}
+                        {
+                            "Session": s_key,
+                            "Epoch": "Learning",
+                            "Score": m_cond,
+                            "Template": t_idx,
+                        }
                     )
                     bar_rows.append(
-                        {"Session": s_key, "Epoch": "PostSleep", "Score": m_post}
+                        {
+                            "Session": s_key,
+                            "Epoch": "PostSleep",
+                            "Score": m_post,
+                            "Template": t_idx,
+                        }
                     )
+                    if summary:
+                        for row in bar_rows[-4:]:
+                            row.update(
+                                {
+                                    k: v
+                                    for k, v in summary.items()
+                                    if k
+                                    in {
+                                        "cond_minus_pre_test",
+                                        "cond_minus_post_test",
+                                        "sleep_delta",
+                                        "cond_ripples",
+                                        "cond_freeze",
+                                        "cond_stim",
+                                        "cond_move",
+                                        "cond_no_ripples",
+                                    }
+                                }
+                            )
 
                     # Map spatial elements
                     h_map, c_map = self.map_reactivation_space(
@@ -10820,6 +11016,15 @@ class Results_Loader(TuningCurvesPlotter):
             ax0.set_ylabel("PC Reactivation Score", fontweight="bold")
             ax0.set_xlabel("")
             ax0.set_title("Global Assembly Reactivation Profile")
+            pairs = [
+                ("PreSleep", "FreeExplo"),
+                ("FreeExplo", "Learning"),
+                ("Learning", "PostSleep"),
+                ("PreSleep", "PostSleep"),
+            ]
+            annotator = Annotator(ax0, pairs, data=df_bars, x="Epoch", y="Score")
+            annotator.configure(test="t-test_paired", text_format="star", loc="inside")
+            annotator.apply_and_annotate()
 
             # Compute averaged matrices for 2D spatial layouts
             mean_hab_spatial = np.nanmean(np.array(spatial_hab_list), axis=0)
@@ -10870,6 +11075,144 @@ class Results_Loader(TuningCurvesPlotter):
                 )
             plt.show()
 
+    def summarize_reactivation_by_condition(
+        self,
+        winMS=100,
+        template_period="cond",
+        num_templates=2,
+        spike_data=True,
+        session_data: Optional[dict] = None,
+    ) -> pd.DataFrame:
+        """Return a compact dataframe comparing reactivation across groups and event windows."""
+        if session_data is None:
+            if spike_data:
+                session_data = self.compute_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+            else:
+                session_data = self.compute_latent_pca_reactivation(
+                    winMS=winMS,
+                    template_period=template_period,
+                    num_templates=num_templates,
+                )
+
+        rows = []
+        for session_key, data in session_data.items():
+            mouse_name, manipe = _parse_session_key(session_key)
+            for t_idx in range(num_templates):
+                summary = data.get("summaries", {}).get(t_idx, {})
+                if not summary:
+                    continue
+                row = {
+                    "Session": session_key,
+                    "Mouse": mouse_name,
+                    "Group": manipe,
+                    "Template": t_idx,
+                }
+                row.update(summary)
+                rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def plot_reactivation_condition_comparison(
+        self,
+        summary_df: Optional[pd.DataFrame] = None,
+        winMS=100,
+        template_period="cond",
+        num_templates=2,
+        spike_data=True,
+        save_path: Optional[str] = None,
+    ):
+        """Plot a group-wise comparison of reactivation summaries across conditions."""
+        if summary_df is None:
+            summary_df = self.summarize_reactivation_by_condition(
+                winMS=winMS,
+                template_period=template_period,
+                num_templates=num_templates,
+                spike_data=spike_data,
+            )
+
+        if summary_df.empty:
+            print("No reactivation summary data available.")
+            return
+
+        metric_candidates = [
+            "cond_minus_pre_test",
+            "cond_minus_post_test",
+            "sleep_delta",
+            "cond_ripples",
+            "cond_freeze",
+            "cond_stim",
+            "cond_move",
+            "cond_no_ripples",
+        ]
+        available_metrics = [
+            col for col in metric_candidates if col in summary_df.columns
+        ]
+        if not available_metrics:
+            print("No comparison metrics were found in the summary dataframe.")
+            return
+
+        fig, axes = plt.subplots(
+            1, len(available_metrics), figsize=(5 * len(available_metrics), 6)
+        )
+        if len(available_metrics) == 1:
+            axes = [axes]
+
+        for ax, metric in zip(axes, available_metrics):
+            sns.boxplot(
+                data=summary_df,
+                x="Group",
+                y=metric,
+                hue="Group",
+                palette={
+                    k: GROUPS_PALETTE.get(k, "#7F7F7F")
+                    for k in summary_df["Group"].unique()
+                },
+                ax=ax,
+                showfliers=False,
+            )
+            sns.stripplot(
+                data=summary_df,
+                x="Group",
+                y=metric,
+                hue="Group",
+                palette={
+                    k: GROUPS_PALETTE.get(k, "#7F7F7F")
+                    for k in summary_df["Group"].unique()
+                },
+                ax=ax,
+                dodge=False,
+                size=5,
+                alpha=0.7,
+                legend=False,
+            )
+            ax.set_title(metric.replace("_", " ").title())
+            ax.set_xlabel("Manipulation")
+            ax.set_ylabel("Reactivation difference")
+            ax.tick_params(axis="x", rotation=45)
+            ax.legend().remove()
+
+        fig.suptitle(
+            f"Group-wise reactivation summaries ({template_period}, {winMS} ms)",
+            fontsize=14,
+            fontweight="bold",
+        )
+        plt.tight_layout()
+        if save_path:
+            os.makedirs(save_path, exist_ok=True)
+            fig.savefig(
+                os.path.join(
+                    save_path,
+                    f"reactivation_condition_comparison_{template_period}.png",
+                ),
+                dpi=300,
+                bbox_inches="tight",
+            )
+        plt.show()
+
     def plot_pc_cell_weights_and_spatial_fields(
         self, session_dict, pc_idx=0, phase="cond"
     ):
@@ -10900,7 +11243,10 @@ class Results_Loader(TuningCurvesPlotter):
         bin_centers = (bins[:-1] + bins[1:]) / 2
 
         # Interpolate linearized position onto Q-matrix timestamps
-        lin_tsd = Tsd(t=pos_time, d=lin_pos).restrict(session_dict["epochs"][phase])
+        interp_lin_pos = np.interp(q_tsd.index, pos_time, lin_pos)
+        lin_tsd = Tsd(t=q_tsd.index, d=interp_lin_pos).restrict(
+            session_dict["epochs"][phase]
+        )
 
         # Spatial rate map array: [N_cells, N_spatial_bins]
         spatial_rate_maps = np.zeros((len(sort_idx), len(bins) - 1))
@@ -10969,7 +11315,7 @@ class Results_Loader(TuningCurvesPlotter):
         plt.show()
 
     def compute_assembly_zone_migration(
-        self, winMS=36, template_period="cond", num_templates=1
+        self, winMS=100, template_period="cond", num_templates=1
     ):
         """Calculates the specific mean reactivation strength within each ZONEDEF arena
 
@@ -11025,7 +11371,7 @@ class Results_Loader(TuningCurvesPlotter):
                     # 3. Calculate mean reactivation strength under different combined conditions
                     # Active exploration in this physical zone during Habituation
                     hab_zone_rs = np.nanmean(
-                        rs_tsd.restrict(epochs["hab"].intersect(zone_intervals)).values
+                        rs_tsd.restrict(epochs["pre"].intersect(zone_intervals)).values
                     )
 
                     # Active exploration in this physical zone during Conditioning
@@ -11054,7 +11400,7 @@ class Results_Loader(TuningCurvesPlotter):
 
         return pd.DataFrame(migration_rows)
 
-    def plot_assembly_migration(self, winMS=36, template_period="cond"):
+    def plot_assembly_migration(self, winMS=100, template_period="cond"):
         """Plots a comparison of assembly expression during Habituation vs Conditioning
 
         broken down by your physical ZONEDEF boundaries.
@@ -11086,11 +11432,17 @@ class Results_Loader(TuningCurvesPlotter):
             hue="Group",
             col="Zone",
             kind="point",
-            palette=GROUPS_PALETTE,
+            palette={
+                k: GROUPS_PALETTE.get(k, "#7F7F7F") for k in df_melted["Group"].unique()
+            },
             dodge=0.25,
-            markers=["o", "s", "D", "X", "*"][: len(df_melted["Group"].unique())],
-            linestyles=["-", "--", ":", "-.", "."][: len(df_melted["Group"].unique())],
             capsize=0.1,
+            markers=list(["o", "s", "D", "X", "*"] * 3)[
+                : len(df_melted["Group"].unique())
+            ],
+            linestyles=list(["-", "--", ":", "-.", ":"] * 3)[
+                : len(df_melted["Group"].unique())
+            ],
             errorbar="se",
             height=5,
             aspect=0.8,
@@ -11106,7 +11458,7 @@ class Results_Loader(TuningCurvesPlotter):
         )
         plt.show()
 
-    def plot_comprehensive_summary_matrix(self, winMS=36, save_path=None):
+    def plot_comprehensive_summary_matrix(self, winMS=100, save_path=None):
         """Generates a multi-panel production figure matching the complete
         3x4 macro dashboard of group-specific boxplots and robust behavior regressions.
         """
@@ -11250,7 +11602,10 @@ class Results_Loader(TuningCurvesPlotter):
                         x="EV",
                         y=metric_name,
                         hue="Group",
-                        palette=GROUPS_PALETTE,
+                        palette={
+                            k: GROUPS_PALETTE.get(k, "#7F7F7F")
+                            for k in df_corr["Group"].unique()
+                        },
                         s=100,
                         edgecolor="black",
                         alpha=0.85,
@@ -11334,7 +11689,7 @@ class Results_Loader(TuningCurvesPlotter):
 
     def plot_spatial_similarity_summary(
         self,
-        winMS=36,
+        winMS=100,
         template_period="cond",
         num_templates=1,
         save_path: Optional[str] = None,
@@ -11410,8 +11765,8 @@ class Results_Loader(TuningCurvesPlotter):
                 # Compute behavioral occupancy density grids
                 edges = np.linspace(0, 1, 21)
                 h_occ, _, _ = np.histogram2d(
-                    pos_tsd.restrict(epochs["hab"]).values[:, 0],
-                    pos_tsd.restrict(epochs["hab"]).values[:, 1],
+                    pos_tsd.restrict(epochs["pre"]).values[:, 0],
+                    pos_tsd.restrict(epochs["pre"]).values[:, 1],
                     bins=edges,
                 )
                 c_occ, _, _ = np.histogram2d(
@@ -11447,7 +11802,7 @@ class Results_Loader(TuningCurvesPlotter):
 
                         hab_val = np.nanmean(
                             rs_tsd.restrict(
-                                epochs["hab"].intersect(zone_intervals)
+                                epochs["pre"].intersect(zone_intervals)
                             ).values
                         )
                         cond_val = np.nanmean(
@@ -11538,7 +11893,9 @@ class Results_Loader(TuningCurvesPlotter):
             y="Delta_Score",
             hue="Group",
             order=ZONELABELS,
-            palette=GROUPS_PALETTE,
+            palette={
+                k: GROUPS_PALETTE.get(k, "#7F7F7F") for k in df_zones["Group"].unique()
+            },
             edgecolor="black",
             linewidth=1.5,
             errorbar="se",
@@ -11551,7 +11908,9 @@ class Results_Loader(TuningCurvesPlotter):
             y="Delta_Score",
             hue="Group",
             order=ZONELABELS,
-            palette=GROUPS_PALETTE,
+            palette={
+                k: GROUPS_PALETTE.get(k, "#7F7F7F") for k in df_zones["Group"].unique()
+            },
             size=5,
             jitter=0.15,
             edgecolor="black",
@@ -11601,7 +11960,7 @@ class Results_Loader(TuningCurvesPlotter):
         plt.show()
 
     def compute_latent_pca_reactivation(
-        self, winMS=36, template_period="cond", num_templates=2
+        self, winMS=100, template_period="cond", num_templates=2
     ):
         """Smarter full-session latent manager. Dynamically stitches together latent spaces
         from all behavioral phases (pre, hab, cond, post) to ensure continuous monitoring
@@ -11618,9 +11977,11 @@ class Results_Loader(TuningCurvesPlotter):
                 results.projectPath.experimentPath, "results"
             )
 
-            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
+            pre_epoch, _ = results.get_epoch_interval("pre")
             cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            post_epoch, _ = results.get_epoch_interval("post")
+            post_sleep, _ = results.get_epoch_interval("post_sleep")
             hab_epoch, _ = results.get_epoch_interval("hab")
 
             sws_epochs = results.DataHelper.get_sws_epochs()
@@ -11651,9 +12012,9 @@ class Results_Loader(TuningCurvesPlotter):
                 ):
                     pkl_data = results.resultsNN_phase_pkl[p_suffix]
                     if (
-                        "latent" in pkl_data
-                        and len(pkl_data["latent"]) >= idWindow + 1
-                        and pkl_data["latent"][idWindow] is not None
+                        "latent_output" in pkl_data
+                        and len(pkl_data["latent_output"]) >= idWindow + 1
+                        and pkl_data["latent_output"][idWindow] is not None
                         and "times" in results.resultsNN_phase[p_suffix]
                     ):
                         stitched_times.append(
@@ -11661,7 +12022,7 @@ class Results_Loader(TuningCurvesPlotter):
                                 idWindow
                             ].flatten()
                         )
-                        stitched_latents.append(pkl_data["latent"][idWindow])
+                        stitched_latents.append(pkl_data["latent_output"][idWindow])
                         continue
 
                 # Fallback: Read file dynamically from disk folder
@@ -11677,7 +12038,7 @@ class Results_Loader(TuningCurvesPlotter):
                             else:
                                 raise ValueError(f"Missing 'times' key in {pkl_path}")
 
-                            l_mat = temp_pkl.get("latent", None)
+                            l_mat = temp_pkl.get("latent_output", None)
                             if isinstance(l_mat, list):
                                 l_mat = np.array(l_mat)
 
@@ -11717,7 +12078,7 @@ class Results_Loader(TuningCurvesPlotter):
                                     f"Sleep file {pkl_path} missing 'times' key."
                                 )
 
-                            l_mat = temp_pkl.get("latent", None)
+                            l_mat = temp_pkl.get("latent_output", None)
                             if isinstance(l_mat, list):
                                 l_mat = np.array(l_mat)
 
@@ -11755,7 +12116,7 @@ class Results_Loader(TuningCurvesPlotter):
             elif template_period == "condFree":
                 template_interval = cond_epoch.intersect(freeze_epochs)
             elif template_period == "postRip":
-                template_interval = post_epoch.intersect(sws_epochs).intersect(
+                template_interval = post_sleep.intersect(sws_epochs).intersect(
                     ripples_epochs
                 )
             elif template_period == "condRip":
@@ -11785,28 +12146,61 @@ class Results_Loader(TuningCurvesPlotter):
             lat_full_norm = np.nan_to_num(lat_full_norm)
 
             rs_templates = {}
+            num_templates = min(num_templates, eigenvectors.shape[1])
             for idx_t in range(num_templates):
                 v_i = eigenvectors[:, idx_t]
                 score_t = np.dot(lat_full_norm, v_i)
                 rs_templates[idx_t] = Tsd(t=full_latent_tsd.index, d=score_t**2)
 
             # 8. Return structured metadata package
+            event_intervals = {
+                "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                "post_sleep_sws": post_sleep.intersect(sws_epochs),
+            }
+            template_summaries = {}
+            for idx_t, rs_tsd in rs_templates.items():
+                template_summaries[idx_t] = _summarize_reactivation_strengths(
+                    rs_tsd,
+                    {
+                        "pre_test": pre_epoch,
+                        "pre_sleep": pre_sleep,
+                        "cond": cond_epoch,
+                        "post_test": post_epoch,
+                        "post_sleep": post_sleep,
+                        "hab": hab_epoch,
+                    },
+                    event_intervals,
+                )
+
             all_session_data[f"{mouse_name}_{manipe}"] = {
                 "rs": rs_templates,
+                "summaries": template_summaries,
                 "epochs": {
-                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "pre_test": pre_epoch,
+                    "pre_sleep": pre_sleep,
+                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                    "pre": pre_epoch,
                     "hab": hab_epoch,
                     "cond": cond_epoch,
                     "cond_freeze": cond_epoch.intersect(freeze_epochs),
                     "cond_ripples": cond_epoch.intersect(ripples_epochs),
                     "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "post_test": post_epoch,
+                    "post": post_epoch,
+                    "post_sleep": post_sleep,
+                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
                     "ripples": ripples_epochs,
                 },
                 "positions": {
                     "x": results.DataHelper.fullBehavior["Positions"][:, 0],
                     "y": results.DataHelper.fullBehavior["Positions"][:, 1],
                     "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                    "linear": results.l_function(
+                        results.DataHelper.fullBehavior["Positions"][:, :2],
+                    )[1].flatten(),
                 },
             }
 
@@ -11814,21 +12208,22 @@ class Results_Loader(TuningCurvesPlotter):
 
     def compute_assembly_reactivation_advanced(
         self,
-        winMS=25,
+        winMS=100,
         template_period="cond",
         num_templates=3,
         calc_type="PCA",  # "PCA" or "ICA"
         keep_mua=False,
         keep_interneurons=True,
         force=False,
+        fig=False,
+        max_templates=5,
+        save_fig_path=None,
     ):
-        """Advanced assembly reactivation tracker replicating react_pca_ica_AG.
+        """Advanced assembly reactivation tracker replicating react_pca_ica_AG.py.
 
-        Supports PCA/ICA forks, neuron layer sub-filtering, and computes shuffling
-        controls alongside the Marčenko-Pastur noise floor.
+        Supports PCA/ICA forks, neuron layer sub-filtering, shuffling controls,
+        Marčenko-Pastur limits, and automated figure generation matching MATLAB output.
         """
-        from sklearn.decomposition import FastICA
-
         bin_size_sec = winMS / 1000.0
         all_session_data = {}
 
@@ -11845,8 +12240,6 @@ class Results_Loader(TuningCurvesPlotter):
             if len(spike_group) < 5:
                 continue
 
-            # Extract classification masks from your existing DataHelper structures
-            # (Assuming your pipeline logs 'neuroclass' or firing properties)
             try:
                 try:
                     neuron_types = results.DataHelper.get_neuron_classifications(
@@ -11857,18 +12250,17 @@ class Results_Loader(TuningCurvesPlotter):
                         folder=results.network_path, force=force
                     )
             except AttributeError:
-                # Fallback mock classification if array is missing from session file
                 warn(
-                    f"Neuron classification data missing for {mouse_name}. Defaulting to 'Pyramidal' for all units."
+                    f"Neuron classification data missing for {mouse_name}. Defaulting to 'Pyramidal'."
                 )
                 neuron_types = np.array(["Pyramidal"] * len(spike_group))
 
             # 2. Filter neuron vectors based on multiU and interN parameters
             valid_indices = []
             for idx, n_type in enumerate(neuron_types):
-                if "mua" in n_type.lower() and not keep_mua:
+                if "mua" in str(n_type).lower() and not keep_mua:
                     continue
-                if "interneuron" in n_type.lower() and not keep_interneurons:
+                if "interneuron" in str(n_type).lower() and not keep_interneurons:
                     continue
                 valid_indices.append(idx)
 
@@ -11876,14 +12268,16 @@ class Results_Loader(TuningCurvesPlotter):
                 continue
 
             valid_indices = np.array(valid_indices)
-
-            # Slice the TsGroup to isolate the requested single-unit sub-population
             filtered_spikes = TsGroup({i: spike_group[i] for i in valid_indices})
+            filtered_types = np.array(neuron_types)[valid_indices]
+            cell_labels = [f"Cell_{i}" for i in valid_indices]
 
             # 3. Extract behavioral intervals
-            pre_epoch, _ = results.get_epoch_interval("pre_sleep")
+            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
+            pre_epoch, _ = results.get_epoch_interval("pre_test")
             cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post_sleep")
+            post_epoch, _ = results.get_epoch_interval("post_test")
+            post_sleep, _ = results.get_epoch_interval("post_sleep")
             hab_epoch, _ = results.get_epoch_interval("hab")
 
             sws_epochs = results.DataHelper.get_sws_epochs()
@@ -11897,9 +12291,8 @@ class Results_Loader(TuningCurvesPlotter):
             # 4. Generate the main binned matrix (Q-Matrix)
             q_tsd = filtered_spikes.count(bin_size_sec)
 
-            # Map template period configuration
             if template_period == "wake":
-                template_interval = cond_epoch
+                template_interval = pre_epoch.union(cond_epoch).union(post_epoch)
             elif template_period == "cond":
                 template_interval = cond_epoch
             elif template_period == "condFree":
@@ -11918,32 +12311,25 @@ class Results_Loader(TuningCurvesPlotter):
             if q_template_raw.shape[0] < 10:
                 continue
 
-            # Replicating MATLAB's zscore(Qtemplate) normalization step
             mean_t = np.mean(q_template_raw, axis=0)
             std_t = np.std(q_template_raw, axis=0) + 1e-12
             q_template = (q_template_raw - mean_t) / std_t
 
             num_bins, num_neurons = q_template.shape
 
-            # ==========================================
-            # FORK A: PRINCIPAL COMPONENT ANALYSIS (PCA)
-            # ==========================================
+            # PCA vs ICA Fork
             if calc_type.upper() == "PCA":
-                # Generate cell-by-cell Pearson correlation matrix
                 corr_matrix = np.corrcoef(q_template, rowvar=False)
                 corr_matrix = np.nan_to_num(corr_matrix)
-                np.fill_diagonal(corr_matrix, 0)  # Drop diagonal dependencies
+                np.fill_diagonal(corr_matrix, 0)
 
-                # Compute eigenvalues and eigenvectors
                 eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
                 sort_idx = np.argsort(eigenvalues)[::-1]
                 eigenvalues = eigenvalues[sort_idx]
                 assemblies = eigenvectors[:, sort_idx]
 
-                # Calculate Marčenko-Pastur noise floor threshold limit
                 lambda_max = (1 + np.sqrt(num_neurons / num_bins)) ** 2
 
-                # Perform shuffling control by shuffling frames independently per neuron
                 shuffled_q = q_template.copy()
                 for col in range(num_neurons):
                     shuffled_q[:, col] = np.random.permutation(shuffled_q[:, col])
@@ -11953,48 +12339,39 @@ class Results_Loader(TuningCurvesPlotter):
                 shuff_values, _ = np.linalg.eigh(np.nan_to_num(shuff_corr))
                 percentile_shuff = np.percentile(shuff_values, 100)
 
-            # ==========================================
-            # FORK B: INDEPENDENT COMPONENT ANALYSIS (ICA)
-            # ==========================================
             elif calc_type.upper() == "ICA":
-                # Extract independent weights using FastICA
                 ica = FastICA(n_components=num_templates, random_state=42, max_iter=500)
                 ica.fit(q_template)
-                # assemblies shape: (n_neurons, n_components)
                 assemblies = ica.components_.T
-                eigenvalues = np.ones(num_templates)  # Standard placeholder
+                eigenvalues = np.ones(num_templates)
                 lambda_max, percentile_shuff = np.nan, np.nan
-
             else:
                 raise ValueError("calc_type must be either 'PCA' or 'ICA'")
 
-            # 6. Project full recording timeline onto the template matrices
-            # Standardize full session data vector stream
+            # 6. Projection onto session timeline
             q_full_normalized = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
                 np.std(q_tsd.values, axis=0) + 1e-12
             )
             q_full_normalized = np.nan_to_num(q_full_normalized)
 
             rs_templates = {}
+            num_templates = min(num_templates, assemblies.shape[1])
             for idx_t in range(num_templates):
                 v_i = assemblies[:, idx_t]
-
-                # Calculate projection vector stream using the linear outer product formulation
-                # react = zscore(Qf) * (v_i * v_i' - diag)
                 outer_product = np.outer(v_i, v_i)
                 np.fill_diagonal(outer_product, 0)
 
                 react_matrix = np.dot(q_full_normalized, outer_product)
                 rs_vector = np.sum(react_matrix * q_full_normalized, axis=1)
-                rs_vector = Tsd(t=q_tsd.times(), d=rs_vector)
+                rs_tsd = Tsd(t=q_tsd.times(), d=rs_vector)
 
                 mean_pre = np.mean(
-                    rs_vector.restrict(
+                    rs_tsd.restrict(
                         IntervalSet(q_tsd.time_support).intersect(pre_epoch)
                     ).values
                 )
                 mean_post = np.mean(
-                    rs_vector.restrict(
+                    rs_tsd.restrict(
                         IntervalSet(q_tsd.time_support).intersect(post_epoch)
                     ).values
                 )
@@ -12003,44 +12380,256 @@ class Results_Loader(TuningCurvesPlotter):
                     max(abs(mean_pre), abs(mean_post)) != max(mean_pre, mean_post)
                     and calc_type.upper() == "PCA"
                 ):
-                    rs_vector = rs_vector * -1.0
+                    rs_tsd = rs_tsd * -1.0
 
-                rs_templates[idx_t] = rs_vector
+                rs_templates[idx_t] = rs_tsd
 
-            try:
-                neuron_types[valid_indices]
-            except Exception:
-                print(
-                    f"could not create this lovely array with {neuron_types} and {valid_indices}"
+            # Position tracking data
+            pos_x = results.DataHelper.fullBehavior["Positions"][:, 0]
+            pos_y = results.DataHelper.fullBehavior["Positions"][:, 1]
+            pos_t = results.DataHelper.fullBehavior["positionTime"].flatten()
+
+            # 7. Automated Figure Generation
+            if fig:
+                session_id = f"{mouse_name}_{manipe}"
+
+                # FIG 1: Stem Plot for Assembly Weights
+                for idx_t in range(num_templates):
+                    if lambda_max is not None and eigenvalues[idx_t] < 0.9 * lambda_max:
+                        warn(
+                            f"Skipping template {idx_t + 1} for {mouse_name}: Eigenvalue below Marčenko-Pastur threshold."
+                        )
+                        break
+                    if idx_t >= max_templates:
+                        warn(
+                            f"Skipping template {idx_t + 1} for {mouse_name}: Exceeds max_templates limit of {max_templates}."
+                        )
+                        break
+                    fig1, ax1 = plt.subplots(figsize=(10, 4))
+                    w = assemblies[:, idx_t]
+                    x_axis = np.arange(len(w))
+                    mu_w, std_w = np.mean(w), np.std(w)
+
+                    colors = {
+                        "SUA_pyramidal": "#77AC30",
+                        "SUA_interneuron": "#0072BD",
+                        "MUA": "#D95319",
+                        "unclassified": "#7F7F7F",
+                    }
+                    for n_type in np.unique(filtered_types):
+                        m_idx = np.where(filtered_types == n_type)[0]
+                        c = colors.get(n_type, None)
+                        if c is None:
+                            for key in colors.keys():
+                                if n_type in key:
+                                    c = colors[key]
+                                    break
+
+                        marker, stem, base = ax1.stem(
+                            m_idx,
+                            w[m_idx],
+                            linefmt=c,
+                            markerfmt="o",
+                            label=n_type,
+                        )
+                        plt.setp(
+                            marker, markerfacecolor=c, markeredgecolor=c, markersize=5
+                        )
+                        plt.setp(stem, color=c)
+
+                    ax1.axhline(
+                        mu_w + 2 * std_w, color="r", linestyle="--", label="±2 SD"
+                    )
+                    ax1.axhline(mu_w - 2 * std_w, color="r", linestyle="--")
+                    ax1.set_xticks(x_axis)
+                    ax1.set_xticklabels(cell_labels, rotation=90, fontsize=6)
+                    ax1.set_ylabel("Weight")
+                    ax1.set_title(
+                        f"{session_id} | {calc_type} Template #{idx_t + 1} ({template_period})"
+                    )
+                    ax1.set_ylim([-0.55, 0.55])
+                    ax1.legend(loc="upper right")
+                    plt.tight_layout()
+                    if save_fig_path:
+                        fig1.savefig(
+                            f"{save_fig_path}/{session_id}_weight_PC{idx_t + 1}.png"
+                        )
+
+                # FIG 2 & 3: Epoch Comparison & Ripple-Triggered PETH
+                print(f"Generating epoch comparison plots for {session_id}...")
+                pre_sws_rs = [
+                    np.mean(rs.restrict(pre_sleep.intersect(sws_epochs)).values)
+                    for rs in rs_templates.values()
+                ]
+                hab_rs = [
+                    np.mean(rs.restrict(hab_epoch.union(pre_epoch)).values)
+                    for rs in rs_templates.values()
+                ]
+                cond_rs = [
+                    np.mean(rs.restrict(cond_epoch).values)
+                    for rs in rs_templates.values()
+                ]
+                post_sws_rs = [
+                    np.mean(rs.restrict(post_sleep.intersect(sws_epochs)).values)
+                    for rs in rs_templates.values()
+                ]
+                normalized_eigenvalues = eigenvalues / np.max(eigenvalues)
+
+                fig2, axes2 = plt.subplots(1, 2, figsize=(11, 4.5))
+
+                # Scatter Pre vs Post
+                scatter = axes2[0].scatter(
+                    pre_sws_rs,
+                    post_sws_rs,
+                    c=normalized_eigenvalues[:num_templates],
+                    alpha=0.8,
                 )
-                print(
-                    f"neuron types has shape {np.array(neuron_types).shape} and valid indices has length {np.array(valid_indices).shape}"
+                if len(pre_sws_rs) > 1:
+                    r_val, p_val = stats.pearsonr(pre_sws_rs, post_sws_rs)
+                    axes2[0].set_title(
+                        f"Pre vs Post SWS (r={r_val:.2f}, p={p_val:.3f})"
+                    )
+                axes2[0].plot(
+                    [
+                        min(pre_sws_rs + post_sws_rs),
+                        max(pre_sws_rs + post_sws_rs),
+                    ],
+                    [
+                        min(pre_sws_rs + post_sws_rs),
+                        max(pre_sws_rs + post_sws_rs),
+                    ],
+                    "k:",
+                )
+                axes2[0].set_xlabel("Reactivation (Pre-Sleep SWS)")
+                axes2[0].set_ylabel("Reactivation (Post-Sleep SWS)")
+                plt.colorbar(scatter, ax=axes2[0], label="Normalized Eigenvalue")
+
+                # Bar chart over epochs
+                epoch_names = ["PreSleep", "FreeExplo", "Learning", "PostSleep"]
+                means = [
+                    np.mean(pre_sws_rs),
+                    np.mean(hab_rs),
+                    np.mean(cond_rs),
+                    np.mean(post_sws_rs),
+                ]
+                sems = [
+                    stats.sem(pre_sws_rs) if len(pre_sws_rs) > 1 else 0,
+                    stats.sem(hab_rs) if len(hab_rs) > 1 else 0,
+                    stats.sem(cond_rs) if len(cond_rs) > 1 else 0,
+                    stats.sem(post_sws_rs) if len(post_sws_rs) > 1 else 0,
+                ]
+                axes2[1].bar(
+                    epoch_names,
+                    means,
+                    yerr=sems,
+                    color=["white", "#CAE62F", "#E60000", "black"],
+                    edgecolor="k",
+                    alpha=0.7,
+                    capsize=4,
+                )
+                axes2[1].set_ylabel("Reactivation Score")
+                axes2[1].set_title("Mean Reactivation Across Epochs")
+                plt.tight_layout()
+
+                if save_fig_path:
+                    fig2.savefig(f"{save_fig_path}/{session_id}_epoch_comparison.png")
+
+                # FIG 4: Spatial Maps (10x10 Maze Spatial Binning)
+                grid_hab = _compute_2d_spatial_reactivation(
+                    rs_templates[0], pos_x, pos_y, pos_t, hab_epoch.union(pre_epoch)
+                )
+                grid_cond = _compute_2d_spatial_reactivation(
+                    rs_templates[0], pos_x, pos_y, pos_t, cond_epoch
                 )
 
-            # Pack structured parameters dictionary
+                fig3, axes3 = plt.subplots(1, 3, figsize=(12, 3.8))
+                vmax = max(np.nanmax(grid_hab), np.nanmax(grid_cond))
+                vmin = min(np.nanmin(grid_hab), np.nanmin(grid_cond))
+
+                im0 = axes3[0].imshow(
+                    grid_hab.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
+                )
+                axes3[0].set_title("Habituation Map")
+                fig3.colorbar(im0, ax=axes3[0])
+
+                im1 = axes3[1].imshow(
+                    grid_cond.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
+                )
+                axes3[1].set_title("Conditioning Map")
+                fig3.colorbar(im1, ax=axes3[1])
+
+                diff_map = grid_cond - grid_hab
+                im2 = axes3[2].imshow(diff_map.T, origin="lower", cmap="bwr")
+                axes3[2].set_title("Cond - Hab Difference")
+                fig3.colorbar(im2, ax=axes3[2])
+
+                for ax in axes3:
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+
+                plt.tight_layout()
+                if save_fig_path:
+                    fig3.savefig(
+                        f"{save_fig_path}/{session_id}_spatial_reactivation.png"
+                    )
+
+            # 8. Store output dictionary
+            event_intervals = {
+                "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                "post_sleep_sws": post_sleep.intersect(sws_epochs),
+            }
+            template_summaries = {}
+            for idx_t, rs_tsd in rs_templates.items():
+                template_summaries[idx_t] = _summarize_reactivation_strengths(
+                    rs_tsd,
+                    {
+                        "pre_test": pre_epoch,
+                        "pre_sleep": pre_sleep,
+                        "cond": cond_epoch,
+                        "post_test": post_epoch,
+                        "post_sleep": post_sleep,
+                        "hab": hab_epoch,
+                    },
+                    event_intervals,
+                )
+
             all_session_data[f"{mouse_name}_{manipe}"] = {
                 "rs": rs_templates,
                 "weights": assemblies[:, :num_templates],
-                "neuron_labels": [f"Cell_{i}" for i in valid_indices],
-                "neuron_types": neuron_types[valid_indices],
+                "neuron_labels": cell_labels,
+                "neuron_types": filtered_types,
+                "spikes": filtered_spikes,
+                "lfp": results.DataHelper.get_lfp_data(
+                    channel_type="ripple", network_path=results.network_path
+                ),
+                "summaries": template_summaries,
                 "stats": {
                     "eigenvalues": eigenvalues[:num_templates],
                     "marcenko_pastur": lambda_max,
                     "shuffle_max": percentile_shuff,
                 },
                 "epochs": {
-                    "pre_sleep_sws": pre_epoch.intersect(sws_epochs),
+                    "pre_test": pre_epoch,
+                    "pre_sleep": pre_sleep,
+                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                    "pre": pre_epoch,
                     "hab": hab_epoch,
                     "cond": cond_epoch,
                     "cond_freeze": cond_epoch.intersect(freeze_epochs),
                     "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                    "post_sleep_sws": post_epoch.intersect(sws_epochs),
+                    "post_test": post_epoch,
+                    "post": post_epoch,
+                    "post_sleep": post_sleep,
+                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
                     "ripples": ripples_epochs,
                 },
                 "positions": {
-                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
-                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
-                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                    "x": pos_x,
+                    "y": pos_y,
+                    "time": pos_t,
                 },
             }
 
@@ -12151,6 +12740,38 @@ class Results_Loader(TuningCurvesPlotter):
             plt.tight_layout()
             plt.show()
 
+def _compute_2d_spatial_reactivation(
+    rs_tsd, pos_x, pos_y, pos_t, epoch_interval, bins=10
+):
+    """Helper to bin reactivation strength onto a 2D spatial maze grid."""
+    rs_restricted = rs_tsd.restrict(epoch_interval)
+    if len(rs_restricted) == 0:
+        return np.zeros((bins, bins))
+
+    rs_times = rs_restricted.times()
+    rs_vals = rs_restricted.values
+
+    # Interpolate x, y positions to match reactivation time bins
+    interp_x = np.interp(rs_times, pos_t, pos_x)
+    interp_y = np.interp(rs_times, pos_t, pos_y)
+
+    x_edges = np.linspace(0, 1, bins + 1)
+    y_edges = np.linspace(0, 1, bins + 1)
+
+    grid = np.zeros((bins, bins))
+    for i in range(bins):
+        for j in range(bins):
+            mask = (
+                (interp_x >= x_edges[i])
+                & (interp_x < x_edges[i + 1])
+                & (interp_y >= y_edges[j])
+                & (interp_y < y_edges[j + 1])
+            )
+            if np.any(mask):
+                grid[i, j] = np.nanmean(rs_vals[mask])
+            else:
+                grid[i, j] = np.nan
+    return grid
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):
     """

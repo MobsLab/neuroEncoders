@@ -464,7 +464,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 dim = getattr(self.params, "contrastive_dim", 128)
 
                 # This slice covers everything: Pos, HD, Speed, Thigmo
-                structure["latent"] = {
+                structure["latent_contrastive"] = {
                     "dim": dim,
                     "slice": (start_idx, end_idx),
                     "activation": "linear",
@@ -544,9 +544,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 loss_dict[name] = "mae"
                 loss_weights[name] = getattr(self.params, "speed_weight", 1)
 
-            elif name == "latent":
+            elif name == "latent_contrastive":
                 behav_structure = {
-                    k: v for k, v in self.target_structure.items() if k != "latent"
+                    k: v
+                    for k, v in self.target_structure.items()
+                    if k != "latent_contrastive"
                 }  # remove latent from the behavioral structure, as we want to predict the full range of coordinates for the contrastive loss
                 loss_dict[name] = ContrastiveRegressionLoss(
                     target_structure=behav_structure,
@@ -780,7 +782,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 if name == "pos_2d" and getattr(self.params, "GaussianHeatmap", False):
                     # GaussianHeatmap is already defined in setup_gaussian_heatmap
                     continue
-                elif name == "latent" and getattr(
+                elif name == "latent_contrastive" and getattr(
                     self.params, "contrastive_loss", False
                 ):
                     # we just need to add a layer norm
@@ -993,7 +995,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             outputs = {}
             for name, head_layer in self.heads.items():
                 out = head_layer(latent_output)
-                if name == "latent" and self.contrastive_temperature_layer is not None:
+                if (
+                    name == "latent_contrastive"
+                    and self.contrastive_temperature_layer is not None
+                ):
                     temp = self.contrastive_temperature_layer(out)
                     out = kops.concatenate([out, temp], axis=-1)
                 if name == "pos_2d" and "pos" in self.params.target.lower():
@@ -1074,7 +1079,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self.jit_compile = jit_compile
         self.inputs = self.inputsToSpikeNets + self.indices + [self.inputGroups]
         self.tmp_outputs = outputs.copy()
-        if "latent" in outputs:
+        if "latent_contrastive" in outputs:
             self.viz_encoder = tf.keras.Model(
                 inputs=self.inputs,
                 outputs=self.tmp_outputs["latent_output"],
@@ -1545,9 +1550,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         for x, y in viz_batch.as_numpy_iterator():
             viz_inputs.append(x)
             if "lin" in self.params.target.lower():
-                viz_linpos.append(y["latent"][:, 0])
+                viz_linpos.append(y["latent_contrastive"][:, 0])
             else:
-                viz_linpos.append(l_function(y["latent"][:, :2])[1])
+                viz_linpos.append(l_function(y["latent_contrastive"][:, :2])[1])
 
         if not isinstance(viz_inputs, list):
             # means we've one only one batch pass
@@ -2577,8 +2582,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             # latent targets are the 2D position for contrastive regression
             # TODO: ensure that contrastive regression is always wrt the 2D position
-            if "latent" in self.outNames:
-                targets_dict["latent"] = vals["pos"]
+            if "latent_contrastive" in self.outNames:
+                targets_dict["latent_contrastive"] = vals["pos"]
 
             if any(["outputCNN" in name for name in self.outNames]):
                 for g in range(self.params.nGroups):
@@ -3299,16 +3304,16 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             results["featurePred"] = np.concatenate(reconstructed_parts, axis=-1)
 
         # 3. Handle latent explicitly (not in reconstructed list because it's auxiliary)
-        if "latent" in preds:
+        if "latent_contrastive" in preds:
             latent_pred = (
-                preds["latent"].numpy()
-                if hasattr(preds["latent"], "numpy")
-                else preds["latent"]
+                preds["latent_contrastive"].numpy()
+                if hasattr(preds["latent_contrastive"], "numpy")
+                else preds["latent_contrastive"]
             )
             if self.learnable_contrastive_temperature and latent_pred.shape[-1] > 1:
                 results["latent_temperature"] = latent_pred[:, -1:]
                 latent_pred = latent_pred[:, :-1]
-            results["latent"] = latent_pred
+            results["latent_contrastive"] = latent_pred
 
         if "latent_output" in preds:
             latent_output = (
@@ -3514,7 +3519,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         print(f"Inferring values for {phase} dataset...")
         # dataset yields (inputs, targets)
         preds_dict = self.model.predict(dataset, verbose=1)
-        # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent": ...}
+        # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent_contrastive": ...}
 
         if "latent_output" not in preds_dict:
             latent_output = self._predict_latent_output(dataset, verbose=1)
@@ -3669,7 +3674,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Reconstruct full Y ground truth from individual target heads
             max_idx = 0
             for name, spec in self.target_structure.items():
-                if name == "latent":
+                if name == "latent_contrastive":
                     continue  # Skip latent for ground truth reconstruction
                 max_idx = max(max_idx, spec["slice"][1])
 
@@ -3677,7 +3682,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             batch_y_true = np.zeros((batch_size, max_idx), dtype=np.float32)
 
             for name, spec in self.target_structure.items():
-                if name == "latent":
+                if name == "latent_contrastive":
                     continue  # Skip latent for ground truth reconstruction
                 if name in targets:
                     start, end = spec["slice"]
@@ -3926,7 +3931,27 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             dataset = datasets["test"]
             # Infer
             print(f"Inferring {sleepName} values")
-            preds_dict = self.model.predict(dataset, verbose=1)
+            # modified to avoid OOM on GPU during long sessions.
+            preds_accum = {}
+            for batch in dataset:
+                x_inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
+                batch_preds = self.model(x_inputs, training=False)
+
+                if not isinstance(batch_preds, dict):
+                    batch_preds = {"output": batch_preds}
+
+                for k, v in batch_preds.items():
+                    if k not in preds_accum:
+                        preds_accum[k] = []
+                    # Immediately cast tensor to NumPy CPU array to release GPU memory
+                    preds_accum[k].append(
+                        v.numpy() if hasattr(v, "numpy") else np.array(v)
+                    )
+
+            # Concatenate batch predictions on system CPU RAM
+            preds_dict = {
+                k: np.concatenate(v_list, axis=0) for k, v_list in preds_accum.items()
+            }
 
             if "latent_output" not in preds_dict:
                 latent_output = self._predict_latent_output(dataset, verbose=1)
