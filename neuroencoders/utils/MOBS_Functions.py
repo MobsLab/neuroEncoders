@@ -12740,6 +12740,972 @@ class Results_Loader(TuningCurvesPlotter):
             plt.tight_layout()
             plt.show()
 
+    def plot_full_session_trace(
+        self,
+        all_session_data,
+        session_key,
+        template_idx=0,
+        sigma_bins=2,
+        high_weight_percentile=80,
+        time_window=None,
+        path=None,
+    ):
+        """Plots reactivation dynamics matching the classic 4-panel publication style (a-d).
+
+        Parameters
+        ----------
+        all_session_data : dict
+            Output dictionary from compute_pca_reactivation.
+        session_key : str
+            Session identifier key.
+        template_idx : int
+            Index of the target template/PC component (0-indexed).
+        sigma_bins : int
+            Gaussian smoothing kernel width (set to 0 or None for raw signal).
+        high_weight_percentile : float
+            Percentile threshold to define high-weight neurons (e.g. 80 = top 20%).
+        time_window : tuple or list, optional
+            (start_time, end_time) in seconds to zoom in on a specific period.
+        """
+
+        from neuroencoders.utils.viz_params import EPOCHS_PALETTE
+
+        if session_key not in all_session_data:
+            print(f"Session key '{session_key}' not found.")
+            return
+
+        # Extract session data
+        data = all_session_data[session_key]
+        rs_tsd: Tsd = data["rs"][template_idx]
+        q_tsd: Tsd = data.get("q_tsd", None)
+        eigenvectors = data.get("eigenvectors", None)
+        epochs: Dict[str, IntervalSet] = data["epochs"]
+
+        time_sec = rs_tsd.times("s")
+        dt = np.median(np.diff(time_sec)) if len(time_sec) > 1 else 1.0
+
+        if sigma_bins:
+            smoothed_rs = gaussian_filter1d(rs_tsd.values, sigma=sigma_bins)
+        else:
+            smoothed_rs = rs_tsd.values
+
+        if q_tsd is not None:
+            # Compute Firing Rates (Hz)
+            total_cells = q_tsd.shape[1]
+            fr_all = np.mean(q_tsd.values, axis=1) / dt
+
+            if eigenvectors is not None:
+                # 1. Separate High-Weight Cells vs. Population
+                pc_weights = eigenvectors[:, template_idx]
+                weight_thresh = np.percentile(
+                    np.abs(pc_weights), high_weight_percentile
+                )
+                high_weight_mask = np.abs(pc_weights) >= weight_thresh
+                num_hw_cells = int(np.sum(high_weight_mask))
+
+                if num_hw_cells > 0:
+                    fr_high_weight = (
+                        np.mean(q_tsd.values[:, high_weight_mask], axis=1) / dt
+                    )
+                else:
+                    fr_high_weight = fr_all
+            else:
+                fr_high_weight = fr_all
+                num_hw_cells = total_cells
+
+            # Optional Smoothing
+            if sigma_bins:
+                smoothed_fr_hw = gaussian_filter1d(fr_high_weight, sigma=sigma_bins)
+                smoothed_fr_all = gaussian_filter1d(fr_all, sigma=sigma_bins)
+            else:
+                smoothed_fr_hw = fr_high_weight
+                smoothed_fr_all = fr_all
+
+        # 2. Extract SPWR timestamps
+        ripples = epochs.get("ripples", None)
+        rip_centers = []
+        if ripples is not None and len(ripples) > 0:
+            rip_centers = (ripples.start + ripples.end) / 2.0
+
+        # 3. Apply Time Window Mask (if zoomed view is specified)
+        if time_window is not None:
+            t_start, t_end = time_window
+            time_mask = (time_sec >= t_start) & (time_sec <= t_end)
+            time_sec = time_sec[time_mask]
+            smoothed_rs = smoothed_rs[time_mask]
+            if q_tsd is not None:
+                smoothed_fr_hw = smoothed_fr_hw[time_mask]
+                smoothed_fr_all = smoothed_fr_all[time_mask]
+
+            if len(rip_centers) > 0:
+                rip_centers = rip_centers[
+                    (rip_centers >= t_start) & (rip_centers <= t_end)
+                ]
+
+        # 4. Construct 4-Panel Stacked Figure Layout
+        fig, axes = plt.subplots(
+            4 if q_tsd is not None else 2,
+            1,
+            figsize=(12, 6),
+            sharex=True,
+            gridspec_kw={
+                "height_ratios": [2.2, 0.6, 1.6, 1.6]
+                if q_tsd is not None
+                else [2.5, 0.8]
+            },
+        )
+        ax_a, ax_b, ax_c, ax_d = (
+            axes if q_tsd is not None else (axes[0], axes[1], None, None)
+        )
+
+        # --- Panel (a): Reactivation Strength ---
+        ax_a.plot(time_sec, smoothed_rs, color="black", linewidth=0.9)
+        ax_a.set_ylabel("React. strength", fontsize=10)
+        ax_a.text(
+            -0.04,
+            0.92,
+            "a",
+            transform=ax_a.transAxes,
+            fontsize=15,
+            fontweight="bold",
+        )
+        ax_a.spines["top"].set_visible(False)
+        ax_a.spines["right"].set_visible(False)
+
+        to_legend = {}
+        for epoch_name, interval in epochs.items():
+            if len(interval) > 0:
+                for start, stop in zip(interval.start, interval.end):
+                    if time_window is not None and (stop < t_start or start > t_end):
+                        continue
+                    color = EPOCHS_PALETTE.get(epoch_name, None)
+                    if color is None:
+                        continue
+                    start = max(start, t_start) if time_window is not None else start
+                    stop = min(stop, t_end) if time_window is not None else stop
+                    ax_a.axvspan(
+                        start,
+                        stop,
+                        color=color,
+                        alpha=0.15 if "sleep" in epoch_name else 0.1,
+                    )
+                    to_legend[epoch_name] = color
+
+        for k, v in to_legend.items():
+            ax_a.plot([], [], color=v, alpha=0.3, label=k.upper(), linewidth=6)
+
+        ax_a.legend()
+
+        # --- Panel (b): SPWR Occurrences ---
+        if len(rip_centers) > 0:
+            ax_b.eventplot(
+                rip_centers,
+                colors="crimson",
+                lineoffsets=0.5,
+                linelengths=0.85,
+                linewidths=1.2,
+            )
+        ax_b.set_yticks([])
+        ax_b.set_ylim(0, 1)
+        ax_b.text(
+            -0.04,
+            0.35,
+            "b",
+            transform=ax_b.transAxes,
+            fontsize=15,
+            fontweight="bold",
+        )
+        ax_b.text(
+            0.002,
+            0.3,
+            "SPWRs",
+            transform=ax_b.transAxes,
+            color="crimson",
+            fontweight="bold",
+            fontsize=10,
+        )
+        ax_b.spines["top"].set_visible(False)
+        ax_b.spines["right"].set_visible(False)
+        ax_b.spines["left"].set_visible(False)
+        ax_b.spines["bottom"].set_visible(False)
+
+        if q_tsd is not None and ax_c is not None and ax_d is not None:
+            # --- Panel (c): High-Weight Cells Firing Rate ---
+            ax_c.plot(time_sec, smoothed_fr_hw, color="#2b5c8f", linewidth=0.9)
+            ax_c.text(
+                -0.04,
+                0.92,
+                "c",
+                transform=ax_c.transAxes,
+                fontsize=15,
+                fontweight="bold",
+            )
+            ax_c.text(
+                0.005,
+                0.72,
+                f"High weight cells\n(n={num_hw_cells})",
+                transform=ax_c.transAxes,
+                color="#2b5c8f",
+                fontweight="bold",
+                fontsize=10,
+            )
+            ax_c.spines["top"].set_visible(False)
+            ax_c.spines["right"].set_visible(False)
+
+            # --- Panel (d): All Cells Firing Rate ---
+            ax_d.plot(time_sec, smoothed_fr_all, color="#555555", linewidth=0.9)
+            ax_d.set_xlabel("Time (s)", fontsize=11)
+            ax_d.text(
+                -0.04,
+                0.92,
+                "d",
+                transform=ax_d.transAxes,
+                fontsize=15,
+                fontweight="bold",
+            )
+            ax_d.text(
+                0.005,
+                0.72,
+                f"All cells\n(n={total_cells})",
+                transform=ax_d.transAxes,
+                color="#555555",
+                fontweight="bold",
+                fontsize=10,
+            )
+            ax_d.spines["top"].set_visible(False)
+            ax_d.spines["right"].set_visible(False)
+
+            # Align labels & formatting
+            fig.align_ylabels([ax_a, ax_c, ax_d])
+        plt.subplots_adjust(hspace=0.25)
+        plt.tight_layout()
+        if path is not None:
+            os.makedirs(path, exist_ok=True)
+            plt.savefig(
+                os.path.join(path, f"full_session_trace_{session_key}.png"),
+                dpi=300,
+                bbox_inches="tight",
+            )
+        plt.show()
+
+    def plot_cell_activity_around_ripples_by_pc(
+        self,
+        all_session_data,
+        session_key,
+        num_pcs=3,
+        peth_window=(-1.0, 1.0),
+        top_n_cells=5,
+        figsize=(10, 8),
+    ):
+        from matplotlib import gridspec
+
+        if session_key not in all_session_data:
+            print(f"Session {session_key} not found in provided data.")
+            return
+
+        session_data = all_session_data[session_key]
+
+        # 1. Reverse-engineer mouse_name and manipe to fetch raw spike data
+        # Assuming session_key format is "MouseName_Manipe"
+        mouse_name, manipe = session_key.rsplit("_", 1)
+        df = self.results_df.xs(mouse_name, level="mouse_name").xs(
+            manipe, level="manipe"
+        )
+        if df.empty:
+            print(f"Raw data for {session_key} not found in results_df.")
+            return
+
+        results: Mouse_Results = df.iloc[0].results
+        spike_group = results.DataHelper.get_spike_data()
+        lfp_data = results.DataHelper.get_lfp_data(
+            channel_type="ripple", network_path=results.network_path
+        )
+
+        # 2. Extract session metadata
+        ripples_epoch = session_data["epochs"]["ripples"]
+        valid_cell_ids = spike_group.keys()
+
+        for pc_idx in range(min(num_pcs, len(list(session_data["rs"].keys())))):
+            rs_tsd = session_data["rs"][pc_idx]
+            weights = session_data["eigenvectors"][:, pc_idx]
+
+            # 3. Find the exact ripple with the maximum Reactivation Strength
+            rs_during_ripples = rs_tsd.restrict(ripples_epoch)
+            if len(rs_during_ripples) == 0:
+                print(f"No reactivation during ripples for PC {pc_idx + 1}.")
+                continue
+
+            peak_time = rs_during_ripples.times()[np.argmax(rs_during_ripples.values)]
+            window_ep = IntervalSet(
+                start=peak_time + peth_window[0], end=peak_time + peth_window[1]
+            )
+
+            # 4. Sort cells by absolute weight contribution
+            sort_order = np.argsort(np.abs(weights))[::-1]
+            sorted_cell_ids = np.array(valid_cell_ids)[sort_order]
+            sorted_weights = weights[sort_order]
+
+            # 5. Extract data for the localized window
+            rs_window = rs_tsd.restrict(window_ep)
+            t_rs = rs_window.times() - peak_time
+            val_rs = rs_window.values
+
+            # 6. Build the Figure layout
+            fig = plt.figure(figsize=figsize)
+            gs = gridspec.GridSpec(2, 1, height_ratios=[1, 2.5], hspace=0.1)
+
+            # Panel A: Reactivation Strength Trace
+            ax_rs = fig.add_subplot(gs[0])
+            ax_rs.plot(t_rs, val_rs, color="#0072BD", linewidth=1.5)
+            ax_rs.axvline(
+                0, color="red", linestyle="--", alpha=0.7, label="Ripple Peak"
+            )
+            ax_rs.set_ylabel("Reactivation\nStrength")
+            ax_rs.set_title(
+                f"{session_key} | PC {pc_idx + 1} Reactivation at Peak Ripple"
+            )
+            ax_rs.set_xlim(peth_window)
+            ax_rs.set_xticks([])  # Hide x-ticks for top panel
+            ax_rs.legend(loc="upper right")
+            ax_rs.spines["top"].set_visible(False)
+            ax_rs.spines["right"].set_visible(False)
+            ax_rs.spines["bottom"].set_visible(False)
+
+            # Panel B: Sorted Spike Raster
+            ax_raster = fig.add_subplot(gs[1])
+
+            # Plot each cell's spikes
+            for y_pos, cell_id in enumerate(sorted_cell_ids):
+                spikes = spike_group[cell_id].restrict(window_ep).times() - peak_time
+
+                # Highlight top N contributing cells in red, others in black
+                color = "#D95319" if y_pos < top_n_cells else "black"
+                lw = 1.2 if y_pos < top_n_cells else 0.8
+
+                if len(spikes) > 0:
+                    ax_raster.vlines(
+                        spikes,
+                        ymin=y_pos - 0.4,
+                        ymax=y_pos + 0.4,
+                        color=color,
+                        linewidth=lw,
+                    )
+
+            ax_raster.axvline(0, color="red", linestyle="--", alpha=0.3)
+            ax_raster.set_xlim(peth_window)
+            ax_raster.set_ylim(-1, len(sorted_cell_ids))
+            ax_raster.set_xlabel("Time from ripple peak (s)")
+            ax_raster.set_ylabel("Cell # (Sorted by PC Weight)")
+
+            # Invert Y-axis so top contributors are at the top of the raster plot
+            ax_raster.invert_yaxis()
+
+            ax_raster.spines["top"].set_visible(False)
+            ax_raster.spines["right"].set_visible(False)
+
+            plt.tight_layout()
+            plt.show()
+
+    def plot_cell_activity_around_events(
+        self,
+        all_session_data,
+        session_key,
+        event_type="ripples",  # "ripples", "delta", or "spindles"
+        epoch="cond",  # e.g., "cond", "pre_sleep_sws", "post_sleep_sws", or IntervalSet
+        max_events=3,  # Maximum number of top events to display
+        num_pcs=2,  # Number of PCs to overlay
+        top_cells_per_pc=10,  # Top N cells highlighted per PC
+        peth_window=(-0.25, 0.25),  # Temporal window around event center (seconds)
+        figsize=(14, 9),
+    ):
+        """Generates multi-event alignment panels (Ripples, Delta Waves, or Spindles).
+
+        Restricts event detection to a specific epoch, selects the top `max_events` highest
+        amplitude events, overlays Reactivation Strength (RS) traces for multiple PCs, and
+        plots top contributing cells grouped sequentially by PC (cells can appear twice if
+        in top N for multiple PCs).
+        """
+        from matplotlib import gridspec
+
+        if session_key not in all_session_data:
+            print(f"Session '{session_key}' not found in all_session_data.")
+            return
+
+        # 1. Reverse-engineer session key to fetch raw Mouse_Results from results_df
+        mouse_name, manipe = session_key.rsplit("_", 1)
+        try:
+            df = self.results_df.xs(mouse_name, level="mouse_name").xs(
+                manipe, level="manipe"
+            )
+        except KeyError:
+            df = self.results_df[
+                (self.results_df["mouse_name"] == mouse_name)
+                & (self.results_df["manipe"] == manipe)
+            ]
+
+        if df.empty:
+            print(f"Session data for {session_key} not found in results_df.")
+            return
+
+        results: Mouse_Results = df.iloc[0].results
+        session_data = all_session_data[session_key]
+
+        # 2. Extract spike trains and dynamic LFP / Events
+        spike_group = results.DataHelper.get_spike_data()
+
+        try:
+            if event_type.lower() == "ripples":
+                lfp = results.DataHelper.get_lfp_data(
+                    channel_type="ripple", network_path=results.network_path
+                )
+                events_epoch = session_data["epochs"]["ripples"]
+            elif event_type.lower() == "delta":
+                lfp = results.DataHelper.get_lfp_data(
+                    channel_type="delta", network_path=results.network_path
+                )
+                events_epoch = results.DataHelper.get_delta_epochs()
+            elif event_type.lower() == "spindles":
+                lfp = results.DataHelper.get_lfp_data(
+                    channel_type="spindle", network_path=results.network_path
+                )
+                events_epoch = results.DataHelper.get_spindle_epochs()
+            else:
+                raise ValueError("event_type must be 'ripples', 'delta', or 'spindles'")
+        except Exception as e:
+            print(
+                f"Could not load LFP/Epochs for event type '{event_type}': {e}. Defaulting to ripples."
+            )
+            lfp = results.DataHelper.get_lfp_data(channel_type="ripple")
+            events_epoch = session_data["epochs"]["ripples"]
+
+        # 3. Restrict events to target epoch
+        if epoch is not None:
+            if isinstance(epoch, str):
+                if epoch in session_data["epochs"]:
+                    target_ep = session_data["epochs"][epoch]
+                else:
+                    target_ep, _ = results.get_epoch_interval(epoch)
+            elif isinstance(epoch, IntervalSet):
+                target_ep = epoch
+            else:
+                raise ValueError(
+                    "epoch_to_restrict must be a string key or IntervalSet"
+                )
+
+            events_epoch = events_epoch.intersect(target_ep)
+
+        if len(events_epoch) == 0:
+            print(f"No {event_type} events found during epoch restriction '{epoch}'.")
+            return
+
+        # 4. Calculate peak amplitude per event and cap at `max_events`
+        event_amplitudes = []
+        event_centers = []
+
+        for start, end in zip(events_epoch.start, events_epoch.end):
+            center = (start + end) / 2.0
+            window = IntervalSet(
+                start=center + peth_window[0], end=center + peth_window[1]
+            )
+            lfp_win = lfp.restrict(window)
+            if len(lfp_win) > 0:
+                amp = np.max(np.abs(lfp_win.values))
+                event_amplitudes.append(amp)
+                event_centers.append(center)
+
+        if not event_centers:
+            print(
+                f"No valid LFP segments found during {event_type} in specified epoch."
+            )
+            return
+
+        # Sort events by peak LFP amplitude descending and select top `max_events`
+        top_event_indices = np.argsort(event_amplitudes)[::-1][:max_events]
+        selected_centers = [event_centers[i] for i in top_event_indices]
+        num_selected_events = len(selected_centers)
+
+        # 5. Build raster rows: Sequential PC groups (Top N cells per PC, permitting duplicates)
+        valid_cell_ids = list(spike_group.keys())
+        weights_matrix = session_data.get("weights", session_data.get("eigenvectors"))
+        pc_colors = ["#D95319", "#77AC30", "#0072BD", "#7E2F8E"]
+
+        raster_rows = []  # List of tuples: (orig_cell_idx, color, linewidth)
+        top_cell_indices_set = set()
+
+        for pc_i in range(min(num_pcs, weights_matrix.shape[1])):
+            weights_pc = np.abs(weights_matrix[:, pc_i])
+            top_indices = np.argsort(weights_pc)[::-1][:top_cells_per_pc]
+            color = pc_colors[pc_i % len(pc_colors)]
+
+            for idx in top_indices:
+                raster_rows.append((idx, color, 1.3))
+                top_cell_indices_set.add(idx)
+
+        # Add remaining cells that were not in top_cells for any PC
+        all_indices = list(range(len(valid_cell_ids)))
+        for idx in all_indices:
+            if idx not in top_cell_indices_set:
+                raster_rows.append((idx, "#808080", 0.6))
+
+        # 6. Build multi-panel figure across selected events
+        fig = plt.figure(figsize=figsize)
+        outer_gs = gridspec.GridSpec(1, num_selected_events, wspace=0.25)
+
+        for ev_idx, center_time in enumerate(selected_centers):
+            window_ep = IntervalSet(
+                start=center_time + peth_window[0],
+                end=center_time + peth_window[1],
+            )
+
+            inner_gs = gridspec.GridSpecFromSubplotSpec(
+                3,
+                1,
+                subplot_spec=outer_gs[ev_idx],
+                height_ratios=[1, 0.8, 2.2],
+                hspace=0.12,
+            )
+
+            # --- PANEL A: Reactivation Strength (RS) Overlay ---
+            ax_rs = fig.add_subplot(inner_gs[0])
+            for pc_i in range(min(num_pcs, len(session_data["rs"]))):
+                rs_tsd = session_data["rs"][pc_i]
+                rs_win = rs_tsd.restrict(window_ep)
+                t_rs = rs_win.times() - center_time
+                v_rs = rs_win.values
+
+                ax_rs.plot(
+                    t_rs,
+                    v_rs,
+                    color=pc_colors[pc_i % len(pc_colors)],
+                    linewidth=1.5,
+                    label=f"PC {pc_i + 1}",
+                )
+
+            ax_rs.axvline(0, color="gray", linestyle="--", alpha=0.6)
+            ax_rs.set_xlim(peth_window)
+            ax_rs.set_xticks([])
+            if ev_idx == 0:
+                ax_rs.set_ylabel("Reactivation\nStrength")
+                ax_rs.legend(loc="upper right", fontsize=8)
+            ax_rs.set_title(f"Event #{ev_idx + 1} ({center_time:.2f}s)", fontsize=10)
+            ax_rs.spines["top"].set_visible(False)
+            ax_rs.spines["right"].set_visible(False)
+
+            # --- PANEL B: Filtered LFP Trace ---
+            ax_lfp = fig.add_subplot(inner_gs[1])
+            lfp_win = lfp.restrict(window_ep)
+            t_lfp = lfp_win.times() - center_time
+            v_lfp = lfp_win.values
+
+            ax_lfp.plot(t_lfp, v_lfp, color="black", linewidth=0.8)
+            ax_lfp.axvline(0, color="gray", linestyle="--", alpha=0.6)
+            ax_lfp.set_xlim(peth_window)
+            ax_lfp.set_xticks([])
+            if ev_idx == 0:
+                ax_lfp.set_ylabel(f"LFP ({event_type.capitalize()})")
+            ax_lfp.spines["top"].set_visible(False)
+            ax_lfp.spines["right"].set_visible(False)
+
+            # --- PANEL C: Color-Coded Spike Raster (PC Grouped) ---
+            ax_raster = fig.add_subplot(inner_gs[2])
+
+            for y_pos, (orig_cell_idx, color, linewidth) in enumerate(raster_rows):
+                cell_id = valid_cell_ids[orig_cell_idx]
+                cell_spikes = spike_group[cell_id].restrict(window_ep)
+
+                if len(cell_spikes) > 0:
+                    t_spikes = cell_spikes.times() - center_time
+                    ax_raster.vlines(
+                        t_spikes,
+                        y_pos - 0.4,
+                        y_pos + 0.4,
+                        color=color,
+                        linewidth=linewidth,
+                    )
+
+            ax_raster.axvline(0, color="gray", linestyle="--", alpha=0.6)
+            ax_raster.set_xlim(peth_window)
+            ax_raster.set_ylim(-1, len(raster_rows))
+            ax_raster.invert_yaxis()
+            ax_raster.set_xlabel("Time from Center (s)")
+            if ev_idx == 0:
+                ax_raster.set_ylabel("Cell Rows (PC Top 10 → Non-Top)")
+            ax_raster.spines["top"].set_visible(False)
+            ax_raster.spines["right"].set_visible(False)
+
+        plt.suptitle(
+            f"{session_key} | Multi-PC Activity Aligned to {event_type.capitalize()} ({epoch})",
+            fontsize=12,
+            y=0.98,
+        )
+        plt.tight_layout()
+        plt.show()
+
+    def plot_component_stim_figure(
+        self,
+        all_session_data,
+        session_key,
+        peth_window=(-3.0, 6.0),
+        bin_size=0.05,
+        figsize=(14, 10),
+    ):
+        """Generates a publication-style multi-panel figure for EACH principal component (PC)
+
+        found in the session data, aligned to stimulation onset.
+
+        Panel (a): Cell PETHs aligned to stim onset, sorted and colored by PC weight.
+        Panel (b): Scree plot of eigenvalues with Marchenko-Pastur theoretical cutoff.
+        Panel (c): Trial-by-trial PC score dynamics (Heatmap across trials).
+        """
+        import matplotlib.cm as cm
+
+        if session_key not in all_session_data:
+            print(f"Session key '{session_key}' not found.")
+            return
+
+        data = all_session_data[session_key]
+        q_tsd = data["q_tsd"]
+        eigenvectors = data["eigenvectors"]  # shape (N_cells, N_components)
+        eigenvalues = data["eigenvalues"]  # shape (N_components,)
+        pc_scores = data["pc_scores"]  # dict: {pc_idx: Tsd}
+
+        # 1. Fetch Stimulus Onset Timestamps
+        results = data.get("results", None)
+        try:
+            stim_epochs = results.DataHelper.get_stim_epochs(before=0.1, after=0.1)
+            stim_starts = np.array(stim_epochs.start)
+        except Exception:
+            print(f"Could not retrieve stim_epochs for {session_key}.")
+            return
+
+        if len(stim_starts) == 0:
+            print(f"No stim events found in {session_key}.")
+            return
+
+        # 2. Setup Dimensions & Marchenko-Pastur Theoretical Upper Bound
+        n_bins_total, n_cells = q_tsd.values.shape
+        n_components = eigenvectors.shape[1]
+
+        # Marchenko-Pastur law: lambda_max = (1 + sqrt(N / B))^2
+        lambda_max = (1.0 + np.sqrt(n_cells / float(n_bins_total))) ** 2
+
+        # Relative time axis for PETHs
+        time_rel = np.arange(peth_window[0], peth_window[1], bin_size)
+        n_peth_bins = len(time_rel)
+
+        # 3. Compute Per-Cell PETHs centered on Stim Onset (Hz)
+        dt = np.median(np.diff(q_tsd.index))
+        spikes_hz = q_tsd.values / dt  # (B, N)
+        tsd_times = q_tsd.index
+
+        cell_peths = np.zeros((n_cells, n_peth_bins))
+
+        for k, t_stim in enumerate(stim_starts):
+            t_target = t_stim + time_rel
+            idx_bins = np.searchsorted(tsd_times, t_target)
+            idx_bins = np.clip(idx_bins, 0, n_bins_total - 1)
+            cell_peths += spikes_hz[idx_bins, :].T
+
+        cell_peths /= len(stim_starts)  # Average across trials (N_cells, N_peth_bins)
+
+        # 4. Generate Figure for EACH Principal Component
+        for pc_idx in range(n_components):
+            if pc_idx > 0 and eigenvalues[pc_idx] < 0.9 * lambda_max:
+                warn(
+                    f"PC {pc_idx + 1} eigenvalue below Marčenko-Pastur threshold ({eigenvalues[pc_idx]:.3f} vs {lambda_max:.3f}); skipping visualization."
+                )
+                break  # Skip PCs below the Marčenko-Pastur threshold
+
+            weights = eigenvectors[:, pc_idx]
+            sorted_cell_idx = np.argsort(weights)  # Ascending/Descending weight sort
+
+            score_tsd = pc_scores[pc_idx]
+            score_vals = score_tsd.values
+            score_times = score_tsd.index
+
+            # Build Trial-by-Trial PC Score Matrix: (N_trials, N_peth_bins)
+            trial_scores = np.zeros((len(stim_starts), n_peth_bins))
+            for k, t_stim in enumerate(stim_starts):
+                t_target = t_stim + time_rel
+                idx_bins = np.searchsorted(score_times, t_target)
+                idx_bins = np.clip(idx_bins, 0, len(score_vals) - 1)
+                trial_scores[k, :] = score_vals[idx_bins]
+
+            # Initialize Grid Layout
+            fig = plt.figure(figsize=figsize)
+            gs = fig.add_gridspec(
+                2,
+                2,
+                width_ratios=[1.2, 1.8],
+                height_ratios=[1, 2.2],
+                hspace=0.3,
+                wspace=0.25,
+            )
+
+            ax_a = fig.add_subplot(gs[:, 0])  # Left: Stacked sorted cell PETHs
+            ax_b = fig.add_subplot(gs[0, 1])  # Top Right: Eigenvalue Scree Plot
+            ax_c = fig.add_subplot(
+                gs[1, 1]
+            )  # Bottom Right: Trial-by-Trial Score Heatmap
+
+            # --- PANEL (a): Cell PETHs Sorted by PC Weight ---
+            cmap = cm.get_cmap("jet")
+            w_min, w_max = np.min(weights), np.max(weights)
+            norm_weights = (
+                (weights - w_min) / (w_max - w_min + 1e-12)
+                if w_max != w_min
+                else np.zeros_like(weights)
+            )
+
+            y_offset = 0
+            y_step = np.percentile(cell_peths, 95) * 0.8 + 1e-3
+
+            for rank, c_idx in enumerate(sorted_cell_idx):
+                peth_trace = cell_peths[c_idx, :]
+                color = cmap(norm_weights[c_idx])
+                ax_a.plot(
+                    time_rel,
+                    peth_trace + y_offset,
+                    color=color,
+                    linewidth=0.8,
+                    alpha=0.9,
+                )
+                ax_a.fill_between(
+                    time_rel,
+                    y_offset,
+                    peth_trace + y_offset,
+                    color=color,
+                    alpha=0.25,
+                )
+                y_offset += y_step
+
+            ax_a.axvline(0, color="black", linestyle="--", linewidth=1.2, alpha=0.8)
+            ax_a.set_xlabel("Time from Stim Onset (s)", fontsize=10)
+            ax_a.set_ylabel("Cells (Sorted by PC Weight)", fontsize=10)
+            ax_a.set_title(
+                f"a  Cell PETHs (PC {pc_idx + 1} Weights)",
+                fontweight="bold",
+                loc="left",
+            )
+            ax_a.set_yticks([])
+            ax_a.set_xlim(peth_window[0], peth_window[1])
+            sns.despine(ax=ax_a, left=True)
+
+            # Colorbar overlay for Panel (a)
+            sm = cm.ScalarMappable(
+                cmap=cmap, norm=plt.Normalize(vmin=w_min, vmax=w_max)
+            )
+            cbar_a = fig.colorbar(
+                sm, ax=ax_a, orientation="horizontal", pad=0.06, shrink=0.7
+            )
+            cbar_a.set_label(f"PC {pc_idx + 1} Weight", fontsize=9)
+
+            # --- PANEL (b): Eigenvalue Scree Plot ---
+            components_x = np.arange(1, len(eigenvalues) + 1)
+            ax_b.plot(
+                components_x,
+                eigenvalues,
+                "o-",
+                color="black",
+                markersize=4,
+                linewidth=1,
+                mfc="white",
+            )
+
+            # Highlight current PC
+            ax_b.plot(
+                pc_idx + 1,
+                eigenvalues[pc_idx],
+                "s",
+                color="crimson",
+                markersize=7,
+                label=f"Active PC {pc_idx + 1}",
+            )
+
+            # Draw Marchenko-Pastur lambda_max threshold
+            ax_b.axhline(
+                lambda_max,
+                color="gray",
+                linestyle="--",
+                linewidth=1,
+                label=r"$\lambda_{max}$ (Noise Threshold)",
+            )
+
+            ax_b.set_xlabel("PC Number", fontsize=9)
+            ax_b.set_ylabel("Eigenvalue", fontsize=9)
+            ax_b.set_title("b  Eigenvalue Spectrum", fontweight="bold", loc="left")
+            ax_b.legend(frameon=False, fontsize=8, loc="upper right")
+            sns.despine(ax=ax_b)
+
+            # --- PANEL (c): Trial-by-Trial PC Score Heatmap ---
+            vmax = np.percentile(np.abs(trial_scores), 98)
+            im = ax_c.imshow(
+                trial_scores,
+                aspect="auto",
+                extent=[
+                    peth_window[0],
+                    peth_window[1],
+                    len(stim_starts),
+                    1,
+                ],
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+                origin="upper",
+            )
+
+            ax_c.axvline(0, color="black", linestyle="--", linewidth=1.2)
+            ax_c.set_xlabel("Time from Stim Onset (s)", fontsize=10)
+            ax_c.set_ylabel("Trial Number", fontsize=10)
+            ax_c.set_title(
+                f"c  Trial-by-Trial PC {pc_idx + 1} Score",
+                fontweight="bold",
+                loc="left",
+            )
+
+            cbar_c = fig.colorbar(im, ax=ax_c, pad=0.02)
+            cbar_c.set_label("PC Score", fontsize=9)
+            sns.despine(ax=ax_c)
+
+            fig.suptitle(
+                f"Component {pc_idx + 1} Dynamics - Session: {session_key}",
+                fontsize=13,
+                fontweight="bold",
+                y=0.98,
+            )
+
+            plt.show()
+
+    def plot_spike_raster(
+        self, spike_group, eigenvectors, cell_ids, template_idx=0, time_window=None
+    ):
+        """Plots a traditional tick raster sorted by PC weight."""
+        # 1. Sort neurons by PC template weight (highest weights at the top)
+        weights = eigenvectors[:, template_idx]
+        sorted_indices = np.argsort(weights)  # Ascending order for display
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # 2. Iterate through sorted cells and plot spike ticks
+        for y_pos, cell_idx in enumerate(sorted_indices):
+            cell_id = cell_ids[cell_idx]
+            spikes = spike_group[cell_id].times("s")
+
+            if time_window is not None:
+                spikes = spikes[(spikes >= time_window[0]) & (spikes <= time_window[1])]
+
+            # Draw vertical ticks for each spike
+            ax.vlines(
+                spikes,
+                y_pos - 0.4,
+                y_pos + 0.4,
+                color="black",
+                linewidth=0.7,
+                alpha=0.8,
+            )
+
+        ax.set_ylim(-0.5, len(cell_ids) - 0.5)
+        ax.set_ylabel("Cells (Sorted by PC Weight)", fontsize=11)
+        ax.set_xlabel("Time (s)", fontsize=11)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if time_window:
+            ax.set_xlim(time_window)
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_q_tsd_heatmap(
+        self,
+        neuron_session_data,
+        session_key,
+        template_idx=0,
+        sigma_bins=1,
+        time_window=None,
+        vmax_percentile=98,
+    ):
+        """Plots a population activity heatmap directly from q_tsd."""
+        from neuroencoders.utils.viz_params import EPOCHS_PALETTE
+
+        q_tsd = neuron_session_data[session_key]["q_tsd"]
+        eigenvectors = neuron_session_data[session_key].get("eigenvectors", None)
+        epochs = neuron_session_data[session_key]["epochs"]
+
+        if eigenvectors is None:
+            print(
+                f"No eigenvectors found for session '{session_key}'. Cannot sort cells."
+            )
+            return
+        if time_window is not None:
+            q_tsd = q_tsd.get(time_window[0], time_window[1])
+
+        time_sec = q_tsd.times("s")
+        dt = np.median(np.diff(time_sec))
+
+        # Convert counts to Firing Rate (Hz): Shape (Time, Cells) -> Transpose to (Cells, Time)
+        fr_matrix = (q_tsd.values / dt).T
+
+        # Optional Gaussian smoothing along the time axis
+        if sigma_bins > 0:
+            fr_matrix = gaussian_filter1d(fr_matrix, sigma=sigma_bins, axis=1)
+
+        # Sort cells by PC weight
+        if eigenvectors is not None:
+            weights = eigenvectors[:, template_idx]
+            sorted_indices = np.argsort(weights)
+            fr_matrix = fr_matrix[sorted_indices, :]
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+
+        # Clip extreme values so high-firing outliers don't wash out the colormap
+        vmax = np.percentile(fr_matrix, vmax_percentile)
+
+        im = ax.imshow(
+            fr_matrix,
+            aspect="auto",
+            origin="lower",
+            cmap="Greys",  # 'Greys', 'viridis', or 'magma' work best
+            extent=[time_sec[0], time_sec[-1], 0, fr_matrix.shape[0]],
+            vmax=vmax,
+            vmin=0,
+            interpolation="nearest",
+        )
+
+        cbar = plt.colorbar(im, ax=ax, pad=0.02)
+        cbar.set_label("Firing Rate (Hz)", fontsize=10)
+
+        ax.set_ylabel("Cells (Sorted by PC Weight)", fontsize=11)
+        ax.set_xlabel("Time (s)", fontsize=11)
+
+        to_legend = {}
+        for epoch_name, interval in epochs.items():
+            if len(interval) > 0:
+                for start, stop in zip(interval.start, interval.end):
+                    if time_window is not None and (stop < t_start or start > t_end):
+                        continue
+                    color = EPOCHS_PALETTE.get(epoch_name, None)
+                    if color is None:
+                        continue
+                    start = max(start, t_start) if time_window is not None else start
+                    stop = min(stop, t_end) if time_window is not None else stop
+                    ax.axvspan(
+                        start,
+                        stop,
+                        color=color,
+                        alpha=0.15 if "sleep" in epoch_name else 0.1,
+                    )
+                    to_legend[epoch_name] = color
+
+        for k, v in to_legend.items():
+            ax.plot([], [], color=v, alpha=0.3, label=k.upper(), linewidth=6)
+
+        ax.legend(frameon=False, fontsize=8, loc="upper right")
+
+        plt.tight_layout()
+        plt.show()
+
+
 def _compute_2d_spatial_reactivation(
     rs_tsd, pos_x, pos_y, pos_t, epoch_interval, bins=10
 ):
@@ -12772,6 +13738,7 @@ def _compute_2d_spatial_reactivation(
             else:
                 grid[i, j] = np.nan
     return grid
+
 
 def _init_worker_plotter(cls_ref, winMS, kwargs_dict):
     """
