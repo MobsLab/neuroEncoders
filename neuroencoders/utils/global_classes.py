@@ -8,10 +8,12 @@ from __future__ import annotations
 
 # Load libs
 import copy
+import glob
 import json
 
 # Load custom code
 import os
+import tempfile
 
 os.environ.setdefault(
     "TF_CPP_MIN_LOG_LEVEL", "2"
@@ -90,7 +92,7 @@ ZONE_COLORS = [
     SAFE_COLOR,  # Cornflower Blue
 ]
 
-DEFAULT_GRIDSIZE = (35, 35)
+DEFAULT_GRIDSIZE = (20, 20)
 
 MIN_LIN_SPEED = 0.05
 MAX_LIN_SPEED = 0.35
@@ -2704,6 +2706,14 @@ class Params:
         )  # first fully connected layer in Transformer arch dimension, the second must be the same as the input dim for the skip connection
 
         self.GaussianHeatmap = kwargs.pop("GaussianHeatmap", True)
+        self.use_multi_token_density = kwargs.pop("use_multi_token_density", False)
+
+        assert self.GaussianHeatmap or not self.use_multi_token_density, (
+            "use_multi_token_density can only be used with GaussianHeatmap"
+        )
+
+        self.k_steps = kwargs.pop("k_steps", 5)
+
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", DEFAULT_GRIDSIZE)
         self.GaussianSigma = kwargs.pop(
             "GaussianSigma", 0.05
@@ -3097,35 +3107,70 @@ class SpatialConstraintsMixin:
     ):
         """
         Unified decoding logic for Gaussian heatmaps.
+        Automatically handles single-token (Batch, ...) and multi-token (Batch, K, ...) inputs.
+        Symbolic-safe using Keras Ops.
         """
         import tensorflow as tf
+        from keras import ops as kops
 
         with tf.device(self.device):
-            B = tf.shape(logits_hw)[0]
+            # Static shape for rank checking during compilation
+            shape_static = logits_hw.shape
+            rank = len(shape_static)
+
+            # Dynamic shape for runtime dimension slicing
+            shape_dyn = kops.shape(logits_hw)
             H, W = self.GRID_H, self.GRID_W
 
-            # Mask forbidden
-            masked_logits = tf.where(
-                self.forbid_mask_tf[None] > 0, self.common_neg, logits_hw
+            # 1. Detect multi-step K dimension and flatten into the Batch dimension
+            is_multistep = False
+            if rank == 4:
+                # Shape: (Batch, K, H, W)
+                is_multistep = True
+                B, K = shape_dyn[0], shape_dyn[1]
+                logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+            elif rank == 3 and shape_static[-1] == H * W:
+                # Shape: (Batch, K, H*W)
+                is_multistep = True
+                B, K = shape_dyn[0], shape_dyn[1]
+                logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+            elif rank == 2:
+                # Shape: (Batch, H*W)
+                B = shape_dyn[0]
+                logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+            else:
+                # Shape: (Batch, H, W)
+                B = shape_dyn[0]
+                logits_flat_batch = logits_hw
+
+            # B_eff is now (Batch * K) if multistep, or just (Batch) if single step
+            B_eff = kops.shape(logits_flat_batch)[0]
+
+            # 2. Mask forbidden
+            masked_logits = kops.where(
+                self.forbid_mask_tf[None] > 0, self.common_neg, logits_flat_batch
             )
 
             # Softmax over grid
-            probs_flat = tf.nn.softmax(tf.reshape(masked_logits, [B, H * W]), axis=-1)
-            probs = tf.reshape(probs_flat, [B, H, W])
+            probs_flat = kops.softmax(
+                kops.reshape(masked_logits, [B_eff, H * W]), axis=-1
+            )
+            probs = kops.reshape(probs_flat, [B_eff, H, W])
 
             # Renormalize (safety)
             allowed_mask = self.get_allowed_mask(use_tensorflow=True)
             probs_allowed = probs * allowed_mask
-            sum_p = tf.reduce_sum(probs_allowed, axis=[1, 2], keepdims=True)
+            sum_p = kops.sum(probs_allowed, axis=[1, 2], keepdims=True)
             probs_allowed /= sum_p + self.common_eps
 
+            # 3. Decode Coordinates
             if mode == "expectation":
-                ex = tf.reduce_sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
-                ey = tf.reduce_sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
-            elif mode == "argmax":  # argmax
-                idx = tf.argmax(tf.reshape(probs_allowed, [B, H * W]), axis=-1)
-                ex = tf.gather(tf.reshape(self.Xc_tf, [-1]), idx)
-                ey = tf.gather(tf.reshape(self.Yc_tf, [-1]), idx)
+                ex = kops.sum(probs_allowed * self.Xc_tf[None], axis=[1, 2])
+                ey = kops.sum(probs_allowed * self.Yc_tf[None], axis=[1, 2])
+            elif mode == "argmax":
+                idx = kops.argmax(kops.reshape(probs_allowed, [B_eff, H * W]), axis=-1)
+                ex = kops.take(kops.reshape(self.Xc_tf, [-1]), idx, axis=0)
+                ey = kops.take(kops.reshape(self.Yc_tf, [-1]), idx, axis=0)
             elif mode == "soft_argmax":
                 ex, ey = self.windowed_soft_argmax(probs_allowed)
             else:
@@ -3133,29 +3178,41 @@ class SpatialConstraintsMixin:
                     f"Invalid mode {mode}, choose 'expectation' or 'argmax' or 'soft_argmax'"
                 )
 
-            # Variance
-            varx = tf.reduce_sum(
-                probs_allowed * tf.square(self.Xc_tf[None] - ex[:, None, None]), [1, 2]
+            # 4. Variance
+            varx = kops.sum(
+                probs_allowed * kops.square(self.Xc_tf[None] - ex[:, None, None]),
+                axis=[1, 2],
             )
-            vary = tf.reduce_sum(
-                probs_allowed * tf.square(self.Yc_tf[None] - ey[:, None, None]), [1, 2]
+            vary = kops.sum(
+                probs_allowed * kops.square(self.Yc_tf[None] - ey[:, None, None]),
+                axis=[1, 2],
             )
             var = varx + vary
 
-            # max probability (confidence)
-            maxp = tf.reduce_max(probs_flat, axis=1)
+            # 5. Max probability (confidence) & Normalized Entropy
+            maxp = kops.max(probs_flat, axis=1)
 
-            # Normalized Entropy
-            H_entropy = -tf.reduce_sum(
-                probs_flat * tf.math.log(probs_flat + self.common_eps), axis=1
+            H_entropy = -kops.sum(
+                probs_flat * kops.log(probs_flat + self.common_eps), axis=1
             )
-            n_allowed = tf.reduce_sum(allowed_mask)
-            Hn = H_entropy / tf.math.log(n_allowed + self.common_eps)
+            n_allowed = kops.sum(allowed_mask)
+            Hn = H_entropy / kops.log(n_allowed + self.common_eps)
+
+            xy = kops.stack([ex, ey], axis=-1)
+
+            # 6. Restore K dimension if it was flattened
+            if is_multistep:
+                xy = kops.reshape(xy, [B, K, 2])
+                maxp = kops.reshape(maxp, [B, K])
+                Hn = kops.reshape(Hn, [B, K])
+                var = kops.reshape(var, [B, K])
+                probs_allowed = kops.reshape(probs_allowed, [B, K, H, W])
 
             xy = tf.stack([ex, ey], axis=-1)
             if return_probs:
                 return xy, maxp, Hn, var, probs_allowed
-            return xy, maxp, Hn, var
+            else:
+                return xy, maxp, Hn, var
 
     def _setup_coordinate_grids(self):
         """Create coordinate grids for both numpy and tensorflow"""

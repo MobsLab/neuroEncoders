@@ -55,10 +55,16 @@ mice_nb = [
     "M906_PAG",
     "M911_PAG",
     "M1168_PAG",
+    "M1117_PAG",
+    "M1223_MFB",
+    "M912_PAG",
+    "M1182_MFB",
+    "M1161_MFB",
 ]
 
 ####
 nameExp = "highmask_high_speed_mask_posandheaddirection_contrastiveLoss_DenseLayer"
+nameExp = "high_speed_multi_token_dynamic_crop"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"
@@ -211,6 +217,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 "--reduce_dense",
                 "--contrastive_loss",
                 "--plot_id",
+                "--multi_token",
                 # "--predicted_loss",
                 # "--transform_w_log",
                 # "--mixed_loss",

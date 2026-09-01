@@ -44,7 +44,6 @@ dependencies = [
     "xgboost>=3.2.0",
     "pynapple",
     "numpy>=2.2.6",
-    "pykeops>=2.3",
     "tensorboard>=2.20.0",
     "jupyter",
     "ipykernel>=7.2.0",
@@ -53,6 +52,8 @@ dependencies = [
     "pyqt6>=6.11.0",
     "ipympl>=0.10.0",
     "qtpy>=2.4.3",
+    "hdbscan>=0.8.44",
+    "pykeops>=2.3",
 ]
 
 [project.optional-dependencies]

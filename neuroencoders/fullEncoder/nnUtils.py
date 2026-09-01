@@ -1356,8 +1356,9 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             # We look at the first channel/time bin; if it's 0 (or your pad value), it's a mask
             # Alternatively, if you have a spike_count tensor, use tf.sequence_mask
             group_data = inputs_to_spike_nets[g]
+            zero_scalar = tf.cast(0.0, group_data.dtype)
             # Shape: (Batch, MaxSpikes, Channels, Time) -> Mask: (Batch, MaxSpikes)
-            g_mask = tf.reduce_any(tf.not_equal(group_data, 0.0), axis=[-1, -2])
+            g_mask = tf.reduce_any(tf.not_equal(group_data, zero_scalar), axis=[-1, -2])
             if incoming_group_masks is not None and incoming_group_masks[g] is not None:
                 g_mask = tf.logical_and(
                     g_mask,
@@ -2303,8 +2304,14 @@ def parse_serialized_sequence(
     tensors = dict(tensors)
     if max_spikes is None:
         max_spikes = getattr(params, "max_nb_spikes", 512)
+        warnings.warn(
+            f"⚠️ max_spikes not provided, using params.max_nb_spikes={max_spikes} as default."
+        )
     if max_spikes_per_group is None:
         max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 128)
+        warnings.warn(
+            f"⚠️ max_spikes_per_group not provided, using params.max_nb_spikes_per_group={max_spikes_per_group} as default."
+        )
 
     # Track total sparse group entries before densification.
     num_groups = tf.shape(tensors["groups"].indices)[0]
@@ -2340,7 +2347,7 @@ def parse_serialized_sequence(
     default = -1
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
     # Padding contract: use -1 for index/metadata tensors
-    for key in ["pos", "groups", "indexInDat"]:
+    for key in ["pos", "pos_k", "groups", "indexInDat"]:
         if key not in tensors:
             continue
         if isinstance(tensors[key], tf.SparseTensor):
@@ -3095,6 +3102,7 @@ def apply_group_augmentation(
     metadata_base = [
         "pos_index",
         "pos",
+        "pos_k",
         "groups",
         "length",
         "total_nb_spikes",
@@ -3149,6 +3157,7 @@ def apply_single_group_augmentation(
     metadata_keys = [
         "pos_index",
         "pos",
+        "pos_k",
         "groups",
         "length",
         "total_nb_spikes",
@@ -3952,34 +3961,66 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
     def fit_temperature(self, val_logits, val_targets, iters=200, lr=1e-2):
         """
         Fit temperature scaling parameter on validation set to minimize NLL.
-        Args:
-            val_logits: [N, H, W] logits from validation set
-            val_targets: [N, H, W] target heatmaps from validation set
-            iters: number of optimization steps
-            lr: learning rate for optimizer
-        Returns:
-            T_cal: fitted temperature scalar
+        Safely broadcasts single-step targets (Batch, H, W) against multi-step logits (Batch, K, H, W).
         """
+        import tensorflow as tf
+
+        # 1. Convert NumPy arrays to Tensors securely
+        val_logits = tf.convert_to_tensor(val_logits, dtype=tf.float32)
+        val_targets = tf.convert_to_tensor(val_targets, dtype=tf.float32)
+
+        H, W = self.GRID_H, self.GRID_W
+
+        # 2. Safely extract Batch (B) and Step (K) dimensions
+        shape_logits = tf.shape(val_logits)
+        rank_logits = len(val_logits.shape)
+
+        if rank_logits == 4:  # (B, K, H, W)
+            B, K = shape_logits[0], shape_logits[1]
+            val_logits = tf.reshape(val_logits, [B, K, H, W])
+        elif rank_logits == 3 and val_logits.shape[-1] == H * W:  # (B, K, H*W)
+            B, K = shape_logits[0], shape_logits[1]
+            val_logits = tf.reshape(val_logits, [B, K, H, W])
+        elif rank_logits == 3:  # (B, H, W)
+            B, K = shape_logits[0], 1
+            val_logits = tf.reshape(val_logits, [B, K, H, W])
+        else:  # (B, H*W)
+            B, K = shape_logits[0], 1
+            val_logits = tf.reshape(val_logits, [B, K, H, W])
+
+        # Standardize val_targets to (B, 1, H, W) so it broadcasts across K
+        val_targets = tf.reshape(val_targets, [B, 1, H, W])
+
         logT = tf.Variable(0.0, trainable=True)
         opt = tf.keras.optimizers.Adam(lr)
+
         for step in range(iters):
             with tf.GradientTape() as t:
+                # Logits shape: (B, K, H, W)
                 scaled = val_logits / tf.exp(logT)
-                B, H, W = tf.shape(scaled)[0], tf.shape(scaled)[1], tf.shape(scaled)[2]
-                scaled_flat = tf.reshape(
-                    tf.where(self.forbid_mask_tf[None] > 0, self.NEG, scaled),
-                    [B, H * W],
+
+                # Mask forbidden zones. [None, None] aligns with [B, K, H, W]
+                masked = tf.where(
+                    self.forbid_mask_tf[None, None, :, :] > 0, self.NEG, scaled
                 )
+
+                # Flatten spatial for softmax: (B, K, H*W)
+                scaled_flat = tf.reshape(masked, [B, K, H * W])
                 logp_flat = tf.nn.log_softmax(scaled_flat, axis=-1)
-                logp = tf.reshape(logp_flat, [B, H, W])
-                nll = -tf.reduce_mean(tf.reduce_sum(val_targets * logp, [1, 2]))
+
+                # Reshape back: (B, K, H, W)
+                logp = tf.reshape(logp_flat, [B, K, H, W])
+
+                # Multiply against (B, 1, H, W) targets, sum over space, average over B and K
+                nll = -tf.reduce_mean(tf.reduce_sum(val_targets * logp, [2, 3]))
 
             opt.apply_gradients([(t.gradient(nll, logT), logT)])
+
             if step % 50 == 0 or step == iters - 1:
                 print(
                     f"Temp fit step {step}: NLL={nll.numpy():.4f}, T={tf.exp(logT).numpy():.4f}"
                 )
-        # inference: probs = softmax(mask_logits / T_cal)
+
         return float(tf.exp(logT).numpy())
 
     def get_config(self):
@@ -4127,36 +4168,74 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
 
     def call(self, y_true, y_pred):
         """
-        Compute loss in a Keras symbolic-safe way.
+        Compute loss in a Keras symbolic-safe way, supporting both single-step (Batch, 2)
+        and multi-step (Batch, K, 2) targets.
         """
         with get_device_context(self.deviceName):
             pred_shape = kops.shape(y_pred)
             true_shape = kops.shape(y_true)
-            if len(pred_shape) == 2:
-                y_pred = kops.reshape(
-                    y_pred,
-                    (-1, self.GRID_H, self.GRID_W),
-                )
 
-            if true_shape[1] == 2:
-                # If input is (B, 2), assume it's (x,y) and convert to heatmap targets
-                y_true = self.gaussian_heatmap_targets_tf(y_true)
+            # Detect if we are using multi-token output (Batch, K, Bins)
+            is_multistep = len(pred_shape) == 3 and pred_shape[2] != self.GRID_H
 
-            y_true = kops.cast(y_true, y_pred.dtype)
+            if is_multistep:
+                # y_pred is (Batch, K, H*W). Reshape to (Batch * K, H, W) for loss functions
+                batch_size = pred_shape[0]
+                k_steps = pred_shape[1]
+                y_pred_flat = kops.reshape(y_pred, (-1, self.GRID_H, self.GRID_W))
+
+                # y_true is (Batch, K, 2). Reshape to (Batch * K, 2) to generate heatmaps
+                if true_shape[-1] == 2:
+                    y_true_flat = kops.reshape(y_true, (-1, 2))
+                    y_true_heatmaps = self.gaussian_heatmap_targets_tf(y_true_flat)
+                else:
+                    y_true_heatmaps = kops.reshape(
+                        y_true, (-1, self.GRID_H, self.GRID_W)
+                    )
+
+                y_true_heatmaps = kops.cast(y_true_heatmaps, y_pred_flat.dtype)
+
+            else:
+                # Standard single-step logic
+                if len(pred_shape) == 2:
+                    y_pred_flat = kops.reshape(y_pred, (-1, self.GRID_H, self.GRID_W))
+                else:
+                    y_pred_flat = y_pred
+
+                if true_shape[-1] == 2:
+                    y_true_heatmaps = self.gaussian_heatmap_targets_tf(y_true)
+                else:
+                    y_true_heatmaps = y_true
+
+                y_true_heatmaps = kops.cast(y_true_heatmaps, y_pred_flat.dtype)
+
+            # Route to requested loss function using flattened (Batch * K, H, W) tensors
             if self.loss_type == "weighted":
-                return self._weighted_heatmap_loss(y_pred, y_true, wmap=self.WMAP)
+                loss_val = self._weighted_heatmap_loss(
+                    y_pred_flat, y_true_heatmaps, wmap=self.WMAP
+                )
             elif self.loss_type == "kl":
-                return self._kl_heatmap_loss(
-                    y_pred, y_true, wmap=self.WMAP, scale=self.scale
+                loss_val = self._kl_heatmap_loss(
+                    y_pred_flat, y_true_heatmaps, wmap=self.WMAP, scale=self.scale
                 )
             elif self.loss_type == "safe_kl":
-                return self._safe_kl_heatmap_loss(
-                    y_pred, y_true, wmap=self.WMAP, scale=self.scale
+                loss_val = self._safe_kl_heatmap_loss(
+                    y_pred_flat, y_true_heatmaps, wmap=self.WMAP, scale=self.scale
                 )
             elif self.loss_type == "wasserstein":
-                return self._safe_kl_wasserstein_heatmap_loss(y_pred, y_true)
+                loss_val = self._safe_kl_wasserstein_heatmap_loss(
+                    y_pred_flat, y_true_heatmaps
+                )
             else:
                 raise ValueError("Unknown loss_type:" + str(self.loss_type))
+
+            # If multi-step, average the loss across the K steps to maintain batch-level scaling
+            if is_multistep:
+                # loss_val is currently shape (Batch * K,). Reshape to (Batch, K) and mean over K.
+                loss_val = kops.reshape(loss_val, (batch_size, k_steps))
+                loss_val = kops.mean(loss_val, axis=-1)
+
+            return loss_val
 
     def get_config(self):
         """Return the config dict for serialization"""
@@ -5312,12 +5391,20 @@ class PositionError2D(tf.keras.metrics.Metric, SpatialConstraintsMixin):
             logits_hw = y_pred
 
         # Decode using the mixin's unified method
-        # Using expectation for smoothness in training logs
         xy, _, _, _ = self.decode_and_uncertainty_tf(logits_hw)
 
-        # Ensure xy is float32 for metric calculation
+        # NEW: Handle Multi-Step K dimension by averaging the trajectory
+        # to a single center-of-mass coordinate for the window's metric computation.
+        if len(xy.shape) == 3:  # (Batch, K, 2)
+            xy = tf.reduce_mean(xy, axis=1)
+
+        y_true_coords = tf.cast(y_true, tf.float32)
+        if len(y_true_coords.shape) == 3:  # (Batch, K, 2)
+            y_true_coords = tf.reduce_mean(y_true_coords, axis=1)
+
+        # Ensure we are only grabbing X and Y (in case there's extra dims)
         xy = tf.cast(xy[:, :2], tf.float32)
-        y_true_coords = tf.cast(y_true[:, :2], tf.float32)
+        y_true_coords = tf.cast(y_true_coords[:, :2], tf.float32)
 
         self.xy_pred.assign(xy)
         self.xy_true.assign(y_true_coords)
@@ -5329,13 +5416,11 @@ class PositionError2D(tf.keras.metrics.Metric, SpatialConstraintsMixin):
             dist = dist * sample_weight
             self.count.assign_add(tf.reduce_sum(sample_weight))
         else:
-            self.count.assign_add(tf.cast(tf.shape(y_true)[0], self.dtype))
+            self.count.assign_add(tf.cast(tf.shape(y_true_coords)[0], self.dtype))
 
         self.total_dist.assign_add(tf.reduce_sum(dist))
 
         # 1. Convert XY coordinates to Grid Indices
-        # Assuming xy is in grid units (0 to GRID_W). If not, scale it first.
-        # xy is returned normalized [0, 1], so we scale to grid size
         xy_scaled = xy * tf.constant([self.GRID_W, self.GRID_H], dtype=tf.float32)
         x_idxs = tf.cast(
             tf.clip_by_value(xy_scaled[:, 0], 0, self.GRID_W - 1), tf.int32
@@ -6384,6 +6469,110 @@ class TransformerIdentityAuditCallback(tf.keras.callbacks.Callback):
         for block, original_call in self.original_calls.items():
             block.call = original_call
         print("✓ Transformer Audit complete. Model state clean.")
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class MultiTokenSpatialDensityHead(keras.layers.Layer):
+    """Reads full (Batch, SeqLen, Dim) sequence tokens from TransformerEncoder
+
+    and maps them to K independent 2D spatial probability distributions.
+    """
+
+    def __init__(self, k_steps=5, d_model=128, n_bins=1225, num_heads=4, **kwargs):
+        super().__init__(**kwargs)
+        self.supports_masking = True
+
+        self.k_steps = k_steps
+        self.d_model = d_model
+        self.n_bins = n_bins
+        self.num_heads = num_heads
+
+        self.cross_attention = keras.layers.MultiHeadAttention(
+            num_heads=self.num_heads,
+            key_dim=self.d_model // self.num_heads,
+            name="density_cross_mha",
+        )
+        self.norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="layer_normalization_23"
+        )
+        self.dense_proj = keras.layers.Dense(
+            self.d_model, activation="gelu", name="dense_50"
+        )
+        self.heatmap_dense = keras.layers.Dense(
+            self.n_bins, activation=None, name="spatial_logits"
+        )
+
+    def build(self, input_shape):
+        self.temporal_queries = self.add_weight(
+            name="temporal_queries",
+            shape=(1, self.k_steps, self.d_model),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+
+        query_shape = (None, self.k_steps, self.d_model)
+        value_shape = input_shape
+
+        self.cross_attention.build(
+            query_shape=query_shape, value_shape=value_shape, key_shape=value_shape
+        )
+        self.norm.build(query_shape)
+        self.dense_proj.build(query_shape)
+        self.heatmap_dense.build(query_shape)
+
+        super().build(input_shape)
+
+    def compute_mask(self, inputs, mask=None):
+        # Consumes the incoming (Batch, SeqLen) mask and does not propagate it (same as MaskedSequential).
+        # The output tokens correspond to fixed queries (k_steps), not the padded sequence.
+        return None
+
+    def call(self, spike_tokens, mask=None, training=False):
+        batch_size = kops.shape(spike_tokens)[0]
+        queries = kops.repeat(self.temporal_queries, batch_size, axis=0)
+
+        attn_mask = None
+        if mask is not None:
+            # mask comes in as (Batch, SeqLen)
+            # Expand to (Batch, 1, SeqLen) and broadcast to (Batch, K_steps, SeqLen)
+            # True = valid token, False = padding token (ignored by attention)
+            bool_mask = kops.cast(mask, "bool")
+            attn_mask = kops.expand_dims(bool_mask, axis=1)
+            attn_mask = kops.broadcast_to(
+                attn_mask,
+                (batch_size, self.k_steps, kops.shape(spike_tokens)[1]),
+            )
+
+        attended = self.cross_attention(
+            query=queries,
+            value=spike_tokens,
+            key=spike_tokens,
+            attention_mask=attn_mask,
+            training=training,
+        )
+        x = self.norm(queries + attended)
+        x = x + self.dense_proj(x)
+
+        logits = self.heatmap_dense(x)
+        prob_density = keras.ops.softmax(logits, axis=-1)
+
+        return prob_density
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "k_steps": self.k_steps,
+                "d_model": self.d_model,
+                "n_bins": self.n_bins,
+                "num_heads": self.num_heads,
+            }
+        )
+        return config
+
+    def compute_output_shape(self, input_shape):
+        batch_size = input_shape[0]
+        return (batch_size, self.k_steps, self.n_bins)
 
 
 # Register custom layers and losses for Keras serialization

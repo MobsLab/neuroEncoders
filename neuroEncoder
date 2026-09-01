@@ -312,6 +312,7 @@ def main(args):
         reduce_dense=args.reduce_dense,
         no_cnn=args.no_cnn,
         contrastive_loss=args.contrastive_loss,
+        use_multi_token_density=args.multi_token,
     )
 
     # Save ProjectPath object
@@ -1483,6 +1484,12 @@ if __name__ == "__main__":
             "--contrastive_loss",
             action="store_true",
             help="defines whether to use contrastive loss alongside the main loss",
+        )
+        p.add_argument(
+            "-mt",
+            "--multi_token",
+            action="store_true",
+            help="defines whether to use multi-token transformer (one token per spike group) or single-token transformer (one token for all spike groups)",
         )
 
         if cmd == "bayes":

@@ -15,7 +15,7 @@ import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 # Get common libraries
 import dill as pickle
@@ -25,6 +25,7 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -68,7 +69,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -744,16 +744,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         )
                     )
 
-                # Add Pooling Layer to Encoder
-                encoder_layers.append(
-                    MaskedGlobalAveragePooling1D(
-                        device=self.deviceName, name="masking_pooling"
-                    )
-                )
-
                 self.transformer_encoder = MaskedSequential(
                     encoder_layers, name="transformer_encoder", no_mask_return=True
                 )
+
+                # Add Pooling Layer after Encoder
+                self.global_pool = MaskedGlobalAveragePooling1D(
+                    device=self.deviceName, name="masking_pooling"
+                )
+
+                self.use_multi_token = getattr(
+                    self.params, "use_multi_token_density", False
+                )
+                self.k_steps = getattr(self.params, "k_steps", 5)
 
                 # Transformer Decoder/Projector (Part 2: dense layers)
                 self.transformer_decoder = MaskedSequential(
@@ -779,6 +782,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Define named outputs heads based on target structure
             self.heads = {}
             for name, spec in self.target_structure.items():
+                if name == "pos_2d" and self.use_multi_token:
+                    grid_size = kwargs.get(
+                        "grid_size",
+                        getattr(self.params, "GaussianGridSize", DEFAULT_GRIDSIZE),
+                    )
+                    self.multi_token_head = nnUtils.MultiTokenSpatialDensityHead(
+                        k_steps=self.k_steps,
+                        d_model=self.params.sequence_output_dim,
+                        n_bins=grid_size[0] * grid_size[1],
+                        num_heads=self.params.nHeads,
+                        name="multi_token_density_head",
+                    )
+                    continue
                 if name == "pos_2d" and getattr(self.params, "GaussianHeatmap", False):
                     # GaussianHeatmap is already defined in setup_gaussian_heatmap
                     continue
@@ -901,36 +917,24 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             output: Output before final dense layers (batch_size, TransformerDenseSize2)
             sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
-
-        latent_output = None
-
-        masked_features_layer = MaskingLayer(name="masking_layer_transformer")
-        allFeatures_raw._keras_mask = (
-            mymask  # Ensure the mask is set for downstream layers
-        )
-        allFeatures._keras_mask = mymask
-        masked_features_raw = masked_features_layer(allFeatures_raw)
-        allFeatures = masked_features_layer(allFeatures)
-
+        x = allFeatures
         if self.project_transformer:
-            # 1. Projection layer
-            allFeatures = self.transformer_projection_layer(allFeatures)
-            allFeatures._keras_mask = mymask
-            masked_features_raw._keras_mask = mymask
-            sumFeatures = kops.sum(
-                self.transformer_projection_layer(masked_features_raw), axis=1
-            )
-        else:
-            sumFeatures = kops.sum(masked_features_raw, axis=1)
+            x = self.transformer_projection_layer(x)
 
-        # 2. Positional encoding and Transformer blocks (Part 1 + Pooling)
-        # the mask is handled automatically by functional API
-        latent_output = self.transformer_encoder(allFeatures)
-        # now the mask is gone because we use MaskedSequential(no_mask_return = True)
-        # 3. Final dense layers (Part 2)
-        x = self.transformer_decoder(latent_output)
+        # 1. Get the full 3D sequence from the encoder
+        sequence_output = self.transformer_encoder(x)
 
-        return x, latent_output, sumFeatures
+        # 2. Pool it to 2D for the standard decoder
+        pooled_latent = self.global_pool(sequence_output)
+
+        # 3. Pass the 2D pooled latent to the decoder (Locks shape to 2D)
+        decoded_x = self.transformer_decoder(pooled_latent)
+
+        # 4. Standard diagnostics
+        sumFeatures = kops.sum(allFeatures_raw, axis=1)
+
+        # Return sequence_output (3D) so generate_model can route it to the multi-token head!
+        return decoded_x, sequence_output, sumFeatures
 
     def apply_lstm_architecture(self, allFeatures, sumFeatures, mymask, **kwargs):
         """
@@ -983,47 +987,54 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
 
             if not self.isTransformer:
-                x, latent_output, sumFeatures = self.apply_lstm_architecture(
+                x, sequence_output, sumFeatures = self.apply_lstm_architecture(
                     allFeatures, sumFeatures, mymask, **kwargs
                 )
             else:
-                x, latent_output, sumFeatures = self.apply_transformer_architecture(
+                x, sequence_output, sumFeatures = self.apply_transformer_architecture(
                     allFeatures, allFeatures_raw, mymask, **kwargs
                 )
+
+            pooled_latent = self.global_pool(sequence_output)
 
             # 5. Create final heads branching from x, removing all masks
             outputs = {}
             for name, head_layer in self.heads.items():
-                out = head_layer(latent_output)
+                out = head_layer(pooled_latent)
                 if (
                     name == "latent_contrastive"
                     and self.contrastive_temperature_layer is not None
                 ):
                     temp = self.contrastive_temperature_layer(out)
                     out = kops.concatenate([out, temp], axis=-1)
-                if name == "pos_2d" and "pos" in self.params.target.lower():
+                if (
+                    name == "pos_2d"
+                    and "pos" in self.params.target.lower()
+                    and not self.use_multi_token
+                ):
                     # Check if heatmap or raw regression
                     if not getattr(self.params, "GaussianHeatmap", False):
                         out = self.ProjectionInMazeLayer(out)
 
                 outputs[name] = UnMaskingLayer(name=name, dtype="float32")(out)
 
-            # Special case for GaussianHeatmap if enabled for pos_2d
-            if (
-                getattr(self.params, "GaussianHeatmap", False)
-                and "pos_2d" in self.target_structure
-            ):
-                # Use the special GaussianHeatmap layer
-                # simply a kernel convolution with a fixed gaussian kernel, applied to the output of the dense layer for pos_2d
-                # before it also had a dense layer
-                out_heatmap = self.GaussianHeatmap(x)
-                outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
-                    out_heatmap
-                )
+            if "pos_2d" in self.target_structure:
+                if self.use_multi_token:
+                    # Branch A: Full sequence goes to Multi-Token Head
+                    out_heatmap = self.multi_token_head(sequence_output, mask=mymask)
+                    outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
+                        out_heatmap
+                    )
+                elif getattr(self.params, "GaussianHeatmap", False):
+                    # Branch B: Standard single-step heatmap
+                    out_heatmap = self.GaussianHeatmap(pooled_latent)
+                    outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
+                        out_heatmap
+                    )
 
             outputs["latent_output"] = UnMaskingLayer(
                 name="latent_output", dtype="float32"
-            )(latent_output)
+            )(sequence_output)
 
             if getattr(self.params, "use_diversity_loss", True):
                 getattr(self.params, "diversity_temperature", 0.1)
@@ -1957,7 +1968,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                     curr_es_callback = EarlyStoppingByLossVal(
                         monitor="pos_2d_dist_2d",
-                        value=0.15,
+                        value=0.1,
                         verbose=1,
                     )
                     curr_callbacks.append(curr_es_callback)
@@ -2512,7 +2523,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 timeSleepStop = timeSleepStop_frombehav
 
         if inference_mode and shuffle:
-            raise ValueError(
+            warnings.warn(
                 "Shuffle should be set to False in inference mode to ensure deterministic outputs."
             )
 
@@ -2570,18 +2581,26 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         @tf.function
         def map_outputs(vals):
-            # Move 'pos' to targets, rest stay in inputs
+            # Move 'pos' and 'pos_k' to targets, rest stay in inputs
             inputs_dict = {
-                k: v for k, v in vals.items() if k != "pos" and not k.startswith("__")
+                k: v
+                for k, v in vals.items()
+                if k not in ["pos", "pos_k"] and not k.startswith("__")
             }
-            # Structured targets matching model outputs
+
             targets_dict = {}
             for name, spec in self.target_structure.items():
                 start_idx, end_idx = spec["slice"]
-                targets_dict[name] = vals["pos"][..., start_idx:end_idx]
+                if name == "pos_2d" and use_multi_token:
+                    targets_dict[name] = vals["pos_k"][
+                        ..., start_idx:end_idx
+                    ]  # Shape: (Batch, K, 2)
+                else:
+                    targets_dict[name] = vals["pos"][
+                        ..., start_idx:end_idx
+                    ]  # Shape: (Batch, 2)
 
-            # latent targets are the 2D position for contrastive regression
-            # TODO: ensure that contrastive regression is always wrt the 2D position
+            # Ensure contrastive and CNN heads strictly get (Batch, 2)
             if "latent_contrastive" in self.outNames:
                 targets_dict["latent_contrastive"] = vals["pos"]
 
@@ -2650,6 +2669,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         datasets = {}
         counts = {}
+
+        # --- MULTI-TOKEN TRAJECTORY SETUP ---
+        use_multi_token = getattr(self.params, "use_multi_token_density", False)
+        k_steps = getattr(self.params, "k_steps", 5)
+        # Frame spacing: e.g., if camera is 50Hz (20ms) and window is 200ms,
+        # spacing=2 grabs frames every 40ms to cover the window.
+        k_frame_spacing = getattr(self.params, "k_frame_spacing", 2)
+
+        # Calculate relative frame offsets: e.g., [-4, -2, 0, 2, 4] for K=5
+        half_k = k_steps // 2
+        frame_offsets = (
+            tf.range(-half_k, k_steps - half_k, dtype=tf.int64) * k_frame_spacing
+        )
+
         for key in totMask.keys():
             # This is just max normalization to use if the behavioral data have not been normalized yet
             # Note: Only scale position columns (first 2 dims), not mixed-head targets
@@ -2665,15 +2698,61 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 @tf.function
                 def hash_import_pos(vals):
                     updated_vals = dict(vals)
-                    start_idx = tf.cast(vals["pos_index"], tf.int64) * out_dim
-                    looked_up_indices = start_idx + tf.range(out_dim, dtype=tf.int64)
-                    looked_up_pos = pos_table.lookup(looked_up_indices)
-                    is_missing = tf.math.reduce_all(tf.math.equal(looked_up_pos, -1.0))
-                    updated_vals["pos"] = tf.cond(
-                        is_missing,
-                        lambda: tf.zeros([out_dim], dtype=tf.float32),
-                        lambda: looked_up_pos,
+                    center_idx = tf.cast(vals["pos_index"], tf.int64)
+
+                    # --- 1. MULTI-TOKEN (K-Steps) LOOKUP ---
+                    if use_multi_token:
+                        # Calculate absolute indices for the K steps
+                        target_indices = center_idx + frame_offsets
+
+                        # Clip to valid table range to avoid out-of-bounds crashes
+                        max_valid_idx = tf.cast(tf.shape(pos_array)[0] - 1, tf.int64)
+                        target_indices = tf.clip_by_value(
+                            target_indices, 0, max_valid_idx
+                        )
+
+                        # Expand to 1D lookup array for the flattened pos_table
+                        k_indices_expanded = tf.expand_dims(
+                            target_indices * out_dim, axis=1
+                        )  # (K, 1)
+                        dim_offsets = tf.range(out_dim, dtype=tf.int64)  # (out_dim,)
+                        lookup_indices_flat = tf.reshape(
+                            k_indices_expanded + dim_offsets, [-1]
+                        )  # (K * out_dim,)
+
+                        looked_up_flat = pos_table.lookup(lookup_indices_flat)
+                        looked_up_k = tf.reshape(
+                            looked_up_flat, [k_steps, out_dim]
+                        )  # (K, out_dim)
+
+                        # Verify if any data point was completely missing (-1.0 fallback)
+                        is_missing_k = tf.math.reduce_any(
+                            tf.math.equal(looked_up_k, -1.0)
+                        )
+
+                        # Write to dict
+                        updated_vals["pos_k"] = tf.cond(
+                            is_missing_k,
+                            lambda: tf.zeros([k_steps, out_dim], dtype=tf.float32),
+                            lambda: looked_up_k,
+                        )
+
+                    # --- 2. SINGLE-TOKEN LOOKUP ---
+                    start_idx = center_idx * out_dim
+                    looked_up_indices_single = start_idx + tf.range(
+                        out_dim, dtype=tf.int64
                     )
+                    looked_up_single = pos_table.lookup(looked_up_indices_single)
+
+                    is_missing_single = tf.math.reduce_all(
+                        tf.math.equal(looked_up_single, -1.0)
+                    )
+                    updated_vals["pos"] = tf.cond(
+                        is_missing_single,
+                        lambda: tf.zeros([out_dim], dtype=tf.float32),
+                        lambda: looked_up_single,
+                    )
+
                     return updated_vals
 
                 dataset = dataset.map(
@@ -2686,6 +2765,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 def remove_pos(vals):
                     updated_vals = dict(vals)
                     updated_vals["pos"] = tf.zeros([out_dim], dtype=tf.float32)
+                    if use_multi_token:
+                        updated_vals["pos_k"] = tf.zeros(
+                            [k_steps, out_dim], dtype=tf.float32
+                        )
                     return updated_vals
 
                 dataset = dataset.map(remove_pos, num_parallel_calls=tf.data.AUTOTUNE)
@@ -3216,7 +3299,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         T_scaling: Optional[float] = None,
         l_function: Optional[Callable] = None,
         **kwargs,
-    ) -> Dict:
+    ) -> Union[Dict, float]:
         """
         Consolidated decoding and post-processing of model predictions.
 
@@ -3237,19 +3320,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # 1. Handle main position head if it's a heatmap
         if use_heatmap and "pos_2d" in preds:
             output_logits = preds["pos_2d"]
-            # Ensure 3D (Batch, H, W)
             if len(output_logits.shape) == 2:
                 H, W = self.params.GaussianGridSize
                 output_logits = tf.reshape(output_logits, [-1, H, W])
 
-            # Calibration if requested
             if fit_temperature and y_true is not None:
-                # Get index slice for pos_2d (usually 0:2)
                 start, end = self.target_structure["pos_2d"]["slice"]
                 y_pos_2d = y_true[:, start:end]
-                # Heatmap targets from Mixin
                 val_targets = self.gaussian_heatmap_targets_tf(y_pos_2d)
-                # Calibrate via Layer
                 T_cal = self.GaussianHeatmap.fit_temperature(
                     output_logits, val_targets, iters=400
                 )
@@ -3261,27 +3339,50 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Decode via Mixin
             xy, maxp, Hn, var_total = self.decode_and_uncertainty_tf(output_logits)
 
-            results.update(
-                {
-                    "pos_2d": xy.numpy(),
-                    "logits_hw": output_logits.numpy()
-                    if hasattr(output_logits, "numpy")
-                    else output_logits,
-                    "var_total": var_total.numpy()
-                    if hasattr(var_total, "numpy")
-                    else var_total,
-                    "Hn": Hn.numpy() if hasattr(Hn, "numpy") else Hn,
-                    "maxp": maxp.numpy() if hasattr(maxp, "numpy") else maxp,
-                    "T_scaling": T_scaling,
-                }
+            # Convert safely to numpy
+            xy_np = xy.numpy() if hasattr(xy, "numpy") else xy
+            maxp_np = maxp.numpy() if hasattr(maxp, "numpy") else maxp
+            Hn_np = Hn.numpy() if hasattr(Hn, "numpy") else Hn
+            var_np = var_total.numpy() if hasattr(var_total, "numpy") else var_total
+            logits_np = (
+                output_logits.numpy()
+                if hasattr(output_logits, "numpy")
+                else output_logits
             )
 
+            # NEW: Split Multi-Token Sequences vs Center of Gravity
+            if len(xy_np.shape) == 3:  # (Batch, K, 2)
+                results.update(
+                    {
+                        "pos_2d": np.mean(xy_np, axis=1),  # Center of gravity
+                        "pos_2d_k": xy_np,  # Full K sequence
+                        "maxp": np.mean(maxp_np, axis=1),
+                        "maxp_k": maxp_np,
+                        "Hn": np.mean(Hn_np, axis=1),
+                        "Hn_k": Hn_np,
+                        "var_total": np.mean(var_np, axis=1),
+                        "var_total_k": var_np,
+                        "logits_hw_k": logits_np,
+                        "T_scaling": T_scaling,
+                    }
+                )
+            else:
+                results.update(
+                    {
+                        "pos_2d": xy_np,
+                        "logits_hw": logits_np,
+                        "var_total": var_np,
+                        "Hn": Hn_np,
+                        "maxp": maxp_np,
+                        "T_scaling": T_scaling,
+                    }
+                )
+
         # 2. Reconstruct featurePred by looping through target_structure
-        # This ensures the output matrix matches expectations of legacy code
         reconstructed_parts = []
         for name, spec in self.target_structure.items():
             if "latent" in name:
-                continue  # skip latent/latent_output for now, it's auxiliary and not part of the main reconstructed featurePred
+                continue
 
             if name == "pos_2d" and use_heatmap:
                 reconstructed_parts.append(results["pos_2d"])
@@ -3300,10 +3401,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 reconstructed_parts.append(pred_val)
 
         if reconstructed_parts:
-            # Concatenate all parts (2d pos + HD + etc)
             results["featurePred"] = np.concatenate(reconstructed_parts, axis=-1)
 
-        # 3. Handle latent explicitly (not in reconstructed list because it's auxiliary)
+        # 3. Handle latent explicitly
         if "latent_contrastive" in preds:
             latent_pred = (
                 preds["latent_contrastive"].numpy()
@@ -3337,7 +3437,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 results["projTruePos"] = projTruePos
                 results["linearTrue"] = linearTrue
         elif "lin" in self.target.lower() and reconstructed_parts:
-            # If the target is linearized, we assume the first dim of featurePred is already the projected position.
             results["projPred"] = None
             results["linearPred"] = results["featurePred"][:, 0]
             if y_true is not None:
@@ -3492,8 +3591,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             totMask,
             inference_mode=True,
             onTheFlyCorrection=onTheFlyCorrection,
-            shuffle=False,
+            shuffle=kwargs.pop("shuffle", False),
             speedMask=speedMask,
+            batch_size=kwargs.pop(
+                "batch_size", 32
+            ),  # smaller batch size because of drop_remainder
             **kwargs,
         )
         dataset = datasets["test"]
@@ -3518,7 +3620,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # 1. Run model prediction
         print(f"Inferring values for {phase} dataset...")
         # dataset yields (inputs, targets)
-        preds_dict = self.model.predict(dataset, verbose=1)
+        preds_dict_lists = {key: [] for key in self.model.output_names}
+
+        for inputs, _ in tqdm(dataset, desc="Predicting"):
+            batch_preds = self.model(inputs, training=False)
+
+            for key in self.model.output_names:
+                preds_dict_lists[key].append(batch_preds[key].numpy())
+
+        preds_dict = {}
+        for key in preds_dict_lists:
+            preds_dict[key] = np.concatenate(preds_dict_lists[key], axis=0)
         # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent_contrastive": ...}
 
         if "latent_output" not in preds_dict:
@@ -3655,7 +3767,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         speedMask: Optional[np.ndarray] = None,
         extract_spikes_counts: bool = False,
     ):
-        # 2. Extract metadata in a single pass
         print("Extracting metadata...")
         list_pos = []
         list_times = []
@@ -3665,7 +3776,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         list_speed_filter = []
         list_index_in_dat = []
 
-        # Spike Counts (Dynamic dict to handle variable groups)
         dict_spike_counts = {
             f"group{g}_spikes_count": [] for g in range(self.params.nGroups)
         }
@@ -3686,7 +3796,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     continue  # Skip latent for ground truth reconstruction
                 if name in targets:
                     start, end = spec["slice"]
-                    batch_y_true[:, start:end] = targets[name].numpy()
+                    val = targets[name].numpy()
+
+                    # INFO: If multi-token (Batch, K, Dim), average to (Batch, Dim)
+                    if len(val.shape) == 3:
+                        val = np.mean(val, axis=1)
+
+                    batch_y_true[:, start:end] = val
 
             list_pos.append(batch_y_true)
             list_times.append(inputs["time"].numpy())
@@ -3695,7 +3811,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             list_index_in_dat.append(inputs["indexInDat"].numpy())
             list_groups.append(inputs["groups"].numpy())
 
-            # Optional keys (use .get or check)
             if "speedFilter" in inputs:
                 list_speed_filter.append(inputs["speedFilter"].numpy())
 
@@ -3705,7 +3820,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     if key in inputs:
                         dict_spike_counts[key].append(inputs[key].numpy())
 
-        # 3. Concatenate all batches into single arrays
         print("Concatenating results...")
         # full_pred_features and full_pos_loss are already arrays/None from predict
 
@@ -3714,12 +3828,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         full_times_behavior = np.concatenate(list_times_behavior, axis=0).flatten()
         full_pos_index = np.concatenate(list_pos_index, axis=0).flatten()
 
-        # Handle Speed Mask
-        # If speedFilter was in dataset, use it. Otherwise compute via lookup
         if len(list_speed_filter) > 0:
             windowmaskSpeed = np.concatenate(list_speed_filter, axis=0).flatten()
         elif speedMask is not None:
-            # Fallback to your original lookup method
             print("Looking up speed mask from original array...")
             windowmaskSpeed = speedMask[full_pos_index]
         else:
@@ -5142,50 +5253,50 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         else:
             folderToSave = os.path.join(self.folderResult, str(folderName))
 
-        if phase is not None:
-            suffix = f"_{phase}" if phase != "" else ""
-        else:
-            suffix = self.suffix
+        suffix = f"_{phase}" if phase and phase != "" else self.suffix
 
-        # predicted coordinates
-        df = pd.DataFrame(test_output["featurePred"])
-        df.to_csv(os.path.join(folderToSave, f"featurePred{suffix}.csv"))
+        # Helper to safely save any array to CSV
+        def save_csv(key, data):
+            arr = np.asarray(data)
+            # Flatten any 3D+ multi-token arrays to 2D for pandas CSV compatibility
+            if arr.ndim > 2:
+                arr = arr.reshape(arr.shape[0], -1)
+            pd.DataFrame(arr).to_csv(os.path.join(folderToSave, f"{key}{suffix}.csv"))
+
+        save_csv("featurePred", test_output["featurePred"])
+
+        # Dynamically save legacy and multi-token keys
+        for key in [
+            "Hn",
+            "maxp",
+            "pos_2d_k",
+            "maxp_k",
+            "Hn_k",
+            "var_total_k",
+        ]:
+            if key in test_output:
+                save_csv(key, test_output[key])
 
         if "latent_output" in test_output:
             latent_output = test_output["latent_output"]
             if hasattr(latent_output, "numpy"):
                 latent_output = latent_output.numpy()
             latent_output = np.asarray(latent_output)
-            if latent_output.ndim > 2:
-                latent_output = latent_output.reshape(latent_output.shape[0], -1)
-            df = pd.DataFrame(latent_output)
-            df.to_csv(os.path.join(folderToSave, f"latent_output{suffix}.csv"))
 
-        if "Hn" in test_output:
-            df = pd.DataFrame(test_output["Hn"])
-            df.to_csv(os.path.join(folderToSave, f"Hn{suffix}.csv"))
-        if "maxp" in test_output:
-            df = pd.DataFrame(test_output["maxp"])
-            df.to_csv(os.path.join(folderToSave, f"maxp{suffix}.csv"))
-        # True coordinates
+            npy_path = os.path.join(folderToSave, f"latent_output{suffix}.npy")
+            np.save(npy_path, latent_output)
+
         if not sleep:
-            df = pd.DataFrame(test_output["featureTrue"])
-            df.to_csv(os.path.join(folderToSave, f"featureTrue{suffix}.csv"))
-            # Position loss
-            df = pd.DataFrame(test_output["posLoss"])
-            df.to_csv(os.path.join(folderToSave, f"posLoss{suffix}.csv"))
-        # Times of prediction
-        df = pd.DataFrame(test_output["times"])
-        df.to_csv(os.path.join(folderToSave, f"timeStepsPred{suffix}.csv"))
-        # Index of spikes relative to positions
-        df = pd.DataFrame(test_output["posIndex"])
-        df.to_csv(os.path.join(folderToSave, f"posIndex{suffix}.csv"))
+            save_csv("featureTrue", test_output["featureTrue"])
+            if "posLoss" in test_output:
+                save_csv("posLoss", test_output["posLoss"])
 
-        # Save additional metrics
+        save_csv("timeStepsPred", test_output["times"])
+        save_csv("posIndex", test_output["posIndex"])
+
         if "metrics" in test_output:
             import json
 
-            # Convert numpy types to native python types for JSON serialization
             metrics_serializable = {
                 k: float(v) if hasattr(v, "__float__") else v
                 for k, v in test_output["metrics"].items()
@@ -5193,38 +5304,28 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             with open(os.path.join(folderToSave, f"metrics{suffix}.json"), "w") as f:
                 json.dump(metrics_serializable, f, indent=4)
 
-        # Save residuals if present
         if "residuals" in test_output:
-            df = pd.DataFrame(test_output["residuals"])
-            df.to_csv(os.path.join(folderToSave, f"residuals{suffix}.csv"))
-        df = pd.DataFrame(test_output["posIndex"])
-        df.to_csv(os.path.join(folderToSave, f"posIndex{suffix}.csv"))
-        # Speed mask
-        if not sleep:
-            df = pd.DataFrame(test_output["speedMask"])
-            df.to_csv(os.path.join(folderToSave, f"speedMask{suffix}.csv"))
+            save_csv("residuals", test_output["residuals"])
 
-        if "indexInDat" in test_output:
-            df = pd.DataFrame(test_output["indexInDat"])
-            df.to_csv(os.path.join(folderToSave, f"indexInDat{suffix}.csv"))
-        if "projPred" in test_output:
-            df = pd.DataFrame(test_output["projPred"])
-            df.to_csv(os.path.join(folderToSave, f"projPredFeature{suffix}.csv"))
-        if "linearPred" in test_output:
-            df = pd.DataFrame(test_output["linearPred"])
-            df.to_csv(os.path.join(folderToSave, f"linearPred{suffix}.csv"))
-        if not sleep:
-            if "projTruePos" in test_output:
-                df = pd.DataFrame(test_output["projTruePos"])
-                df.to_csv(os.path.join(folderToSave, f"projTrueFeature{suffix}.csv"))
-            if "linearTrue" in test_output:
-                df = pd.DataFrame(test_output["linearTrue"])
-                df.to_csv(os.path.join(folderToSave, f"linearTrue{suffix}.csv"))
+        if not sleep and "speedMask" in test_output:
+            save_csv("speedMask", test_output["speedMask"])
+
+        for key in [
+            "indexInDat",
+            "projPredFeature",
+            "linearPred",
+            "projTrueFeature",
+            "linearTrue",
+        ]:
+            alt_key = key.replace("Feature", "")  # Match the dict key name
+            if alt_key in test_output:
+                save_csv(key, test_output[alt_key])
 
         if save_as_pickle:
-            # save the whole results dictionary
             filename = os.path.join(folderToSave, f"decoding_results{suffix}.pkl")
             with open(filename, "wb") as f:
+                import pickle
+
                 pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
 
     def setup_training_data(self, **kwargs):
@@ -5417,8 +5518,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             input_to_posEncoding._keras_mask = mask_input
             allFeatures = masked_features_layer(input_to_posEncoding)
 
-            latent_output = self.transformer_encoder(allFeatures)
-            x = self.transformer_decoder(latent_output)
+            sequence_output = self.transformer_encoder(allFeatures)
+            pooled_latent = self.global_pool(sequence_output)
+            x = self.transformer_decoder(pooled_latent)
 
             outputs = {}
             outputs["transformer_decoder_output"] = UnMaskingLayer(
@@ -5464,11 +5566,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             input_to_posEncoding._keras_mask = mask_input
             allFeatures = masked_features_layer(input_to_posEncoding)
 
-            latent_output = self.transformer_encoder(allFeatures)
-            x = self.transformer_decoder(latent_output)
+            sequence_output = self.transformer_encoder(allFeatures)
+            pooled_latent = self.global_pool(sequence_output)
+
+            x = self.transformer_decoder(pooled_latent)
             outputs = {}
             for name, head_layer in self.heads.items():
-                out = head_layer(latent_output)
+                out = head_layer(pooled_latent)
                 if name == "pos_2d" and "pos" in self.params.target.lower():
                     # Check if heatmap or raw regression
                     if not getattr(self.params, "GaussianHeatmap", False):
@@ -5476,18 +5580,27 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 outputs[name] = UnMaskingLayer(name=name, dtype="float32")(out)
 
-            if (
-                getattr(self.params, "GaussianHeatmap", False)
-                and "pos_2d" in self.target_structure
-            ):
-                out_heatmap = self.GaussianHeatmap(x)
-                outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
-                    out_heatmap
-                )
+            # 4. Handle Spatial Heatmaps (Single vs Multi-Token)
+            if "pos_2d" in self.target_structure:
+                if self.use_multi_token:
+                    # Multi-token requires the full sequence
+                    out_heatmap = self.multi_token_head(
+                        sequence_output, mask=mask_input
+                    )
+                    outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
+                        out_heatmap
+                    )
+                elif getattr(self.params, "GaussianHeatmap", False):
+                    # Old GaussianHeatmap required the old decoder
+                    x = self.transformer_decoder(pooled_latent)
+                    out_heatmap = self.GaussianHeatmap(x)
+                    outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
+                        out_heatmap
+                    )
 
             outputs["latent_output"] = UnMaskingLayer(
                 name="latent_output", dtype="float32"
-            )(latent_output)
+            )(pooled_latent)
             tmp_outputs = outputs.copy()
 
             self.full_transformer = tf.keras.Model(
