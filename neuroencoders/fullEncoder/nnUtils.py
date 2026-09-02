@@ -1289,7 +1289,9 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             offsets=self.offsets,
             max_nb_spikes=self.max_nb_spikes,
         )
-        self.embed_dim = n_features * dim_factor if project_transformer else n_features
+        self.embed_dim = (
+            n_features * dim_factor if self.project_transformer else n_features
+        )
 
         if self.project_transformer:
             self.transformer_projection = tf.keras.layers.Dense(
@@ -1399,14 +1401,16 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             pool = kops.concatenate(all_group_latents, axis=1)
 
             # 3. GATHER
-            all_features = self.sequence_reconstructor([pool, indices, input_groups])
+            gathered_sequence = self.sequence_reconstructor(
+                [pool, indices, input_groups]
+            )
 
             # 4. MASKING
             mymask = self.safe_mask_creation(input_groups)
-            all_features._keras_mask = (
+            gathered_sequence._keras_mask = (
                 mymask  # Attach the mask to the features tensor for downstream layers
             )
-            masked_features = self.masking_layer(all_features)
+            masked_features = self.masking_layer(gathered_sequence)
 
             x = masked_features
             if self.project_transformer:
@@ -1415,16 +1419,16 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             x = self.anatomical_embedding([x, input_groups])
 
             # Sum inputs for legacy/diagnostics
-            sum_features = kops.sum(x, axis=1)
+            sum_features = kops.sum(gathered_sequence, axis=1)
 
             # The layer returns the processed features sequence and the mask
 
             return (
-                x,
-                mymask,
-                sum_features,
-                all_features,
-                group_latents_raw,
+                x,  # embed dim sequence
+                mymask,  # attention mask in embed dim
+                sum_features,  # sum of features for legacy/diagnostics in original spike encoder dim
+                gathered_sequence,  # simply gathered sequence in spike encoder dim
+                group_latents_raw,  # group latents, unordered
             )
 
     def compute_mask(self, inputs, mask=None):
@@ -1442,7 +1446,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
 
         # Returns: (masked_features, mymask, sum_features, all_features)
         return [
-            (batch_size, seq_len, self.n_features),  # masked_features
+            (batch_size, seq_len, self.embed_dim),  # masked_features
             (batch_size, seq_len),  # mymask
             (batch_size, self.n_features),  # sum_features
             (batch_size, seq_len, self.n_features),  # all_features
@@ -1702,6 +1706,7 @@ class AnatomicalEmbedding(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.n_groups = n_groups
         self.embed_dim = embed_dim
+        self.supports_masking = True
 
     def build(self, input_shape):
         self.group_embeddings = self.add_weight(
@@ -1749,6 +1754,13 @@ class AnatomicalEmbedding(tf.keras.layers.Layer):
             }
         )
         return config
+
+    def compute_mask(self, inputs, mask=None):
+        if mask is None:
+            return None
+        if isinstance(mask, (list, tuple)):
+            return mask[0]  # Pass through the first mask if multiple are provided
+        return mask
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")

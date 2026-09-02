@@ -603,10 +603,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.params, "dim_factor", 1
         )  # factor to increase the dimension of the transformer if needed
         self.project_transformer = (
-            getattr(self.params, "project_transformer", True)
-            and self.isTransformer
-            and self.dim_factor * self.params.nFeatures
-            != self.params.sequence_output_dim
+            getattr(self.params, "project_transformer", True) and self.isTransformer
         )
         print("dim_factor:", self.dim_factor)
         print(
@@ -925,9 +922,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             **kwargs: Additional arguments
 
         Returns:
-            tuple: (myoutputPos, output, sumFeatures)
-            myoutputPos: Final output positions or heatmaps (batch_size, dimOutput) or (batch_size, GaussianGridSize[0], GaussianGridSize[1]) or (batch_size, flattened heatmap + dimOutput - 2)
-            output: Output before final dense layers (batch_size, TransformerDenseSize2)
+            tuple: (output, sumFeatures)
+            output: Sequence Output before final dense layers (batch_size, TransformerDenseSize2)
             sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
         x = allFeatures
@@ -935,17 +931,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # 1. Get the full 3D sequence from the encoder
         sequence_output = self.transformer_encoder(x)
 
-        # 2. Pool it to 2D for the standard decoder
-        pooled_latent = self.global_pool(sequence_output)
-
-        # 3. Pass the 2D pooled latent to the decoder (Locks shape to 2D)
-        decoded_x = self.transformer_decoder(pooled_latent)
-
-        # 4. Standard diagnostics
+        # # 2. Pool it to 2D for the standard decoder
+        # pooled_latent = self.global_pool(sequence_output)
+        #
+        # # 3. Pass the 2D pooled latent to the decoder (Locks shape to 2D)
+        # decoded_x = self.transformer_decoder(pooled_latent)
+        #
+        # # 4. Standard diagnostics
         sumFeatures = kops.sum(allFeatures_raw, axis=1)
 
         # Return sequence_output (3D) so generate_model can route it to the multi-token head!
-        return decoded_x, sequence_output, sumFeatures
+        # return decoded_x, sequence_output, sumFeatures
+        return sequence_output, sumFeatures
 
     def apply_lstm_architecture(self, allFeatures, sumFeatures, mymask, **kwargs):
         """
@@ -970,7 +967,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         final_output = output
 
-        return output, final_output, sumFeatures
+        return final_output, sumFeatures
 
     def generate_model(self, **kwargs):
         """
@@ -985,25 +982,25 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
             # Call the processor - From single spikes to features sequence
-            masked_features, mymask, sumFeatures, allFeatures, group_latents_raw = (
+            embedded_features, mymask, sumFeatures, raw_sequence, group_latents_raw = (
                 self.spike_sequence_processor(processor_inputs)
             )
-            masked_features._keras_mask = (
+            embedded_features._keras_mask = (
                 mymask  # Ensure the mask is set for downstream layers
             )
 
-            # 5. RNN / TRANSFORMER
-            allFeatures_raw = allFeatures
-            allFeatures = self.dropoutLayer(allFeatures)
-            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures)
+            allFeatures_raw = raw_sequence
+
+            transformer_input = self.dropoutLayer(embedded_features)
+            # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures/embed_dim)
 
             if not self.isTransformer:
-                x, sequence_output, sumFeatures = self.apply_lstm_architecture(
-                    allFeatures, sumFeatures, mymask, **kwargs
+                sequence_output, sumFeatures = self.apply_lstm_architecture(
+                    transformer_input, sumFeatures, mymask, **kwargs
                 )
             else:
-                x, sequence_output, sumFeatures = self.apply_transformer_architecture(
-                    allFeatures, allFeatures_raw, mymask, **kwargs
+                sequence_output, sumFeatures = self.apply_transformer_architecture(
+                    transformer_input, allFeatures_raw, mymask, **kwargs
                 )
 
             pooled_latent = self.global_pool(sequence_output)
@@ -1018,11 +1015,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 ):
                     temp = self.contrastive_temperature_layer(out)
                     out = kops.concatenate([out, temp], axis=-1)
-                if (
-                    name == "pos_2d"
-                    and "pos" in self.params.target.lower()
-                    and not self.use_multi_token
-                ):
+                if name == "pos_2d" and "pos" in self.params.target.lower():
                     # Check if heatmap or raw regression
                     if not getattr(self.params, "GaussianHeatmap", False):
                         out = self.ProjectionInMazeLayer(out)
@@ -1032,13 +1025,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             if "pos_2d" in self.target_structure:
                 if self.use_multi_token:
                     # Branch A: Full sequence goes to Multi-Token Head
-                    out_heatmap = self.multi_token_head(sequence_output, mask=mymask)
+                    out_heatmap = self.multi_token_head(
+                        sequence_output, mask=mymask
+                    )  # multi head can work directly with transformer output
                     outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
                         out_heatmap
                     )
                 elif getattr(self.params, "GaussianHeatmap", False):
                     # Branch B: Standard single-step heatmap
-                    out_heatmap = self.GaussianHeatmap(pooled_latent)
+                    decoded_x = self.transformer_decoder(
+                        pooled_latent
+                    )  # moved legacy transformer decoder to here to generate heatmap from pooled latent
+                    out_heatmap = self.GaussianHeatmap(decoded_x)
                     outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
                         out_heatmap
                     )
@@ -1361,7 +1359,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 if "train" in ds_stats and ds_stats["train"] is not None:
                     means, stds, max_nb_spikes = self.compute_normalization_stats(
-                        ds_stats["train"]
+                        ds_stats["train"], winMS_max
                     )
                     self.normalization_stats = (means, stds, max_nb_spikes)
                     with open(norm_filename, "wb") as f:
@@ -2304,7 +2302,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     f"⚠️ Could not update master pickle file for spike_net nCh {num_channels}: {e}"
                 )
 
-    def compute_normalization_stats(self, dataset, max_samples=15000):
+    def compute_normalization_stats(self, dataset, winMS, max_samples=15000):
         """
         Compute mean and std for each channel of each group in the dataset.
         Uses a subset of the dataset to estimate statistics.
@@ -2457,6 +2455,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             f"✓ Empirical max spikes detected in subset scan: {max_observed_global_spikes} while current max number spikes is set to {self.max_nb_spikes}"
         )
         self.empirical_max_spikes = max_observed_global_spikes
+
+        max_spikes_csv = os.path.join(
+            Path(self.projectPath.folder).parent,
+            f"max_spikes_{winMS}.csv",
+        )
+        # add this to the CSV file for future reference
+        # 3 columns : name of projectPath.folder, empirical max spikes, and number of groups
+        with open(max_spikes_csv, "a") as f:
+            f.write(
+                f"{os.path.basename(os.path.normpath(self.projectPath.folder))},{max_observed_global_spikes},{self.params.nGroups}\n"
+            )
 
         return means, stds, max_observed_global_spikes
 
@@ -5480,14 +5489,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         with nnUtils.get_device_context(self.deviceName):
             # This grabs the actual output tensor from the existing model's graph
-            # No risk of dropout mismatch or bias leakage
-            cnn_output_tensor = self.model.get_layer(
-                "feature_projection_transformer"
-            ).output
 
             # We also need the mask from the processor
-            # You can find the mask layer by name (e.g., the one from spike_sequence_processor)
-            mask_tensor = self.model.get_layer("spike_sequence_processor").output[1]
+            cnn_output_tensor, mask_tensor = self.model.get_layer(
+                "spike_sequence_processor"
+            ).output[:2]
 
             # Apply your masking layer to the cnn_output to clean the bias
             cnn_output_tensor._keras_mask = mask_tensor
@@ -5536,12 +5542,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             sequence_output = self.transformer_encoder(allFeatures)
             pooled_latent = self.global_pool(sequence_output)
-            x = self.transformer_decoder(pooled_latent)
 
             outputs = {}
-            outputs["transformer_decoder_output"] = UnMaskingLayer(
+            outputs["transformer_output"] = UnMaskingLayer(
                 name="transformer_decoder_output", dtype="float32"
-            )(x)
+            )(pooled_latent)
 
             self.transformer_only = tf.keras.Model(
                 inputs=[input_to_posEncoding, mask_input],
@@ -5585,10 +5590,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             sequence_output = self.transformer_encoder(allFeatures)
             pooled_latent = self.global_pool(sequence_output)
 
-            x = self.transformer_decoder(pooled_latent)
             outputs = {}
             for name, head_layer in self.heads.items():
                 out = head_layer(pooled_latent)
+                if (
+                    name == "latent_contrastive"
+                    and self.contrastive_temperature_layer is not None
+                ):
+                    temp = self.contrastive_temperature_layer(out)
+                    out = kops.concatenate([out, temp], axis=-1)
                 if name == "pos_2d" and "pos" in self.params.target.lower():
                     # Check if heatmap or raw regression
                     if not getattr(self.params, "GaussianHeatmap", False):
@@ -5596,27 +5606,29 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 outputs[name] = UnMaskingLayer(name=name, dtype="float32")(out)
 
-            # 4. Handle Spatial Heatmaps (Single vs Multi-Token)
             if "pos_2d" in self.target_structure:
                 if self.use_multi_token:
-                    # Multi-token requires the full sequence
+                    # Branch A: Full sequence goes to Multi-Token Head
                     out_heatmap = self.multi_token_head(
                         sequence_output, mask=mask_input
-                    )
+                    )  # multi head can work directly with transformer output
                     outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
                         out_heatmap
                     )
                 elif getattr(self.params, "GaussianHeatmap", False):
-                    # Old GaussianHeatmap required the old decoder
-                    x = self.transformer_decoder(pooled_latent)
-                    out_heatmap = self.GaussianHeatmap(x)
+                    # Branch B: Standard single-step heatmap
+                    decoded_x = self.transformer_decoder(
+                        pooled_latent
+                    )  # moved legacy transformer decoder to here to generate heatmap from pooled latent
+                    out_heatmap = self.GaussianHeatmap(decoded_x)
                     outputs["pos_2d"] = UnMaskingLayer(name="pos_2d", dtype="float32")(
                         out_heatmap
                     )
 
             outputs["latent_output"] = UnMaskingLayer(
                 name="latent_output", dtype="float32"
-            )(pooled_latent)
+            )(sequence_output)
+
             tmp_outputs = outputs.copy()
 
             self.full_transformer = tf.keras.Model(
