@@ -582,6 +582,38 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         return loss_dict, loss_weights, metrics_dict
 
     def _build_model(self, **kwargs):
+        """
+        Build the full model architecture, including spike encoders, LSTM or Transformer layers, and output heads based on the target structure.
+        This method initializes the necessary layers and constructs the model based on the provided parameters and configurations.
+
+        kwargs:
+            - isTransformer: bool, optional, default False
+                Whether to use a Transformer architecture instead of LSTM.
+            - dim_factor: int, optional, default 1
+                Factor to increase the dimension of the Transformer if needed.
+            - project_transformer: bool, optional, default True
+                Whether to project the Transformer output to match the sequence output dimension.
+            - dropoutCNN: float, optional, default self.params.dropoutCNN
+        """
+
+        self.isTransformer = kwargs.get(
+            "isTransformer", getattr(self.params, "isTransformer", False)
+        )
+        self.dim_factor = getattr(
+            self.params, "dim_factor", 1
+        )  # factor to increase the dimension of the transformer if needed
+        self.project_transformer = (
+            getattr(self.params, "project_transformer", True)
+            and self.isTransformer
+            and self.dim_factor * self.params.nFeatures
+            != self.params.sequence_output_dim
+        )
+        print("dim_factor:", self.dim_factor)
+        print(
+            "project transformer:",
+            self.project_transformer,
+        )
+
         ### Description of layers here
         with nnUtils.get_device_context(self.deviceName):
             self.inputsToSpikeNets = [
@@ -641,6 +673,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 n_features=self.params.nFeatures,
                 max_spikes_per_group=self.max_spikes_per_group,
                 max_nb_spikes=self.max_nb_spikes,
+                project_transformer=self.project_transformer,
+                dim_factor=self.dim_factor,
                 device=self.deviceName,
                 name="spike_sequence_processor",
             )
@@ -663,9 +697,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
             # LSTMs
-            self.isTransformer = kwargs.get(
-                "isTransformer", getattr(self.params, "isTransformer", False)
-            )
             if (
                 not hasattr(self.params, "sequence_output_dim")
                 or self.params.sequence_output_dim is None
@@ -709,18 +740,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             else:
                 self.isTransformer = True
-
-                self.dim_factor = getattr(
-                    self.params, "dim_factor", 1
-                )  # factor to increase the dimension of the transformer if needed
-                print("dim_factor:", self.dim_factor)
-                self.project_transformer = (
-                    getattr(self.params, "project_transformer", True),
-                )
-                print(
-                    "project transformer:",
-                    self.project_transformer,
-                )
 
                 # Transformer Encoder (Part 1: up to pooling)
                 encoder_layers = []
@@ -862,12 +881,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.params, "dim_factor", 1
             )  # factor to increase the dimension of the transformer if needed
 
-            if self.project_transformer:
-                self.transformer_projection_layer = tf.keras.layers.Dense(
-                    self.params.nFeatures * self.dim_factor,
-                    activation="silu",
-                    name="feature_projection_transformer",
-                )
             self.ProjectionInMazeLayer = UMazeProjectionLayer(
                 grid_size=kwargs.get(
                     "grid_size",
@@ -918,8 +931,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             sumFeatures: Sum of masked raw features (batch_size, feature_dim * nGroups)
         """
         x = allFeatures
-        if self.project_transformer:
-            x = self.transformer_projection_layer(x)
 
         # 1. Get the full 3D sequence from the encoder
         sequence_output = self.transformer_encoder(x)

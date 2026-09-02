@@ -64,7 +64,7 @@ mice_nb = [
 
 ####
 nameExp = "highmask_high_speed_mask_posandheaddirection_contrastiveLoss_DenseLayer"
-nameExp = "high_speed_multi_token"
+nameExp = "high_speed_multi_token_high_dim_factor_high_embedding"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"
@@ -209,7 +209,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 "--n_features",
                 "32",
                 "--dim_factor",
-                "4",
+                "8",
                 "--n_transformers",
                 "2",
                 "--loss_type",

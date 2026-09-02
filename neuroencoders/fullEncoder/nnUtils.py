@@ -1256,7 +1256,9 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
         n_features: int,
         max_spikes_per_group: int,
         max_nb_spikes: int,
-        device="/cpu:0",
+        project_transformer: bool = True,
+        dim_factor: int = 4,
+        device: str = "/cpu:0",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -1265,6 +1267,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
         self.n_features = n_features
         self.max_spikes_per_group = max_spikes_per_group
         self.max_nb_spikes = max_nb_spikes
+        self.project_transformer = project_transformer
         self.device = device
 
         # Compute offsets statically
@@ -1285,6 +1288,17 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             group_dim=self.n_features,
             offsets=self.offsets,
             max_nb_spikes=self.max_nb_spikes,
+        )
+        self.embed_dim = n_features * dim_factor if project_transformer else n_features
+
+        if self.project_transformer:
+            self.transformer_projection = tf.keras.layers.Dense(
+                self.embed_dim, activation="silu", name="transformer_projection"
+            )
+        self.anatomical_embedding = AnatomicalEmbedding(
+            n_groups=self.n_groups,
+            embed_dim=self.embed_dim,
+            name="anatomical_embedding",
         )
 
         self.safe_mask_creation = SafeMaskCreation(name="safe_mask_creation")
@@ -1321,6 +1335,8 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
                 (None, self.max_nb_spikes),
             ]
         )
+
+        self.anatomical_embedding.build((None, self.max_nb_spikes))
 
         # receives inputGroups of shape (Batch, SeqLen) to create the mask, and also receives the features of shape (Batch, SeqLen, nFeatures) to apply the mask
         self.safe_mask_creation.build(
@@ -1392,13 +1408,19 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             )
             masked_features = self.masking_layer(all_features)
 
+            x = masked_features
+            if self.project_transformer:
+                x = self.transformer_projection(x)
+
+            x = self.anatomical_embedding([x, input_groups])
+
             # Sum inputs for legacy/diagnostics
-            sum_features = kops.sum(masked_features, axis=1)
+            sum_features = kops.sum(x, axis=1)
 
             # The layer returns the processed features sequence and the mask
 
             return (
-                masked_features,
+                x,
                 mymask,
                 sum_features,
                 all_features,
@@ -1609,6 +1631,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
 class GlobalSequenceGather(tf.keras.layers.Layer):
     """
     Gathers features from the concatenated pool of all groups back into the original temporal sequence order.
+    (Stripped of embeddings to operate purely in low-dimensional space for efficiency)
     """
 
     def __init__(self, n_groups, group_dim, offsets, max_nb_spikes, **kwargs):
@@ -1618,75 +1641,88 @@ class GlobalSequenceGather(tf.keras.layers.Layer):
         self.max_nb_spikes = max_nb_spikes
         self.offsets = kops.convert_to_tensor(offsets, dtype="int32")
 
-    def build(self, input_shape):
-        # learnable embedding for each group
-        self.group_embeddings = self.add_weight(
-            name="group_embeddings",
-            shape=(self.n_groups, self.group_dim),
-            initializer="glorot_uniform",
-            trainable=True,
-        )
-        self.null_identity = self.add_weight(
-            name="null_identity",
-            shape=(1, self.group_dim),
-            initializer="zeros",
-            trainable=False,
-        )
-
-        super().build(input_shape)
-
     def call(self, inputs):
         pool, indices_list, group_sequence = inputs
         dtype = self.compute_dtype
 
-        # 1. Vectorized Global Index Calculation
-        # pool shape: (Batch, Total_Spikes, Features)
         batch_size = kops.shape(pool)[0]
         seq_len = kops.shape(group_sequence)[1]
 
-        # Stack indices: (n_groups, Batch, SeqLen)
         stacked_indices = kops.stack(indices_list, axis=0)
         offsets_expanded = self.offsets[:, None, None]
-
-        # options: (n_groups, Batch, SeqLen) -> global positions within the pool
         options = stacked_indices + offsets_expanded
 
-        # Pick the correct group's index for every time step
-        # Since kops.take doesn't do batch_dims, we pick based on the group_sequence ID
         safe_group_seq = kops.where(
             group_sequence == -1, 0, kops.cast(group_sequence, "int32")
         )
 
-        # We use a masking strategy to flatten the options into the final global_indices
-        # This replaces the 'for' loop and 'kops.where' chain
-        group_mask = kops.one_hot(
-            safe_group_seq, num_classes=self.n_groups
-        )  # (B, Seq, nGroups)
-        group_mask = kops.transpose(group_mask, [2, 0, 1])  # (nGroups, B, Seq)
+        group_mask = kops.one_hot(safe_group_seq, num_classes=self.n_groups)
+        group_mask = kops.transpose(group_mask, [2, 0, 1])
 
-        # Extract the specific indices for each group and sum them
-        # (This is a standard XLA trick for 'gathering from a list of tensors')
         global_indices = kops.sum(kops.cast(options, "float32") * group_mask, axis=0)
-        global_indices = kops.cast(global_indices, "int32")  # (Batch, SeqLen)
+        global_indices = kops.cast(global_indices, "int32")
 
-        # 2. BATCH TAKE: Flattening for kops.take
-        # kops.take usually works on a single axis. To do batch take:
-        # We shift global_indices by the batch offset
         batch_offsets = kops.arange(batch_size, dtype="int32") * kops.shape(pool)[1]
         flat_global_indices = kops.reshape(
             global_indices + batch_offsets[:, None], [-1]
         )
 
-        # Flatten the pool: (Batch * Total_Spikes, Features)
         flat_pool = kops.reshape(pool, [-1, self.group_dim])
-
-        # Perform the take
         sequence_features = kops.take(flat_pool, flat_global_indices, axis=0)
         sequence_features = kops.reshape(
             sequence_features, [batch_size, seq_len, self.group_dim]
         )
 
-        # 3. Anatomical Shank Identity
+        return kops.cast(sequence_features, dtype)
+
+    def compute_output_shape(self, input_shape):
+        batch_size = input_shape[2][0]
+        return (batch_size, self.max_nb_spikes, self.group_dim)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "n_groups": self.n_groups,
+                "group_dim": self.group_dim,
+                "offsets": self.offsets,
+                "max_nb_spikes": self.max_nb_spikes,
+            }
+        )
+        return config
+
+
+@keras.saving.register_keras_serializable(package="neuroencoders")
+class AnatomicalEmbedding(tf.keras.layers.Layer):
+    """
+    Injects anatomical shank identities linearly into the high-dimensional Transformer space.
+    """
+
+    def __init__(self, n_groups, embed_dim, **kwargs):
+        super().__init__(**kwargs)
+        self.n_groups = n_groups
+        self.embed_dim = embed_dim
+
+    def build(self, input_shape):
+        self.group_embeddings = self.add_weight(
+            name="group_embeddings",
+            shape=(self.n_groups, self.embed_dim),
+            initializer="glorot_uniform",
+            trainable=True,
+        )
+        self.null_identity = self.add_weight(
+            name="null_identity",
+            shape=(1, self.embed_dim),
+            initializer="zeros",
+            trainable=False,
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        features, group_sequence = inputs
+        batch_size = kops.shape(features)[0]
+        seq_len = kops.shape(features)[1]
+
         lookup_table = kops.concatenate(
             [
                 self.group_embeddings,
@@ -1698,33 +1734,21 @@ class GlobalSequenceGather(tf.keras.layers.Layer):
         safe_ids = kops.where(
             group_sequence == -1, self.n_groups, kops.cast(group_sequence, "int32")
         )
+
         identities = kops.take(lookup_table, kops.reshape(safe_ids, [-1]), axis=0)
-        identities = kops.reshape(identities, [batch_size, seq_len, self.group_dim])
+        identities = kops.reshape(identities, [batch_size, seq_len, self.embed_dim])
 
-        return kops.cast(sequence_features, dtype) + kops.cast(identities, dtype)
-
-    def compute_output_shape(self, input_shape):
-        # input_shape[2] is the shape of 'group_sequence' (Batch, SeqLen)
-        batch_size = input_shape[2][0]
-        seq_len = self.max_nb_spikes  # or input_shape[2][1]
-        return (batch_size, seq_len, self.group_dim)
+        return features + kops.cast(identities, features.dtype)
 
     def get_config(self):
         config = super().get_config()
         config.update(
             {
                 "n_groups": self.n_groups,
-                "group_dim": self.group_dim,
-                "offsets": self.offsets,
-                "max_nb_spikes": self.max_nb_spikes,
-                "device": self.device,
+                "embed_dim": self.embed_dim,
             }
         )
         return config
-
-    @classmethod
-    def from_config(cls, config):
-        return cls(**config)
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
