@@ -1,9 +1,11 @@
 import os
 from unittest.mock import MagicMock
 
+import dill as pickle
 import numpy as np
+import pandas as pd
 import scipy.io
-from pynapple import Tsd
+from pynapple import Tsd, TsdFrame
 
 from neuroencoders.importData.compareSpikeFiltering import WaveFormComparator
 from neuroencoders.utils.global_classes import ZONEDEF, DataHelper, Project, is_in_zone
@@ -208,3 +210,95 @@ def test_waveform_comparator_lazy_memmap(tmp_path):
     )
     assert filtered_window.shape[1] == 1
     assert filtered_window[0, 0] == 1
+
+
+def test_results_loader_pickle_and_addition_compatibility():
+    from neuroencoders.utils.MOBS_Functions import Results_Loader
+
+    class FakeResult:
+        def __init__(self, label):
+            self.label = label
+            self.results_df = pd.DataFrame(
+                {
+                    "mouse": ["M1"],
+                    "manipe": ["SubMFB"],
+                    "phase": ["pre"],
+                    "winMS": [50],
+                    "value": [1.0],
+                }
+            )
+
+        def convert_to_df(self, redo=False, disable=False):
+            return self.results_df.copy()
+
+    dir_df = pd.DataFrame(
+        {
+            "name": ["Mouse001", "Mouse002"],
+            "manipe": ["SubMFB", "SubMFB"],
+            "path": ["/tmp/mouse1", "/tmp/mouse2"],
+            "results": ["Network", "Network"],
+        }
+    )
+
+    result1 = FakeResult("one")
+    result2 = FakeResult("two")
+
+    loader1 = Results_Loader(
+        dir=dir_df,
+        mice_nb=[1],
+        mice_manipes=["SubMFB"],
+        timeWindows=[50],
+        phases=["pre"],
+        dict={"Network": {"M1SubMFB": {"pre": result1}}},
+        df=pd.DataFrame(),
+        nameExp=["Network"],
+    )
+    loader2 = Results_Loader(
+        dir=dir_df,
+        mice_nb=[2],
+        mice_manipes=["SubMFB"],
+        timeWindows=[50],
+        phases=["pre"],
+        dict={"Network": {"M2SubMFB": {"pre": result2}}},
+        df=pd.DataFrame(),
+        nameExp=["Network"],
+    )
+
+    loader1_df = loader1.convert_to_df()
+    assert len(loader1_df) == 1
+    assert loader1_df.iloc[0]["results"].label == "one"
+
+    combined = loader1 + loader2
+    assert isinstance(combined, Results_Loader)
+    assert len(combined.results_df) == 2
+
+    dumped = pickle.dumps(loader1)
+    restored = pickle.loads(dumped)
+    assert restored.results_dict["Network"]["M1SubMFB"]["pre"].label == "one"
+
+
+def test_datahelper_lazy_cache_for_heavy_data(monkeypatch, tmp_path):
+    from neuroencoders.utils import global_classes
+
+    times = np.array([0.0, 0.1, 0.2])
+    vals = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    cached_respi = TsdFrame(times, vals, columns=np.array([10.0, 20.0]))
+    calls = {"respi": 0}
+
+    def fake_load_respi_data(path):
+        calls["respi"] += 1
+        return cached_respi.values, cached_respi.index.values, cached_respi.columns.values
+
+    import neuroencoders.utils.wrappers as wrappers
+
+    monkeypatch.setattr(wrappers, "loadRespiData", fake_load_respi_data)
+
+    helper = global_classes.DataHelper.__new__(global_classes.DataHelper)
+    helper.folder = str(tmp_path)
+    helper._lazy_cache = {}
+
+    respi1 = helper.get_respi_data(folder=str(tmp_path), add_to_attr=True, force=False)
+    respi2 = helper.get_respi_data(folder=str(tmp_path), add_to_attr=True, force=False)
+
+    assert respi1 is respi2
+    assert calls["respi"] == 1

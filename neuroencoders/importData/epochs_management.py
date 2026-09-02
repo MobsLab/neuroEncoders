@@ -3,7 +3,7 @@ All functions to deal with Epochs and time data. Mainly inspired from Tsd, and s
 """
 
 import warnings
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -230,7 +230,7 @@ def get_epochs_mask(
     useTrain: bool = False,
     useTest: bool = True,
     usePredLoss: bool = False,
-    sleepEpochs: Optional = None,
+    sleepEpochs: Optional[List] = None,
 ):
     """
     Get the epochs mask for training or testing.

@@ -68,7 +68,7 @@ GROUPS_PALETTE = {
     "WeirdPAG": "xkcd:purple",
     "Novel": "xkcd:blue",
     "Known": "xkcd:grey",
-    "reversal": "xkcd:orange",
+    "Reversal": "xkcd:orange",
 }
 
 EPOCHS_PALETTE = {

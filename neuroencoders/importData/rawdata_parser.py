@@ -1098,7 +1098,7 @@ def select_epochs(
                 # we want to select only the idx that are in the speedMask
                 idx = np.arange(idx_testSet, idx_testSet + sizeTest)
                 idx_valid = np.where(speedMaskToShowPRE[idx])[0]
-                if idx_valid.shape[0] == 0:
+                if idx_valid.shape[0] == 0 or np.isnan(behToShow[idx_valid, :]).all():
                     entropiesPositions += [0]
                     entropiesSpeeds += [0]
                     nb_points += [0]

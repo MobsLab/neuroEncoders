@@ -1,7 +1,8 @@
 function extractTsd=extractTsd(folderData)
 % the function should receive the folder ending by a /
 %%%%%%%%%%%--- load the tsd file to read tsds array ---%%%%%%%%%%%
-addpath('./tsdPackage/')
+scriptDir = fileparts(mfilename('fullpath'));
+addpath(fullfile(scriptDir, 'tsdPackage'));
 cd(folderData)
 %%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%
 

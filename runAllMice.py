@@ -64,7 +64,7 @@ mice_nb = [
 
 ####
 nameExp = "highmask_high_speed_mask_posandheaddirection_contrastiveLoss_DenseLayer"
-nameExp = "high_speed_multi_token_dynamic_crop"
+nameExp = "high_speed_multi_token"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"

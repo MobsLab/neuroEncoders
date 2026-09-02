@@ -9,18 +9,28 @@
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/addTsd.m" beforeDir="false" afterPath="$PROJECT_DIR$/addTsd.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractSWR.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractSWR.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractTsd.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractTsd.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractTsd_withimportdata.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractTsd_withimportdata.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/importdata.m" beforeDir="false" afterPath="$PROJECT_DIR$/importdata.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/rawdata_parser.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/PathForExperiments.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/PathForExperiments.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/viz_params.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/viz_params.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/EphyViewer - Jeudi 1912.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/NotebookKarimSingleMouse.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/NotebookKarimSingleMouse.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_models.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_data_helper.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_data_helper.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -354,6 +364,24 @@
       <workItem from="1786376118051" duration="33684000" />
       <workItem from="1786542052687" duration="11583000" />
       <workItem from="1786622168243" duration="2558000" />
+      <workItem from="1786960590179" duration="6277000" />
+      <workItem from="1786981625879" duration="2606000" />
+      <workItem from="1787072003536" duration="2714000" />
+      <workItem from="1787128024262" duration="2069000" />
+      <workItem from="1787133907558" duration="299000" />
+      <workItem from="1787140697460" duration="5643000" />
+      <workItem from="1787147220959" duration="5596000" />
+      <workItem from="1787153002885" duration="3962000" />
+      <workItem from="1787216509809" duration="3634000" />
+      <workItem from="1787228874570" duration="1676000" />
+      <workItem from="1787235414864" duration="1951000" />
+      <workItem from="1787237800738" duration="5247000" />
+      <workItem from="1788169543790" duration="5812000" />
+      <workItem from="1788178656490" duration="1236000" />
+      <workItem from="1788180346412" duration="12124000" />
+      <workItem from="1788258987575" duration="2805000" />
+      <workItem from="1788267847424" duration="1000000" />
+      <workItem from="1788269011340" duration="8335000" />
     </task>
     <servers />
   </component>
@@ -376,7 +404,7 @@
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py</url>
-          <line>3197</line>
+          <line>3199</line>
           <option name="timeStamp" value="10" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">

@@ -2591,7 +2591,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             targets_dict = {}
             for name, spec in self.target_structure.items():
                 start_idx, end_idx = spec["slice"]
-                if name == "pos_2d" and use_multi_token:
+                if name == "pos_2d" and self.use_multi_token:
                     targets_dict[name] = vals["pos_k"][
                         ..., start_idx:end_idx
                     ]  # Shape: (Batch, K, 2)
@@ -2639,7 +2639,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             total_elements = tf.shape(pos_array)[0] * out_dim
             flat_indices = tf.range(tf.cast(total_elements, tf.int64), dtype=tf.int64)
 
-            # 2. Flatten the position array completely to a 1D vector of shape [939534]
+            # 2. Flatten the position array completely to a 1D vector of shape
             flat_pos_values = tf.reshape(pos_array, [-1])
 
             # 3. Initialize the StaticHashTable with matching 1D constraints
@@ -2671,17 +2671,24 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         counts = {}
 
         # --- MULTI-TOKEN TRAJECTORY SETUP ---
-        use_multi_token = getattr(self.params, "use_multi_token_density", False)
-        k_steps = getattr(self.params, "k_steps", 5)
-        # Frame spacing: e.g., if camera is 50Hz (20ms) and window is 200ms,
-        # spacing=2 grabs frames every 40ms to cover the window.
-        k_frame_spacing = getattr(self.params, "k_frame_spacing", 2)
+        if self.use_multi_token:
+            k_steps = getattr(
+                self.params, "k_steps", nnUtils.get_k_steps_params(windowSizeMS)[0]
+            )
+            k_frame_spacing = getattr(
+                self.params,
+                "k_frame_spacing",
+                nnUtils.get_k_steps_params(windowSizeMS)[1],
+            )
 
-        # Calculate relative frame offsets: e.g., [-4, -2, 0, 2, 4] for K=5
-        half_k = k_steps // 2
-        frame_offsets = (
-            tf.range(-half_k, k_steps - half_k, dtype=tf.int64) * k_frame_spacing
-        )
+            half_k = k_steps // 2
+            frame_offsets = (
+                tf.range(-half_k, k_steps - half_k, dtype=tf.int64) * k_frame_spacing
+            )
+
+            print(
+                f"Multi Token mode is ON. Will look up {k_steps} steps with spacing {k_frame_spacing} frames."
+            )
 
         for key in totMask.keys():
             # This is just max normalization to use if the behavioral data have not been normalized yet
@@ -2701,7 +2708,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     center_idx = tf.cast(vals["pos_index"], tf.int64)
 
                     # --- 1. MULTI-TOKEN (K-Steps) LOOKUP ---
-                    if use_multi_token:
+                    if self.use_multi_token:
                         # Calculate absolute indices for the K steps
                         target_indices = center_idx + frame_offsets
 
@@ -2765,7 +2772,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 def remove_pos(vals):
                     updated_vals = dict(vals)
                     updated_vals["pos"] = tf.zeros([out_dim], dtype=tf.float32)
-                    if use_multi_token:
+                    if self.use_multi_token:
                         updated_vals["pos_k"] = tf.zeros(
                             [k_steps, out_dim], dtype=tf.float32
                         )
@@ -3299,7 +3306,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         T_scaling: Optional[float] = None,
         l_function: Optional[Callable] = None,
         **kwargs,
-    ) -> Union[Dict, float]:
+    ) -> Dict:
         """
         Consolidated decoding and post-processing of model predictions.
 
@@ -3313,6 +3320,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         Returns:
             dict: Decoded predictions and metadata.
+            OR
+            float: If fit_temperature is True, returns the fitted temperature value.
         """
         results = {}
         use_heatmap = getattr(self.params, "GaussianHeatmap", False)
@@ -4043,21 +4052,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Infer
             print(f"Inferring {sleepName} values")
             # modified to avoid OOM on GPU during long sessions.
-            preds_accum = {}
-            for batch in dataset:
-                x_inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
+            preds_accum = {key: [] for key in self.model.output_names}
+            for x_inputs, _ in tqdm(dataset, desc=f"Predicting {sleepName}"):
                 batch_preds = self.model(x_inputs, training=False)
 
-                if not isinstance(batch_preds, dict):
-                    batch_preds = {"output": batch_preds}
-
-                for k, v in batch_preds.items():
-                    if k not in preds_accum:
-                        preds_accum[k] = []
-                    # Immediately cast tensor to NumPy CPU array to release GPU memory
-                    preds_accum[k].append(
-                        v.numpy() if hasattr(v, "numpy") else np.array(v)
-                    )
+                for key in self.model.output_names:
+                    preds_accum[key].append(batch_preds[key].numpy())
 
             # Concatenate batch predictions on system CPU RAM
             preds_dict = {
@@ -5257,9 +5257,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # Helper to safely save any array to CSV
         def save_csv(key, data):
+            if data is None:
+                return
+
             arr = np.asarray(data)
-            # Flatten any 3D+ multi-token arrays to 2D for pandas CSV compatibility
-            if arr.ndim > 2:
+
+            if arr.ndim == 0:
+                arr = np.atleast_1d(arr)
+            elif arr.ndim > 2:
                 arr = arr.reshape(arr.shape[0], -1)
             pd.DataFrame(arr).to_csv(os.path.join(folderToSave, f"{key}{suffix}.csv"))
 

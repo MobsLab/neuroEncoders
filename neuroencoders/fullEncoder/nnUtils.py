@@ -6575,6 +6575,20 @@ class MultiTokenSpatialDensityHead(keras.layers.Layer):
         return (batch_size, self.k_steps, self.n_bins)
 
 
+def get_k_steps_params(winMS):
+    """
+    Returns the number of temporal steps (k_steps) and the stride for the MultiTokenSpatialDensityHead based on the input window size in milliseconds (winMS).
+    """
+    if winMS == 108:
+        return 5, 1
+    elif winMS == 252:
+        return 8, 1
+    elif winMS == 504:
+        return 10, 2
+    else:
+        return 1, 1
+
+
 # Register custom layers and losses for Keras serialization
 keras_utils.get_custom_objects()["DenseLossProcessor"] = DenseLossProcessor
 keras_utils.get_custom_objects()["SpikeNet1D"] = SpikeNet1D

@@ -127,7 +127,7 @@ if strcmpi(FileName,'-pastespecial')
     out = LocalRowColShuffle(out);
     delimiter = delim.printed;
 else
-    
+
     % attempt extracting descriptive information about file
     warnState = warning('off', 'MATLAB:xlsfinfo:ActiveX');
     warnState(2) = warning('off', 'MATLAB:audiovideo:avifinfo:FunctionToBeRemoved');
@@ -138,17 +138,17 @@ else
         warning(warnState);
         error(message('MATLAB:importdata:FileNotFound'));
     end
-    
+
     % Test success of FINFO call
     if strcmp(descr,'FileInterpretError')
-        
+
         % Generate a warning that FINFO could not interpret data file
         warning(message('MATLAB:importdata:InvalidDataSection'));
         out.data=[]; % return an empty matrix object
         out.textdata={}; % return an empty cell object
         return
     end
-    
+
     delim.printed = NaN;
     delimiter = delim.printed;
     %Just in case we found incorrect command, i.e. the name was a
@@ -254,125 +254,175 @@ end
 
 % ------------------------------------------------
 function [out, delimiter, headerlines] = LocalTextRead(filename, delim, hlines)
-% get the delimiter for the file
-if isnan(delim.requested)
-    fid = fopen(filename);
-    str = fread(fid, 4096,'*char')';
-    fclose(fid);
-    delim.printed = guessdelim(fixLineEndings(str));
-    delim.requested = delim.printed;
-    
-else
-    delim.printed = sprintf(delim.requested);
-end
-delimiter = delim.printed;
-fileString = fixLineEndings(fileread(filename));
-[out.data, out.textdata, headerlines] = parse(fileString, delim, hlines);
-out = LocalRowColShuffle(out);
+    % get the delimiter for the file
+    if isnan(delim.requested)
+        fid = fopen(filename);
+        str = fread(fid, 4096,'*char')';
+        fclose(fid);
+        delim.printed = guessdelim(fixLineEndings(str));
+        delim.requested = delim.printed;
 
-% ------------------------------------------------
+    else
+        delim.printed = sprintf(delim.requested);
+    end
+    delimiter = delim.printed;
+    fileString = fixLineEndings(fileread(filename));
+    [out.data, out.textdata, headerlines] = parse(fileString, delim, hlines);
+    out = LocalRowColShuffle(out);
+
+    % ------------------------------------------------
 function out = LocalRowColShuffle(in)
 
-out = in;
+    out = in;
 
-if isempty(in) || ~isfield(in, 'data') || ~isfield(in,'textdata') || isempty(in.data) || isempty(in.textdata)
-    return;
-end
+    if isempty(in) || ~isfield(in, 'data') || ~isfield(in,'textdata') || isempty(in.data) || isempty(in.textdata)
+        return;
+    end
 
-[dm, dn] = size(in.data);
-[tm, tn] = size(in.textdata);
+    [dm, dn] = size(in.data);
+    [tm, tn] = size(in.textdata);
 
-if tn == 1 && tm == dm
-    % use as row headers
-    out.rowheaders = in.textdata(:,end);
-elseif tn == dn
-    % use last row as col headers
-    out.colheaders = in.textdata(end,:);
-end
+    if tn == 1 && tm == dm
+        % use as row headers
+        out.rowheaders = in.textdata(:,end);
+    elseif tn == dn
+        % use last row as col headers
+        out.colheaders = in.textdata(end,:);
+    end
 
-% ------------------------------------------------
+    % ------------------------------------------------
 function [numericData, textData, numHeaderRows] = parse(fileString, ...
-    delim, headerLines)
-%This is the function which takes in a string and parses it into
-%"spreadsheet" type data.
-narginchk(1,4);
+        delim, headerLines)
+    %This is the function which takes in a string and parses it into
+    %"spreadsheet" type data.
+    narginchk(1,4);
 
-numericData = [];
-textData = {};
-numHeaderRows = 0;
+    numericData = [];
+    textData = {};
+    numHeaderRows = 0;
 
-% gracefully handle empty
-if isempty(fileString) && isempty(regexp(fileString,'\S','once'));
-    %regexp is faster than all(isspace(fileString));
-    return;
-end
+    % gracefully handle empty
+    if isempty(fileString) && isempty(regexp(fileString,'\S','once'));
+        %regexp is faster than all(isspace(fileString));
+        return;
+    end
 
-% validate delimiter
-if length(delim.printed) > 1
-    error(message('MATLAB:importdata:InvalidDelimiter'))
-end
+    % validate delimiter
+    if length(delim.printed) > 1
+        error(message('MATLAB:importdata:InvalidDelimiter'))
+    end
 
-if nargin < 3
-    headerLines = NaN;
-end
-% use what user asked for header lines if specified
-[numDataCols, numHeaderRows, numHeaderCols, numHeaderChars] = ...
-    analyze(fileString, delim, headerLines);
+    if nargin < 3
+        headerLines = NaN;
+    end
+    % use what user asked for header lines if specified
+    [numDataCols, numHeaderRows, numHeaderCols, numHeaderChars] = ...
+        analyze(fileString, delim, headerLines);
 
-% fetch header lines and look for a line of column headers
-headerLine = {};
-headerData = {};
-origHeaderData = headerData;
-useAsCells = 1;
+    % fetch header lines and look for a line of column headers
+    headerLine = {};
+    headerData = {};
+    origHeaderData = headerData;
+    useAsCells = 1;
 
-if numHeaderRows
-    firstLineOffset = numHeaderRows - 1;
-    pos = 0;
-    if numHeaderRows > 1
-        [headerData,pos] = getLines(fileString,firstLineOffset,0);
-        origHeaderData = headerData{1};
-        if numDataCols
-            headerData = [origHeaderData, cell(length(origHeaderData), numHeaderCols + numDataCols - 1)];
+    if numHeaderRows
+        firstLineOffset = numHeaderRows - 1;
+        pos = 0;
+        if numHeaderRows > 1
+            [headerData,pos] = getLines(fileString,firstLineOffset,0);
+            origHeaderData = headerData{1};
+            if numDataCols
+                headerData = [origHeaderData, cell(length(origHeaderData), numHeaderCols + numDataCols - 1)];
+            else
+                headerData = [origHeaderData, cell(length(origHeaderData), numHeaderCols)];
+            end
         else
-            headerData = [origHeaderData, cell(length(origHeaderData), numHeaderCols)];
+            headerData = emptyCharCell(0, numHeaderCols + numDataCols);
         end
-    else
-        headerData = emptyCharCell(0, numHeaderCols + numDataCols);
+        Data = getLines(fileString,1,pos);
+
+        headerLine = Data{1};
+        origHeaderLine = headerLine;
+
+        useAsCells = 0;
+
+        if ~isempty(delim.printed) && ~isempty(headerLine) && ~isempty(strfind(deblank(headerLine{:}), delim.printed))
+            cellLine = split(headerLine{:}, delim);
+            %Trailing spaces are not treated as extra delimiters
+            if (delim.printed ~= ' ' && isequal(headerLine{:}(end),delim.printed))
+                cellLine(end+1) = {''};
+            end
+            if length(cellLine) == numHeaderCols + numDataCols
+                headerLine = cellLine;
+                useAsCells = 1;
+            end
+        end
+
+        if ~useAsCells
+            if numDataCols
+                headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols + numDataCols - 1)];
+            else
+                headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols)];
+            end
+        end
     end
-    Data = getLines(fileString,1,pos);
-    
-    headerLine = Data{1};
-    origHeaderLine = headerLine;
-    
-    useAsCells = 0;
-    
-    if ~isempty(delim.printed) && ~isempty(headerLine) && ~isempty(strfind(deblank(headerLine{:}), delim.printed))
-        cellLine = split(headerLine{:}, delim);
-        %Trailing spaces are not treated as extra delimiters
-        if (delim.printed ~= ' ' && isequal(headerLine{:}(end),delim.printed))
-            cellLine(end+1) = {''};
-        end
-        if length(cellLine) == numHeaderCols + numDataCols
-            headerLine = cellLine;
-            useAsCells = 1;
-        end
-    end
-    
-    if ~useAsCells
+
+    formatString = [repmat('%q', 1, numHeaderCols) repmat('%n', 1, numDataCols)];
+
+
+    % now try for the whole shootin' match
+    try
         if numDataCols
-            headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols + numDataCols - 1)];
-        else
-            headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols)];
+            %When the delimiter is a space, multiple spaces do NOT mean
+            %multiple delimiters.  Thus, call textscan such that it will
+            %treat them as one.
+            multipleDelimsAsOne = isequal(delim.printed,' ');
+            if strfind(delim.printed, '%')
+                commentStyle = '';
+            else
+                commentStyle = '%';
+            end
+            [~,pos] = getLines(fileString,numHeaderRows,0);
+            Data = readData(fileString,formatString,...
+                delim.requested,multipleDelimsAsOne,commentStyle,pos);
+
+            if (numHeaderCols)
+                numericData = Data{2};
+            else
+                numericData = Data{1};
+            end
+        end
+        wasError = false;
+    catch exception %#ok
+        wasError = true;
+    end
+
+
+    if nargout > 1
+        if numHeaderCols > 0
+            textData = emptyCharCell(size(Data{1}, 1), numDataCols+numHeaderCols);
+            textData(:, 1:numHeaderCols) =  Data{1};
+        end
+
+        if ~isempty(headerLine)
+            textData = [headerLine; textData];
+        end
+
+        if ~isempty(headerData)
+            textData = [headerData; textData];
         end
     end
-end
+    clear('Data');
 
-formatString = [repmat('%q', 1, numHeaderCols) repmat('%n', 1, numDataCols)];
+    if (numDataCols && numHeaderCols && (size(textData, 1) ~= numHeaderRows + size(numericData, 1)))
+        wasError = true;
+    end
 
+    % if the first pass failed to read the whole shootin' match, try again using the character offset
+    if wasError && numHeaderChars
+        % rebuild format string
+        formatString = ['%' num2str(numHeaderChars) 'c' repmat('%n', 1, numDataCols)];
 
-% now try for the whole shootin' match
-try
-    if numDataCols
         %When the delimiter is a space, multiple spaces do NOT mean
         %multiple delimiters.  Thus, call textscan such that it will
         %treat them as one.
@@ -383,380 +433,330 @@ try
             commentStyle = '%';
         end
         [~,pos] = getLines(fileString,numHeaderRows,0);
-        Data = readData(fileString,formatString,...
-            delim.requested,multipleDelimsAsOne,commentStyle,pos);
-        
-        if (numHeaderCols)
-            numericData = Data{2};
+        Data = readData(fileString,formatString,delim.requested,multipleDelimsAsOne,commentStyle,pos);
+
+        textCharData = Data{1};
+        numericData = Data{2};
+        numHeaderCols = 1;
+        if ~isempty(numericData)
+            numRows = size(numericData, 1);
         else
-            numericData = Data{1};
+            numRows = length(textCharData);
         end
-    end
-    wasError = false;
-catch exception %#ok
-    wasError = true;
-end
 
-
-if nargout > 1
-    if numHeaderCols > 0
-        textData = emptyCharCell(size(Data{1}, 1), numDataCols+numHeaderCols);
-        textData(:, 1:numHeaderCols) =  Data{1};
-    end
-    
-    if ~isempty(headerLine)
-        textData = [headerLine; textData];
-    end
-    
-    if ~isempty(headerData)
-        textData = [headerData; textData];
-    end
-end
-clear('Data');
-
-if (numDataCols && numHeaderCols && (size(textData, 1) ~= numHeaderRows + size(numericData, 1)))
-    wasError = true;
-end
-
-% if the first pass failed to read the whole shootin' match, try again using the character offset
-if wasError && numHeaderChars  
-    % rebuild format string
-    formatString = ['%' num2str(numHeaderChars) 'c' repmat('%n', 1, numDataCols)];
-    
-    %When the delimiter is a space, multiple spaces do NOT mean
-    %multiple delimiters.  Thus, call textscan such that it will
-    %treat them as one.
-    multipleDelimsAsOne = isequal(delim.printed,' ');
-    if strfind(delim.printed, '%')
-        commentStyle = '';
-    else
-        commentStyle = '%';
-    end
-    [~,pos] = getLines(fileString,numHeaderRows,0);
-    Data = readData(fileString,formatString,delim.requested,multipleDelimsAsOne,commentStyle,pos);
-    
-    textCharData = Data{1};
-    numericData = Data{2};
-    numHeaderCols = 1;
-    if ~isempty(numericData)
-        numRows = size(numericData, 1);
-    else
-        numRows = length(textCharData);
-    end
-    
-    if numDataCols
-        headerData = [origHeaderData, ...
-            emptyCharCell(length(origHeaderData), numHeaderCols + numDataCols - 1)];
-    else
-        headerData = [origHeaderData, ...
-            emptyCharCell(length(origHeaderData), numHeaderCols)];
-    end
-    
-    if ~useAsCells
         if numDataCols
-            headerLine = [origHeaderLine, ...
-                emptyCharCell(1, numHeaderCols + numDataCols - 1)];
+            headerData = [origHeaderData, ...
+                emptyCharCell(length(origHeaderData), numHeaderCols + numDataCols - 1)];
         else
-            headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols)];
+            headerData = [origHeaderData, ...
+                emptyCharCell(length(origHeaderData), numHeaderCols)];
         end
+
+        if ~useAsCells
+            if numDataCols
+                headerLine = [origHeaderLine, ...
+                    emptyCharCell(1, numHeaderCols + numDataCols - 1)];
+            else
+                headerLine = [origHeaderLine, emptyCharCell(1, numHeaderCols)];
+            end
+        end
+
+        if nargout > 1 && ~isempty(textCharData)
+            textCellData = cellstr(textCharData);
+            if ~isempty(headerLine)
+                textData = [headerLine; ...
+                    textCellData(1:numRows), ...
+                    emptyCharCell(numRows, numHeaderCols + numDataCols - 1)];
+            else
+                textData = [textCellData(1:numRows), ...
+                    emptyCharCell(numRows, numHeaderCols + numDataCols - 1)];
+            end
+
+            if ~isempty(headerData)
+                textData = [headerData; textData];
+            end
+        end
+
     end
-    
-    if nargout > 1 && ~isempty(textCharData)
-        textCellData = cellstr(textCharData);
-        if ~isempty(headerLine)
-            textData = [headerLine; ...
-                textCellData(1:numRows), ...
-                emptyCharCell(numRows, numHeaderCols + numDataCols - 1)];
-        else
-            textData = [textCellData(1:numRows), ...
-                emptyCharCell(numRows, numHeaderCols + numDataCols - 1)];
-        end
-        
-        if ~isempty(headerData)
-            textData = [headerData; textData];
-        end
+
+    if nargout > 1 && ~isempty(textData)
+        textData = TrimTrailing(@(x)cellfun('isempty', x), textData);
     end
 
-end
-
-if nargout > 1 && ~isempty(textData)
-    textData = TrimTrailing(@(x)cellfun('isempty', x), textData);
-end
-
-if ~isempty(numericData)
-    numericData = TrimTrailing(@(x)(isnan(x)), numericData);
-end
-% ------------------------------------------------
+    if ~isempty(numericData)
+        numericData = TrimTrailing(@(x)(isnan(x)), numericData);
+    end
+    % ------------------------------------------------
 function out = emptyCharCell(m,n)
-%Create a cell array with empty strings of a given size
-out = repmat({''}, [m, n]);
-% ------------------------------------------------
+    %Create a cell array with empty strings of a given size
+    out = repmat({''}, [m, n]);
+    % ------------------------------------------------
 function [numColumns, numHeaderRows, numHeaderCols, numHeaderChars] = ...
-    analyze(fileString, delim, header)
-%ANALYZE count columns, header rows and header columns
+        analyze(fileString, delim, header)
+    %ANALYZE count columns, header rows and header columns
 
-numColumns = 0;
-numHeaderRows = 0;
-numHeaderCols = 0;
-numHeaderChars = 0;
+    numColumns = 0;
+    numHeaderRows = 0;
+    numHeaderCols = 0;
+    numHeaderChars = 0;
 
-pos = 0;
-if ~isnan(header)
-    [header_rows,pos] = getLines(fileString,header,0,false);
-    empties = cellfun('isempty',header_rows{1});
-    numHeaderRows = header - nnz(empties);
-end
-
-[Data,pos] = getLines(fileString,1,pos);
-
-thisLine = Data{1};
-
-if isempty(thisLine)
-    return;
-end
-thisLine = thisLine{:};
-
-[isvalid, numHeaderCols, numHeaderChars] = isvaliddata(thisLine, delim);
-
-if ~isvalid && isnan(header)
-    numHeaderRows = numHeaderRows + 1;
+    pos = 0;
+    if ~isnan(header)
+        [header_rows,pos] = getLines(fileString,header,0,false);
+        empties = cellfun('isempty',header_rows{1});
+        numHeaderRows = header - nnz(empties);
+    end
 
     [Data,pos] = getLines(fileString,1,pos);
 
     thisLine = Data{1};
+
     if isempty(thisLine)
         return;
     end
-    thisLine = thisLine{1};
-    
+    thisLine = thisLine{:};
+
     [isvalid, numHeaderCols, numHeaderChars] = isvaliddata(thisLine, delim);
-    while ~isvalid
-        % stop now if the user specified a number of header lines
-        if ~isnan(header) && numHeaderRows == header
-            break;
-        end
+
+    if ~isvalid && isnan(header)
         numHeaderRows = numHeaderRows + 1;
-        if numHeaderRows >= 1000
-            %Assume no data.
-            Data = getLines(fileString,inf,pos);
-            thisLine = Data{1};
-            numHeaderRows = length(thisLine) + numHeaderRows;
-            break;
-        end
-        
+
         [Data,pos] = getLines(fileString,1,pos);
-        
+
         thisLine = Data{1};
         if isempty(thisLine)
-            break;
+            return;
         end
         thisLine = thisLine{1};
+
         [isvalid, numHeaderCols, numHeaderChars] = isvaliddata(thisLine, delim);
-    end
-end
+        while ~isvalid
+            % stop now if the user specified a number of header lines
+            if ~isnan(header) && numHeaderRows == header
+                break;
+            end
+            numHeaderRows = numHeaderRows + 1;
+            if numHeaderRows >= 1000
+                %Assume no data.
+                Data = getLines(fileString,inf,pos);
+                thisLine = Data{1};
+                numHeaderRows = length(thisLine) + numHeaderRows;
+                break;
+            end
 
-% This check could happen earlier
-if ~isnan(header) && numHeaderRows >= header
-    numHeaderRows = header;
-end
+            [Data,pos] = getLines(fileString,1,pos);
 
-if isvalid
-    % determine num columns
-    %remove trailing spaces.  Spaces are different from other delimiters.
-    thisLine = regexprep(thisLine, ' +$', '');
-    delimiterIndexes = strfind(thisLine, delim.printed);
-    if all(delim.printed ==' ') && length(delimiterIndexes) > 1
-        delimiterIndexes = delimiterIndexes([true diff(delimiterIndexes) ~= 1]);
-        delimiterIndexes = delimiterIndexes(delimiterIndexes > 1);
+            thisLine = Data{1};
+            if isempty(thisLine)
+                break;
+            end
+            thisLine = thisLine{1};
+            [isvalid, numHeaderCols, numHeaderChars] = isvaliddata(thisLine, delim);
+        end
     end
-    
-    % format string should have 1 more specifier than there are delimiters
-    numColumns = length(delimiterIndexes) + 1;
-    if numHeaderCols > 0
-        % add one to numColumns because the two set of columns share a delimiter
-        numColumns = numColumns - numHeaderCols;
+
+    % This check could happen earlier
+    if ~isnan(header) && numHeaderRows >= header
+        numHeaderRows = header;
     end
-end
-% ------------------------------------------------
+
+    if isvalid
+        % determine num columns
+        %remove trailing spaces.  Spaces are different from other delimiters.
+        thisLine = regexprep(thisLine, ' +$', '');
+        delimiterIndexes = strfind(thisLine, delim.printed);
+        if all(delim.printed ==' ') && length(delimiterIndexes) > 1
+            delimiterIndexes = delimiterIndexes([true diff(delimiterIndexes) ~= 1]);
+            delimiterIndexes = delimiterIndexes(delimiterIndexes > 1);
+        end
+
+        % format string should have 1 more specifier than there are delimiters
+        numColumns = length(delimiterIndexes) + 1;
+        if numHeaderCols > 0
+            % add one to numColumns because the two set of columns share a delimiter
+            numColumns = numColumns - numHeaderCols;
+        end
+    end
+    % ------------------------------------------------
 function [status, numHeaderCols, numHeaderChars] = isvaliddata(fileString, delim)
-% ISVALIDDATA delimiters and all numbers or e or + or . or -
-% what about single columns???
+    % ISVALIDDATA delimiters and all numbers or e or + or . or -
+    % what about single columns???
 
-numHeaderCols  = 0;
-numHeaderChars = 0;
+    numHeaderCols  = 0;
+    numHeaderChars = 0;
 
-if isempty(delim.printed)
-    % with no delimiter, the line must be all numbers, +, . or -
-    status = isdata(fileString);
-    return
-end
-
-status = 0;
-if ~strcmp(delim.printed,'"')
-    fileString = regexprep(fileString, '"[^"]*"','""');
-end
-delims = strfind(fileString, delim.printed);
-if isempty(delims)
-    checkstring = fileString;
-    if isempty(regexp(checkstring, '\S', 'once'))
-        % Just a blank line, not actually data.
-        status = 0;
+    if isempty(delim.printed)
+        % with no delimiter, the line must be all numbers, +, . or -
+        status = isdata(fileString);
         return
     end
-else
-    checkstring = fileString(delims(end)+1:end);
-end
 
-% if there is data at the end of the line, it's legit
-if isdata(checkstring)
-    try
-        [cellstring, indices] = split(fileString, delim);
-        numNonEmptyCols = find(cellfun('isempty',deblank(cellstring)) == false, 1, 'last');
-        numHeaderCols = maxNotData(cellstring);
-        % use contents of 1st data cell to find num leading chars
-        if numHeaderCols > 0
-            numHeaderChars = indices(numHeaderCols);
+    status = 0;
+    if ~strcmp(delim.printed,'"')
+        fileString = regexprep(fileString, '"[^"]*"','""');
+    end
+    delims = strfind(fileString, delim.printed);
+    if isempty(delims)
+        checkstring = fileString;
+        if isempty(regexp(checkstring, '\S', 'once'))
+            % Just a blank line, not actually data.
+            status = 0;
+            return
         end
-        if (numHeaderCols == numNonEmptyCols)
+    else
+        checkstring = fileString(delims(end)+1:end);
+    end
+
+    % if there is data at the end of the line, it's legit
+    if isdata(checkstring)
+        try
+            [cellstring, indices] = split(fileString, delim);
+            numNonEmptyCols = find(cellfun('isempty',deblank(cellstring)) == false, 1, 'last');
+            numHeaderCols = maxNotData(cellstring);
+            % use contents of 1st data cell to find num leading chars
+            if numHeaderCols > 0
+                numHeaderChars = indices(numHeaderCols);
+            end
+            if (numHeaderCols == numNonEmptyCols)
+                numHeaderCols = 0;
+                numHeaderChars = 0;
+            else
+                status = 1;
+            end
+        catch exception  %#ok<NASGU>
             numHeaderCols = 0;
             numHeaderChars = 0;
-        else
-            status = 1;
         end
-    catch exception  %#ok<NASGU>
-        numHeaderCols = 0;
-        numHeaderChars = 0;
     end
-end
-% ------------------------------------------------
+    % ------------------------------------------------
 function index = maxNotData(cellstring)
-len = length(cellstring);
-index = 0;
-for i = len:-1:1
-    if ~isdata(cellstring{i})
-        index = i;
-        break;
-    end
-end
-% ------------------------------------------------
-function status = isdata(fileString)
-%ISDATA true if string can be shoved into a number or if it's allwhite
-if isempty(regexp(fileString, '\S', 'once'))
-    status = 1;
-else
-    [~,b,c] = sscanf(fileString, '%g');
-    status = isempty(c) && b == 1;
-end
-% ------------------------------------------------
-function [cellOut, indOut] = split(fileString, delim)
-%SPLIT rip string apart
-
-mdao = (delim.printed == ' ');
-cellOut = textscan(fileString,'%s',...
-                'Delimiter',delim.requested,...
-                'MultipleDelimsAsOne', mdao,...
-                'Whitespace','',...
-                'EndOfLine','\n');
-    
-cellOut = (cellOut{1})';
-
-if mdao
-    %Multiple spaces are often used as a "fixed-width", thus we treat them
-    %differently.
-    indOut = regexp(strtrim(fileString),' [^ ]') ;
-else    
-    indOut = strfind(fileString,delim.printed);
-end
-% ------------------------------------------------
-function out = TrimTrailing(operation, out)
-% Trim trailing that use a certain operation
-cols = size(out,2);
-while cols >= 1
-    if ~all(operation(out(:,cols)))
-        break;
-    end
-    cols = cols - 1;
-end
-% trim trailing empty rows from textData
-rows = size(out,1);
-while rows >= 1
-    if ~all(operation(out(rows,1:cols)))
-        break;
-    end
-    rows = rows - 1;
-end
-if rows < size(out,1) || cols < size(out,2)
-    out = out(1:rows,1:cols);
-end
-% ------------------------------------------------
-function out = readFromExcelFile(FileName, descr,out, bFlatten)
-warnState = warning('off', 'MATLAB:xlsread:Mode');
-warnState(2) = warning('off', 'MATLAB:xlsread:ActiveX');
-cleanupObj = onCleanup(@()warning(warnState));
-if bFlatten && length(descr) == 1
-    baseSubs = {struct('type', {}, 'subs', {})};
-else
-    names = genvarname(descr);
-    baseSubs = num2cell(struct('type','.', 'subs', names));
-end
-% top level fields so assignments below work right
-for i = 1:length(descr)
-    [n,s,raw] = xlsread(FileName,descr{i});
-    likely_row = size(raw,1) - size(n,1);
-    if ~isempty(n)
-        out = subsasgn(out, [substruct('.','data') baseSubs{i}], n);
-    end
-    if ~isempty(s)
-        out = subsasgn(out, [substruct('.', 'textdata') baseSubs{i}], s);
-    end
-    
-    if ~isempty(s) && ~isempty(n)
-        [dm, dn] = size(n);
-        [tm, tn] = size(s);
-        if tn == 1 && tm == dm
-            out = subsasgn(out, [substruct('.', 'rowheaders') baseSubs{i}], s(:,end));
-        elseif tn == dn && likely_row > 0 && tm >= likely_row
-            out = subsasgn(out, [substruct('.', 'colheaders') baseSubs{i}], s(likely_row, :));
+    len = length(cellstring);
+    index = 0;
+    for i = len:-1:1
+        if ~isdata(cellstring{i})
+            index = i;
+            break;
         end
     end
-end
+    % ------------------------------------------------
+function status = isdata(fileString)
+    %ISDATA true if string can be shoved into a number or if it's allwhite
+    if isempty(regexp(fileString, '\S', 'once'))
+        status = 1;
+    else
+        [~,b,c] = sscanf(fileString, '%g');
+        status = isempty(c) && b == 1;
+    end
+    % ------------------------------------------------
+function [cellOut, indOut] = split(fileString, delim)
+    %SPLIT rip string apart
 
-% ------------------------------------------------
+    mdao = (delim.printed == ' ');
+    cellOut = textscan(fileString,'%s',...
+        'Delimiter',delim.requested,...
+        'MultipleDelimsAsOne', mdao,...
+        'Whitespace','',...
+        'EndOfLine','\n');
+
+    cellOut = (cellOut{1})';
+
+    if mdao
+        %Multiple spaces are often used as a "fixed-width", thus we treat them
+        %differently.
+        indOut = regexp(strtrim(fileString),' [^ ]') ;
+    else
+        indOut = strfind(fileString,delim.printed);
+    end
+    % ------------------------------------------------
+function out = TrimTrailing(operation, out)
+    % Trim trailing that use a certain operation
+    cols = size(out,2);
+    while cols >= 1
+        if ~all(operation(out(:,cols)))
+            break;
+        end
+        cols = cols - 1;
+    end
+    % trim trailing empty rows from textData
+    rows = size(out,1);
+    while rows >= 1
+        if ~all(operation(out(rows,1:cols)))
+            break;
+        end
+        rows = rows - 1;
+    end
+    if rows < size(out,1) || cols < size(out,2)
+        out = out(1:rows,1:cols);
+    end
+    % ------------------------------------------------
+function out = readFromExcelFile(FileName, descr,out, bFlatten)
+    warnState = warning('off', 'MATLAB:xlsread:Mode');
+    warnState(2) = warning('off', 'MATLAB:xlsread:ActiveX');
+    cleanupObj = onCleanup(@()warning(warnState));
+    if bFlatten && length(descr) == 1
+        baseSubs = {struct('type', {}, 'subs', {})};
+    else
+        names = genvarname(descr);
+        baseSubs = num2cell(struct('type','.', 'subs', names));
+    end
+    % top level fields so assignments below work right
+    for i = 1:length(descr)
+        [n,s,raw] = xlsread(FileName,descr{i});
+        likely_row = size(raw,1) - size(n,1);
+        if ~isempty(n)
+            out = subsasgn(out, [substruct('.','data') baseSubs{i}], n);
+        end
+        if ~isempty(s)
+            out = subsasgn(out, [substruct('.', 'textdata') baseSubs{i}], s);
+        end
+
+        if ~isempty(s) && ~isempty(n)
+            [dm, dn] = size(n);
+            [tm, tn] = size(s);
+            if tn == 1 && tm == dm
+                out = subsasgn(out, [substruct('.', 'rowheaders') baseSubs{i}], s(:,end));
+            elseif tn == dn && likely_row > 0 && tm >= likely_row
+                out = subsasgn(out, [substruct('.', 'colheaders') baseSubs{i}], s(likely_row, :));
+            end
+        end
+    end
+
+    % ------------------------------------------------
 function me = CatalogException(message)
-% Helper function for MException
+    % Helper function for MException
 
-me = MException(message.Identifier, '%s', message.getString);
-% ------------------------------------------------
-% reads full lines and returns the end position
+    me = MException(message.Identifier, '%s', message.getString);
+    % ------------------------------------------------
+    % reads full lines and returns the end position
 function [lines,pos] = getLines(str,numlines,pos,skip_lines)
-delim = '';
-if nargin == 4 && ~skip_lines 
-    delim = '\n';
-end
-[lines,pos] = textscan(str,'%[^\n]',numlines,...
-                'NumCharactersToSkip',pos,...
-                'Delimiter',delim,...
-                'EndOfLine','\n',...
-                'Whitespace',''); 
-                    
-% ------------------------------------------------
-% reads the data                     
+    delim = '';
+    if nargin == 4 && ~skip_lines
+        delim = '\n';
+    end
+    [lines,pos] = textscan(str,'%[^\n]',numlines,...
+        'NumCharactersToSkip',pos,...
+        'Delimiter',delim,...
+        'EndOfLine','\n',...
+        'Whitespace','');
+
+    % ------------------------------------------------
+    % reads the data
 function Data = readData(str,fmt,delim,mdao,comment,pos)
-Data = textscan(str,fmt,...
-    'Delimiter', delim, ...
-    'MultipleDelimsAsOne', mdao,...
-    'ReturnOnError', true,...
-    'CommentStyle', comment,...
-    'NumCharactersToSkip',pos,... 
-    'CollectOutput', true,...
-    'EndOfLine','\n');
+    Data = textscan(str,fmt,...
+        'Delimiter', delim, ...
+        'MultipleDelimsAsOne', mdao,...
+        'ReturnOnError', true,...
+        'CommentStyle', comment,...
+        'NumCharactersToSkip',pos,...
+        'CollectOutput', true,...
+        'EndOfLine','\n');
 
-% ------------------------------------------------
+    % ------------------------------------------------
 function str = fixLineEndings(str)
-% Remove any \r\n, or \r with \n
-% char(13) = '\r' and char(10) = '\n'
+    % Remove any \r\n, or \r with \n
+    % char(13) = '\r' and char(10) = '\n'
 
-% make \r\n into \n
-str(strfind(str,char([13 10]))) = '';
-% make remaining \r into \n
-str(str==char(13)) = char(10);
+    % make \r\n into \n
+    str(strfind(str,char([13 10]))) = '';
+    % make remaining \r into \n
+    str(str==char(13)) = char(10);

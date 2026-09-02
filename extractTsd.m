@@ -19,7 +19,8 @@ function extractTsd(folderData, target)
 %         - sessionSleepNames: the names of the sessions where the animal was sleeping
 
 
-addpath('./tsdPackage/')
+scriptDir = fileparts(mfilename('fullpath'));
+addpath(fullfile(scriptDir, 'tsdPackage'));
 
 folderData = [folderData filesep];
 %%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%

@@ -16,7 +16,8 @@ function addTsd(folderData, target)
 %
 
 
-addpath('./tsdPackage/')
+scriptDir = fileparts(mfilename('fullpath'));
+addpath(fullfile(scriptDir, 'tsdPackage'));
 
 folderData = [folderData filesep];
 %%%%%%%%%%%--- LOAD NEEDED RESOURCES ---%%%%%%%%%%%

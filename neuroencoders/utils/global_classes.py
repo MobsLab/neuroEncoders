@@ -49,6 +49,7 @@ from statannotations.Annotator import Annotator
 from neuroencoders.importData import epochs_management as ep
 from neuroencoders.importData.rawdata_parser import get_behavior, get_params
 from neuroencoders.utils.management import get_git_info
+from neuroencoders.utils.wrappers import LazySleepScoring, PicklableMemmap
 
 if TYPE_CHECKING:
     from neuroencoders.utils.MOBS_Functions import Mouse_Results
@@ -409,6 +410,7 @@ class DataHelper(Project):
         self.phase = kwargs.get("phase", None)  # remove from the kwargs
         self.force_ref = kwargs.get("force_ref", False)
         self.isPredLoss = kwargs.get("isPredLoss", False)
+        self._lazy_cache: Dict[Tuple[str, str], object] = {}
 
         # LEGACY: old called directly called Project object in the init
         if isinstance(xmlPath, Project):
@@ -1954,9 +1956,12 @@ class DataHelper(Project):
 
         return self.freeze_epochs
 
-    def get_ripples_epochs(self, before=0.05, after=0.1):
+    def get_ripples_epochs(self, before=0.0, after=0.05):
         self.tRipples = self.fullBehavior["Times"].get("tRipples", None)
         if self.tRipples is None:
+            warnings.warn(
+                f"tRipples is not available in fullBehavior['Times']. Please provide tRipples to compute ripple epochs for {os.path.basename(os.path.dirname(self.baseName))}"
+            )
             return None
 
         self.tRipples = self.tRipples.flatten()
@@ -1966,12 +1971,12 @@ class DataHelper(Project):
         self.ripples_epochs = ripples_epochs
         return self.ripples_epochs
 
-    def get_stim_epochs(self, before=0, after=0.1):
+    def get_stim_epochs(self, before=0.0, after=0.02):
         start_stim = self.fullBehavior["Times"].get("start_stim", None)
         stop_stim = self.fullBehavior["Times"].get("stop_stim", None)
         if start_stim is None and stop_stim is None:
             warnings.warn(
-                "Both startStim and stopStim are absent. Please provide at least one of them."
+                f"Both startStim and stopStim are absent. Please provide at least one of them for {os.path.basename(os.path.dirname(self.baseName))}"
             )
         else:
             start_stim = (
@@ -1998,29 +2003,175 @@ class DataHelper(Project):
         ).time_support.merge_close_intervals(0.2)
         return mov_epoch
 
-    def get_sws_epochs(self, force: bool = False, folder: Optional[str] = None):
-        if (
-            hasattr(self, "sleep_scoring")
-            and isinstance(self.sleep_scoring, dict)
-            and not force
-        ):
-            return self.sleep_scoring["sws_epochs"]
-        from neuroencoders.utils.wrappers import loadSleepScoring
+    def add_sleep_scoring(
+        self,
+        force: bool = False,
+        folder: Optional[str] = None,
+        network_path: Optional[str] = None,
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
 
-        self.sleep_scoring = loadSleepScoring(self.folder if folder is None else folder)
-        return self.sleep_scoring["sws_epochs"]
+        cache_key = ("sleep_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            if network_path is None:
+                warnings.warn(
+                    "Network path must be provided if sleep scoring is not found in the local folder."
+                )
+            sleep_scoring = LazySleepScoring(
+                folder_path=folder if folder else self.folder,
+                fallback_network_path=network_path,
+            )
 
-    def get_rem_epochs(self, force: bool = False, folder: Optional[str] = None):
-        if (
-            hasattr(self, "sleep_scoring")
-            and isinstance(self.sleep_scoring, dict)
-            and not force
-        ):
-            return self.sleep_scoring["rem_epochs"]
-        from neuroencoders.utils.wrappers import loadSleepScoring
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
 
-        self.sleep_scoring = loadSleepScoring(self.folder if folder is None else folder)
-        return self.sleep_scoring["rem_epochs"]
+        self.sleep_scoring = sleep_scoring
+        return self.sleep_scoring
+
+    def get_sws_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("sleep_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadSleepScoring
+
+            try:
+                sleep_scoring = loadSleepScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    sleep_scoring = loadSleepScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Sleep scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "sws_epochs" in sleep_scoring:
+            return sleep_scoring["sws_epochs"]
+
+        raise KeyError("SleepScoring cache does not contain 'sws_epochs'.")
+
+    def get_rem_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("sleep_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadSleepScoring
+
+            try:
+                sleep_scoring = loadSleepScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    sleep_scoring = loadSleepScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Sleep scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "rem_epochs" in sleep_scoring:
+            return sleep_scoring["rem_epochs"]
+
+        raise KeyError("SleepScoring cache does not contain 'rem_epochs'.")
+
+    def get_spindle_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("spindles_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadSpindlesScoring
+
+            try:
+                sleep_scoring = loadSpindlesScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    sleep_scoring = loadSpindlesScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Spindles scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "spindle_epochs" in sleep_scoring:
+            return sleep_scoring["spindle_epochs"]
+
+        if "SpindlesEpoch_PFCx_epochs" in sleep_scoring:
+            return sleep_scoring["SpindlesEpoch_PFCx_epochs"]
+
+        raise KeyError(
+            f"Spindle Scoring cache does not contain 'spindle_epochs'. Found keys: {list(sleep_scoring.keys())}."
+        )
+
+    def get_delta_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("delta_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            delta_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadDeltaScoring
+
+            try:
+                delta_scoring = loadDeltaScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    delta_scoring = loadDeltaScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Sleep scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = delta_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "delta_epochs" in delta_scoring:
+            return delta_scoring["delta_epochs"]
+
+        if "alldeltas_PFCx_epochs" in delta_scoring:
+            return delta_scoring["alldeltas_PFCx_epochs"]
+
+        if "deltas_PFCx_epochs" in delta_scoring:
+            return delta_scoring["deltas_PFCx_epochs"]
+
+        raise KeyError(
+            f"Delta Scoring cache does not contain 'delta_epochs'. Found keys: {list(delta_scoring.keys())}"
+        )
 
     def get_spike_data(self, folder=None, add_to_attr=True, force=False) -> TsGroup:
         """
@@ -2028,17 +2179,30 @@ class DataHelper(Project):
         """
         from neuroencoders.utils.wrappers import loadSpikeData
 
-        if (
-            hasattr(self, "spikeData")
-            and isinstance(self.spikeData, TsGroup)
-            and not force
-        ):
-            return self.spikeData
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
 
         if folder is None:
             folder = self.folder
-        spikes, shanks, spikedata = loadSpikeData(folder)
-        spike_group = TsGroup(spikes)
+        folder = os.path.abspath(folder)
+        cache_key = ("spikeData", folder)
+
+        if cache_key in self._lazy_cache and not force:
+            spike_group = self._lazy_cache[cache_key]
+        else:
+            if (
+                hasattr(self, "spikeData")
+                and isinstance(self.spikeData, TsGroup)
+                and not force
+            ):
+                return self.spikeData
+
+            spikes, shanks, spikedata = loadSpikeData(folder)
+            spike_group = TsGroup(spikes)
+            self._lazy_cache[cache_key] = spike_group
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
         if add_to_attr:
             self.spikeData = spike_group
 
@@ -2088,19 +2252,27 @@ class DataHelper(Project):
             try:
                 lfp_data, channels = loadLFPData(folder, lazy=True)
             except FileNotFoundError:
-                lfp_data, channels = loadLFPData(network_path, lazy=True)
+                if network_path is not None:
+                    lfp_data, channels = loadLFPData(network_path, lazy=True)
+                else:
+                    raise FileNotFoundError(
+                        f"LFP data not found in {folder}. Please check the path and try again."
+                    )
             if add_to_attr:
                 self.lfpData = lfp_data
                 self.lfpChannels = channels
 
         if channel_type is not None:
-            channel_type = alias_dict.get(channel_type.lower(), channel_type)
+            channel_type = alias_dict.get(channel_type.lower(), channel_type.lower())
             if not isinstance(channel_type, list):
                 channel_type = [channel_type]
 
-            filtered_lfp_data = {
-                ch: lfp_data[ch] for ch in channel_type if ch in lfp_data
-            }
+            filtered_lfp_data = {}
+            for ch in channel_type:
+                matches = [lfp_data[k] for k in lfp_data if ch.lower() in k.lower()]
+                if matches:
+                    filtered_lfp_data[ch] = matches[0] if len(matches) == 1 else matches
+
             if len(list(filtered_lfp_data.keys())) == 1:
                 return filtered_lfp_data[list(filtered_lfp_data.keys())[0]]
             return filtered_lfp_data if filtered_lfp_data else lfp_data
@@ -2131,42 +2303,102 @@ class DataHelper(Project):
 
         return np.array(neuron_classifications)
 
+    @staticmethod
+    def _as_memmap_if_large(array: np.ndarray, threshold_bytes: int = 64 * 1024 * 1024):
+        """Persist large arrays to a temporary np.memmap to keep RAM usage bounded."""
+        if not isinstance(array, np.ndarray):
+            return array
+
+        if array.size == 0:
+            return array
+
+        if array.nbytes <= threshold_bytes:
+            return array
+
+        fd, temp_path = tempfile.mkstemp(prefix="respi_", suffix=".npy")
+        os.close(fd)
+
+        # Write initial array data to disk using standard open_memmap
+        mm = np.lib.format.open_memmap(
+            temp_path, mode="w+", dtype=array.dtype, shape=array.shape
+        )
+        mm[...] = array
+        mm.flush()  # Ensure data is flushed to disk
+
+        return PicklableMemmap(
+            filename=temp_path, dtype=array.dtype, shape=array.shape, mode="r+"
+        )
+
     def get_respi_data(
-        self, folder: Optional[str] = None, add_to_attr=True, force=False
+        self,
+        folder: Optional[str] = None,
+        add_to_attr=True,
+        force=False,
+        network_path: Optional[str] = None,
     ) -> Tsd:
-        """
-        Get respiratory spectro from the DataHelper and store it in the fullBehavior dict for later use.
-        """
+        """Get respiratory spectro from the DataHelper and store it in the fullBehavior dict for later use."""
         from neuroencoders.utils.wrappers import loadRespiData
+
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
 
         if folder is None:
             folder = self.folder
+        folder = os.path.abspath(folder)
+
+        cache_key = ("respiData", folder, network_path)
+
+        if cache_key in self._lazy_cache and not force:
+            return self._lazy_cache[cache_key]
 
         if hasattr(self, "respiData") and isinstance(self.respiData, Tsd) and not force:
             print("Respiratory data already loaded, returning existing data.")
             return self.respiData
 
-        try:
-            if not os.path.exists(os.path.join(folder, "B_Low_Spectrum.mat")):
-                raise FileNotFoundError(
-                    f"B_Low_Spectrum.mat not found in {folder}. Please check the path and try again."
-                )
-            respi_values, respi_times, freqs = loadRespiData(
-                os.path.join(folder, "B_Low_Spectrum.mat")
-                if "mat" not in folder
-                else folder
-            )
-        except FileNotFoundError:
-            respi_values, respi_times, freqs = loadRespiData(
-                os.path.join(folder, "Bulb_deep_Low_Spectrum.mat")
-                if "mat" not in folder
-                else folder
+        # Define location hierarchy and target filenames
+        locations = [loc for loc in [folder, network_path] if loc is not None]
+        filenames = ["B*_Low_Spectrum.mat", "Bulb_deep*_Low_Spectrum.mat"]
+
+        target_file = None
+
+        # 1. Search for an existing spectrum file in order of preference
+        for loc in locations:
+            for name in filenames:
+                matches = glob.glob(os.path.join(loc, name))
+                if matches:
+                    target_file = sorted(matches)[0]
+                    break
+            if target_file:
+                break
+
+        # 2. Fallback: check if MATLAB reconstruction can be triggered in candidate folders
+        if target_file is None:
+            for loc in locations:
+                if os.path.isdir(os.path.join(loc, "LFPData")) and os.path.isdir(
+                    os.path.join(loc, "ChannelsToAnalyse")
+                ):
+                    target_file = os.path.join(loc, filenames[0])
+                    break
+
+        if target_file is None:
+            raise FileNotFoundError(
+                f"Spectrum file ({' or '.join(filenames)}) not found in {folder} nor {network_path}."
             )
 
-        # weirdly enough the times are in seconds here although they come from matlab tsds
-        # round freqs to 2 decimals to avoid floating point issues
+        # 3. Load and parse respiration data
+        respi_values, respi_times, freqs = loadRespiData(target_file)
+
         freqs = np.round(freqs, 2)
+        respi_values = np.asarray(respi_values)
+        if respi_values.size > 0:
+            respi_values = self._as_memmap_if_large(respi_values)
+
         respi_tsd = TsdFrame(respi_times, respi_values, columns=freqs)
+
+        self._lazy_cache[cache_key] = respi_tsd
+        if len(self._lazy_cache) > 8:
+            self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
         if add_to_attr:
             self.respiData = respi_tsd
 
@@ -2712,8 +2944,6 @@ class Params:
             "use_multi_token_density can only be used with GaussianHeatmap"
         )
 
-        self.k_steps = kwargs.pop("k_steps", 5)
-
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", DEFAULT_GRIDSIZE)
         self.GaussianSigma = kwargs.pop(
             "GaussianSigma", 0.05
@@ -3208,7 +3438,6 @@ class SpatialConstraintsMixin:
                 var = kops.reshape(var, [B, K])
                 probs_allowed = kops.reshape(probs_allowed, [B, K, H, W])
 
-            xy = tf.stack([ex, ey], axis=-1)
             if return_probs:
                 return xy, maxp, Hn, var, probs_allowed
             else:

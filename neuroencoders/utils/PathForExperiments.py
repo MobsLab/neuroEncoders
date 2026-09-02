@@ -2,6 +2,7 @@
 
 import os
 import warnings
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -32,7 +33,7 @@ def path_for_experiments(
         - 'name': List of mouse names
         - 'group': List of group classifications (for UMazePAG)
 
-     Currently used mice 30/06/2026
+     Currently used mice 19/08/2026
      -----------------------------------------------------------------------------------------------
      |      Known       |        MFB         |        UMazePAG        |    Reversal     |   Novel   |
      -----------------------------------------------------------------------------------------------
@@ -46,7 +47,10 @@ def path_for_experiments(
      |                  |  M1334_MFB         |  M1161_PAG             |                 |             |
      |                  |  M1317_MFB         |  M906_PAG              |                 |             |
      |                  |  M1257_MFB         |  M911_PAG              |                 |             |
-     |                  |                    |  M1124_PAG             |                 |             |
+     |                  |  M1223_MFB         |  M1124_PAG             |                 |             |
+     |                  |  M1182_MFB         |  M1168_PAG             |                 |             |
+     |                  |                    |  M1117_PAG             |                 |             |
+     |                  |                    |  M912_PAG              |                 |             |
      -----------------------------------------------------------------------------------------------
 
     Exemple:
@@ -90,6 +94,9 @@ def path_for_experiments(
         "M1334MFB",
         "M1317MFB",
         "M1257MFB",
+        "M1223_MFB",
+        "M1182_MFB",
+        "M1161_MFB",
     ]
     UMazePAG_keys = [
         "m1186_pag",
@@ -104,6 +111,8 @@ def path_for_experiments(
         "M906_PAG",
         "M911_PAG",
         "M1168_PAG",
+        "M1117_PAG",
+        "M912_PAG",
     ]
     Reversal_keys = ["m1199_reversal", "m994_reversal"]
     Known_keys = ["m1336_known", "m1230_Known", "m1334_known"]
@@ -147,6 +156,11 @@ def path_for_experiments(
         "M906_PAG": f"neuroencoders_1021/_work/M906_PAG/{training_name}",
         "M911_PAG": f"neuroencoders_1021/_work/M911_PAG/{training_name}",
         "M1168_PAG": f"neuroencoders_1021/_work/M1168_PAG/{training_name}",
+        "M1117_PAG": f"neuroencoders_1021/_work/M1117_PAG/{training_name}",
+        "M1223_MFB": f"neuroencoders_1021/_work/M1223_MFB/{training_name}",
+        "M912_PAG": f"neuroencoders_1021/_work/M912_PAG/{training_name}",
+        "M1182_MFB": f"neuroencoders_1021/_work/M1182_MFB/{training_name}",
+        "M1161_MFB": f"neuroencoders_1021/_work/M1161_MFB/{training_name}",
     }
 
     # Define the second dictionary (subpython_REAL equivalent)
@@ -182,6 +196,11 @@ def path_for_experiments(
         "M911_PAG": "/media/nas5/ProjetERC2/Mouse-911/20190508/_Concatenated/",
         "M906_PAG": "/media/nas5/ProjetERC2/Mouse-906/20190418/PAGExp/_Concatenated/",
         "M1168_PAG": "/media/nas6/ProjetERC2/Mouse-K168/20210122/_Concatenated",
+        "M1117_PAG": "/media/nas5/ProjetERC2/Mouse-K117/20201109/_Concatenated/",
+        "M1223_MFB": "/media/nas6/ProjetERC1/StimMFBWake/M1223/",
+        "M912_PAG": "/media/nas5/ProjetERC2/Mouse-912/20190515/PAGexp/_Concatenated/",
+        "M1182_MFB": "/media/nas7/ProjetERC1/StimMFBWake/M1182/2",
+        "M1161_MFB": "/media/nas5/ProjetERC1/StimMFBWake/M1161/",
     }
 
     # Select appropriate keys based on experiment name.lower()
@@ -253,8 +272,8 @@ def path_for_experiments(
 
     def add_experiment(
         main_path: str,
-        additional_paths: List[str] = None,
-        results_path: str = None,
+        additional_paths: Optional[List[str]] = None,
+        results_path: Optional[str] = None,
         network_path: Optional[str] = None,
     ):
         """Helper function to add an experiment to the Dir structure"""
@@ -583,19 +602,24 @@ def path_for_experiments(
                 elif len(matching_idx) > 1:
                     try:
                         all_selected_network_path = [
-                            path for path in Dir_sub["network_path"]
+                            Path(path).expanduser().resolve()
+                            for path in Dir_sub["network_path"]
                         ]
-                        curr_net_path = Dir["path"][i]
+                        curr_net_path = Path(Dir["path"][i]).expanduser().resolve()
                         if curr_net_path in all_selected_network_path:
                             final_idx = all_selected_network_path.index(curr_net_path)
                             Dir["path"][i] = Dir_sub["path"][final_idx]
                             Dir["network_path"][i] = Dir_sub["network_path"][final_idx]
                             Dir["results"][i] = Dir_sub["results"][final_idx]
+                        else:
+                            raise ValueError(
+                                f"Warning: Multiple matches found for {name} with manipe {manipe}, but none of the network paths match the current path. Please check the selected keys."
+                            )
 
-                        print(
+                        warnings.warn(
                             f"Multiple matches found for {name} with manipe {manipe}. Please check the selected keys because we had to take {Dir['path'][i]}."
                         )
-                        print(
+                        warnings.warn(
                             f"we could have taken {[Dir_sub['path'][idx] for idx in matching_idx if idx != final_idx]} instead"
                         )
                     except Exception as e:

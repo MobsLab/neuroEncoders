@@ -1,7 +1,8 @@
+import copy
 import os
 import sys
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import mat73
 import numpy as np
@@ -9,6 +10,7 @@ import pandas as pd
 import scipy.io
 import scipy.signal
 from pynapple import IntervalSet, Ts, TsGroup, Tsd, TsdFrame
+from scipy.io import loadmat
 
 
 class LazyLFPData:
@@ -33,6 +35,26 @@ class LazyLFPData:
             self._tsd = Tsd(time, data, time_units=self.time_units)
         return self._tsd
 
+    def unload(self):
+        """Unload the materialized Tsd to free memory."""
+        self._tsd = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unload()
+
+    def __getstate__(self):
+        """Reset _tsd to keep the object lazy and lightweight when serialized."""
+        state = self.__dict__.copy()
+        state["_tsd"] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore instance dictionary without materializing data yet."""
+        self.__dict__.update(state)
+
     @property
     def index(self):
         return self._materialize().index
@@ -54,6 +76,8 @@ class LazyLFPData:
         return self._materialize()
 
     def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
         return getattr(self._materialize(), name)
 
 
@@ -75,8 +99,27 @@ class LazyDatReader:
         self.n_channels = int(n_channels)
         self.dtype = np.dtype(dtype)
         self.fs = float(fs)
-        self._mmap = np.memmap(self.path, mode="r", dtype=self.dtype)
+
+        self._mmap = None
+        self._init_mmap()
         self.n_samples = self._mmap.size // self.n_channels
+
+    def _init_mmap(self):
+        """
+        Initializes or restores the mmap object. For pickling/unpickling.
+        """
+        self._mmap = np.memmap(self.path, mode="r", dtype=self.dtype)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Remove the mmap object from the state to avoid pickling it
+        state["_mmap"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # Restore the mmap object after unpickling
+        self._init_mmap()
 
     def read_window(self, start_s: float, stop_s: float, channels=None):
         start_idx = max(0, int(start_s * self.fs))
@@ -104,6 +147,328 @@ class LazyDatReader:
         if stop_s is None:
             stop_s = self.n_samples / self.fs
         return self.read_window(start_s, stop_s, channels=[channel])
+
+    def unload(self):
+        """Unload the mmap to free memory."""
+        if self._mmap is not None:
+            del self._mmap
+            self._mmap = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unload()
+
+
+class PicklableMemmap:
+    """Picklable wrapper around np.memmap.
+
+    Stores disk metadata instead of the open file descriptor, re-opening
+    the memmap handle lazily when accessed in worker processes.
+    """
+
+    def __init__(self, filename: str, dtype: np.dtype, shape: tuple, mode: str = "r+"):
+        self.filename = filename
+        self.dtype = np.dtype(dtype)
+        self.shape = shape
+        self.mode = mode
+        self._mm = None
+
+    @property
+    def mm(self) -> np.memmap:
+        if self._mm is None:
+            self._mm = np.memmap(
+                self.filename, dtype=self.dtype, mode=self.mode, shape=self.shape
+            )
+        return self._mm
+
+    def __getstate__(self):
+        """Strip the unpicklable _mm handle before pickling."""
+        state = self.__dict__.copy()
+        state["_mm"] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore metadata; _mm will re-open on next attribute access."""
+        self.__dict__.update(state)
+
+    def __getitem__(self, key):
+        return self.mm[key]
+
+    def __setitem__(self, key, value):
+        self.mm[key] = value
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __array__(self, dtype=None):
+        arr = np.asarray(self.mm)
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def __getattr__(self, name):
+        # Guard against recursive dunder attribute lookups during unpickling
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return getattr(self.mm, name)
+
+
+class LazySleepScoring(dict):
+    """Lazy dictionary wrapper for sleep scoring MAT files.
+
+    Defers checking file locations, running conversion scripts, and parsing `.mat` files
+    until the dictionary keys are actually accessed.
+    """
+
+    def __init__(self, folder_path: str, fallback_network_path: Optional[str] = None):
+        super().__init__()
+        self.folder_path = folder_path
+        self.old_folder_path = folder_path
+        self.fallback_network_path = fallback_network_path
+        self._is_loaded = False
+
+    def _load_data(self):
+        """Triggers the heavy disk/subprocess operations once."""
+        if self._is_loaded:
+            return
+
+        target_path = self.folder_path
+
+        # 1. Check local folder existence; fallback to network path if needed
+        if not self._has_sleep_scoring_files(self.folder_path):
+            if self.fallback_network_path and self._has_sleep_scoring_files(
+                self.fallback_network_path
+            ):
+                target_path = self.fallback_network_path
+                self.old_folder_path = self.folder_path
+                self.folder_path = self.fallback_network_path
+            else:
+                raise FileNotFoundError(
+                    f"Sleep scoring files not found in {self.folder_path} "
+                    f"or network path {self.fallback_network_path}."
+                )
+
+        print(f"Attempting to load sleep scoring from {target_path}...")
+        # 2. Materialize raw dict from loadSleepScoring
+        raw_dict = loadSleepScoring(target_path)
+
+        # Populate super dict
+        super().update(raw_dict)
+        self._is_loaded = True
+
+    @staticmethod
+    def _has_sleep_scoring_files(path: str) -> bool:
+        if not path:
+            return False
+        return any(
+            os.path.exists(os.path.join(path, fname))
+            for fname in [
+                "SleepScoring_OBGamma.mat",
+                "SleepScoring_Accelero.mat",
+            ]
+        )
+
+    # --- Dictionary Method Overrides for Lazy Materialization ---
+
+    def __getitem__(self, key):
+        self._load_data()
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._load_data()
+        return super().get(key, default)
+
+    def keys(self):
+        self._load_data()
+        return super().keys()
+
+    def values(self):
+        self._load_data()
+        return super().values()
+
+    def items(self):
+        self._load_data()
+        return super().items()
+
+    def __len__(self):
+        self._load_data()
+        return super().__len__()
+
+    def __contains__(self, key):
+        self._load_data()
+        return super().__contains__(key)
+
+    def __repr__(self):
+        if not self._is_loaded:
+            return f"<LazySleepScoring [Unloaded] path={self.folder_path}>"
+        return super().__repr__()
+
+    def __iter__(self):
+        self._load_data()
+        return super().__iter__()
+
+    def __getstate__(self):
+        """If pickled before loading, send only the path string (bytes instead of MBs)."""
+        state = self.__dict__.copy()
+        if not self._is_loaded:
+            return state
+        state["_dict_items"] = dict(self)
+        return state
+
+    def __setstate__(self, state):
+        items = state.pop("_dict_items", None)
+        self.__dict__.update(state)
+        if items:
+            super().update(items)
+
+    def __reduce__(self):
+        """Ensure that the object can be pickled and unpickled correctly."""
+        return (
+            LazySleepScoring,
+            (self.folder_path, self.fallback_network_path),
+            self.__getstate__(),
+        )
+
+    def __reduce_ex__(self, proto):
+        """Ensure that the object can be pickled and unpickled correctly."""
+        return self.__reduce__()
+
+    def unload(self):
+        """Unload the materialized data to free memory."""
+        if self._is_loaded:
+            super().clear()
+            self._is_loaded = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unload()
+
+
+class LazyBreathing:
+    """Lazy proxy for mouse breathing and EKG signals.
+
+    Defers loading .mat files, running compute_breathing_rate, and applying
+    time-mask restrictions until specific attributes are accessed.
+    """
+
+    def __init__(
+        self,
+        data_helper,
+        time_mask=None,
+        network_path: Optional[str] = None,
+    ):
+        self.data_helper = data_helper
+        self.time_mask = time_mask
+        self.network_path = network_path
+        self._cache: Dict[str, Any] = {}
+
+    def _get_respi(self):
+        if "respi" not in self._cache:
+            try:
+                respi = self.data_helper.get_respi_data(
+                    folder=self.data_helper.folder, network_path=self.network_path
+                )
+            except FileNotFoundError:
+                respi = self.data_helper.get_respi_data(folder=self.network_path)
+            self._cache["respi"] = respi
+        return self._cache["respi"]
+
+    def _get_breathing_signals(self) -> Tuple[Any, Any]:
+        if "spectro" not in self._cache or "power" not in self._cache:
+            respi = self._get_respi()
+            spectro, power = self.data_helper.compute_breathing_rate(spectro_tsd=respi)
+            self._cache["spectro"] = spectro
+            self._cache["power"] = power
+        return self._cache["spectro"], self._cache["power"]
+
+    def _get_ekg_signals(self) -> Tuple[Optional[Any], Optional[Any]]:
+        if "hb_lfp" not in self._cache:
+            folder = self.data_helper.folder
+            if not os.path.exists(os.path.join(folder, "HeartBeatInfo.mat")):
+                if self.network_path and os.path.exists(
+                    os.path.join(self.network_path, "HeartBeatInfo.mat")
+                ):
+                    folder = self.network_path
+                else:
+                    self._cache["hb_lfp"] = None
+                    self._cache["hb_rate"] = None
+                    return None, None
+
+            heart_file = loadmat(os.path.join(folder, "HeartBeatInfo.mat"))
+            if "EKG" in heart_file and {"HBRate", "LFP"}.issubset(
+                heart_file["EKG"].dtype.names
+            ):
+                hb_rate = clean_mat_structure(heart_file["EKG"]["HBRate"])
+                hb_lfp = clean_mat_structure(heart_file["EKG"]["LFP"])
+
+                self._cache["hb_rate"] = Tsd(
+                    t=np.array(hb_rate["t"]) / 1e4, d=np.array(hb_rate["data"])
+                )
+                self._cache["hb_lfp"] = Tsd(
+                    t=np.array(hb_lfp["t"]) / 1e4, d=np.array(hb_lfp["data"])
+                )
+            else:
+                self._cache["hb_lfp"] = None
+                self._cache["hb_rate"] = None
+
+        return self._cache["hb_lfp"], self._cache["hb_rate"]
+
+    def _restrict(self, tsd_obj):
+        if tsd_obj is None:
+            return None
+        if self.time_mask is not None:
+            return tsd_obj.restrict(self.time_mask)
+        return tsd_obj
+
+    # --- Lazy Property Accessors ---
+
+    @property
+    def lfp_bulb(self):
+        return self._restrict(self._get_respi())
+
+    @property
+    def breathing_rate(self):
+        spectro, _ = self._get_breathing_signals()
+        return self._restrict(spectro)
+
+    @property
+    def breathing_power(self):
+        _, power = self._get_breathing_signals()
+        return self._restrict(power)
+
+    @property
+    def lfp_ekg(self):
+        hb_lfp, _ = self._get_ekg_signals()
+        return self._restrict(hb_lfp)
+
+    @property
+    def heart_rate(self):
+        _, hb_rate = self._get_ekg_signals()
+        return self._restrict(hb_rate)
+
+    # --- Pickling Support ---
+
+    def __getstate__(self):
+        """Strips in-memory caches before serialization to keep IPC lightweight."""
+        state = self.__dict__.copy()
+        state["_cache"] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._cache = {}
+
+    def unload(self):
+        """Unload the materialized data to free memory."""
+        self._cache.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.unload()
 
 
 def read_dat_window(
@@ -139,7 +504,6 @@ def loadSleepScoring(path: str):
     Returns:
     Dict of pynapple.IntervalSet
     """
-    import copy
 
     resolved_path = os.path.abspath(os.path.expanduser(path))
 
@@ -193,6 +557,91 @@ def loadSleepScoring(path: str):
             sleep_scoring[f"{k}_epochs"] = IntervalSet(start, stop, time_units="s")
 
     return sleep_scoring
+
+
+def loadDeltaScoring(path: str):
+    """
+    Load DeltaWaves.mat if it finds it and return a dict of IntervalSet.
+
+    deltas_PFCx is the best. All takes wake as well
+    """
+
+    path = os.path.abspath(os.path.expanduser(path))
+    file = os.path.join(path, "DeltaWaves.mat")
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
+
+    if not os.path.exists(file):
+        raise FileNotFoundError(
+            f"DeltaWaves.mat file not found in {path}. Please ensure that the delta scoring has been generated."
+        )
+
+    from scipy.io import loadmat
+
+    delta_dict = {}
+    delta_scoring = loadmat(file)
+    for k, v in delta_scoring.items():
+        if not ("delta" in k.lower() and "PFCx" in k):
+            continue
+
+        if "info" in k.lower():
+            delta_dict[k] = clean_mat_structure(v)
+        else:
+            delta_dict[f"{k}_epochs"] = IntervalSet(
+                v["start"][0][0] / 1e4, v["stop"][0][0] / 1e4, time_units="s"
+            )
+
+    if delta_dict:
+        return delta_dict
+
+    raise NotImplementedError(
+        "The function loadDeltaScoring is not implemented yet. Please implement it to load DeltaWaves.mat and return a dict of IntervalSet."
+    )
+
+
+def loadSpindlesScoring(path: str):
+    """
+    Load sSpindles.mat if it finds it and return a dict of IntervalSet.
+    """
+
+    path = os.path.abspath(os.path.expanduser(path))
+    file = os.path.join(path, "sSpindles.mat")
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
+
+    if not os.path.exists(file):
+        raise FileNotFoundError(
+            f"sSpindles.mat file not found in {path}. Please ensure that the spindles scoring has been generated."
+        )
+
+    from scipy.io import loadmat
+
+    spindles_dict = {}
+    spindles_scoring = loadmat(file)
+    for k, v in spindles_scoring.items():
+        if not ("spindles" in k.lower() and "PFCx" in k):
+            continue
+
+        if "info" in k.lower():
+            spindles_dict[k] = clean_mat_structure(v)
+        elif "start" in v.dtype.names and "stop" in v.dtype.names:
+            spindles_dict[f"{k}_epochs"] = IntervalSet(
+                v["start"][0][0] / 1e4, v["stop"][0][0] / 1e4, time_units="s"
+            )
+        elif "t" in v.dtype.names:
+            spindles_dict[f"{k}_ts"] = Ts(
+                v["t"][0][0] / 1e4,
+                time_units="s",
+            )
+
+    if spindles_dict:
+        return spindles_dict
+
+    raise NotImplementedError(
+        "The function loadSpindlesScoring is not implemented yet. Please implement it to load sSpindles.mat and return a dict of IntervalSet."
+    )
 
 
 def loadNeuronClassifications(path: str) -> Tuple[dict, list]:
@@ -303,7 +752,7 @@ def loadSpikeData(
                     os.path.join(path, "SpikeData.mat"), use_attrdict=True
                 )
             except TypeError:
-                return loadSpikeData_falllback(path, index, fs)
+                return loadSpikeData_fallback(path, index, fs)
 
             shanksPairs = spikedata["TT"]
             shank = 0 * np.ones(len(shanksPairs), dtype=int)
@@ -451,8 +900,8 @@ def loadSpikeData(
     return toreturn, shank
 
 
-def loadSpikeData_falllback(path: str, index: Optional = None, fs: int = 20000):
-    spikedata = scipy.io.loadmat(path + "SpikeData.mat")
+def loadSpikeData_fallback(path: str, index: Optional = None, fs: int = 20000):
+    spikedata = scipy.io.loadmat(os.path.join(path, "SpikeData.mat"))
     shanksPairs = spikedata["TT"].flatten()
     shanksPairs = np.array([s.flatten() for s in shanksPairs])
     shank = 0 * np.ones(len(shanksPairs), dtype=int)
@@ -1053,43 +1502,30 @@ def clean_mat_structure(element):
 
 
 def loadRespiData(path):
-    """
-    Extract the respiration data from the respiration.dat for each epochs
-
-    Args:
-    path: string
-
-    Returns:
-    Respiration times,
-    Respiration values
-    """
+    """Extract respiration data from the spectrum .mat file or compute via MATLAB if absent."""
     if not os.path.exists(path):
-        if os.path.isdir(
-            os.path.join(os.path.dirname(path), "LFPData")
-        ) and os.path.isdir(os.path.join(os.path.dirname(path), "ChannelsToAnalyse")):
+        parent_dir = os.path.dirname(path)
+        if os.path.isdir(os.path.join(parent_dir, "LFPData")) and os.path.isdir(
+            os.path.join(parent_dir, "ChannelsToAnalyse")
+        ):
             try:
                 print(
-                    "Could not find respiration data at "
-                    + path
-                    + "; Attempting to reconstruct from LFPData and ChannelsToAnalyse through matlab..."
+                    f"Could not find respiration data at {path}; "
+                    "Attempting to reconstruct from LFPData and ChannelsToAnalyse through MATLAB..."
                 )
-                compute_spectro_from_matlab(os.path.dirname(path))
+                compute_spectro_from_matlab(parent_dir)
             except Exception as e:
-                print(
-                    "Could not compute spectro from matlab for respiration data. Error: ",
-                    e,
-                )
-                raise FileNotFoundError(f"The path {path} doesn't exist; Exiting ...")
-
-    if not os.path.isfile(path):
-        path = os.path.join(os.path.dirname(path), "Bulb_deep_low_Spectrum.mat")
+                print("Could not compute spectro from MATLAB for respiration data.")
+                raise e
+        else:
+            raise FileNotFoundError(f"The path {path} doesn't exist.")
 
     try:
         from scipy.io import loadmat
 
         loaded_file = loadmat(path)
         spectro = clean_mat_structure(loaded_file["Spectro"])
-    except NotImplementedError:
+    except (NotImplementedError, KeyError):
         from mat73 import loadmat
 
         loaded_file = loadmat(path)
@@ -1163,7 +1599,7 @@ def compute_spectro_from_matlab(path):
         print("MATLAB engine closed.")
 
 
-def loadLFPData(path: str, lazy: bool = False) -> Tuple[Dict[str, Tsd], Dict[str, str]]:
+def loadLFPData(path: str, lazy: bool = True) -> Tuple[Dict[str, Tsd], Dict[str, str]]:
     """
     Extract the LFP data from the LFPData folder for each relevant Channel.
 
