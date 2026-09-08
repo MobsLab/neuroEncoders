@@ -84,7 +84,7 @@ class UMazeLinearizer:
                 )
         self.filename = filename
         # Extract basic behavior
-        with tables.open_file(filename, "a") as f:
+        with tables.open_file(filename, "r") as f:
             children = [c.name for c in f.list_nodes("/behavior")]
             if (
                 "linearizationPoints" in children

@@ -15,10 +15,12 @@ import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
 import warnings
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Get common libraries
 import dill as pickle
+import h5py
+import hdf5plugin
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -508,7 +510,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         **loss_kwargs,
                     )
                     self.gaussian_layer_loss_config = gaussian_loss_layer_config
-                    loss_weights[name] = getattr(self.params, "heatmap_weight", 1.5)
+                    loss_weights[name] = getattr(self.params, "heatmap_weight", 2)
                     metrics_dict[name] = [
                         PositionError2D(
                             self.GaussianHeatmap.get_config(),
@@ -538,7 +540,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 loss_dict[name] = CyclicMAE(
                     high=getattr(self.params, "high_rad", 2 * np.pi), **loss_kwargs
                 )
-                loss_weights[name] = getattr(self.params, "hd_weight", 1.0)
+                loss_weights[name] = getattr(self.params, "hd_weight", 0.8)
 
             elif name == "speed":
                 loss_dict[name] = "mae"
@@ -772,7 +774,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.use_multi_token = getattr(
                     self.params, "use_multi_token_density", False
                 )
-                self.k_steps = getattr(self.params, "k_steps", 5)
+                self.k_steps = getattr(
+                    self.params,
+                    "k_steps",
+                    nnUtils.get_k_steps_params(self.params.windowSizeMS)[0],
+                )
+                if self.use_multi_token:
+                    print(f"Using multi-token density head with k_steps={self.k_steps}")
 
                 # Transformer Decoder/Projector (Part 2: dense layers)
                 self.transformer_decoder = MaskedSequential(
@@ -804,8 +812,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         getattr(self.params, "GaussianGridSize", DEFAULT_GRIDSIZE),
                     )
                     self.multi_token_head = nnUtils.MultiTokenSpatialDensityHead(
+                        dense_size_1=self.params.TransformerDenseSize1,
+                        dense_size_2=self.params.TransformerDenseSize2,
                         k_steps=self.k_steps,
                         d_model=self.params.sequence_output_dim,
+                        grid_size=grid_size,
                         n_bins=grid_size[0] * grid_size[1],
                         num_heads=self.params.nHeads,
                         name="multi_token_density_head",
@@ -1045,32 +1056,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 name="latent_output", dtype="float32"
             )(sequence_output)
 
-            if getattr(self.params, "use_diversity_loss", True):
-                getattr(self.params, "diversity_temperature", 0.1)
-                getattr(self.params, "diversity_alpha", 1.0)
-                div_weight = getattr(self.params, "diversity_weight", 0.3)
-
-                from neuroencoders.fullEncoder.nnUtils import SpikeDiversityLossLayer
-
-                div_layer = SpikeDiversityLossLayer(
-                    temperature=getattr(self.params, "diversity_temperature", 0.1),
-                    alpha_variance=getattr(self.params, "diversity_alpha", 1.0),
-                    weight=getattr(self.params, "diversity_weight", 0.3),
-                    name="spike_diversity_loss_layer",
-                )
-
-                for g, raw_group_tensor in enumerate(group_latents_raw):
-                    output_key = f"outputCNN{g if g > 0 else ''}"
-                    print(
-                        f"Adding diversity loss for {output_key} with weight {div_weight}"
-                    )
-
-                    # Flatten (Batch, MaxSpikes, nFeatures) to 2D (Batch * MaxSpikes, nFeatures)
-                    # so SpikeLatentDiversityLoss can evaluate individual spike vectors
-                    flat_group_tensor = kops.reshape(
-                        raw_group_tensor, [-1, self.params.nFeatures]
-                    )
-                    _ = div_layer(flat_group_tensor)
         return outputs
 
     def compile_model(
@@ -2010,7 +1995,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
                     phase2_scheduler = tf.keras.callbacks.LearningRateScheduler(
                         lambda epoch, lr: self.LRScheduler(
-                            lrs=[self.params.learningRates[0] / 10],  # Start lower
+                            lrs=[fine_tune_lr],  # Start lower
                             total_epochs=self.params.nEpochs - alignment_epochs,
                             warmup_epochs=2,  # Short warmup for the new unfrozen weights
                         ).schedule_cosine_warmup(epoch - alignment_epochs, lr)
@@ -2021,7 +2006,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             patience=5,
                             min_delta=0.001,
                             restore_best_weights=True,
-                            start_from_epoch=alignment_epochs + 3,
+                            start_from_epoch=alignment_epochs + 6,
                         )
                         callbacks.append(es_callback)
 
@@ -2692,13 +2677,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # --- MULTI-TOKEN TRAJECTORY SETUP ---
         if self.use_multi_token:
-            k_steps = getattr(
-                self.params, "k_steps", nnUtils.get_k_steps_params(windowSizeMS)[0]
-            )
+            k_steps = kwargs.get("k_steps", self.k_steps)
             k_frame_spacing = getattr(
                 self.params,
                 "k_frame_spacing",
                 nnUtils.get_k_steps_params(windowSizeMS)[1],
+            )
+            print(
+                f"Multi Token mode is ON. Will look up {k_steps} steps with spacing {k_frame_spacing} frames."
             )
 
             half_k = k_steps // 2
@@ -3379,18 +3365,23 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 else output_logits
             )
 
-            # NEW: Split Multi-Token Sequences vs Center of Gravity
+            # NEW: Split Multi-Token Sequences into center pred
             if len(xy_np.shape) == 3:  # (Batch, K, 2)
+                K = xy_np.shape[1]
+                center = K // 2
+                H, W = self.params.GaussianGridSize
+
                 results.update(
                     {
-                        "pos_2d": np.mean(xy_np, axis=1),  # Center of gravity
+                        "pos_2d": xy_np[:, center, :],  # Center prediction
                         "pos_2d_k": xy_np,  # Full K sequence
-                        "maxp": np.mean(maxp_np, axis=1),
+                        "maxp": maxp_np[:, center],  # Center max probability
                         "maxp_k": maxp_np,
-                        "Hn": np.mean(Hn_np, axis=1),
+                        "Hn": Hn_np[:, center],  # Center entropy
                         "Hn_k": Hn_np,
-                        "var_total": np.mean(var_np, axis=1),
+                        "var_total": var_np[:, center],  # Center variance
                         "var_total_k": var_np,
+                        "logits_hw": np.reshape(logits_np[:, center, :], (-1, H, W)),
                         "logits_hw_k": logits_np,
                         "T_scaling": T_scaling,
                     }
@@ -3624,7 +3615,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             speedMask=speedMask,
             batch_size=kwargs.pop(
                 "batch_size", 32
-            ),  # smaller batch size because of drop_remainder
+            ),  # WARNING: smaller batch size because of drop_remainder
             **kwargs,
         )
         dataset = datasets["test"]
@@ -3827,9 +3818,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     start, end = spec["slice"]
                     val = targets[name].numpy()
 
-                    # INFO: If multi-token (Batch, K, Dim), average to (Batch, Dim)
+                    # INFO: If multi-token (Batch, K, Dim), take center pred
                     if len(val.shape) == 3:
-                        val = np.mean(val, axis=1)
+                        K = val.shape[1]
+                        val = val[:, K // 2, :]  # Center token
 
                     batch_y_true[:, start:end] = val
 
@@ -5260,7 +5252,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         sleep=False,
         sleepName="Sleep",
         phase=None,
-        save_as_pickle=True,
+        save_as_pickle=True,  # Kept parameter name for backward compatibility
     ):
         # Manage folders to save
         if sleep:
@@ -5347,11 +5339,33 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 save_csv(key, test_output[alt_key])
 
         if save_as_pickle:
-            filename = os.path.join(folderToSave, f"decoding_results{suffix}.pkl")
-            with open(filename, "wb") as f:
-                import pickle
+            filename = os.path.join(folderToSave, f"decoding_results{suffix}.h5")
+            compression_filter = hdf5plugin.Zstd(clevel=3)
 
-                pickle.dump(test_output, f, pickle.HIGHEST_PROTOCOL)
+            with h5py.File(filename, "w") as f:
+                for k, v in test_output.items():
+                    # Skip empty entries, metrics, and strings
+                    if v is None or k == "metrics" or isinstance(v, str):
+                        continue
+
+                    # Safely extract TF tensors or lists to numpy
+                    arr = v.numpy() if hasattr(v, "numpy") else np.asarray(v)
+
+                    # Skip unsupported object dtypes (e.g., ragged lists)
+                    if arr.dtype == object:
+                        continue
+
+                    # Downcast numeric types to save memory and write bandwidth
+                    if arr.dtype == np.float32:
+                        arr = arr.astype(np.float16)
+                    elif arr.dtype == np.int64:
+                        arr = arr.astype(np.int32)
+
+                    # Scalars (0-D) cannot be chunked or compressed in HDF5
+                    if arr.ndim > 0:
+                        f.create_dataset(k, data=arr, **compression_filter, chunks=True)
+                    else:
+                        f.create_dataset(k, data=arr)
 
     def setup_training_data(self, **kwargs):
         # Unpack kwargs

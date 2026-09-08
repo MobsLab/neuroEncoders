@@ -54,6 +54,8 @@ dependencies = [
     "qtpy>=2.4.3",
     "hdbscan>=0.8.44",
     "pykeops>=2.3",
+    "hdf5plugin>=7.1.0",
+    "zstd>=1.5.7.2",
 ]
 
 [project.optional-dependencies]
@@ -159,7 +161,9 @@ pynapple = { git = "https://github.com/MobsLab/pynapple.git" }
 
 
 [[tool.uv.index]]
+name = "nvidia"
 url = "https://pypi.nvidia.com/"
+explicit = true
 
 [build-system]
 requires = ["setuptools>=64", "setuptools-scm>=8"]

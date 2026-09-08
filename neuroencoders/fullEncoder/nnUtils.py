@@ -1268,6 +1268,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
         self.max_spikes_per_group = max_spikes_per_group
         self.max_nb_spikes = max_nb_spikes
         self.project_transformer = project_transformer
+        self.dim_factor = dim_factor
         self.device = device
 
         # Compute offsets statically
@@ -1290,8 +1291,27 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             max_nb_spikes=self.max_nb_spikes,
         )
         self.embed_dim = (
-            n_features * dim_factor if self.project_transformer else n_features
+            self.n_features * self.dim_factor
+            if self.project_transformer
+            else self.n_features
         )
+
+        self.use_diversity_loss = getattr(
+            kwargs.get("params", self), "use_diversity_loss", True
+        )
+        if self.use_diversity_loss:
+            from neuroencoders.fullEncoder.nnUtils import SpikeDiversityLossLayer
+
+            self.diversity_layer = SpikeDiversityLossLayer(
+                temperature=getattr(
+                    kwargs.get("params", self), "diversity_temperature", 0.1
+                ),
+                alpha_variance=getattr(
+                    kwargs.get("params", self), "diversity_alpha", 1.0
+                ),
+                weight=getattr(kwargs.get("params", self), "diversity_weight", 0.1),
+                name="spike_diversity_loss_layer",
+            )
 
         if self.project_transformer:
             self.transformer_projection = tf.keras.layers.Dense(
@@ -1338,14 +1358,17 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             ]
         )
 
-        self.anatomical_embedding.build((None, self.max_nb_spikes))
-
         # receives inputGroups of shape (Batch, SeqLen) to create the mask, and also receives the features of shape (Batch, SeqLen, nFeatures) to apply the mask
         self.safe_mask_creation.build(
             [(None, self.max_nb_spikes), (None, self.max_nb_spikes, self.n_features)]
         )
 
         self.masking_layer.build((None, self.max_nb_spikes, self.n_features))
+
+        self.transformer_projection.build((None, self.max_nb_spikes, self.n_features))
+        self.anatomical_embedding.build(
+            [(None, self.max_nb_spikes, self.embed_dim), (None, self.max_nb_spikes)]
+        )
 
         super().build(input_shape)
 
@@ -1392,6 +1415,9 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
 
             all_group_latents = []
             for g, latent in enumerate(group_latents_raw):
+                if self.use_diversity_loss:
+                    latent = self.diversity_layer(latent, mask=all_group_masks[g])
+
                 full_emb = self.add_null_spike_layers[g](
                     latent, mask=all_group_masks[g]
                 )
@@ -1465,6 +1491,8 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
                 "n_features": self.n_features,
                 "max_spikes_per_group": self.max_spikes_per_group,
                 "max_nb_spikes": self.max_nb_spikes,
+                "project_transformer": self.project_transformer,
+                "dim_factor": self.dim_factor,
                 "device": self.device,
             }
         )
@@ -1605,7 +1633,7 @@ class GroupAttentionFusion(tf.keras.layers.Layer):
             shape=(1, 1, self.n_groups, self.embed_dim),
             initializer="glorot_uniform",
             trainable=True,
-            dtype="float32",
+            dtype=self.compute_dtype,
         )
         # build sublayers
         # attention operates on (batch*time, n_groups, embed_dim)
@@ -1661,9 +1689,13 @@ class GlobalSequenceGather(tf.keras.layers.Layer):
         )
 
         group_mask = kops.one_hot(safe_group_seq, num_classes=self.n_groups)
-        group_mask = kops.transpose(group_mask, [2, 0, 1])
+        group_mask = kops.cast(
+            kops.transpose(group_mask, [2, 0, 1]), self.compute_dtype
+        )
 
-        global_indices = kops.sum(kops.cast(options, "float32") * group_mask, axis=0)
+        global_indices = kops.sum(
+            kops.cast(options, self.compute_dtype) * group_mask, axis=0
+        )
         global_indices = kops.cast(global_indices, "int32")
 
         batch_offsets = kops.arange(batch_size, dtype="int32") * kops.shape(pool)[1]
@@ -2620,483 +2652,6 @@ class NeuralDataAugmentation:
         return tf.where(preserve_mask, aug_data, tf.zeros_like(aug_data))
 
 
-class NeuralDataAugmentation_old:
-    """Neural data augmentation pipeline for TFRecord datasets."""
-
-    def __init__(
-        self,
-        **kwargs,
-    ):
-        """
-        Initialize augmentation parameters.
-
-        kwargs:
-            keep_original: Whether to keep the original trial (default: True)
-            num_augmentations: Number of augmented copies per trial (4-20 range)
-            white_noise_std: Standard deviation for white noise (default: 5.0)
-            offset_noise_std: Standard deviation for constant offset (default: 1.6)
-            offset_scale_factor: Scale factor for threshold crossings offset (default: 0.67)
-            cumulative_noise_std: Standard deviation for cumulative noise (default: 0.02)
-            spike_band_channels: List of spike-band channel indices (if None, assumes all channels)
-            normalize: Whether to normalize data (default: False)
-            normalization_stats: Tuple of (means, stds) for normalization. means and stds are lists of arrays per group.
-            time_shift_max: Maximum time shift in samples for time shifting augmentation (default: 2)
-            channel_dropout_rate: Probability of dropping out a channel (default: 0.02)
-            spike_dropout_rate: Probability of dropping out a spike (default: 0.05)
-            span_mask_prob: Probability of applying span masking (default: 0.25)
-            span_mask_max_width: Maximum width of span masks in time steps (default: 4)
-            amplitude_jitter_std: Standard deviation for amplitude jitter (default: 0.02)
-            spike_band_channels: List of channel indices to apply spike-band specific augmentations (default: None, meaning all channels)
-            device: Device to perform augmentations on (default: "/cpu:0")
-        """
-        self.keep_original = kwargs.get("keep_original", True)
-        self.num_augmentations = kwargs.get("num_augmentations", 11)
-        self.white_noise_std = kwargs.get("white_noise_std", 0.05)
-        self.offset_noise_std = kwargs.get("offset_noise_std", 0.05)
-        self.offset_scale_factor = kwargs.get("offset_scale_factor", 0.67)
-        self.cumulative_noise_std = kwargs.get("cumulative_noise_std", 0.02)
-        self.time_shift_max = int(kwargs.get("time_shift_max", 2))
-        self.channel_dropout_rate = float(kwargs.get("channel_dropout_rate", 0.02))
-        self.spike_dropout_rate = float(kwargs.get("spike_dropout_rate", 0.03))
-        self.span_mask_prob = float(kwargs.get("span_mask_prob", 0.15))
-        self.span_mask_max_width = int(kwargs.get("span_mask_max_width", 4))
-        self.amplitude_jitter_std = float(kwargs.get("amplitude_jitter_std", 0.02))
-        spike_band_channels = kwargs.get("spike_band_channels", None)
-        self.spike_band_channels = (
-            spike_band_channels if spike_band_channels is not None else []
-        )
-        self.device = kwargs.get("device", "/cpu:0")
-        self.normalize = kwargs.get("normalize", False)
-        self.normalization_stats = kwargs.get("normalization_stats", None)
-
-        # Adaptive augmentation: enable per-example augmentation counts based on oversampling factors
-        self.use_adaptive_augmentation = kwargs.get("use_adaptive_augmentation", False)
-        # Scale factor for augmentation: if rep_factor=5 and aug_scale=0.8, create 4 augmented copies
-        self.augmentation_scale = float(kwargs.get("augmentation_scale", 0.8))
-        self.min_augmentations_per_repeat = int(
-            kwargs.get("min_augmentations_per_repeat", 1)
-        )
-
-        # Undersampling: reduce high-frequency bins by subsampling them
-        self.use_undersampling = kwargs.get("use_undersampling", False)
-        self.undersampling_target_percentile = float(
-            kwargs.get("undersampling_target_percentile", 50.0)
-        )
-        self.undersampling_keep_rate = float(
-            kwargs.get("undersampling_keep_rate", 1.0)
-        )  # Will be computed from rep_factors
-
-        if self.normalize:
-            # If normalization is enabled, we assume the data will be ~unit variance.
-            # We scale the default noise levels down if they appear to be at the "raw" scale.
-            # Heuristic: if white_noise_std > 1.0, it's probably for raw data.
-            if self.white_noise_std > 1.0:
-                print(
-                    f"Scaling down noise levels for normalized data (was {self.white_noise_std})"
-                )
-                self.white_noise_std /= 50.0  # e.g. 2.0 -> 0.04
-                self.offset_noise_std /= 50.0
-                print(f"New white_noise_std: {self.white_noise_std}")
-
-    def normalize_group(self, group_data: tf.Tensor, group_idx: int) -> tf.Tensor:
-        """
-        Normalize group data using stored stats.
-        group_data: (Batch, Channels, Time)
-        """
-        if not self.normalize or self.normalization_stats is None:
-            return group_data
-
-        means, stds = self.normalization_stats
-        if group_idx >= len(means) or group_idx >= len(stds):
-            return group_data
-
-        return standardize_channelwise_tensor(
-            group_data,
-            means[group_idx],
-            tf.square(stds[group_idx]),
-            axis=1,
-            preserve_zero_rows=True,
-        )
-
-    def add_white_noise(self, neural_data: tf.Tensor) -> tf.Tensor:
-        """
-        Add white noise to all time points of all channels independently.
-
-        Args:
-            neural_data: Tensor of any shape
-
-        Returns:
-            Augmented neural data with white noise
-        """
-        noise = tf.random.normal(
-            shape=tf.shape(neural_data),
-            mean=0.0,
-            stddev=self.white_noise_std,
-            dtype=neural_data.dtype,
-        )
-        return neural_data + noise
-
-    def add_constant_offset(self, neural_data: tf.Tensor, axis: int = -2) -> tf.Tensor:
-        """
-        Add constant offset to channels along specified axis.
-
-        Args:
-            neural_data: Input tensor
-            axis: Axis along which to apply offset (default: -2, second-to-last dimension)
-
-        Returns:
-            Augmented neural data with constant offset
-        """
-        # Convert negative axis to positive to ensure slicing works correctly
-        rank = tf.rank(neural_data)
-        if axis < 0:
-            axis = rank + axis
-
-        # Create offset shape - same as neural_data but with 1 along time dimension
-        shape = tf.shape(neural_data)
-
-        # We assume time dimension is AFTER channel dimension (axis + 1)
-        # If axis is the last dimension, this logic fails, but usually constant offset
-        # is across time for channels.
-
-        offset_shape = tf.concat(
-            [
-                shape[: axis + 1],  # Keep dimensions up to and including channel axis
-                [1],  # Make time dimension 1 for broadcasting
-                shape[axis + 2 :],  # Keep remaining dimensions
-            ],
-            axis=0,
-        )
-
-        # Generate offset noise
-        offset = tf.random.normal(
-            shape=offset_shape,
-            mean=0.0,
-            stddev=self.offset_noise_std,
-            dtype=neural_data.dtype,
-        )
-
-        # Apply offset to neural data
-        augmented_data = neural_data + offset
-
-        return augmented_data
-
-    def add_cumulative_noise(
-        self, neural_data: tf.Tensor, time_axis: int = -1
-    ) -> tf.Tensor:
-        """
-        Add cumulative (random walk) noise along the specified time axis.
-
-        Args:
-            neural_data: Input tensor
-            time_axis: Axis along which to apply cumulative noise (default: -1, last dimension)
-
-        Returns:
-            Augmented neural data with cumulative noise
-        """
-        # Generate random noise for each time step
-        noise_increments = tf.random.normal(
-            shape=tf.shape(neural_data),
-            mean=0.0,
-            stddev=self.cumulative_noise_std,
-            dtype=neural_data.dtype,
-        )
-
-        # Compute cumulative sum along time axis to create random walk
-        cumulative_noise = tf.cumsum(noise_increments, axis=time_axis)
-
-        return neural_data + cumulative_noise
-
-    def add_amplitude_jitter(self, neural_data: tf.Tensor) -> tf.Tensor:
-        """Apply a small multiplicative scaling jitter."""
-        scale = tf.random.normal(
-            shape=[],
-            mean=1.0,
-            stddev=self.amplitude_jitter_std,
-            dtype=neural_data.dtype,
-        )
-        return neural_data * scale
-
-    def add_channel_dropout(
-        self, neural_data: tf.Tensor, channel_axis: int = -2
-    ) -> tf.Tensor:
-        """Randomly zero entire channels."""
-        if self.channel_dropout_rate <= 0.0:
-            return neural_data
-        rank = len(neural_data.shape)
-        axis = channel_axis if channel_axis >= 0 else rank + channel_axis
-        channel_count = tf.shape(neural_data)[axis]
-        keep_mask_1d = (
-            tf.random.uniform([channel_count], dtype=neural_data.dtype)
-            >= self.channel_dropout_rate
-        )
-        broadcast_shape = [1] * rank
-        broadcast_shape[axis] = channel_count
-        keep_mask = tf.reshape(
-            tf.cast(keep_mask_1d, neural_data.dtype), broadcast_shape
-        )
-        return neural_data * keep_mask
-
-    def add_spike_dropout(self, group_data: tf.Tensor) -> tf.Tensor:
-        """Randomly zero whole spikes within a group tensor."""
-        if self.spike_dropout_rate <= 0.0:
-            return group_data
-        spike_keep = (
-            tf.random.uniform([tf.shape(group_data)[0]], dtype=group_data.dtype)
-            >= self.spike_dropout_rate
-        )
-        spike_keep = tf.cast(spike_keep, group_data.dtype)[:, tf.newaxis, tf.newaxis]
-        return group_data * spike_keep
-
-    def add_time_shift(self, neural_data: tf.Tensor, time_axis: int = -1) -> tf.Tensor:
-        """Shift the sequence in time without wrap-around."""
-        if self.time_shift_max <= 0:
-            return neural_data
-        rank = len(neural_data.shape)
-        axis = time_axis if time_axis >= 0 else rank + time_axis
-        time_len = tf.shape(neural_data)[axis]
-        shift = tf.random.uniform(
-            [], -self.time_shift_max, self.time_shift_max + 1, dtype=tf.int32
-        )
-        shifted = tf.roll(neural_data, shift=shift, axis=axis)
-
-        def build_mask(shift_value):
-            shift_value = tf.cast(shift_value, tf.int32)
-            mask_1d = tf.case(
-                [
-                    (
-                        shift_value > 0,
-                        lambda: tf.concat(
-                            [
-                                tf.zeros(tf.maximum(shift_value, 0), dtype=tf.bool),
-                                tf.ones(
-                                    tf.maximum(time_len - shift_value, 0), dtype=tf.bool
-                                ),
-                            ],
-                            axis=0,
-                        ),
-                    ),
-                    (
-                        shift_value < 0,
-                        lambda: tf.concat(
-                            [
-                                tf.ones(
-                                    tf.maximum(time_len + shift_value, 0), dtype=tf.bool
-                                ),
-                                tf.zeros(tf.maximum(-shift_value, 0), dtype=tf.bool),
-                            ],
-                            axis=0,
-                        ),
-                    ),
-                ],
-                default=lambda: tf.ones([time_len], dtype=tf.bool),
-                exclusive=True,
-            )
-            broadcast_shape = [1] * rank
-            broadcast_shape[axis] = time_len
-            return tf.reshape(mask_1d, broadcast_shape)
-
-        mask = tf.cast(build_mask(shift), neural_data.dtype)
-        return shifted * mask
-
-    def add_span_masking(
-        self, neural_data: tf.Tensor, time_axis: int = -1
-    ) -> tf.Tensor:
-        """Mask a contiguous temporal span with zeros."""
-        if self.span_mask_prob <= 0.0:
-            return neural_data
-        if tf.random.uniform([]) > self.span_mask_prob:
-            return neural_data
-
-        rank = len(neural_data.shape)
-        axis = time_axis if time_axis >= 0 else rank + time_axis
-        time_len = tf.shape(neural_data)[axis]
-        max_width = tf.maximum(1, tf.minimum(self.span_mask_max_width, time_len))
-        width = tf.random.uniform([], 1, max_width + 1, dtype=tf.int32)
-        start = tf.random.uniform(
-            [], 0, tf.maximum(time_len - width + 1, 1), dtype=tf.int32
-        )
-        span = tf.concat(
-            [
-                tf.ones([start], dtype=tf.bool),
-                tf.zeros([width], dtype=tf.bool),
-                tf.ones([tf.maximum(time_len - start - width, 0)], dtype=tf.bool),
-            ],
-            axis=0,
-        )
-        broadcast_shape = [1] * rank
-        broadcast_shape[axis] = time_len
-        span = tf.reshape(span, broadcast_shape)
-        return tf.where(span, neural_data, tf.zeros_like(neural_data))
-
-    def _preserve_padding_rows(
-        self, original: tf.Tensor, augmented: tf.Tensor
-    ) -> tf.Tensor:
-        rank = len(original.shape)
-        if rank is None or rank < 2:
-            return augmented
-        mask_axes = list(range(1, rank))
-        preserve_mask = tf.reduce_any(
-            tf.not_equal(original, 0.0), axis=mask_axes, keepdims=True
-        )
-        return tf.where(preserve_mask, augmented, tf.zeros_like(augmented))
-
-    @tf.function
-    def augment_sample(
-        self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
-    ) -> tf.Tensor:
-        """
-        Apply all augmentation strategies to a sample.
-
-        Args:
-            neural_data: Neural features tensor
-            time_axis: Axis representing time dimension
-            channel_axis: Axis representing channel dimension
-
-        Returns:
-            Augmented neural data
-        """
-        augmented_data = neural_data
-
-        if self.normalize:
-            augmented_data = augmented_data
-
-        augmented_data = self.add_amplitude_jitter(augmented_data)
-        augmented_data = self.add_white_noise(augmented_data)
-        augmented_data = self.add_constant_offset(augmented_data, axis=channel_axis)
-        augmented_data = self.add_cumulative_noise(augmented_data, time_axis=time_axis)
-        augmented_data = self.add_time_shift(augmented_data, time_axis=time_axis)
-        augmented_data = self.add_span_masking(augmented_data, time_axis=time_axis)
-        augmented_data = self.add_channel_dropout(
-            augmented_data, channel_axis=channel_axis
-        )
-
-        return self._preserve_padding_rows(neural_data, augmented_data)
-
-    @tf.function
-    def augment_spike_group_vectorized(self, group_data: tf.Tensor) -> tf.Tensor:
-        augmented = tf.map_fn(
-            lambda _: self.augment_spike_group(group_data),
-            elems=tf.range(self.num_augmentations),
-            fn_output_signature=tf.TensorSpec(
-                shape=group_data.shape, dtype=group_data.dtype
-            ),
-        )
-        return augmented
-
-    def augment_spike_group(self, group_data: tf.Tensor) -> tf.Tensor:
-        """
-        Apply augmentation to spike group data with shape [num_spikes, channels, time_bins].
-
-        Args:
-            group_data: Tensor of shape [num_spikes, channels, time_bins]
-
-        Returns:
-            Augmented group data
-        """
-        augmented = self.augment_sample(group_data, time_axis=2, channel_axis=1)
-        augmented = self.add_spike_dropout(augmented)
-        return self._preserve_padding_rows(group_data, augmented)
-
-    def create_augmented_copies(
-        self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2
-    ) -> Dict[str, tf.Tensor]:
-        """
-        Create multiple augmented copies of a single trial.
-
-        Args:
-            neural_data: Neural features tensor
-            time_axis: Axis representing time dimension
-            channel_axis: Axis representing channel dimension
-
-        Returns:
-            Dictionary containing stacked augmented data
-        """
-        augmented_samples = []
-
-        for _ in range(self.num_augmentations):
-            aug_data = self.augment_sample(neural_data, time_axis, channel_axis)
-            augmented_samples.append(aug_data)
-
-        # Stack all augmented samples
-        result = {"neural_data": tf.stack(augmented_samples, axis=0)}
-
-        return result
-
-    def compute_adaptive_augmentation_count(self, rep_factor: int) -> int:
-        """
-        Compute number of augmentations for an example based on its repetition factor.
-
-        When an example needs to be repeated N times (underrepresented spatial bin),
-        we create N-1 augmented versions to achieve uniform distribution on maze space.
-
-        Args:
-            rep_factor (int): Repetition factor from oversampling (how many times to repeat)
-
-        Returns:
-            int: Number of augmented copies to create (0 if no augmentation needed)
-        """
-        if not self.use_adaptive_augmentation or rep_factor <= 1:
-            return 0
-
-        # Create augmentations proportional to rep_factor
-        # If rep_factor=5, create ceil(5 * 0.8) = 4 augmented copies
-        # This ensures each spatial bin gets similar representation
-        num_aug = max(
-            self.min_augmentations_per_repeat,
-            int(np.ceil(rep_factor * self.augmentation_scale)),
-        )
-        return num_aug
-
-    def create_adaptive_augmented_copies(
-        self,
-        neural_data: tf.Tensor,
-        rep_factor: int = 1,
-        time_axis: int = -1,
-        channel_axis: int = -2,
-    ) -> List[tf.Tensor]:
-        """
-        Create augmented copies adaptively based on repetition factor.
-
-        This is used in oversampling resampling to ensure underrepresented spatial bins
-        get diverse augmented versions, promoting uniform distribution on maze space.
-
-        Args:
-            neural_data: Neural features tensor
-            rep_factor: Repetition factor from oversampling
-            time_axis: Axis representing time dimension
-            channel_axis: Axis representing channel dimension
-
-        Returns:
-            List of augmented tensors (may be empty if no augmentation needed)
-        """
-        num_aug = self.compute_adaptive_augmentation_count(rep_factor)
-
-        if num_aug == 0:
-            return []
-
-        augmented_samples = []
-        for _ in range(num_aug):
-            aug_data = self.augment_sample(neural_data, time_axis, channel_axis)
-            augmented_samples.append(aug_data)
-
-        return augmented_samples
-
-    def __repr__(self):
-        return (
-            f"NeuralDataAugmentation(num_augmentations={self.num_augmentations}, "
-            f"keep_original={self.keep_original}, "
-            f"white_noise_std={self.white_noise_std}, "
-            f"offset_noise_std={self.offset_noise_std}, "
-            f"offset_scale_factor={self.offset_scale_factor}, "
-            f"cumulative_noise_std={self.cumulative_noise_std}, "
-            f"spike_band_channels={self.spike_band_channels})"
-        )
-
-    def call(self, neural_data: tf.Tensor, time_axis: int = -1, channel_axis: int = -2):
-        return self.augment_sample(neural_data, time_axis, channel_axis)
-
-
 @tf.function
 def apply_group_augmentation(
     tensors: Dict[str, tf.Tensor],
@@ -3762,7 +3317,7 @@ class GaussianHeatmapLayer(tf.keras.layers.Layer, SpatialConstraintsMixin):
         self,
         training_positions,
         grid_size,
-        sigma=0.03,
+        sigma=0.05,
         maze_params=None,
         **kwargs,
     ):
@@ -4122,7 +3677,7 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
         l_function_layer_params,
         training_positions=None,
         grid_size=DEFAULT_GRIDSIZE,
-        sigma=0.03,
+        sigma=0.05,
         maze_params=None,
         sinkhorn_eps=0.4,
         loss_type="safe_kl",
@@ -4223,7 +3778,9 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
                 # y_true is (Batch, K, 2). Reshape to (Batch * K, 2) to generate heatmaps
                 if true_shape[-1] == 2:
                     y_true_flat = kops.reshape(y_true, (-1, 2))
-                    y_true_heatmaps = self.gaussian_heatmap_targets_tf(y_true_flat)
+                    y_true_heatmaps = self.gaussian_heatmap_targets_tf(
+                        y_true_flat, sigma=self.sigma
+                    )
                 else:
                     y_true_heatmaps = kops.reshape(
                         y_true, (-1, self.GRID_H, self.GRID_W)
@@ -4587,7 +4144,7 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
         """
         dtype = logits_hw.dtype
         if alpha is None:
-            alpha = 1  # default weight for Wasserstein penalty
+            alpha = 3  # default weight for Wasserstein penalty
 
         batch_size = kops.shape(logits_hw)[0]
         allowed_mask = kops.cast(self.allowed_mask_tf, dtype)
@@ -4597,15 +4154,14 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
         NEG = kops.cast(self.NEG, dtype)
         EPS = kops.cast(self.EPS, dtype)
 
-        # Mask + logits flatten
-        masked_logits = kops.where(
-            kops.expand_dims(forbid_mask, 0) > 0,
-            NEG,
-            logits_hw,
-        )
-        logits_flat = kops.reshape(
-            masked_logits, (batch_size, self.GRID_H * self.GRID_W)
-        )
+        # # Mask + logits flatten
+        # masked_logits = kops.where(
+        #     kops.expand_dims(forbid_mask, 0) > 0,
+        #     NEG,
+        #     logits_hw,
+        # )
+
+        logits_flat = kops.reshape(logits_hw, (batch_size, self.GRID_H * self.GRID_W))
 
         # Normalize target P
         P = target_hw * allowed_mask
@@ -5429,10 +4985,11 @@ class PositionError2D(tf.keras.metrics.Metric, SpatialConstraintsMixin):
         # Decode using the mixin's unified method
         xy, _, _, _ = self.decode_and_uncertainty_tf(logits_hw)
 
-        # NEW: Handle Multi-Step K dimension by averaging the trajectory
-        # to a single center-of-mass coordinate for the window's metric computation.
+        # NEW: Handle Multi-Step K dimension by taking the center of the window (true position)
         if len(xy.shape) == 3:  # (Batch, K, 2)
-            xy = tf.reduce_mean(xy, axis=1)
+            K = tf.shape(xy)[1]
+            center = K // 2
+            xy = xy[:, center, :]  # Take the center step for prediction
 
         y_true_coords = tf.cast(y_true, tf.float32)
         if len(y_true_coords.shape) == 3:  # (Batch, K, 2)
@@ -6040,10 +5597,10 @@ class SpikeLatentDiversityLoss(tf.keras.losses.Loss):
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
-class SpikeDiversityLossLayer(keras.layers.Layer):
+class SpikeDiversityLossLayer(tf.keras.layers.Layer):
     """
     Symbolic Keras 3 Layer that computes L2-normalized cosine repulsion
-    and feature variance loss directly inside the model graph.
+    and feature variance loss per-sample (Batch, MaxSpikes, nFeatures).
     """
 
     def __init__(self, temperature=0.1, alpha_variance=1.0, weight=0.3, **kwargs):
@@ -6052,59 +5609,98 @@ class SpikeDiversityLossLayer(keras.layers.Layer):
         self.alpha_variance = float(alpha_variance)
         self.weight = float(weight)
 
-    def call(self, inputs):
-        # inputs: (BatchSize * MaxSpikes, nFeatures) or (Batch, MaxSpikes, nFeatures)
+        # 1. Keras 3 requirement: Create a stateful metric tracker
+        self.diversity_metric = tf.keras.metrics.Mean(name="spike_diversity_loss")
+
+    def call(self, inputs, mask=None):
+
         y_pred = inputs
         dtype = y_pred.dtype
 
-        # 1. L2 Normalize vectors along feature axis
+        Batch = kops.shape(y_pred)[0]
+        S = kops.shape(y_pred)[1]
+
+        # 1. Handle Mask
+        if mask is None:
+            mask = getattr(inputs, "_keras_mask", None)
+        if mask is not None:
+            mask = kops.cast(mask, dtype)
+        else:
+            mask = kops.ones((Batch, S), dtype=dtype)
+
+        # 2. L2 Normalize
         norm = kops.sqrt(kops.sum(kops.square(y_pred), axis=-1, keepdims=True) + 1e-8)
         y_pred_norm = y_pred / norm
 
-        # Dynamic number of rows (N = Batch * MaxSpikes)
-        N = kops.shape(y_pred_norm)[0]
-
-        # 2. Cosine Similarity Matrix: (N, N)
+        # 3. Batched Cosine Similarity
+        y_pred_transposed = kops.transpose(y_pred_norm, axes=[0, 2, 1])
         similarity_matrix = (
-            kops.matmul(y_pred_norm, kops.transpose(y_pred_norm)) / self.temperature
+            kops.matmul(y_pred_norm, y_pred_transposed) / self.temperature
         )
 
-        # 3. Dynamic Masking without static eye or dynamic arange dtype bugs
-        # kops.arange with explicit start, stop, and int32 dtype
-        idx = kops.arange(0, N, dtype="int32")
-        eye_mask = kops.equal(
-            kops.expand_dims(idx, axis=1), kops.expand_dims(idx, axis=0)
+        # 4. Masking Logic (Ignore Diagonal AND Ignore Padding)
+        idx = kops.arange(0, S, dtype="int32")
+        eye_mask = kops.equal(kops.expand_dims(idx, 1), kops.expand_dims(idx, 0))
+        eye_mask_batched = kops.expand_dims(eye_mask, 0)
+
+        # Valid pairs mask: (Batch, S, S). Only 1 if BOTH spikes are valid.
+        valid_pair_mask = mask[:, :, None] * mask[:, None, :]
+
+        # Ignore if it's the diagonal OR if it's an invalid padding pair
+        ignore_mask = kops.logical_or(
+            eye_mask_batched, kops.equal(valid_pair_mask, 0.0)
         )
 
-        # Mask diagonal (self-similarity) with large negative scalar
-        large_neg = kops.cast(-1e9, dtype=dtype)
-        off_diag_sim = kops.where(eye_mask, large_neg, similarity_matrix)
+        large_neg = kops.cast(-1e9, dtype)
+        off_diag_sim = kops.where(ignore_mask, large_neg, similarity_matrix)
 
-        # 4. Cosine Repulsion Loss
+        # 5. Repulsion Loss
         exp_sim = kops.exp(off_diag_sim)
-        off_diag_exp_sum = kops.sum(kops.where(eye_mask, 0.0, exp_sim))
+        off_diag_exp_sum = kops.sum(kops.where(ignore_mask, 0.0, exp_sim), axis=[1, 2])
 
-        num_off_diag = kops.cast(N * (N - 1), dtype=dtype)
-        repulsion_loss = off_diag_exp_sum / kops.maximum(1.0, num_off_diag)
+        # Dynamic denominator: (Valid Spikes) * (Valid Spikes - 1)
+        valid_S = kops.sum(mask, axis=1)  # (Batch,)
+        num_off_diag = valid_S * (valid_S - 1.0)
 
-        # 5. Feature Variance Loss
-        mean = kops.mean(y_pred_norm, axis=0, keepdims=True)
-        var = kops.mean(kops.square(y_pred_norm - mean), axis=0)
+        repulsion_loss_per_batch = off_diag_exp_sum / kops.maximum(1.0, num_off_diag)
+        # go to log to mimick infoNCE
+        repulsion_loss_per_batch = kops.log(repulsion_loss_per_batch + 1e-8)
+
+        repulsion_loss = kops.mean(repulsion_loss_per_batch)
+
+        # 6. Feature Variance Loss (Masked)
+        valid_S_expanded = kops.maximum(1.0, valid_S[:, None, None])
+        mean = (
+            kops.sum(y_pred_norm * mask[:, :, None], axis=1, keepdims=True)
+            / valid_S_expanded
+        )
+
+        var = kops.sum(
+            kops.square(y_pred_norm - mean) * mask[:, :, None], axis=1
+        ) / kops.maximum(1.0, valid_S[:, None])
         feature_std = kops.sqrt(var + 1e-8)
-
         variance_loss = kops.mean(kops.maximum(0.0, 1.0 - feature_std))
 
         total_loss = repulsion_loss + (self.alpha_variance * variance_loss)
 
-        # Apply loss conditionally if batch has > 1 sample
-        is_valid_batch = kops.greater(N, 1)
-        final_loss = kops.where(is_valid_batch, total_loss, kops.cast(0.0, dtype=dtype))
+        # Apply loss only if batch has enough valid spikes to compare
+        is_valid_S = kops.greater(valid_S, 1.0)
+        final_loss = kops.mean(
+            kops.where(is_valid_S, total_loss, kops.cast(0.0, dtype))
+        )
+        weighted_loss = final_loss * self.weight
+        weighted_loss = kops.cast(
+            weighted_loss, "float32"
+        )  # Ensure loss is float32 for backprop
 
-        # Register loss directly to the current model scope
-        self.add_loss(final_loss * self.weight)
+        self.add_loss(weighted_loss)
+        self.diversity_metric.update_state(weighted_loss)
 
-        # Pass through inputs unchanged
         return inputs
+
+    # Required for Keras 3 to correctly pass the mask downstream
+    def compute_mask(self, inputs, mask=None):
+        return mask
 
     def get_config(self):
         config = super().get_config()
@@ -6116,6 +5712,11 @@ class SpikeDiversityLossLayer(keras.layers.Layer):
             }
         )
         return config
+
+    @property
+    def metrics(self):
+        # Explicitly expose the stateful metric so Keras polls it for the progress bar
+        return [self.diversity_metric]
 
 
 @tf.keras.utils.register_keras_serializable(package="neuroencoders")
@@ -6509,19 +6110,37 @@ class TransformerIdentityAuditCallback(tf.keras.callbacks.Callback):
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
 class MultiTokenSpatialDensityHead(keras.layers.Layer):
-    """Reads full (Batch, SeqLen, Dim) sequence tokens from TransformerEncoder
-
-    and maps them to K independent 2D spatial probability distributions.
+    """
+    Reads full (Batch, SeqLen, Dim) sequence tokens from TransformerEncoder
+    and maps them to K independent 2D spatial logit distributions.
     """
 
-    def __init__(self, k_steps=5, d_model=128, n_bins=1225, num_heads=4, **kwargs):
-        super().__init__(**kwargs)
-        self.supports_masking = True
+    def __init__(
+        self,
+        dense_size_1,
+        dense_size_2,
+        k_steps=5,
+        d_model=256,
+        grid_size=(35, 35),
+        num_heads=4,
+        sigma=0.05,
+        **kwargs,
+    ):
+        self.GRID_H, self.GRID_W = grid_size
+        self.n_bins = kwargs.pop("n_bins", self.GRID_H * self.GRID_W)
 
+        assert self.n_bins == self.GRID_H * self.GRID_W, (
+            f"n_bins ({self.n_bins}) must equal GRID_H * GRID_W ({self.GRID_H * self.GRID_W})"
+        )
+
+        super().__init__(**kwargs)
+        self.dense_1 = dense_size_1
+        self.dense_2 = dense_size_2
+        self.supports_masking = True
         self.k_steps = k_steps
         self.d_model = d_model
-        self.n_bins = n_bins
         self.num_heads = num_heads
+        self.sigma = sigma
 
         self.cross_attention = keras.layers.MultiHeadAttention(
             num_heads=self.num_heads,
@@ -6531,8 +6150,19 @@ class MultiTokenSpatialDensityHead(keras.layers.Layer):
         self.norm = keras.layers.LayerNormalization(
             epsilon=1e-6, name="layer_normalization_23"
         )
-        self.dense_proj = keras.layers.Dense(
-            self.d_model, activation="gelu", name="dense_50"
+
+        # 1. Add expansion capacity to mimick transformer decoder behavior
+        self.expansion_dense_1 = keras.layers.Dense(
+            self.dense_1,
+            activation="silu",
+            name="decoder_1",
+            kernel_regularizer="l2",
+        )
+        self.expansion_dense_2 = keras.layers.Dense(
+            self.dense_2,
+            activation="silu",
+            name="decoder_2",
+            kernel_regularizer="l2",
         )
         self.heatmap_dense = keras.layers.Dense(
             self.n_bins, activation=None, name="spatial_logits"
@@ -6547,36 +6177,46 @@ class MultiTokenSpatialDensityHead(keras.layers.Layer):
         )
 
         query_shape = (None, self.k_steps, self.d_model)
-        value_shape = input_shape
-
         self.cross_attention.build(
-            query_shape=query_shape, value_shape=value_shape, key_shape=value_shape
+            query_shape=query_shape, value_shape=input_shape, key_shape=input_shape
         )
         self.norm.build(query_shape)
-        self.dense_proj.build(query_shape)
-        self.heatmap_dense.build(query_shape)
+
+        self.expansion_dense_1.build(query_shape)
+        query_shape_1 = query_shape[:-1] + (self.dense_1,)
+        self.expansion_dense_2.build(query_shape_1)
+        query_shape_2 = query_shape_1[:-1] + (self.dense_2,)
+        self.heatmap_dense.build(query_shape_2)
+
+        # convert to pixels
+        sigma_pixels = self.sigma * max(self.GRID_H, self.GRID_W)
+
+        kernel_size = int(2 * np.ceil(2 * sigma_pixels) + 1)
+        self.pad_size = kernel_size // 2
+
+        ax = np.arange(-kernel_size // 2 + 1, kernel_size // 2 + 1)
+        xx, yy = np.meshgrid(ax, ax)
+        kernel = np.exp(-(xx**2 + yy**2) / (2 * sigma_pixels**2))
+        kernel = kernel / np.sum(kernel)
+        self.gaussian_kernel = tf.constant(kernel, dtype=tf.float32)
 
         super().build(input_shape)
 
     def compute_mask(self, inputs, mask=None):
-        # Consumes the incoming (Batch, SeqLen) mask and does not propagate it (same as MaskedSequential).
-        # The output tokens correspond to fixed queries (k_steps), not the padded sequence.
+        # the mask is deleted after this layer, as we are producing a fixed number of outputs (k_steps)
         return None
 
     def call(self, spike_tokens, mask=None, training=False):
+
         batch_size = kops.shape(spike_tokens)[0]
         queries = kops.repeat(self.temporal_queries, batch_size, axis=0)
 
         attn_mask = None
         if mask is not None:
-            # mask comes in as (Batch, SeqLen)
-            # Expand to (Batch, 1, SeqLen) and broadcast to (Batch, K_steps, SeqLen)
-            # True = valid token, False = padding token (ignored by attention)
             bool_mask = kops.cast(mask, "bool")
             attn_mask = kops.expand_dims(bool_mask, axis=1)
             attn_mask = kops.broadcast_to(
-                attn_mask,
-                (batch_size, self.k_steps, kops.shape(spike_tokens)[1]),
+                attn_mask, (batch_size, self.k_steps, kops.shape(spike_tokens)[1])
             )
 
         attended = self.cross_attention(
@@ -6587,33 +6227,71 @@ class MultiTokenSpatialDensityHead(keras.layers.Layer):
             training=training,
         )
         x = self.norm(queries + attended)
-        x = x + self.dense_proj(x)
 
-        logits = self.heatmap_dense(x)
-        prob_density = keras.ops.softmax(logits, axis=-1)
+        # Expand dimensionality, similar to GaussianHeatmap
+        x = self.expansion_dense_1(x)
+        x = self.expansion_dense_2(x)
+        logits = self.heatmap_dense(x)  # Shape: (Batch, K, n_bins)
 
-        return prob_density
+        # TEST: skip the convolution to avoid border effects in the inner maze
+
+        # logits_4d = kops.reshape(
+        #     logits, (batch_size * self.k_steps, self.GRID_H, self.GRID_W, 1)
+        # )
+        #
+        # pad = int(self.pad_size)
+        # logits_padded = tf.pad(
+        #     logits_4d,
+        #     paddings=[[0, 0], [pad, pad], [pad, pad], [0, 0]],
+        #     mode="SYMMETRIC",
+        # )
+        #
+        # kernel_tf = kops.cast(self.gaussian_kernel[:, :, None, None], logits_4d.dtype)
+        #
+        # logits_smoothed = tf.nn.conv2d(
+        #     logits_padded,
+        #     kernel_tf,
+        #     strides=[1, 1, 1, 1],
+        #     padding="VALID",
+        # )  # already shape (Batch*K, GRID_H, GRID_W, 1)
+        #
+        # final_logits = kops.reshape(
+        #     logits_smoothed[:, :, :, 0], (batch_size, self.k_steps, self.n_bins)
+        # )
+        # return final_logits
+
+        return logits  # Shape: (Batch, K, n_bins)
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.k_steps, self.n_bins)
 
     def get_config(self):
         config = super().get_config()
         config.update(
             {
+                "dense_size_1": self.dense_1,
+                "dense_size_2": self.dense_2,
                 "k_steps": self.k_steps,
                 "d_model": self.d_model,
-                "n_bins": self.n_bins,
+                "grid_size": (self.GRID_H, self.GRID_W),
                 "num_heads": self.num_heads,
+                "sigma": self.sigma,
             }
         )
         return config
-
-    def compute_output_shape(self, input_shape):
-        batch_size = input_shape[0]
-        return (batch_size, self.k_steps, self.n_bins)
 
 
 def get_k_steps_params(winMS):
     """
     Returns the number of temporal steps (k_steps) and the stride for the MultiTokenSpatialDensityHead based on the input window size in milliseconds (winMS).
+
+    Args:
+        winMS (int): The window size in milliseconds.
+
+    Returns:
+        tuple of
+        k_steps: int: The number of temporal steps for the MultiTokenSpatialDensityHead.
+        stride: int: The stride for the MultiTokenSpatialDensityHead, expressed in dataset stride (depends on the number of windows). If winMS is 108, the sliding is 27ms, if 252 it is 63. For example, a stride of 1 means every frame is used, while a stride of 2 means every other frame is used.
     """
     if winMS == 108:
         return 5, 1

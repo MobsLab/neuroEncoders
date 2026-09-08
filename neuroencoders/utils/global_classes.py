@@ -3251,7 +3251,7 @@ class SpatialConstraintsMixin:
             self.common_eps = tf.constant(1e-8, dtype=tf.float32)
             self.common_neg = tf.constant(-1e5, dtype=tf.float32)
 
-    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.03):
+    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.06):
         """
         Generate Gaussian target heatmap for a batch of [x, y] positions.
         """
