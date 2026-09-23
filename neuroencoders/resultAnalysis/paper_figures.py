@@ -336,52 +336,47 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                     ]
                 )[final_mask]
 
-        if (
-            isinstance(self.resultsNN_phase_pkl, dict)
-            and "_training" in self.resultsNN_phase_pkl
-            and "_pre" in self.resultsNN_phase_pkl
-        ):
-            self.resultsNN_phase_pkl["_full_pre"] = copy.deepcopy(
-                self.resultsNN_phase_pkl["_pre"]
-            )
-            for key in self.resultsNN_phase_pkl["_training"]:
+        self.resultsNN_phase_pkl["_full_pre"] = copy.deepcopy(
+            self.resultsNN_phase_pkl["_pre"]
+        )
+        for key in self.resultsNN_phase_pkl["_training"]:
+            if (
+                self.resultsNN_phase_pkl["_training"][key] is None
+                or len(self.resultsNN_phase_pkl["_training"][key]) == 0
+                or len(self.resultsNN_phase_pkl["_pre"][key]) == 0
+            ):
+                continue
+            for idWin in range(len(self.resultsNN_phase_pkl["_training"][key])):
                 if (
-                    self.resultsNN_phase_pkl["_training"][key] is None
-                    or len(self.resultsNN_phase_pkl["_training"][key]) == 0
-                    or len(self.resultsNN_phase_pkl["_pre"][key]) == 0
+                    self.resultsNN_phase_pkl["_training"][key][idWin] is None
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], float
+                    )
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], str
+                    )
+                    or isinstance(
+                        self.resultsNN_phase_pkl["_training"][key][idWin], dict
+                    )
+                    or len(self.resultsNN_phase_pkl["_training"][key][idWin]) == 0
+                    or len(self.resultsNN_phase_pkl["_pre"][key][idWin]) == 0
                 ):
                     continue
-                for idWin in range(len(self.resultsNN_phase_pkl["_training"][key])):
-                    if (
-                        self.resultsNN_phase_pkl["_training"][key][idWin] is None
-                        or isinstance(
-                            self.resultsNN_phase_pkl["_training"][key][idWin], float
-                        )
-                        or isinstance(
-                            self.resultsNN_phase_pkl["_training"][key][idWin], str
-                        )
-                        or isinstance(
-                            self.resultsNN_phase_pkl["_training"][key][idWin], dict
-                        )
-                        or len(self.resultsNN_phase_pkl["_training"][key][idWin]) == 0
-                        or len(self.resultsNN_phase_pkl["_pre"][key][idWin]) == 0
-                    ):
-                        continue
-                    times_train = self.resultsNN_phase_pkl["_training"]["times"][idWin]
-                    train_in_pre = (inEpochsMask(times_train, self.pre)) & (
-                        ~inEpochsMask(times_train, self.hab)
-                    )
-                    times_pre = self.resultsNN_phase_pkl["_pre"]["times"][idWin]
-                    pre_in_pre = (inEpochsMask(times_pre, self.pre)) & (
-                        ~inEpochsMask(times_pre, self.hab)
-                    )
-                    final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
-                    self.resultsNN_phase_pkl["_full_pre"][key][idWin] = np.concatenate(
-                        [
-                            self.resultsNN_phase_pkl["_training"][key][idWin],
-                            self.resultsNN_phase_pkl["_pre"][key][idWin],
-                        ]
-                    )[final_mask]
+                times_train = self.resultsNN_phase_pkl["_training"]["times"][idWin]
+                train_in_pre = (inEpochsMask(times_train, self.pre)) & (
+                    ~inEpochsMask(times_train, self.hab)
+                )
+                times_pre = self.resultsNN_phase_pkl["_pre"]["times"][idWin]
+                pre_in_pre = (inEpochsMask(times_pre, self.pre)) & (
+                    ~inEpochsMask(times_pre, self.hab)
+                )
+                final_mask = np.concat([train_in_pre, pre_in_pre]).astype(bool)
+                self.resultsNN_phase_pkl["_full_pre"][key][idWin] = np.concatenate(
+                    [
+                        self.resultsNN_phase_pkl["_training"][key][idWin],
+                        self.resultsNN_phase_pkl["_pre"][key][idWin],
+                    ]
+                )[final_mask]
 
     def _extract_bayes_spike_counts(self, times, ws):
         """Internal helper for spike count extraction in load_bayes."""
