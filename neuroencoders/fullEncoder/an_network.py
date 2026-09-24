@@ -13,6 +13,7 @@ an_network module for training and managing LSTM and spiking neural networks.
 import os
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Only show errors, not warnings
+import os
 import warnings
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -61,6 +62,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     TransformerIdentityAuditCallback,
     UMazeProjectionLayer,
     UnMaskingLayer,
+    VectorQuantizer,
     WandBErrorMapCallback,
 )
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
@@ -139,12 +141,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         self._setup_feature_description()
         self.preprocess_normalization = kwargs.get(
             "normalize_in_pipeline",
-            getattr(self.params, "normalize_in_pipeline", True),
+            getattr(self.params, "normalize_in_pipeline", False),
         )
         self.normalization_stats = None
         self.learnable_contrastive_temperature = kwargs.get(
             "learnable_contrastive_temperature",
-            getattr(self.params, "learnable_contrastive_temperature", True),
+            getattr(self.params, "learnable_contrastive_temperature", False),
         )
         self.contrastive_temperature_layer = None
 
@@ -160,6 +162,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if self.max_spikes_per_group is None:
             self.max_spikes_per_group = int(self.max_nb_spikes / self.params.nGroups)
 
+        print("")
         if self.params.usingMixedPrecision:
             print(f"Using mixed precision with float16 on device {self.deviceName}")
             policy = tf.keras.mixed_precision.Policy("mixed_bfloat16")
@@ -285,11 +288,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         structure = {}
 
         # dummy structure for the output of the transformer.
-        structure["latent_output"] = {
+        structure["latent_output_pooled"] = {
             "dim": self.params.sequence_output_dim,  # independant on whats predicted,
             "slice": (0, 1),
             "activation": "linear",
         }
+
+        # for dev only if we want to look at full sequence
+        # structure["latent_output_sequence"] = {
+        #     "dim": self.params.sequence_output_dim,  # actual shape is (max_nb_spikes, sequence output dim)
+        #     "slice": (0, 1),
+        #     "activation": "linear",
+        # }
 
         if target == "pos":
             structure["pos_2d"] = {
@@ -605,7 +615,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.params, "dim_factor", 1
         )  # factor to increase the dimension of the transformer if needed
         self.project_transformer = (
-            getattr(self.params, "project_transformer", True) and self.isTransformer
+            getattr(self.params, "project_transformer", False) and self.isTransformer
         )
         print("dim_factor:", self.dim_factor)
         print(
@@ -675,8 +685,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 project_transformer=self.project_transformer,
                 dim_factor=self.dim_factor,
                 device=self.deviceName,
+                params=self.params,
                 name="spike_sequence_processor",
             )
+
+            if getattr(self.params, "use_vq_bottleneck", False):
+                self.vq_bottleneck = VectorQuantizer(
+                    num_embeddings=256,
+                    embedding_dim=self.params.nFeatures * self.dim_factor
+                    if self.project_transformer
+                    else self.params.nFeatures,
+                    commitment_cost=0.75,
+                    name="vq_bottleneck",
+                    device=self.deviceName,
+                )
 
             if getattr(self.params, "use_group_attention_fusion", False):
                 # 2. Initialize the Group Attention Fusion layer
@@ -1000,6 +1022,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 mymask  # Ensure the mask is set for downstream layers
             )
 
+            if getattr(self.params, "use_vq_bottleneck", False):
+                print("Using VQ Bottleneck for latent representation.")
+                embedded_features = self.vq_bottleneck(embedded_features, mask=mymask)
+                # Re-apply the mask just to ensure downstream Keras layers behave safely
+                embedded_features._keras_mask = mymask
+
             allFeatures_raw = raw_sequence
 
             transformer_input = self.dropoutLayer(embedded_features)
@@ -1052,9 +1080,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         out_heatmap
                     )
 
-            outputs["latent_output"] = UnMaskingLayer(
-                name="latent_output", dtype="float32"
-            )(sequence_output)
+            # for debugging, we can also output the latent sequence before pooling
+            # outputs["latent_output_sequence"] = UnMaskingLayer(
+            #     name="latent_output_sequence", dtype="float32"
+            # )(sequence_output)
+
+            outputs["latent_output_pooled"] = UnMaskingLayer(
+                name="latent_output_pooled", dtype="float32"
+            )(pooled_latent)
 
         return outputs
 
@@ -1087,7 +1120,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if "latent_contrastive" in outputs:
             self.viz_encoder = tf.keras.Model(
                 inputs=self.inputs,
-                outputs=self.tmp_outputs["latent_output"],
+                outputs=self.tmp_outputs["latent_output_pooled"],
                 name="SpikeNetEncoderModel",
             )
 
@@ -1172,7 +1205,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             return None
 
         try:
-            latent_tensor = self.model.get_layer("latent_output").output
+            latent_tensor = self.model.get_layer("latent_output_pooled").output
         except Exception:
             return None
 
@@ -1440,7 +1473,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         is_interleaving_subdataset=True,
                         **kwargs,
                     )
-                    sub_datasets_train.append(ds["train"])
+                    if "train" in ds:
+                        sub_datasets_train.append(ds["train"])
                     if "test" in ds:
                         sub_datasets_test.append(ds["test"])
                     sub_counts.append(counts)
@@ -1458,13 +1492,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 interleaved_ds_train = interleaved_ds_train.batch(
                     batch_size, drop_remainder=True
                 )
-                interleaved_ds_train = interleaved_ds_train.repeat().prefetch(
-                    tf.data.AUTOTUNE
-                )
+                interleaved_ds_train = interleaved_ds_train.repeat().prefetch(4)
 
                 interleaved_ds_test = interleaved_ds_test.batch(
                     batch_size, drop_remainder=True
-                ).prefetch(tf.data.AUTOTUNE)
+                ).prefetch(4)
 
                 interleaved_ds = {
                     "train": interleaved_ds_train,
@@ -1475,6 +1507,12 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             datasets, subcounts = get_interleaved_dataset(windowSizeMS, **kwargs)
             counts = subcounts[windowSizeMS.index(max(windowSizeMS))]
+        else:
+            raise ValueError(
+                "windowSizeMS must be either an int or a list of ints. Got {} of type: {}".format(
+                    windowSizeMS, type(windowSizeMS)
+                )
+            )
 
         if kwargs.get("return_datasets", False):
             return datasets, counts
@@ -1664,7 +1702,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 os.path.join(
                     Path(self.projectPath.folder).parent,
                     "foundation_transformer",
-                    str(winMS_max),
+                    str(self.max_nb_spikes),
                     "transformer.keras",
                 )
             ):
@@ -1673,7 +1711,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         os.path.join(
                             Path(self.projectPath.folder).parent,
                             "foundation_transformer",
-                            str(winMS_max),
+                            str(self.max_nb_spikes),
                             f"{self.target.lower()}_transformer.keras",
                         )
                     )
@@ -1690,7 +1728,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             os.path.join(
                                 Path(self.projectPath.folder).parent,
                                 "foundation_transformer",
-                                str(winMS_max),
+                                str(self.max_nb_spikes),
                                 "transformer.keras",
                             )
                         )
@@ -1744,12 +1782,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
             # Manage learning rates schedule
             if loaded and fine_tune:
-                print("Fine-tuning the model with a lower learning rate, set to 0.0005")
-                self.model.optimizer.learning_rate.assign(
-                    self.params.learningRates[0] / 30
+                fine_tune_lr = self.params.learningRates[0] / 30
+                print(
+                    f"Fine-tuning the model with a lower learning rate, set to {fine_tune_lr}"
                 )
+                self.model.optimizer.learning_rate.assign(fine_tune_lr)
             elif loaded:
-                print("Loading the model with the initial learning rate")
+                print(
+                    f"Loading the model with the initial learning rate {self.params.learningRates[0]}"
+                )
                 self.model.optimizer.learning_rate.assign(self.params.learningRates[0])
 
             if found_foundation_transformer and not loaded:
@@ -1895,7 +1936,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             TransformerIdentityAuditCallback(
                                 val_dataset=datasets["test"],
                                 save_dir=os.path.join(
-                                    self.folderResult, "transformer_audit"
+                                    self.folderResult,
+                                    "logs",
+                                    str(winMS_max),
+                                    "transformer_audit",
                                 ),
                             ),
                         )
@@ -1929,7 +1973,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             TransformerIdentityAuditCallback(
                                 val_dataset=datasets["test"],
                                 save_dir=os.path.join(
-                                    self.folderResult, "transformer_audit"
+                                    self.folderResult,
+                                    "logs",
+                                    str(winMS_max),
+                                    "transformer_audit",
                                 ),
                             ),
                         )
@@ -2110,7 +2157,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             base_path = os.path.join(
                 Path(self.projectPath.folder).parent,
                 "foundation_transformer",
-                str(winMS_max),
+                str(self.max_nb_spikes),
             )
             os.makedirs(base_path, exist_ok=True)
 
@@ -2158,7 +2205,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         target_master_path = os.path.join(
             Path(self.projectPath.folder).parent,
             "foundation_transformer",
-            str(winMS_max),
+            str(self.max_nb_spikes),
             f"target_{self.target.lower()}_master.keras",
         )
 
@@ -2659,21 +2706,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         ndataset = tf.data.TFRecordDataset(
             os.path.join(self.projectPath.dataPath, filename),
             buffer_size=512 * 1024 * 1024,  # 512MB read buffer
-            num_parallel_reads=tf.data.AUTOTUNE,
+            num_parallel_reads=4,
         )
 
         if shuffle:
             print("Shuffling the dataset")
             ndataset = ndataset.shuffle(
-                10000
+                100000
             )  # move shuffle before parsing for better randomness, we can afford a bigger buffer because we are not yet in the batched stage
-
-        # Parse the record into tensors - simply attribute a name to every tensor from featDesc
-        ndataset = ndataset.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-        ndataset = ndataset.prefetch(tf.data.AUTOTUNE)
-
-        datasets = {}
-        counts = {}
 
         # --- MULTI-TOKEN TRAJECTORY SETUP ---
         if self.use_multi_token:
@@ -2696,97 +2736,121 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 f"Multi Token mode is ON. Will look up {k_steps} steps with spacing {k_frame_spacing} frames."
             )
 
+        @tf.function
+        def hash_import_pos(vals):
+            updated_vals = dict(vals)
+            center_idx = tf.cast(vals["pos_index"], tf.int64)
+
+            # --- 1. MULTI-TOKEN (K-Steps) LOOKUP ---
+            if self.use_multi_token:
+                # Calculate absolute indices for the K steps
+                target_indices = center_idx + frame_offsets
+
+                # Clip to valid table range to avoid out-of-bounds crashes
+                max_valid_idx = tf.cast(tf.shape(pos_array)[0] - 1, tf.int64)
+                target_indices = tf.clip_by_value(target_indices, 0, max_valid_idx)
+
+                # Expand to 1D lookup array for the flattened pos_table
+                k_indices_expanded = tf.expand_dims(
+                    target_indices * out_dim, axis=1
+                )  # (K, 1)
+                dim_offsets = tf.range(out_dim, dtype=tf.int64)  # (out_dim,)
+                lookup_indices_flat = tf.reshape(
+                    k_indices_expanded + dim_offsets, [-1]
+                )  # (K * out_dim,)
+
+                looked_up_flat = pos_table.lookup(lookup_indices_flat)
+                looked_up_k = tf.reshape(
+                    looked_up_flat, [k_steps, out_dim]
+                )  # (K, out_dim)
+
+                # Verify if any data point was completely missing (-1.0 fallback)
+                is_missing_k = tf.math.reduce_any(tf.math.equal(looked_up_k, -1.0))
+
+                # Write to dict
+                updated_vals["pos_k"] = tf.cond(
+                    is_missing_k,
+                    lambda: tf.zeros([k_steps, out_dim], dtype=tf.float32),
+                    lambda: looked_up_k,
+                )
+
+            # --- 2. SINGLE-TOKEN LOOKUP ---
+            start_idx = center_idx * out_dim
+            looked_up_indices_single = start_idx + tf.range(out_dim, dtype=tf.int64)
+            looked_up_single = pos_table.lookup(looked_up_indices_single)
+
+            is_missing_single = tf.math.reduce_all(
+                tf.math.equal(looked_up_single, -1.0)
+            )
+            updated_vals["pos"] = tf.cond(
+                is_missing_single,
+                lambda: tf.zeros([out_dim], dtype=tf.float32),
+                lambda: looked_up_single,
+            )
+
+            return updated_vals
+
+        @tf.function
+        def remove_pos(vals):
+            updated_vals = dict(vals)
+            updated_vals["pos"] = tf.zeros([out_dim], dtype=tf.float32)
+            if self.use_multi_token:
+                updated_vals["pos_k"] = tf.zeros([k_steps, out_dim], dtype=tf.float32)
+            return updated_vals
+
+        def parse_serialized_sequence(vals):
+            return nnUtils.parse_serialized_sequence(
+                self.params,
+                vals,
+                count_spikes=kwargs.get("extract_spikes_counts", False),
+                # sorted_indices = #TODO: at some point
+                max_spikes=self.max_nb_spikes,
+                max_spikes_per_group=self.max_spikes_per_group,
+            )
+
+            # Parse the record into tensors - simply attribute a name to every tensor from featDesc
+
+        # --- FUSED MAP 1: Parse and Position Lookup ---
+        @tf.function
+        def fused_parse_and_lookup(example_proto):
+            # 1. Parse from binary
+            parsed = _parse_function(example_proto)
+            # 2. Add spatial coordinates (if required)
+            if not is_sleep:
+                return hash_import_pos(parsed)
+            else:
+                return remove_pos(parsed)
+
+        ndataset = ndataset.map(fused_parse_and_lookup, num_parallel_calls=4)
+
+        datasets = {}
+        counts = {}
+
         for key in totMask.keys():
-            # This is just max normalization to use if the behavioral data have not been normalized yet
-            # Note: Only scale position columns (first 2 dims), not mixed-head targets
-            # posFeature is already of shape (N,dimOutput) because we ran data_helper.get_true_target before.
             if not is_sleep:
                 filter_op = get_mask_filter(totMask[key])
             else:
                 filter_op = get_time_filter(timeSleepStart, timeSleepStop)
+
+            # Apply filters
             dataset = ndataset.filter(filter_op)
 
             if not is_sleep:
+                dataset = dataset.filter(filter_nan_pos)
 
-                @tf.function
-                def hash_import_pos(vals):
-                    updated_vals = dict(vals)
-                    center_idx = tf.cast(vals["pos_index"], tf.int64)
+            # --- NEW FUSED MAP 2: DENSIFY BEFORE OVERSAMPLING ---
+            # We must convert SparseTensors to Dense Tensors before calling tf.repeat
+            @tf.function
+            def densify_and_index(vals):
+                # 1. Densify sparse arrays (pads with 0s to make fixed shapes)
+                densified = parse_serialized_sequence(vals)
+                # 2. Generate local tracking indices
+                indexed = create_indices(densified)
+                return indexed
 
-                    # --- 1. MULTI-TOKEN (K-Steps) LOOKUP ---
-                    if self.use_multi_token:
-                        # Calculate absolute indices for the K steps
-                        target_indices = center_idx + frame_offsets
+            dataset = dataset.map(densify_and_index, num_parallel_calls=4)
 
-                        # Clip to valid table range to avoid out-of-bounds crashes
-                        max_valid_idx = tf.cast(tf.shape(pos_array)[0] - 1, tf.int64)
-                        target_indices = tf.clip_by_value(
-                            target_indices, 0, max_valid_idx
-                        )
-
-                        # Expand to 1D lookup array for the flattened pos_table
-                        k_indices_expanded = tf.expand_dims(
-                            target_indices * out_dim, axis=1
-                        )  # (K, 1)
-                        dim_offsets = tf.range(out_dim, dtype=tf.int64)  # (out_dim,)
-                        lookup_indices_flat = tf.reshape(
-                            k_indices_expanded + dim_offsets, [-1]
-                        )  # (K * out_dim,)
-
-                        looked_up_flat = pos_table.lookup(lookup_indices_flat)
-                        looked_up_k = tf.reshape(
-                            looked_up_flat, [k_steps, out_dim]
-                        )  # (K, out_dim)
-
-                        # Verify if any data point was completely missing (-1.0 fallback)
-                        is_missing_k = tf.math.reduce_any(
-                            tf.math.equal(looked_up_k, -1.0)
-                        )
-
-                        # Write to dict
-                        updated_vals["pos_k"] = tf.cond(
-                            is_missing_k,
-                            lambda: tf.zeros([k_steps, out_dim], dtype=tf.float32),
-                            lambda: looked_up_k,
-                        )
-
-                    # --- 2. SINGLE-TOKEN LOOKUP ---
-                    start_idx = center_idx * out_dim
-                    looked_up_indices_single = start_idx + tf.range(
-                        out_dim, dtype=tf.int64
-                    )
-                    looked_up_single = pos_table.lookup(looked_up_indices_single)
-
-                    is_missing_single = tf.math.reduce_all(
-                        tf.math.equal(looked_up_single, -1.0)
-                    )
-                    updated_vals["pos"] = tf.cond(
-                        is_missing_single,
-                        lambda: tf.zeros([out_dim], dtype=tf.float32),
-                        lambda: looked_up_single,
-                    )
-
-                    return updated_vals
-
-                dataset = dataset.map(
-                    hash_import_pos, num_parallel_calls=tf.data.AUTOTUNE
-                )
-                dataset = dataset.filter(filter_nan_pos).prefetch(tf.data.AUTOTUNE)
-            else:
-
-                @tf.function
-                def remove_pos(vals):
-                    updated_vals = dict(vals)
-                    updated_vals["pos"] = tf.zeros([out_dim], dtype=tf.float32)
-                    if self.use_multi_token:
-                        updated_vals["pos_k"] = tf.zeros(
-                            [k_steps, out_dim], dtype=tf.float32
-                        )
-                    return updated_vals
-
-                dataset = dataset.map(remove_pos, num_parallel_calls=tf.data.AUTOTUNE)
-
-            # now that we have clean positions, we can resample if needed
+            # Apply Oversampling (calls the fast vectorized version)
             count_before = None
             if (
                 self.params.OversamplingResampling
@@ -2798,44 +2862,75 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                 if "lin" in self.target.lower():
                     dataset = dataset.map(nnUtils.import_true_pos(two_d_pos))
+
+                # This will now work perfectly because all tensors are DENSE
                 dataset, count_before, count_after = (
                     self._apply_oversampling_resampling(
                         dataset, windowSizeMS=windowSizeMS, shuffle=shuffle
                     )
                 )
+
                 if "lin" in self.target.lower():
                     dataset = dataset.map(nnUtils.import_true_pos(pos_array))
 
-            def parse_serialized_sequence(vals):
-                return nnUtils.parse_serialized_sequence(
-                    self.params,
-                    vals,
-                    count_spikes=kwargs.get("extract_spikes_counts", False),
-                    # sorted_indices = #TODO: at some point
-                    max_spikes=self.max_nb_spikes,
-                    max_spikes_per_group=self.max_spikes_per_group,
+            # =================================================================
+            # NEW: RANDOMIZED SEQUENCE PADDING (AFTER OVERSAMPLING)
+            # =================================================================
+            @tf.function
+            def apply_random_sequence_shift(vals):
+                vals = dict(vals)
+
+                # 1. Find valid spikes to calculate max possible shift
+                # groups is padded with -1.
+                valid_mask = tf.math.not_equal(vals["groups"], -1)
+                actual_spikes = tf.reduce_sum(tf.cast(valid_mask, tf.int32))
+                max_spikes = tf.shape(vals["groups"])[0]
+
+                max_shift = tf.maximum(0, max_spikes - actual_spikes)
+
+                # 2. Pick a random shift offset
+                # tf.random.uniform is exclusive on maxval, so add 1
+                shift_offset = tf.random.uniform(
+                    [], minval=0, maxval=max_shift + 1, dtype=tf.int32
                 )
 
-            # Map create_indices BEFORE batching and data augmentation (per-example)
-            dataset = dataset.map(
-                parse_serialized_sequence, num_parallel_calls=tf.data.AUTOTUNE
-            )
-            dataset = dataset.map(create_indices, num_parallel_calls=tf.data.AUTOTUNE)
+                # 3. Roll sequence-dependent metadata
+                # Rolling pushes the -1 padding from the end to the front.
+                # safe_mask_creation naturally ignores -1 wherever it is!
+                seq_keys = ["groups", "indexInDat"] + [
+                    k for k in vals.keys() if k.startswith("indices")
+                ]
+
+                for k in seq_keys:
+                    vals[k] = tf.roll(vals[k], shift=shift_offset, axis=0)
+
+                return vals
+
+            # Only randomize during training!
+            if (
+                key == "train"
+                and kwargs.get("randomize_padding", True)
+                and not inference_mode
+            ):
+                print(f"randomizing sequence padding for {key} dataset")
+                dataset = dataset.map(apply_random_sequence_shift, num_parallel_calls=4)
+            # =================================================================
+
+            # --- NEW FUSED MAP 3: STANDARDIZE ---
+            @tf.function
+            @tf.autograph.experimental.do_not_convert
+            def map_standardize(vals):
+                return nnUtils.standardize_group_tensors(
+                    vals,
+                    normalization_stats=self.normalization_stats,
+                    params=self.params,
+                )
 
             if normalize_in_pipeline and self.normalization_stats is not None:
-                print("Normalizing the dataset in the pipeline with pre-computed stats")
-
-                def map_standardize(vals):
-                    return nnUtils.standardize_group_tensors(
-                        vals,
-                        normalization_stats=self.normalization_stats,
-                        params=self.params,
-                    )
-
-                dataset = dataset.map(
-                    map_standardize,
-                    num_parallel_calls=tf.data.AUTOTUNE,
+                print(
+                    f"Normalizing the {key} dataset in the pipeline with pre-computed stats"
                 )
+                dataset = dataset.map(map_standardize, num_parallel_calls=4)
 
             dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
@@ -2847,7 +2942,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 and key != "test"
                 and not inference_mode
             )
-
             selective_oversampled_aug = (
                 is_aug_active
                 and self.params.OversamplingResampling
@@ -2862,21 +2956,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     "Applying data augmentation only to oversampled duplicate copies in train dataset"
                 )
                 aug_config_kwargs = kwargs.copy()
-                aug_config_kwargs["channel_dropout_rate"] = 0.0
-                aug_config_kwargs["spike_dropout_rate"] = 0.0
+                aug_config_kwargs["channel_dropout_rate"] = 0.2
+                aug_config_kwargs["spike_dropout_rate"] = 0.3
 
                 oversampling_augmentation_config = NeuralDataAugmentation(
                     device=self.deviceName, **aug_config_kwargs
                 )
 
                 @tf.function
+                @tf.autograph.experimental.do_not_convert
                 def maybe_augment_oversampled(vals):
                     was_oversampled = tf.cast(
                         vals.get("__oversampled_copy", tf.constant(False)), tf.bool
-                    )
-                    rep_factor = tf.cast(
-                        vals.get("__rep_factor", tf.constant(1, dtype=tf.int32)),
-                        tf.int32,
                     )
 
                     clean_vals = {
@@ -2890,7 +2981,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             clean_vals,
                             self.params,
                             oversampling_augmentation_config,
-                            num_augs=rep_factor,
+                            num_augs=1,
                         )
                         return augmented_dict
 
@@ -2902,25 +2993,24 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
                     return tf.cond(was_oversampled, _augment_path, _standard_path)
 
-                dataset = dataset.map(
-                    maybe_augment_oversampled, num_parallel_calls=tf.data.AUTOTUNE
-                )
+                dataset = dataset.map(maybe_augment_oversampled, num_parallel_calls=4)
                 dataset = (
                     dataset.unbatch()
                 )  # Flatten the dataset back to individual examples after augmentation
-                dataset = dataset.shuffle(10000)
-
-            if is_aug_active:
+                dataset = dataset.shuffle(
+                    500
+                )  # reshuffle such that oversampled augmented examples are mixed with original examples
+            elif is_aug_active:
                 optimized_fn = self.create_optimized_parse_function(
                     augmentation=is_aug_active,
                     augmentation_config=augmentation_config if is_aug_active else None,
                     count_spikes=kwargs.get("extract_spikes_counts", False),
                 )
                 print(f"Applying data augmentation to {key} dataset")
-                dataset = dataset.map(optimized_fn, num_parallel_calls=tf.data.AUTOTUNE)
+                dataset = dataset.map(optimized_fn, num_parallel_calls=4)
                 dataset = dataset.unbatch()
                 dataset = dataset.shuffle(
-                    10000
+                    500
                 )  # Shuffle after interleaving to mix augmented samples
 
             # Save the dataset state here: Unbatched, Unrepeated, Contains 'pos'
@@ -2946,17 +3036,17 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             ):
                 print("Batching the dataset with batch size:", batch_size)
                 dataset = dataset.batch(batch_size, drop_remainder=True)
-                dataset = dataset.prefetch(tf.data.AUTOTUNE)
+                dataset = dataset.prefetch(4)
 
             # We then reorganize the dataset so that it provides (inputsDict,outputsDict) tuple
-            dataset = dataset.map(map_outputs, num_parallel_calls=tf.data.AUTOTUNE)
+            dataset = dataset.map(map_outputs, num_parallel_calls=4)
 
             if key != "test" and not is_interleaving_subdataset:
                 # handle dataset ran out of data by repeating it
                 dataset = dataset.repeat()
 
             options = self._get_dataset_options()
-            dataset = dataset.with_options(options).prefetch(tf.data.AUTOTUNE)
+            dataset = dataset.with_options(options).prefetch(4)
 
             datasets[key] = dataset
             counts[key] = (
@@ -3122,9 +3212,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             def _parse_function(example_proto):
                 return tf.io.parse_single_example(example_proto, featDesc)
 
-            dataset = raw_dataset.map(
-                _parse_function, num_parallel_calls=tf.data.AUTOTUNE
-            )
+            dataset = raw_dataset.map(_parse_function, num_parallel_calls=4)
 
             def map_parse_serialized_sequence(*vals):
                 return nnUtils.parse_serialized_sequence(self.params, *vals)
@@ -3132,7 +3220,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             # Re-apply the parsing logic to get the correct shapes (e.g., reshaping groups)
             dataset = dataset.map(
                 map_parse_serialized_sequence,
-                num_parallel_calls=tf.data.AUTOTUNE,
+                num_parallel_calls=4,
             )
 
             datasets[key] = dataset
@@ -3334,7 +3422,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         # 1. Handle main position head if it's a heatmap
         if use_heatmap and "pos_2d" in preds:
-            output_logits = preds["pos_2d"]
+            output_logits = np.asarray(preds["pos_2d"])
             if len(output_logits.shape) == 2:
                 H, W = self.params.GaussianGridSize
                 output_logits = tf.reshape(output_logits, [-1, H, W])
@@ -3355,14 +3443,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             xy, maxp, Hn, var_total = self.decode_and_uncertainty_tf(output_logits)
 
             # Convert safely to numpy
-            xy_np = xy.numpy() if hasattr(xy, "numpy") else xy
-            maxp_np = maxp.numpy() if hasattr(maxp, "numpy") else maxp
-            Hn_np = Hn.numpy() if hasattr(Hn, "numpy") else Hn
-            var_np = var_total.numpy() if hasattr(var_total, "numpy") else var_total
+            xy_np = xy.numpy() if hasattr(xy, "numpy") else np.asarray(xy)
+            maxp_np = maxp.numpy() if hasattr(maxp, "numpy") else np.asarray(maxp)
+            Hn_np = Hn.numpy() if hasattr(Hn, "numpy") else np.asarray(Hn)
+            var_np = (
+                var_total.numpy()
+                if hasattr(var_total, "numpy")
+                else np.asarray(var_total)
+            )
             logits_np = (
                 output_logits.numpy()
                 if hasattr(output_logits, "numpy")
-                else output_logits
+                else np.asarray(output_logits)
             )
 
             # NEW: Split Multi-Token Sequences into center pred
@@ -3435,13 +3527,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 latent_pred = latent_pred[:, :-1]
             results["latent_contrastive"] = latent_pred
 
-        if "latent_output" in preds:
+        if "latent_output_pooled" in preds:
             latent_output = (
-                preds["latent_output"].numpy()
-                if hasattr(preds["latent_output"], "numpy")
-                else preds["latent_output"]
+                preds["latent_output_pooled"].numpy()
+                if hasattr(preds["latent_output_pooled"], "numpy")
+                else preds["latent_output_pooled"]
             )
-            results["latent_output"] = latent_output
+            results["latent_output_pooled"] = latent_output
 
         # Linear projections / ID score
         if (
@@ -3515,11 +3607,23 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # TODO: change speed filter with custom speed
         # Create the folder
         os.makedirs(os.path.join(self.folderResult, str(windowSizeMS)), exist_ok=True)
+
+        if isinstance(windowSizeMS, list) and len(windowSizeMS) > 1:
+            print("Multiple window sizes provided:", windowSizeMS)
+            winMS_max = max(windowSizeMS)
+        elif isinstance(windowSizeMS, list) and len(windowSizeMS) == 1:
+            winMS_max = max(windowSizeMS)
+        else:
+            winMS_max = windowSizeMS
+
+        if not isinstance(windowSizeMS, int):
+            winMS_max = int(winMS_max)
+
         # Loading the weights
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
+                    self.folderModels, str(winMS_max), "savedModels", "predLoss"
                 ),
             )
             print("Loading the weights of the predLoss trained network")
@@ -3529,7 +3633,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.model = tf.keras.models.load_model(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(winMS_max),
                             "savedModels",
                             "full_model.keras",
                         ),
@@ -3540,7 +3644,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(winMS_max),
                             "savedModels",
                             "full_cp.weights.h5",
                         ),
@@ -3552,7 +3656,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.model.load_weights(
                     os.path.join(
                         self.folderModels,
-                        str(windowSizeMS),
+                        str(winMS_max),
                         "full",
                         "cp.weights.h5",
                     ),
@@ -3598,29 +3702,111 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # Load the and imfer dataset
         ## Get datasets
         if strideFactor > 1:
-            filename = (
-                f"dataset_stride{str(windowSizeMS)}_factor{str(strideFactor)}.tfrec"
-            )
+            filename = f"dataset_stride{str(winMS_max)}_factor{str(strideFactor)}.tfrec"
         else:
-            filename = f"dataset_stride{str(windowSizeMS)}.tfrec"
+            filename = f"dataset_stride{str(winMS_max)}.tfrec"
 
-        datasets, counts = self._dataset_loading_pipeline(
-            filename,
-            windowSizeMS,
-            behaviorData,
-            totMask,
-            inference_mode=True,
-            onTheFlyCorrection=onTheFlyCorrection,
-            shuffle=kwargs.pop("shuffle", False),
-            speedMask=speedMask,
-            batch_size=kwargs.pop(
-                "batch_size", 32
-            ),  # WARNING: smaller batch size because of drop_remainder
-            **kwargs,
-        )
-        dataset = datasets["test"]
+        if isinstance(windowSizeMS, int) or len(windowSizeMS) == 1:
+            datasets, counts = self._dataset_loading_pipeline(
+                filename,
+                winMS_max,
+                behaviorData,
+                totMask,
+                inference_mode=True,
+                onTheFlyCorrection=onTheFlyCorrection,
+                shuffle=kwargs.pop("shuffle", False),
+                speedMask=speedMask,
+                batch_size=kwargs.pop(
+                    "batch_size", 32
+                ),  # WARNING: smaller batch size because of drop_remainder
+                **kwargs,
+            )
+
+        elif isinstance(windowSizeMS, list):
+
+            def get_interleaved_dataset(
+                window_sizes: list,
+                weights: Optional[list] = None,
+                **kwargs,
+            ):
+                sub_datasets_test = []
+                sub_counts = []
+                print(
+                    "Loading and preparing interleaved datasets for window sizes:",
+                    window_sizes,
+                )
+                ## Get datasets
+                for ws in window_sizes:
+                    # FIX: missing logic from neuroEncoder
+                    # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
+                    tmp_stride_factor = strideFactor
+                    windowStride = round(ws / 1000 / tmp_stride_factor, 4)
+                    if windowStride < 0.036:
+                        windowStride = 0.036
+                        if ws / 1000 == 0.036:
+                            # this way we dont have to recreate them.
+                            tmp_stride_factor = 1
+
+                    print(
+                        f"Processing window size {ws} ms with stride factor {tmp_stride_factor}..."
+                    )
+                    if tmp_stride_factor > 1:
+                        filename = f"dataset_stride{str(ws)}_factor{str(tmp_stride_factor)}.tfrec"
+                    else:
+                        filename = f"dataset_stride{str(ws)}.tfrec"
+
+                    # Call your existing pipeline for each window size
+                    # Note: Ensure you disable .repeat() and .batch() inside the pipeline
+                    # so you can interleave individual examples first.
+                    ds, counts = self._dataset_loading_pipeline(
+                        filename,
+                        ws,
+                        behaviorData,
+                        totMask,
+                        inference_mode=True,
+                        onTheFlyCorrection=onTheFlyCorrection,
+                        shuffle=kwargs.pop("shuffle", False),
+                        speedMask=speedMask,
+                        batch_size=kwargs.pop(
+                            "batch_size", 32
+                        ),  # WARNING: smaller batch size because of drop_remainder
+                        is_interleaving_subdataset=True,
+                        **kwargs,
+                    )
+                    if "test" in ds:
+                        sub_datasets_test.append(ds["test"])
+                    sub_counts.append(counts)
+
+                # Interleave them
+                interleaved_ds_test = tf.data.Dataset.sample_from_datasets(
+                    sub_datasets_test, weights=weights, stop_on_empty_dataset=True
+                )
+
+                batch_size = kwargs.get("batch_size", self.params.batch_size)
+
+                interleaved_ds_test = interleaved_ds_test.batch(
+                    batch_size, drop_remainder=True
+                ).prefetch(4)
+
+                interleaved_ds = {
+                    "test": interleaved_ds_test,
+                }
+
+                return interleaved_ds, sub_counts
+
+            datasets, subcounts = get_interleaved_dataset(windowSizeMS, **kwargs)
+            counts = subcounts[windowSizeMS.index(max(windowSizeMS))]
+        else:
+            raise ValueError(
+                "windowSizeMS must be either an int or a list of ints. Got {} of type: {}".format(
+                    windowSizeMS, type(windowSizeMS)
+                )
+            )
+
         if kwargs.get("return_datasets", False):
-            return dataset, counts
+            return datasets, counts
+
+        dataset = datasets["test"]
 
         save_parsed_tfrec = kwargs.get("save_parsed_tfrec", None)
         if save_parsed_tfrec is not None:
@@ -3653,10 +3839,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             preds_dict[key] = np.concatenate(preds_dict_lists[key], axis=0)
         # Model returns a dictionary of outputs {"heatmap": ..., "others": ..., "latent_contrastive": ...}
 
-        if "latent_output" not in preds_dict:
+        if "latent_output_pooled" not in preds_dict:
             latent_output = self._predict_latent_output(dataset, verbose=1)
             if latent_output is not None:
-                preds_dict["latent_output"] = latent_output
+                preds_dict["latent_output_pooled"] = latent_output
 
         full_pos_loss = (
             None  # Position loss is not explicitly returned by the model anymore
@@ -3731,7 +3917,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
         if extract_spikes_counts:
             csv_path = os.path.join(
-                self.folderResult, str(windowSizeMS), f"spikes_count_{phase}.csv"
+                self.folderResult, str(winMS_max), f"spikes_count_{phase}.csv"
             )
 
             if not os.path.exists(csv_path) and not useSpeedFilter:
@@ -3769,7 +3955,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             featurePred=decoded_results["featurePred"],
             featureTrue=featureTrue,
             phase=phase,
-            windowSizeMS=windowSizeMS,
+            windowSizeMS=winMS_max,
             testOutput=testOutput,
             sleep=False,
         )
@@ -3777,7 +3963,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         # -------------------------------------------------------------------------
         # SAVE RESULTS
         # -------------------------------------------------------------------------
-        self.saveResults(testOutput, folderName=windowSizeMS, phase=phase)
+        self.saveResults(testOutput, folderName=winMS_max, phase=phase)
 
         return testOutput
 
@@ -3956,9 +4142,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         behaviorData : dict
             dictionary containing the behavioral data. In particular, it needs to contain the following keys:
             - Times : dict with sleepNames and sleepEpochs keys
-        l_function : list
-        windowSizeDecoder : int
-        windowSizeMS : int
+        l_function : Callable, optional
+        windowSizeMS : int, the size of the window used to decode the sleep epochs.
+        windowSizeDecoder : int, the size of the window used to train the network. If None, it will be set to windowSizeMS.
         isPredLoss : bool
         """
         # TODO: add option for windowSizeMS vs windowSizeDecoder consistency check, with striding as well
@@ -3984,11 +4170,23 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         if windowSizeDecoder is None:
             windowSizeDecoder = windowSizeMS
 
+        # make sure stride factor is integer and compatible
+        assert isinstance(strideFactor, int), "Stride factor must be an integer"
+        windowStride = round(windowSizeMS / 1000 / strideFactor, 4)
+        if windowStride < 0.036:
+            warnings.warn(
+                f"The selected striding factor of {strideFactor} is too high for the selected decoding window size of {windowSizeMS}ms (would make a windowStride of {windowStride}). Setting striding to 36ms."
+            )
+            windowStride = 0.036
+            if windowSizeMS / 1000 == 0.036:
+                # this way we dont have to recreate them.
+                strideFactor = 1
+
         # Loading the weights
         if len(behaviorData["Times"]["lossPredSetEpochs"]) > 0 and isPredLoss:
             self.model.load_weights(
                 os.path.join(
-                    self.folderModels, str(windowSizeMS), "savedModels", "predLoss"
+                    self.folderModels, str(windowSizeDecoder), "savedModels", "predLoss"
                 ),
             )
             print("Loading the weights of the predLoss trained network")
@@ -3998,35 +4196,41 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     self.model = tf.keras.models.load_model(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(windowSizeDecoder),
                             "savedModels",
                             "full_model.keras",
                         ),
                     )
-                    print("Directly loading the keras model from savedModels")
+                    print(
+                        f"Directly loading the keras model from savedModels with windowSizeDecoder={windowSizeDecoder}"
+                    )
                 except Exception as e:
                     print(f"could not load keras model due to {e}. Trying with weights")
                     self.model.load_weights(
                         os.path.join(
                             self.folderModels,
-                            str(windowSizeMS),
+                            str(windowSizeDecoder),
                             "savedModels",
                             "full_cp.weights.h5",
                         ),
                         skip_mismatch=True,
                     )
-                    print("Loading the weights of the trained network from savedModels")
+                    print(
+                        f"Loading the weights of the trained network from savedModels with {windowSizeDecoder=}"
+                    )
             except FileNotFoundError:
                 print("loading from savedModels failed, trying full checkpoint ")
                 self.model.load_weights(
                     os.path.join(
                         self.folderModels,
-                        str(windowSizeMS),
+                        str(windowSizeDecoder),
                         "full",
                         "cp.weights.h5",
                     ),
                 )
-                print("Loading the weights of the trained network from full checkpoint")
+                print(
+                    f"Loading the weights of the trained network from full checkpoint with {windowSizeDecoder=}"
+                )
 
         print("decoding sleep epochs")
         predictions = {}
@@ -4039,6 +4243,10 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             else:
                 sleepFilename = f"datasetSleep_stride{str(windowSizeMS)}.tfrec"
 
+            print(
+                f"Decoding sleep epoch: {sleepName} from {timeSleepStart} to {timeSleepStop}. Dataset is {sleepFilename} with windowSizeMS={windowSizeMS} and strideFactor={strideFactor}."
+            )
+
             totMask = get_epochs_mask(
                 behaviorData=behaviorData,
                 sleepEpochs=[[timeSleepStart, timeSleepStop]],
@@ -4047,39 +4255,159 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 f"Total sleep duration: {(timeSleepStop - timeSleepStart) / 3600:.2f} hours for {sleepName}."
             )
 
-            datasets, counts = self._dataset_loading_pipeline(
-                sleepFilename,
-                windowSizeMS,
-                behaviorData,
-                totMask,
-                inference_mode=True,
-                onTheFlyCorrection=False,
-                shuffle=False,
-                is_sleep=True,
-                timeSleepStart=timeSleepStart,
-                timeSleepStop=timeSleepStop,
-                **kwargs,
+            temp_h5_path = os.path.join(
+                self.folderResultSleep, str(folderName), f"temp_{sleepName}.h5"
             )
+            print(
+                f"Will save {sleepName} preds to {os.path.join(self.folderResultSleep, str(folderName), sleepName)}"
+            )
+
+            if isinstance(windowSizeMS, int) or len(windowSizeMS) == 1:
+                datasets, counts = self._dataset_loading_pipeline(
+                    sleepFilename,
+                    windowSizeMS,
+                    behaviorData,
+                    totMask,
+                    inference_mode=True,
+                    onTheFlyCorrection=False,
+                    shuffle=False,
+                    is_sleep=True,
+                    timeSleepStart=timeSleepStart,
+                    timeSleepStop=timeSleepStop,
+                    **kwargs,
+                )
+            elif isinstance(windowSizeMS, list):
+
+                def get_interleaved_dataset(
+                    window_sizes: list,
+                    weights: Optional[list] = None,
+                    **kwargs,
+                ):
+                    sub_datasets_test = []
+                    sub_counts = []
+                    print(
+                        "Loading and preparing interleaved datasets for window sizes:",
+                        window_sizes,
+                    )
+                    ## Get datasets
+                    for ws in window_sizes:
+                        # FIX: missing logic from neuroEncoder
+                        # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
+                        tmp_stride_factor = strideFactor
+                        windowStride = round(ws / 1000 / tmp_stride_factor, 4)
+                        if windowStride < 0.036:
+                            windowStride = 0.036
+                            if ws / 1000 == 0.036:
+                                # this way we dont have to recreate them.
+                                tmp_stride_factor = 1
+
+                        print(
+                            f"Processing window size {ws} ms with stride factor {tmp_stride_factor}..."
+                        )
+                        if tmp_stride_factor > 1:
+                            filename = f"dataset_stride{str(ws)}_factor{str(tmp_stride_factor)}.tfrec"
+                        else:
+                            filename = f"dataset_stride{str(ws)}.tfrec"
+
+                        # Call your existing pipeline for each window size
+                        # Note: Ensure you disable .repeat() and .batch() inside the pipeline
+                        # so you can interleave individual examples first.
+                        ds, counts = self._dataset_loading_pipeline(
+                            sleepFilename,
+                            ws,
+                            behaviorData,
+                            totMask,
+                            inference_mode=True,
+                            onTheFlyCorrection=False,
+                            shuffle=False,
+                            is_sleep=True,
+                            timeSleepStart=timeSleepStart,
+                            timeSleepStop=timeSleepStop,
+                            is_interleaving_subdataset=True,
+                            **kwargs,
+                        )
+                        if "test" in ds:
+                            sub_datasets_test.append(ds["test"])
+                        sub_counts.append(counts)
+
+                    # Interleave them
+                    interleaved_ds_test = tf.data.Dataset.sample_from_datasets(
+                        sub_datasets_test, weights=weights, stop_on_empty_dataset=True
+                    )
+
+                    batch_size = kwargs.get("batch_size", self.params.batch_size)
+
+                    interleaved_ds_test = interleaved_ds_test.batch(
+                        batch_size, drop_remainder=True
+                    ).prefetch(4)
+
+                    interleaved_ds = {
+                        "test": interleaved_ds_test,
+                    }
+
+                    return interleaved_ds, sub_counts
+
+                datasets, subcounts = get_interleaved_dataset(windowSizeMS, **kwargs)
+                counts = subcounts[windowSizeMS.index(max(windowSizeMS))]
+
+            else:
+                raise ValueError(
+                    "windowSizeMS must be either an int or a list of ints. Got {} of type: {}".format(
+                        windowSizeMS, type(windowSizeMS)
+                    )
+                )
+
+            if kwargs.get("return_datasets", False):
+                return datasets, counts
+
             dataset = datasets["test"]
-            # Infer
-            print(f"Inferring {sleepName} values")
-            # modified to avoid OOM on GPU during long sessions.
-            preds_accum = {key: [] for key in self.model.output_names}
-            for x_inputs, _ in tqdm(dataset, desc=f"Predicting {sleepName}"):
-                batch_preds = self.model(x_inputs, training=False)
 
-                for key in self.model.output_names:
-                    preds_accum[key].append(batch_preds[key].numpy())
+            if os.path.exists(temp_h5_path):
+                print(
+                    f"Temporary HDF5 file {temp_h5_path} already exists. Loading predictions from disk."
+                )
+                preds_dict = h5py.File(temp_h5_path, "a")
+            else:
+                # Infer
+                print(f"Inferring {sleepName} values (Streaming to disk)")
 
-            # Concatenate batch predictions on system CPU RAM
-            preds_dict = {
-                k: np.concatenate(v_list, axis=0) for k, v_list in preds_accum.items()
-            }
+                # 1. Create a temporary HDF5 file to act as your disk-backed dictionary
+                os.makedirs(os.path.dirname(temp_h5_path), exist_ok=True)
+                preds_dict = h5py.File(temp_h5_path, "w")
 
-            if "latent_output" not in preds_dict:
+                for x_inputs, _ in tqdm(dataset, desc=f"Predicting {sleepName}"):
+                    batch_preds = self.model(x_inputs, training=False)
+
+                    for key in self.model.output_names:
+                        arr = batch_preds[key].numpy()
+                        if arr.dtype == np.float32:
+                            arr = arr.astype(np.float16)
+                        elif arr.dtype == np.int64:
+                            arr = arr.astype(np.int32)
+
+                        # Stream directly to the hard drive
+                        if key not in preds_dict:
+                            preds_dict.create_dataset(
+                                key,
+                                data=arr,
+                                maxshape=(None, *arr.shape[1:]),
+                                chunks=True,
+                            )
+                        else:
+                            dset = preds_dict[key]
+                            current_size = dset.shape[0]
+                            dset.resize(current_size + arr.shape[0], axis=0)
+                            dset[current_size:] = arr
+
+            # 2. Stream Latent Output (This is usually the biggest OOM culprit)
+            if "latent_output_pooled" not in preds_dict:
+                # Warning: If _predict_latent_output returns a massive array all at once,
+                # you may need to modify it to yield batches as well.
                 latent_output = self._predict_latent_output(dataset, verbose=1)
                 if latent_output is not None:
-                    preds_dict["latent_output"] = latent_output
+                    preds_dict.create_dataset(
+                        "latent_output_pooled", data=latent_output
+                    )
 
             (
                 full_feature_true,
@@ -4126,11 +4454,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 if k in decoded_results.keys():
                     predictions[sleepName][k] = decoded_results[k]
 
-        # Save the results
-        for key in predictions.keys():
+            print(f"Saving results for sleep epoch: {sleepName}")
             self.saveResults(
-                predictions[key], folderName=folderName, sleep=True, sleepName=key
+                predictions[sleepName],
+                folderName=folderName,
+                sleep=True,
+                sleepName=sleepName,
+                phase="",
             )
+            # clean the temp HDF5 file
+            preds_dict.close()
+            if os.path.exists(temp_h5_path):
+                os.remove(temp_h5_path)
+
+        return predictions
 
     def get_theweights(self, behaviorData, windowSizeMS, isPredLoss=0):
         print("Loading the weights of the trained network")
@@ -4180,7 +4517,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 np.ndarray
                 The expected counts of samples in each bin after resampling.
         """
-        print("Using oversampling resampling on the training set")
+        print("Using vectorized oversampling resampling on the training set")
 
         if not hasattr(self, "GaussianHeatmap") or self.GaussianHeatmap is None:
             raise ValueError(
@@ -4191,8 +4528,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             self.GaussianHeatmap.GRID_H,
             self.GaussianHeatmap.GRID_W,
         )
-        # Instead of oversampling on the full fine grid, use a coarser mesh.
-        # Use ceil so edge bins are kept (floor would silently drop the last row/col).
         stride = int(getattr(self.params, "oversampling_stride", 5))
         self.coarse_H = int(np.ceil(GRID_H / stride))
         self.coarse_W = int(np.ceil(GRID_W / stride))
@@ -4204,34 +4539,27 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 block = forbid_fine[
                     y * stride : (y + 1) * stride, x * stride : (x + 1) * stride
                 ]
-                # Mark coarse bin forbidden only if all underlying fine bins are forbidden.
                 if block.size > 0 and np.all(block > 0):
                     FORBID_coarse[y, x] = True
+
         forbid_coarse_tf = tf.constant(FORBID_coarse, dtype=tf.bool)
-
-        def map_bin_class(ex):
-            pos = ex["pos"]
-            x = tf.cast(
-                tf.clip_by_value(pos[0] * self.coarse_W, 0, self.coarse_W - 1), tf.int32
-            )
-            y = tf.cast(
-                tf.clip_by_value(pos[1] * self.coarse_H, 0, self.coarse_H - 1), tf.int32
-            )
-            forbidden_here = tf.gather_nd(forbid_coarse_tf, tf.stack([y, x], axis=-1))
-            bin_cls = y * self.coarse_W + x
-            return tf.where(forbidden_here, -1, bin_cls)
-
         coarse_H, coarse_W = self.coarse_H, self.coarse_W
         target_percentile = float(
             getattr(self.params, "oversampling_target_percentile", 95.0)
         )
-        max_repeat = int(getattr(self.params, "oversampling_max_repeat", 10))
+        if target_percentile <= 1:
+            warnings.warn(
+                f"Target percentile {target_percentile} is <= 1. Assuming it is a fraction and converting to percentage."
+            )
+            target_percentile *= 100.0
 
-        if not os.path.exists(
-            os.path.join(self.folderResult, str(windowSizeMS), "oversampling_stats.pkl")
-        ):
-            # Compute counts from the dataset that is actually being oversampled
-            # (already filtered by epochs/speed/NaNs), not from global training positions.
+        max_repeat = int(getattr(self.params, "oversampling_max_repeat", 4))
+        stats_path = os.path.join(
+            self.folderResult, str(windowSizeMS), "oversampling_stats.pkl"
+        )
+
+        if not os.path.exists(stats_path):
+            os.makedirs(os.path.dirname(stats_path), exist_ok=True)
             dataset_positions = []
             for ex in dataset:
                 pos = ex["pos"].numpy()
@@ -4252,94 +4580,98 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             counts = np.bincount(coarse_bins, minlength=coarse_H * coarse_W).astype(
                 np.float32
             )
-
-            FORBID_flat = FORBID_coarse.flatten()
-            counts[FORBID_flat] = 0  # For diagnostics and repeat factors.
-
+            counts[FORBID_coarse.flatten()] = 0
             allowed_bins = counts > 0
 
-            # Use a robust target count so one outlier-dense bin does not force extreme repeats.
             target_count = np.percentile(counts[allowed_bins], target_percentile)
-
             rep_factors = np.ones_like(counts, dtype=np.int64)
             rep_factors[allowed_bins] = np.ceil(
                 target_count / np.maximum(counts[allowed_bins], 1.0)
             ).astype(np.int64)
             rep_factors = np.clip(rep_factors, 1, max_repeat)
 
-            # Keep forbidden/out-of-range samples unless explicitly requested, to avoid
-            # silently deleting data and creating holes in the empirical distribution.
             drop_forbidden = bool(
                 getattr(self.params, "oversampling_drop_forbidden", False)
             )
-            rep_factors_tf = tf.constant(rep_factors, dtype=tf.int64)
 
-            dict_to_save = {
-                "counts": counts,
-                "rep_factors": rep_factors,
-                "drop_forbidden": drop_forbidden,
-            }
-            with open(
-                os.path.join(
-                    self.folderResult, str(windowSizeMS), "oversampling_stats.pkl"
-                ),
-                "wb",
-            ) as f:
-                pickle.dump(dict_to_save, f)
-
+            with open(stats_path, "wb") as f:
+                pickle.dump(
+                    {
+                        "counts": counts,
+                        "rep_factors": rep_factors,
+                        "drop_forbidden": drop_forbidden,
+                    },
+                    f,
+                )
         else:
             print("Loading oversampling stats from disk...")
-            with open(
-                os.path.join(
-                    self.folderResult, str(windowSizeMS), "oversampling_stats.pkl"
-                ),
-                "rb",
-            ) as f:
+            with open(stats_path, "rb") as f:
                 stats = pickle.load(f)
                 counts = stats["counts"]
                 rep_factors = stats["rep_factors"]
                 drop_forbidden = stats["drop_forbidden"]
-                rep_factors_tf = tf.constant(rep_factors, dtype=tf.int64)
                 allowed_bins = counts > 0
 
+        rep_factors_tf = tf.constant(rep_factors, dtype=tf.int32)
         dataset_before_oversampling = dataset
 
-        # Map each example to repeated dataset with attached metadata for adaptive augmentation.
-        # The first copy remains the original sample. Additional copies are
-        # marked so augmentation can be applied selectively downstream.
-        def map_repeat(ex):
-            idx = map_bin_class(ex)
-            num_repeats = tf.cond(
+        # --- OPTIMIZED BATCHED VECTORIZED OVERSAMPLING ---
+        @tf.function
+        def batched_map_bin_class(pos_batch):
+            x = tf.cast(
+                tf.clip_by_value(pos_batch[:, 0] * coarse_W, 0, coarse_W - 1), tf.int32
+            )
+            y = tf.cast(
+                tf.clip_by_value(pos_batch[:, 1] * coarse_H, 0, coarse_H - 1), tf.int32
+            )
+            forbidden_here = tf.gather_nd(forbid_coarse_tf, tf.stack([y, x], axis=-1))
+            return tf.where(forbidden_here, -1, y * coarse_W + x)
+
+        @tf.function
+        def batched_repeat(batch_dict):
+            idx = batched_map_bin_class(batch_dict["pos"])
+
+            # FIX: Prevent tf.gather from crashing on -1 by clipping to 0
+            safe_idx = tf.maximum(idx, 0)
+
+            # Lookup repeat factors safely
+            num_repeats = tf.where(
                 idx >= 0,
-                lambda: tf.gather(rep_factors_tf, idx),
-                lambda: tf.constant(0 if drop_forbidden else 1, dtype=tf.int64),
+                tf.gather(rep_factors_tf, safe_idx),
+                tf.constant(0 if drop_forbidden else 1, dtype=tf.int32),
             )
 
-            def attach_repeat_metadata(i):
-                ex_out = dict(ex)
-                # Attach metadata for adaptive augmentation pipeline
-                ex_out["__oversampled_copy"] = tf.greater(
-                    i, 0
-                )  # True for copies beyond original
-                ex_out["__rep_factor"] = tf.cast(
-                    num_repeats, tf.int32
-                )  # How many times to repeat
+            # 1. Native C++ tensor repetition
+            repeated_batch = {
+                k: tf.repeat(v, num_repeats, axis=0) for k, v in batch_dict.items()
+            }
 
-                return ex_out
+            # 2. Build metadata masks natively
+            max_rep = tf.reduce_max(num_repeats)
+            is_valid = tf.sequence_mask(num_repeats, maxlen=max_rep)
+            is_copy = tf.logical_and(is_valid, tf.range(max_rep) > 0)
 
-            return tf.data.Dataset.range(num_repeats).map(
-                attach_repeat_metadata, num_parallel_calls=tf.data.AUTOTUNE
+            flat_valid = tf.reshape(is_valid, [-1])
+            flat_is_copy = tf.reshape(is_copy, [-1])
+
+            repeated_batch["__oversampled_copy"] = tf.boolean_mask(
+                flat_is_copy, flat_valid
             )
+            repeated_batch["__rep_factor"] = tf.repeat(num_repeats, num_repeats, axis=0)
 
-        dataset = dataset.flat_map(map_repeat)
+            return repeated_batch
 
-        # shuffle after repeating to mix repeated samples
+        # Batch, repeat entirely in C++, then unbatch
+        dataset = dataset.batch(512)
+        dataset = dataset.map(batched_repeat, num_parallel_calls=4)
+        dataset = dataset.unbatch()
+
+        # FIX: Capture the dataset for the visualizer BEFORE it gets scrambled
+        dataset_after_oversampling = dataset
+
         if shuffle:
-            dataset = dataset.shuffle(buffer_size=20000, seed=42)
+            dataset = dataset.shuffle(buffer_size=100000, seed=42)
 
-        dataset_after_oversampling = dataset  # Save this before the oversampling block
-
-        # Calculate expected counts after oversampling (for coarse allowed bins).
         expected_counts_after = counts.copy()
         expected_counts_after[allowed_bins] = (
             counts[allowed_bins] * rep_factors[allowed_bins]
@@ -4362,18 +4694,22 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 self.folderResult, str(windowSizeMS), "oversampling_effect.png"
             )
         ):
+            dataset_before_viz = dataset_before_oversampling.shuffle(
+                2000, reshuffle_each_iteration=True
+            )
+            dataset_after_viz = dataset_after_oversampling.shuffle(
+                2000, reshuffle_each_iteration=True
+            )
             visualizer = OversamplingVisualizer(
                 self.GaussianHeatmap, l_function=self.Linearizer.pykeops_linearization
             )
             visualizer.visualize_oversampling_effect(
-                dataset_before_oversampling,
-                dataset_after_oversampling,
+                dataset_before_viz,
+                dataset_after_viz,
                 stride=stride,
-                max_samples=30000,
+                max_samples=300000,
                 path=os.path.join(
-                    self.folderResult,
-                    str(windowSizeMS),
-                    "oversampling_effect.png",
+                    self.folderResult, str(windowSizeMS), "oversampling_effect.png"
                 ),
             )
 
@@ -5029,6 +5365,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
 
             # 4. Handle Shuffling (Null Hypothesis Control)
             if shuffle:
+                print(
+                    f"Shuffling indices for group {group_id} to test null hypothesis..."
+                )
                 # We only want to shuffle the non-zero indices
                 # Extract values, shuffle them, and put them back
                 mask = indices_tensor > 0
@@ -5259,13 +5598,15 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             folderToSave = os.path.join(
                 self.folderResultSleep, str(folderName), sleepName
             )
-            phase = ""
             if not os.path.isdir(folderToSave):
                 os.makedirs(folderToSave)
         else:
             folderToSave = os.path.join(self.folderResult, str(folderName))
 
-        suffix = f"_{phase}" if phase and phase != "" else self.suffix
+        if phase is not None:
+            suffix = f"_{phase}" if phase != "" else ""
+        else:
+            suffix = self.suffix
 
         # Helper to safely save any array to CSV
         def save_csv(key, data):
@@ -5293,15 +5634,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         ]:
             if key in test_output:
                 save_csv(key, test_output[key])
-
-        if "latent_output" in test_output:
-            latent_output = test_output["latent_output"]
-            if hasattr(latent_output, "numpy"):
-                latent_output = latent_output.numpy()
-            latent_output = np.asarray(latent_output)
-
-            npy_path = os.path.join(folderToSave, f"latent_output{suffix}.npy")
-            np.save(npy_path, latent_output)
 
         if not sleep:
             save_csv("featureTrue", test_output["featureTrue"])
@@ -5346,6 +5678,20 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 for k, v in test_output.items():
                     # Skip empty entries, metrics, and strings
                     if v is None or k == "metrics" or isinstance(v, str):
+                        continue
+
+                    # If 'v' is an h5py.Dataset (our disk-backed temp file), copy it in chunks to avoid OOM
+                    if isinstance(v, h5py.Dataset):
+                        dset = f.create_dataset(
+                            k,
+                            shape=v.shape,
+                            dtype=v.dtype,
+                            **compression_filter,
+                            chunks=True,
+                        )
+                        chunk_size = 5000  # Move 5000 frames at a time
+                        for i in range(0, v.shape[0], chunk_size):
+                            dset[i : i + chunk_size] = v[i : i + chunk_size]
                         continue
 
                     # Safely extract TF tensors or lists to numpy
@@ -5639,9 +5985,14 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         out_heatmap
                     )
 
-            outputs["latent_output"] = UnMaskingLayer(
-                name="latent_output", dtype="float32"
-            )(sequence_output)
+            # for dev only if we want to look at full sequence
+            # outputs["latent_output_sequence"] = UnMaskingLayer(
+            #     name="latent_output_sequence", dtype="float32"
+            # )(sequence_output)
+
+            outputs["latent_output_pooled"] = UnMaskingLayer(
+                name="latent_output_pooled", dtype="float32"
+            )(pooled_latent)
 
             tmp_outputs = outputs.copy()
 
@@ -5671,7 +6022,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         with nnUtils.get_device_context(self.deviceName):
             self.latent_space_model = tf.keras.Model(
                 inputs=self.inputs,
-                outputs=self.tmp_outputs["latent_output"],
+                outputs=self.tmp_outputs["latent_output_pooled"],
                 name="LatentSpaceModel",
             )
 

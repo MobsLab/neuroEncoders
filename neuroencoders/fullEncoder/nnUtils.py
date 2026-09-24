@@ -1261,6 +1261,7 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
         device: str = "/cpu:0",
         **kwargs,
     ):
+        params = kwargs.pop("params", self)
         super().__init__(**kwargs)
         self.spike_encoder = spike_encoder
         self.n_groups = n_groups
@@ -1296,20 +1297,22 @@ class SpikeSequenceProcessor(tf.keras.layers.Layer):
             else self.n_features
         )
 
-        self.use_diversity_loss = getattr(
-            kwargs.get("params", self), "use_diversity_loss", True
-        )
+        self.use_diversity_loss = getattr(params, "use_diversity_loss", True)
         if self.use_diversity_loss:
             from neuroencoders.fullEncoder.nnUtils import SpikeDiversityLossLayer
 
+            print(
+                "Using SpikeDiversityLossLayer with temperature={}, alpha_variance={}, weight={}".format(
+                    getattr(params, "diversity_temperature", 0.1),
+                    getattr(params, "diversity_alpha", 1.0),
+                    getattr(params, "diversity_weight", 0.1),
+                )
+            )
+
             self.diversity_layer = SpikeDiversityLossLayer(
-                temperature=getattr(
-                    kwargs.get("params", self), "diversity_temperature", 0.1
-                ),
-                alpha_variance=getattr(
-                    kwargs.get("params", self), "diversity_alpha", 1.0
-                ),
-                weight=getattr(kwargs.get("params", self), "diversity_weight", 0.1),
+                temperature=getattr(params, "diversity_temperature", 0.1),
+                alpha_variance=getattr(params, "diversity_alpha", 1.0),
+                weight=getattr(params, "diversity_weight", 0.1),
                 name="spike_diversity_loss_layer",
             )
 
@@ -1845,8 +1848,8 @@ class MaskedGlobalAveragePooling1D(tf.keras.layers.Layer):
         Create a new instance of the layer from its config.
         This is necessary for serialization/deserialization.
         """
-        device = config.get("device", "/cpu:0")
-        return cls(device=device)
+        device = config.pop("device", "/cpu:0")
+        return cls(device=device, **config)
 
 
 def create_attention_mask_from_padding_mask(padding_mask):
@@ -2370,47 +2373,47 @@ def parse_serialized_sequence(
     """
     # TODO: add sorted indices to the function, in order to filter by indexInDat (eg spike sorting)
     tensors = dict(tensors)
-    if max_spikes is None:
-        max_spikes = getattr(params, "max_nb_spikes", 512)
+    _max_spikes = max_spikes
+    if _max_spikes is None:
+        _max_spikes = getattr(params, "max_nb_spikes", 512)
         warnings.warn(
             f"⚠️ max_spikes not provided, using params.max_nb_spikes={max_spikes} as default."
         )
-    if max_spikes_per_group is None:
-        max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 128)
+    _max_spikes_per_group = max_spikes_per_group
+    if _max_spikes_per_group is None:
+        _max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 128)
         warnings.warn(
             f"⚠️ max_spikes_per_group not provided, using params.max_nb_spikes_per_group={max_spikes_per_group} as default."
         )
 
     # Track total sparse group entries before densification.
-    num_groups = tf.shape(tensors["groups"].indices)[0]
+    actual_total = tf.shape(tensors["groups"].indices)[0]
 
-    if max_spikes is not None:
-        actual_total = tf.shape(tensors["groups"].indices)[0]
+    # 2. Determine the truncation limit (the smaller of the two)
+    # This prevents errors if actual_total is already smaller than max_spikes
+    limit = tf.minimum(actual_total, max_spikes)
 
-        # 2. Determine the truncation limit (the smaller of the two)
-        # This prevents errors if actual_total is already smaller than max_spikes
-        limit = tf.minimum(actual_total, max_spikes)
+    # 3. Slice the indices and values to the limit
+    tensors["groups"] = tf.sparse.SparseTensor(
+        indices=tensors["groups"].indices[:limit],
+        values=tensors["groups"].values[:limit],
+        dense_shape=tf.cast(tf.stack([limit]), tf.int64),
+    )
 
-        # 3. Slice the indices and values to the limit
-        tensors["groups"] = tf.sparse.SparseTensor(
-            indices=tensors["groups"].indices[:limit],
-            values=tensors["groups"].values[:limit],
-            dense_shape=tf.cast(tf.stack([limit]), tf.int64),
-        )
+    # 3. Slice the indices and values to the limit
+    tensors["indexInDat"] = tf.sparse.SparseTensor(
+        indices=tensors["indexInDat"].indices[:limit],
+        values=tensors["indexInDat"].values[:limit],
+        dense_shape=tf.cast(tf.stack([limit]), tf.int64),
+    )
 
-        # 3. Slice the indices and values to the limit
-        tensors["indexInDat"] = tf.sparse.SparseTensor(
-            indices=tensors["indexInDat"].indices[:limit],
-            values=tensors["indexInDat"].values[:limit],
-            dense_shape=tf.cast(tf.stack([limit]), tf.int64),
-        )
+    # 4. Optional: Add your "Simple Warning" here
+    tf.cond(
+        actual_total > max_spikes,
+        lambda: tf.print("⚠️ Truncating sample:", actual_total, "->", max_spikes),
+        lambda: tf.no_op(),
+    )
 
-        # 4. Optional: Add your "Simple Warning" here
-        tf.cond(
-            actual_total > max_spikes,
-            lambda: tf.print("⚠️ Truncating sample:", actual_total, "->", max_spikes),
-            lambda: tf.no_op(),
-        )
     lengths = []
     default = -1
     # 1. Handle Metadata (Vectorized to avoid CPU overhead)
@@ -2468,6 +2471,7 @@ def parse_serialized_sequence(
 
     # 5. Length and Masking
     # Keep track of actual length for SafeMaskCreation
+    num_groups = tf.shape(tensors["groups"])[0]
     tensors["total_nb_spikes"] = tf.cast(num_groups, tf.int32)
     tensors["max_spikes_in_groups"] = tf.reduce_max(tf.stack(lengths))
 
@@ -6109,7 +6113,7 @@ class TransformerIdentityAuditCallback(tf.keras.callbacks.Callback):
 
 
 @keras.saving.register_keras_serializable(package="neuroencoders")
-class MultiTokenSpatialDensityHead(keras.layers.Layer):
+class MultiTokenSpatialDensityHead(tf.keras.layers.Layer):
     """
     Reads full (Batch, SeqLen, Dim) sequence tokens from TransformerEncoder
     and maps them to K independent 2D spatial logit distributions.
@@ -6280,6 +6284,188 @@ class MultiTokenSpatialDensityHead(keras.layers.Layer):
         )
         return config
 
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+class VectorQuantizer(tf.keras.layers.Layer):
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25, **kwargs):
+        self.device = kwargs.pop("device", None)
+        super().__init__(**kwargs)
+        with get_device_context(self.device):
+            self.num_embeddings = num_embeddings
+            self.embedding_dim = embedding_dim
+            self.commitment_cost = commitment_cost
+            self.supports_masking = True
+            self.vq_metric = tf.keras.metrics.Mean(name="vq_loss")
+
+    def build(self, input_shape):
+        # Initialize with zeros; we will overwrite this on the first forward pass
+        with get_device_context(self.device):
+            self.embeddings = self.add_weight(
+                shape=(self.embedding_dim, self.num_embeddings),
+                initializer="zeros",
+                trainable=True,
+                name="vq_codebook",
+            )
+
+            # A flag to track if the codebook has been initialized with data
+            self.is_initialized = self.add_weight(
+                name="is_initialized",
+                shape=(),
+                initializer="zeros",
+                trainable=False,
+                dtype=tf.float32,  # force to be on GPU
+            )
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
+
+    def call(self, inputs, mask=None, training=None):
+        with get_device_context(self.device):
+            compute_dtype = inputs.dtype
+            flat_inputs = tf.reshape(inputs, [-1, self.embedding_dim])
+
+            # =====================================================================
+            # 1. DATA-DEPENDENT INITIALIZATION (Triggers only on the first batch)
+            # =====================================================================
+            if training:
+                if not tf.executing_eagerly():
+                    # Handle graph mode safely with tf.cond
+                    tf.cond(
+                        tf.equal(self.is_initialized, 0),
+                        lambda: self._initialize_from_data(flat_inputs, mask),
+                        lambda: tf.constant(0.0),  # Do nothing
+                    )
+                else:
+                    if self.is_initialized == 0.0:
+                        self._initialize_from_data(flat_inputs, mask)
+
+            # =====================================================================
+            # 2. STANDARD VQ FORWARD PASS
+            # =====================================================================
+            embeddings_cast = tf.cast(self.embeddings, compute_dtype)
+
+            # Calculate L2 distances
+            distances = (
+                tf.reduce_sum(flat_inputs**2, axis=1, keepdims=True)
+                + tf.reduce_sum(embeddings_cast**2, axis=0)
+                - 2 * tf.matmul(flat_inputs, embeddings_cast)
+            )
+
+            encoding_indices = tf.argmin(distances, axis=1)
+            encodings = tf.cast(
+                tf.one_hot(encoding_indices, self.num_embeddings), compute_dtype
+            )
+
+            quantized = tf.matmul(encodings, embeddings_cast, transpose_b=True)
+            quantized = tf.reshape(quantized, tf.shape(inputs))
+
+            inputs_fp32 = tf.cast(inputs, tf.float32)
+            quantized_fp32 = tf.cast(quantized, tf.float32)
+
+            # --- Calculate VQ Loss ---
+            if mask is not None:
+                mask_float = tf.cast(mask, tf.float32)
+                mask_expanded = tf.expand_dims(mask_float, -1)
+
+                e_latent_loss = tf.reduce_sum(
+                    (tf.stop_gradient(quantized_fp32) - inputs_fp32) ** 2
+                    * mask_expanded
+                ) / (tf.reduce_sum(mask_float) * self.embedding_dim + 1e-8)
+
+                q_latent_loss = tf.reduce_sum(
+                    (quantized_fp32 - tf.stop_gradient(inputs_fp32)) ** 2
+                    * mask_expanded
+                ) / (tf.reduce_sum(mask_float) * self.embedding_dim + 1e-8)
+            else:
+                e_latent_loss = tf.reduce_mean(
+                    (tf.stop_gradient(quantized_fp32) - inputs_fp32) ** 2
+                )
+                q_latent_loss = tf.reduce_mean(
+                    (quantized_fp32 - tf.stop_gradient(inputs_fp32)) ** 2
+                )
+
+            total_vq_loss = q_latent_loss + self.commitment_cost * e_latent_loss
+            self.add_loss(total_vq_loss)
+            self.vq_metric.update_state(total_vq_loss)
+
+            # Straight-Through Estimator
+            quantized = inputs + tf.stop_gradient(quantized - inputs)
+
+            if mask is not None:
+                zero_tensor = tf.cast(0.0, compute_dtype)
+                quantized = tf.where(tf.expand_dims(mask, -1), quantized, zero_tensor)
+
+            return quantized
+
+    def _initialize_from_data(self, flat_inputs, mask):
+        """Helper to sample vectors from the current batch and update the codebook."""
+        # If masked, only sample from valid spike vectors
+
+        with get_device_context(self.device):
+            if mask is not None:
+                flat_mask = tf.reshape(mask, [-1])
+                valid_indices = tf.squeeze(tf.where(flat_mask), axis=-1)
+                valid_inputs = tf.gather(flat_inputs, valid_indices)
+            else:
+                valid_inputs = flat_inputs
+
+            num_valid = tf.shape(valid_inputs)[0]
+
+            # Shuffle and sample 'num_embeddings' vectors
+            shuffle_indices = tf.random.shuffle(tf.range(num_valid))
+            sample_indices = shuffle_indices[: self.num_embeddings]
+            sampled_vectors = tf.gather(valid_inputs, sample_indices)
+
+            # Handle edge case where the batch has fewer valid spikes than dictionary size
+            num_sampled = tf.shape(sampled_vectors)[0]
+            pad_size = self.num_embeddings - num_sampled
+
+            padded_vectors = tf.cond(
+                pad_size > 0,
+                lambda: tf.concat(
+                    [
+                        sampled_vectors,
+                        tf.zeros(
+                            (pad_size, self.embedding_dim), dtype=flat_inputs.dtype
+                        ),
+                    ],
+                    axis=0,
+                ),
+                lambda: sampled_vectors,
+            )
+
+            # Assign the transposed vectors to the codebook weights
+            self.embeddings.assign(
+                tf.cast(tf.transpose(padded_vectors), self.embeddings.dtype)
+            )
+            self.is_initialized.assign(1.0)
+            return tf.constant(1.0)
+
+    def compute_mask(self, inputs, mask=None):
+        return mask
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "num_embeddings": self.num_embeddings,
+                "embedding_dim": self.embedding_dim,
+                "commitment_cost": self.commitment_cost,
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+    @property
+    def metrics(self):
+        return [self.vq_metric]
+
 
 def get_k_steps_params(winMS):
     """
@@ -6357,3 +6543,8 @@ keras_utils.get_custom_objects()["ContrastiveRegressionLoss"] = (
 keras_utils.get_custom_objects()["AngularErrorMetric"] = AngularErrorMetric
 keras_utils.get_custom_objects()["CyclicMAE"] = CyclicMAE
 keras_utils.get_custom_objects()["LearnableTemperature"] = LearnableTemperature
+keras_utils.get_custom_objects()["VectorQuantizer"] = VectorQuantizer
+keras_utils.get_custom_objects()["MultiTokenSpatialDensityHead"] = (
+    MultiTokenSpatialDensityHead
+)
+keras_utils.get_custom_objects()["AnatomicalEmbedding"] = AnatomicalEmbedding

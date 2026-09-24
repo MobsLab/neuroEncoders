@@ -46,6 +46,9 @@ wake = struct('wakeStart', [], 'wakeStop', []);
 if isfield(sleepScore, 'WakeEpoch')
     wake.wakeStart = Start(sleepScore.WakeEpoch) / 10000;
     wake.wakeStop = Stop(sleepScore.WakeEpoch) / 10000;
+elseif isfield(sleepScore, 'Wake')
+    wake.wakeStart = Start(sleepScore.Wake) / 10000;
+    wake.wakeStop = Stop(sleepScore.Wake) / 10000;
 end
 
 % Micro-wake Epochs
@@ -53,12 +56,23 @@ microwake = struct('microwakeStart', [], 'microwakeStop', []);
 if isfield(sleepScore, 'microWakeEpochOB')
     microwake.microwakeStart = Start(sleepScore.microWakeEpochOB) / 10000;
     microwake.microwakeStop = Stop(sleepScore.microWakeEpochOB) / 10000;
+elseif isfield(sleepScore, 'microWakeEpochAcc')
+    microwake.microwakeStart = Start(sleepScore.microWakeEpochAcc) / 10000;
+    microwake.microwakeStop = Stop(sleepScore.microWakeEpochAcc) / 10000;
+end
+
+
+% Noise Epochs
+noise = struct('noiseStart', [], 'noiseStop', []);
+if isfield(sleepScore, 'TotalNoiseEpoch')
+    noise.noiseStart = Start(sleepScore.TotalNoiseEpoch) / 10000;
+    noise.noiseStop = Stop(sleepScore.TotalNoiseEpoch) / 10000;
 end
 
 %%%%%%%%%%%--- SAVE OUTPUT ---%%%%%%%%%%%
 
 % Save structural data with v7.3 compatibility for Python/mat73 reading
-save('nnSleepScoring.mat', 'rem', 'sws', 'wake', 'microwake', '-v7.3');
+save('nnSleepScoring.mat', 'rem', 'sws', 'wake', 'microwake', 'noise', '-v7.3');
 disp('nnSleepScoring.mat generated.');
 
 % Return structural array as output if requested
@@ -66,4 +80,5 @@ extractTsd.rem = rem;
 extractTsd.sws = sws;
 extractTsd.wake = wake;
 extractTsd.microwake = microwake;
+extractTsd.noise = noise;
 end

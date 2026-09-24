@@ -35,7 +35,7 @@ overWrite_speed_filter_and_linearization = False
 redo_params = False
 redo_all_params = False
 # Modify the speed mask to be much more conservative
-min_speed = 7.5
+min_speed = 6.5
 max_speed = 50
 
 
@@ -149,7 +149,7 @@ def main(args):
         windowSize=windowSizeMS / 1000,
         force_ref=False,
         isPredLoss=isPL,
-        load_at_init=False,  # we load a new params
+        load_at_init=True,  # we load a new params
     )
     helpers = [DataHelper]
     if args.phase != "cond":
@@ -189,7 +189,7 @@ def main(args):
             windowSize=windowSizeMS / 1000,
             force_ref=False,
             isPredLoss=isPL,
-            load_at_init=False,  # we load a new params
+            load_at_init=True,  # we load a new params
         )
         try:
             # adding post test helper
@@ -229,7 +229,7 @@ def main(args):
                 windowSize=windowSizeMS / 1000,
                 force_ref=False,
                 isPredLoss=isPL,
-                load_at_init=False,  # we load a new params
+                load_at_init=True,  # we load a new params
             )
             helpers = [DataHelper_cond, DataHelper_post, DataHelper]
         except Exception as e:
@@ -298,7 +298,7 @@ def main(args):
         nFeatures=args.n_features,
         batch_size=batch_size,
         save_json=True,
-        load_at_init=False,  # we load a new params
+        load_at_init=True,  # we load a new params
         isTransformer=not args.lstm,
         transform_w_log=args.transform_w_log,
         denseweight=args.dense_weight,
@@ -746,12 +746,14 @@ def main(args):
                 windowSizeMS=windowSizeMSlist,
                 isPredLoss=isPL,
                 earlyStop=args.early_stop,
-                load_model=True,
+                load_model=False,
                 fine_tune=False,
                 l_function=l_function,
                 num_augmentations=num_augmentations,
                 strideFactor=strideFactor,
                 normalize=True,
+                oversampling_resampling=True,
+                enable_augmentation=True,
             )
             T = None
 
@@ -990,8 +992,21 @@ def main(args):
                 isPredLoss=isPL,
                 strideFactor=strideFactor,
                 T_scaling=T,
-                # TODO: add window Size Decoder --> decode small windows with big window trained model
             )
+            # TODO: add window Size Decoder --> decode small windows with big window trained model
+            if windowSizeMS > 36:
+                print(
+                    f"Running decoding on small window 36ms with model trained on {windowSizeMS}ms."
+                )
+                NNTrainer.testSleep(
+                    behaviorData=DataHelper.fullBehavior,
+                    l_function=l_function,
+                    windowSizeMS=36,
+                    windowSizeDecoder=windowSizeMS,
+                    isPredLoss=isPL,
+                    strideFactor=strideFactor,
+                    T_scaling=T,
+                )
 
         if args.plot_id and (
             not os.path.exists(
