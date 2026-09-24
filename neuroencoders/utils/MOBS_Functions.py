@@ -1082,11 +1082,15 @@ class AssemblyReactivationPipeline:
 
             # 9. Collect Summaries & Metadata
             event_intervals = {
-                "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                "post_sleep_sws": post_sleep.intersect(sws_epochs),
+                "cond_ripples": epochs["cond"].intersect(epochs["ripples"]),
+                "cond_no_ripples": epochs["cond"].set_diff(epochs["ripples"]),
+                "cond_freeze": epochs["cond"].intersect(epochs["freeze"]),
+                "cond_move": epochs["cond"].intersect(epochs["mov"]),
+                "cond_stim": epochs["cond"].intersect(epochs["stim"]),
+                "pre_sleep_sws": epochs["pre_sleep"].intersect(epochs["sws"]),
+                "post_sleep_sws": epochs["post_sleep"].intersect(epochs["sws"]),
+                "pre_sleep_rem": epochs["pre_sleep"].intersect(epochs["rem"]),
+                "post_sleep_rem": epochs["post_sleep"].intersect(epochs["rem"]),
             }
             template_summaries = {}
             for idx_t, rs_tsd in rs_templates.items():
@@ -12923,7 +12927,7 @@ class Results_Loader(TuningCurvesPlotter):
                     )
                     ax_box.set_ylabel("% explained" if g_col_idx == 0 else "")
                     ax_box.set_xlabel("")
-                    ax_box.set_ylim(-5, 45)
+                    ax_box.set_ylim(-5, max(45, df_melt["Percentage"].max() + 5))
 
             # ==========================================
             # COLUMNS 3 & 4: GROUP-SPECIFIC CORRELATIONS

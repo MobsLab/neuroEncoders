@@ -3439,7 +3439,7 @@ def parallel_pred_as_NN(
     # Note: here achieved on the CPU, could also be ported to the GPU by using torch tensor....
     # Here everything in log scale to avoid numerical overflow
     """
-    if isinstance(windowSize, int) or windowSize > 0.5:
+    if isinstance(windowSize, int) or windowSize > 0.9:
         raise ValueError(
             "windowSize must be a float in seconds, typically around 0.036 for neural decoding."
         )
