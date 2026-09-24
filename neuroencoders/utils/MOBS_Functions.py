@@ -942,7 +942,7 @@ class AssemblyReactivationPipeline:
             lat_template_values = lat_template.values
             n_bins, n_dim = lat_template_values.shape
             print(
-                f"Will compute assembly reactivation on {n_bins} time bins (representing a duration of {lat_template.find_support(0.5).tot_length}) with dim {n_dim} for {mouse_name}."
+                f"Will compute assembly reactivation on {n_bins} time bins (representing a duration of {lat_template.find_support(0.5).tot_length():.2f}s) with dim {n_dim} for {mouse_name}."
             )
             if n_bins < 10 or n_dim < 2:
                 print(

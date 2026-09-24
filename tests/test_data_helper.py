@@ -15,7 +15,7 @@ from neuroencoders.utils.wrappers import loadLFPData
 def test_project_init(temp_project_dir):
     project_dir, xml_path = temp_project_dir
 
-    prj = Project(str(xml_path), nameExp="Network")
+    prj = Project(str(xml_path), nameExp="Network", windowSize=0.036)
 
     assert prj.xml == str(xml_path)
     assert prj.baseName == str(xml_path)[:-4]
@@ -127,7 +127,7 @@ def test_project_paths(temp_project_dir):
     project_dir, xml_path = temp_project_dir
 
     # Test normalization of paths
-    prj = Project(xmlPath=xml_path, nameExp="TestExp")
+    prj = Project(xmlPath=xml_path, nameExp="TestExp", windowSize=0.036)
 
     assert prj.experimentPath == os.path.join(project_dir, "TestExp")
     # Verify subfolders are set
@@ -190,7 +190,9 @@ def test_waveform_comparator_lazy_memmap(tmp_path):
     fil_values = dat_values + 1
     fil_values.tofile(fil_path)
 
-    project = Project(str(xml_path), datPath=str(dat_path), nameExp="Network")
+    project = Project(
+        str(xml_path), datPath=str(dat_path), nameExp="Network", windowSize=0.036
+    )
     comparator = WaveFormComparator.__new__(WaveFormComparator)
     comparator.projectPath = project
     comparator.samplingRate = 20000.0
@@ -237,6 +239,7 @@ def test_results_loader_pickle_and_addition_compatibility():
             "manipe": ["SubMFB", "SubMFB"],
             "path": ["/tmp/mouse1", "/tmp/mouse2"],
             "results": ["Network", "Network"],
+            "nameExp": "Network",
         }
     )
 
@@ -251,7 +254,6 @@ def test_results_loader_pickle_and_addition_compatibility():
         phases=["pre"],
         dict={"Network": {"M1SubMFB": {"pre": result1}}},
         df=pd.DataFrame(),
-        nameExp=["Network"],
     )
     loader2 = Results_Loader(
         dir=dir_df,
@@ -261,7 +263,6 @@ def test_results_loader_pickle_and_addition_compatibility():
         phases=["pre"],
         dict={"Network": {"M2SubMFB": {"pre": result2}}},
         df=pd.DataFrame(),
-        nameExp=["Network"],
     )
 
     loader1_df = loader1.convert_to_df()
@@ -287,7 +288,11 @@ def test_datahelper_lazy_cache_for_heavy_data(monkeypatch, tmp_path):
 
     def fake_load_respi_data(path):
         calls["respi"] += 1
-        return cached_respi.values, cached_respi.index.values, cached_respi.columns.values
+        return (
+            cached_respi.values,
+            cached_respi.index.values,
+            cached_respi.columns.values,
+        )
 
     import neuroencoders.utils.wrappers as wrappers
 

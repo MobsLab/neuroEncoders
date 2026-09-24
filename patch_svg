@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+
+import logging
+import os
+import re
+
+import cssutils
+from bs4 import BeautifulSoup
+
+# Suppress cssutils noisy warning logs
+cssutils.log.setLevel(logging.CRITICAL)
+
+
+def patch_scientific_svg(input_path, output_path, target_font="'Noto Sans'"):
+    """
+    Patches Matplotlib/Seaborn SVGs for scientific publication readiness.
+    - Sets a responsive viewBox
+    - Forces standardized sans-serif typography across all elements
+    - Cleans up inline CSS
+    """
+    if not os.path.exists(input_path):
+        print(f"Error: File {input_path} not found.")
+        return
+
+    try:
+        with open(input_path, "r", encoding="utf-8") as f:
+            soup = BeautifulSoup(f.read(), "xml")  # 'xml' parser is critical for SVGs
+    except Exception as e:
+        print(f"Failed to read {input_path}: {e}")
+        return
+
+    svg_tag = soup.find("svg")
+    if not svg_tag:
+        print(f"Skipping: No <svg> tag found in {input_path}")
+        return
+
+    # -------------------------------------------------------------
+    # 1. Fix ViewBox and Responsiveness
+    # -------------------------------------------------------------
+    width_attr = svg_tag.get("width")
+    height_attr = svg_tag.get("height")
+
+    if width_attr and height_attr and not svg_tag.get("viewBox"):
+        try:
+            # Strip 'pt', 'px', etc., to get raw numbers
+            w = re.findall(r"[-+]?\d*\.\d+|\d+", width_attr)[0]
+            h = re.findall(r"[-+]?\d*\.\d+|\d+", height_attr)[0]
+            svg_tag["viewBox"] = f"0 0 {w} {h}"
+        except IndexError:
+            pass  # Fallback if regex fails to match cleanly
+
+    # -------------------------------------------------------------
+    # 2. Patch Stylesheets & Inline Styles for Fonts
+    # -------------------------------------------------------------
+    # Standardize fonts inside <style> blocks
+    for style_tag in soup.find_all("style"):
+        if style_tag.string:
+            sheet = cssutils.parseString(style_tag.string)
+            for rule in sheet:
+                if rule.type == rule.STYLE_RULE:
+                    if "font-family" in rule.style:
+                        rule.style["font-family"] = target_font
+            css_text = (
+                sheet._getCssText().decode("utf-8")
+                if isinstance(sheet._getCssText(), bytes)
+                else sheet._getCssText()
+            )
+            style_tag.string.replace_with(css_text)
+
+    # Standardize fonts in inline 'style' attributes (labels, titles, ticks)
+    for element in soup.find_all(style=True):
+        style_css = cssutils.parseStyle(element["style"])
+        if "font-family" in style_css:
+            style_css["font-family"] = target_font
+            inline_css = style_css._getCssText()
+            if isinstance(inline_css, bytes):
+                inline_css = inline_css.decode("utf-8")
+
+            element["style"] = inline_css
+
+    # Standardize presentation 'font-family' attributes directly
+    for element in soup.find_all(attrs={"font-family": True}):
+        element["font-family"] = target_font
+
+    # -------------------------------------------------------------
+    # 3. Save the Patched SVG
+    # -------------------------------------------------------------
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(str(soup))
+
+
+if __name__ == "__main__":
+    # Get all SVG files strictly in the current working directory
+    current_dir = os.getcwd()
+
+    # os.listdir avoids walking into subdirectories unlike os.walk
+    svg_files = [f for f in os.listdir(current_dir) if f.lower().endswith(".svg")]
+
+    if not svg_files:
+        print(f"No SVG files found in the current directory: {current_dir}")
+    else:
+        print(
+            f"Found {len(svg_files)} SVG file(s) to patch in {current_dir}\n" + "-" * 50
+        )
+
+        for file_name in svg_files:
+            print(f"Processing: {file_name}...")
+
+            # OPTION A: Overwrite original files in place
+            output_name = file_name
+
+            # OPTION B: Un-comment below if you prefer saving to a new file instead
+            output_name = f"{os.path.splitext(file_name)[0]}_patched.svg"
+
+            patch_scientific_svg(file_name, output_name)
+            print("--> Done styling with Noto Sans.\n")
+
+        print("All patches complete!")

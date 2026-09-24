@@ -18,10 +18,12 @@ win_values = [
     # [0.036, 0.108, 0.252, 0.504],
 ]  # only kept for new dataset
 
-# win_values = [
-#     [0.036, 0.108],
-#     [0.036, 0.108, 0.252],
-# ]
+win_values = [
+    [0.036, 0.108],
+    [0.036, 0.108, 0.252],
+    # [0.036],
+    # [0.036, 0.108, 0.252, 0.504],
+]
 
 # Mice name
 mice_nb = [
@@ -64,7 +66,11 @@ mice_nb = [
 
 ####
 nameExp = "highmask_high_speed_mask_posandheaddirection_contrastiveLoss_DenseLayer"
-nameExp = "high_speed_multi_token_high_dim_factor_high_embedding"
+nameExp = "more_windows_loweri_speed_multi_token_high_dim_factor_high_embedding"
+nameExp = (
+    "random_padding_more_windows_lower_speed_multi_token_high_dim_factor_high_embedding"
+)
+nameExp = "VQ_random_padding_more_windows_lower_dim_multi_token"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"
@@ -117,9 +123,7 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
     win_tmp = win if not isinstance(win, list) else max(win)
 
     def result_ready(result_dir, suffix=""):
-        return os.path.exists(
-            os.path.join(result_dir, f"featurePred{suffix}.csv")
-        ) and os.path.exists(os.path.join(result_dir, f"latent_output{suffix}.csv"))
+        return os.path.exists(os.path.join(result_dir, f"featurePred{suffix}.csv"))
 
     main_result_dir = os.path.join(dir, nameExp, "results", str(int(win_tmp * 1000)))
     lstm_result_dir = os.path.join(
@@ -207,9 +211,9 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 target,
                 "--early_stop",
                 "--n_features",
-                "32",
+                "16",
                 "--dim_factor",
-                "8",
+                "4",
                 "--n_transformers",
                 "2",
                 "--loss_type",
@@ -324,7 +328,7 @@ if __name__ == "__main__":
     lstm = False
     redo = "--redo" in sys.argv
     rsync = "--rsync" in sys.argv
-    sleep = "--no-sleep" not in sys.argv
+    sleep = "--sleep" in sys.argv
     force = "--force" in sys.argv or "--redo" in sys.argv
     lstm = "--lstm" in sys.argv
     run_bayes = "--bayes" in sys.argv
