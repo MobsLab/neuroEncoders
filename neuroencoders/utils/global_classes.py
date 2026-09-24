@@ -2391,9 +2391,7 @@ class DataHelper(Project):
                     break
 
         if target_file is None:
-            raise FileNotFoundError(
-                f"Spectrum file ({' or '.join(filenames)}) not found in {folder} nor {network_path}."
-            )
+            target_file = os.path.join(locations[0], filenames[0])
 
         # 3. Load and parse respiration data
         respi_values, respi_times, freqs = loadRespiData(target_file)

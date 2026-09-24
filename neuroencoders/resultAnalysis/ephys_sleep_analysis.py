@@ -1044,11 +1044,15 @@ class SleepEphysAnalyser:
             )
 
             if phase_dict is None or (
-                any(k not in phase_dict for k in metric_keys)
-                and (pkl_dict is None or any(k not in pkl_dict for k in metric_keys))
+                all(
+                    k not in phase_dict and (pkl_dict is None or k not in pkl_dict)
+                    for k in metric_keys
+                )
             ):
                 must_unload = True
-                og_suffixes = mouse_results.suffixes
+                og_suffixes = getattr(mouse_results, "suffixes", None)
+                if og_suffixes is None or not hasattr(mouse_results, "load_data"):
+                    continue
                 mouse_results.load_data(
                     suffixes=[suffix],
                     load_pickle=True,
@@ -1092,6 +1096,18 @@ class SleepEphysAnalyser:
                     if k in pkl_dict and len(pkl_dict[k]) > id_window:
                         arrays[k] = np.array(pkl_dict[k][id_window])
 
+            if "certainty" in metric_keys and "certainty" not in arrays:
+                arrays["certainty"] = arrays.get("maxp")
+            if "surprisal" in metric_keys and "surprisal" not in arrays:
+                maxp = arrays.get("maxp")
+                if maxp is not None:
+                    arrays["surprisal"] = -np.log(np.clip(maxp, 1e-12, 1.0))
+            latent = arrays.get("latent_output_pooled", arrays.get("latent_output"))
+            if "latent_l2" in metric_keys and latent is not None:
+                arrays["latent_l2"] = np.linalg.norm(latent, axis=-1)
+            if "latent_var" in metric_keys and latent is not None:
+                arrays["latent_var"] = np.var(latent, axis=-1)
+
             for key in metric_keys:
                 vals = arrays.get(key, None)
                 if vals is None:
@@ -1116,35 +1132,34 @@ class SleepEphysAnalyser:
                 mouse_results.unload()
 
         # --- SLEEP PHASES ---
-        if (
-            getattr(mouse_results.sleepFigures, "resultsNN_phase", None) is None
-            or len(mouse_results.sleepFigures.resultsNN_phase.keys()) == 0
-        ):
-            mouse_results.sleepFigures.load_data()
-
-        sleep_names = list(mouse_results.sleepFigures.resultsNN_phase.keys())
+        sleep_figures = getattr(mouse_results, "sleepFigures", None)
+        if sleep_figures is None:
+            sleep_names = []
+        else:
+            if (
+                getattr(sleep_figures, "resultsNN_phase", None) is None
+                or len(sleep_figures.resultsNN_phase.keys()) == 0
+            ):
+                sleep_figures.load_data()
+            sleep_names = list(sleep_figures.resultsNN_phase.keys())
 
         for sleep_name in sleep_names:
-            phase_dict = mouse_results.sleepFigures.resultsNN_phase.get(
+            phase_dict = sleep_figures.resultsNN_phase.get(sleep_name, None)
+            pkl_dict = getattr(sleep_figures, "resultsNN_phase_pkl", {}).get(
                 sleep_name, None
             )
-            pkl_dict = getattr(
-                mouse_results.sleepFigures, "resultsNN_phase_pkl", {}
-            ).get(sleep_name, None)
 
             if phase_dict is None or (
                 any(k not in phase_dict for k in metric_keys)
                 and (pkl_dict is None or any(k not in pkl_dict for k in metric_keys))
             ):
-                mouse_results.sleepFigures.load_data(
+                sleep_figures.load_data(
                     sleepNames=[sleep_name], load_pickle=True, keys_to_load=metric_keys
                 )
-                phase_dict = mouse_results.sleepFigures.resultsNN_phase.get(
+                phase_dict = sleep_figures.resultsNN_phase.get(sleep_name, None)
+                pkl_dict = getattr(sleep_figures, "resultsNN_phase_pkl", {}).get(
                     sleep_name, None
                 )
-                pkl_dict = getattr(
-                    mouse_results.sleepFigures, "resultsNN_phase_pkl", {}
-                ).get(sleep_name, None)
 
             if phase_dict is None:
                 warn(
@@ -1235,6 +1250,57 @@ class SleepEphysAnalyser:
                     out[key] = Tsd3DFallback(t_ord, v_ord)
 
         return out
+
+    def analyze_ripples_by_state(
+        self, mouse_results: Any, state_intervals: Dict[str, Any]
+    ):
+        return self.analyse_ripples_by_state(mouse_results, state_intervals)
+
+    def analyze_mouse(self, *args, **kwargs):
+        return self.analyse_mouse(*args, **kwargs)
+
+    def plot_state_summary(
+        self,
+        summary_df: pd.DataFrame,
+        value_col: str,
+        title: str = "",
+        save_path: Optional[str] = None,
+    ):
+        fig, ax = plt.subplots(figsize=(6, 4))
+        summary_df.groupby("state")[value_col].mean().plot(kind="bar", ax=ax)
+        ax.set_title(title)
+        ax.set_ylabel(value_col)
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        return fig, ax
+
+    def plot_transition_profiles(
+        self,
+        transition_profiles: Dict[str, Dict[str, np.ndarray]],
+        value_key: str = "mean",
+        title: str = "",
+        ylabel: str = "",
+        save_path: Optional[str] = None,
+    ):
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for state, profile in transition_profiles.items():
+            ax.plot(profile["time_sec"], profile[value_key], label=state)
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.legend()
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        return fig, ax
+
+    def plot_drowsiness_curves(
+        self, drowsiness: Dict[str, Any], save_path: Optional[str] = None
+    ):
+        return self.plot_drowsiness_multi_panel(
+            drowsiness=drowsiness,
+            save_dir=os.path.dirname(save_path) if save_path else None,
+        )
 
     @staticmethod
     def _safe_interval_df(interval: Any) -> pd.DataFrame:
@@ -1406,8 +1472,6 @@ class SleepEphysAnalyser:
                 return np.full((len(target_times), source_data.values.shape[1]), np.nan)
             return np.full(len(target_times), np.nan)
 
-        import pynapple as nap
-
         target_ts = nap.Ts(t=target_times, time_units="s")
         aligned = target_ts.value_from(source_data)
 
@@ -1519,12 +1583,11 @@ class SleepEphysAnalyser:
         ripple_times = ripple_times[np.isfinite(ripple_times)]
 
         # Convert discrete events into a native Pynapple Point Process (Ts)
-        import pynapple as nap
 
         rip_ts = nap.Ts(t=ripple_times, time_units="s")
 
         rows = []
-        for state_name in ("rem", "nrem", "wake", "microwake"):
+        for state_name in ("rem", "nrem", "wake"):
             state_ep = state_intervals.get(state_name, None)
             duration = self._interval_duration_sec(state_ep)
 
@@ -2036,7 +2099,20 @@ class SleepEphysAnalyser:
             "reactivation_curve": _align_curve(reactivation_tsd),
             "model_curve": _align_curve(model_tsd),
             "theta_delta_curve": _align_curve(theta_delta_tsd),
+            "slopes": {
+                "reactivation": self._curve_slope(
+                    centers, _align_curve(reactivation_tsd)
+                ),
+                "model": self._curve_slope(centers, _align_curve(model_tsd)),
+            },
         }
+
+    @staticmethod
+    def _curve_slope(times: np.ndarray, values: np.ndarray) -> float:
+        valid = np.isfinite(times) & np.isfinite(values)
+        if np.count_nonzero(valid) < 2:
+            return np.nan
+        return float(np.polyfit(times[valid], values[valid], 1)[0])
 
     def _analyse_tsd_by_state(
         self,

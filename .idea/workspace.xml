@@ -9,24 +9,7 @@
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extractSleepState.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractSleepState.m" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ephys_sleep_analysis.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ephys_sleep_analysis.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/management.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/management.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_sleep_ephys_analysis.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_sleep_ephys_analysis.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -409,7 +392,7 @@
       <workItem from="1790155221089" duration="1553000" />
       <workItem from="1790175774172" duration="2587000" />
       <workItem from="1790240278788" duration="10694000" />
-      <workItem from="1790252418003" duration="579000" />
+      <workItem from="1790252418003" duration="1358000" />
     </task>
     <servers />
   </component>

@@ -4865,6 +4865,7 @@ class Results_Loader(TuningCurvesPlotter):
         self.all_spikes = None
 
         self.init_kwargs = kwargs
+        self.results_dict = kwargs.get("dict", {})
 
         assert len(dir.nameExp.unique()) == 1, (
             "All entries in dir must have the same nameExp."
@@ -4972,6 +4973,27 @@ class Results_Loader(TuningCurvesPlotter):
             and not self.results_df.empty
         ):
             print("Results DataFrame already exists. Use redo=True to recreate it.")
+            return self.results_df
+
+        if self.results_dict:
+            result_frames = []
+            for name_exp, mice in self.results_dict.items():
+                for mouse_name, phases in mice.items():
+                    for phase, result in phases.items():
+                        result_df = result.convert_to_df(redo=redo, disable=disable)
+                        if result_df is None or result_df.empty:
+                            continue
+                        result_df = result_df.copy()
+                        result_df["nameExp"] = name_exp
+                        result_df["mouse_name"] = mouse_name
+                        result_df["phase"] = phase
+                        result_df["results"] = result
+                        result_frames.append(result_df)
+
+            if result_frames:
+                self.results_df = pd.concat(result_frames, ignore_index=True)
+            else:
+                self.results_df = pd.DataFrame()
             return self.results_df
 
         template_phase = getattr(self, "template", "pre")
@@ -11142,11 +11164,11 @@ class Results_Loader(TuningCurvesPlotter):
 
         if subpre is not None:
             print(
-                f"Warning: 'subpre' is explicitly set to '{subpre}'. This will override 'subsleep' for the pre-sleep phase."
+                f"Warning: 'subpre' is explicitly set to '{subpre}'. This will override 'subsleep' for the {pre_phase} phase."
             )
         if subpost is not None:
             print(
-                f"Warning: 'subpost' is explicitly set to '{subpost}'. This will override 'subsleep' for the post-sleep phase."
+                f"Warning: 'subpost' is explicitly set to '{subpost}'. This will override 'subsleep' for the {post_phase} phase."
             )
 
         # Grouping sessions via your dataframe loop architecture

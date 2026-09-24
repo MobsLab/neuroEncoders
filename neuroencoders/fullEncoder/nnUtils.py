@@ -2376,14 +2376,18 @@ def parse_serialized_sequence(
     _max_spikes = max_spikes
     if _max_spikes is None:
         _max_spikes = getattr(params, "max_nb_spikes", 512)
+        if _max_spikes is None:
+            _max_spikes = 512
         warnings.warn(
-            f"⚠️ max_spikes not provided, using params.max_nb_spikes={max_spikes} as default."
+            f"⚠️ max_spikes not provided, using params.max_nb_spikes={_max_spikes} as default."
         )
     _max_spikes_per_group = max_spikes_per_group
     if _max_spikes_per_group is None:
         _max_spikes_per_group = getattr(params, "max_nb_spikes_per_group", 128)
+        if _max_spikes_per_group is None:
+            _max_spikes_per_group = 128
         warnings.warn(
-            f"⚠️ max_spikes_per_group not provided, using params.max_nb_spikes_per_group={max_spikes_per_group} as default."
+            f"⚠️ max_spikes_per_group not provided, using params.max_nb_spikes_per_group={_max_spikes_per_group} as default."
         )
 
     # Track total sparse group entries before densification.
@@ -2391,7 +2395,7 @@ def parse_serialized_sequence(
 
     # 2. Determine the truncation limit (the smaller of the two)
     # This prevents errors if actual_total is already smaller than max_spikes
-    limit = tf.minimum(actual_total, max_spikes)
+    limit = tf.minimum(actual_total, _max_spikes)
 
     # 3. Slice the indices and values to the limit
     tensors["groups"] = tf.sparse.SparseTensor(
@@ -2409,8 +2413,8 @@ def parse_serialized_sequence(
 
     # 4. Optional: Add your "Simple Warning" here
     tf.cond(
-        actual_total > max_spikes,
-        lambda: tf.print("⚠️ Truncating sample:", actual_total, "->", max_spikes),
+        actual_total > _max_spikes,
+        lambda: tf.print("⚠️ Truncating sample:", actual_total, "->", _max_spikes),
         lambda: tf.no_op(),
     )
 
@@ -2422,7 +2426,7 @@ def parse_serialized_sequence(
         if key not in tensors:
             continue
         if isinstance(tensors[key], tf.SparseTensor):
-            padded_sparse = tf.sparse.reset_shape(tensors[key], new_shape=[max_spikes])
+            padded_sparse = tf.sparse.reset_shape(tensors[key], new_shape=[_max_spikes])
             tensors[key] = tf.sparse.to_dense(padded_sparse, default_value=default)
         if key == "pos":
             tensors[key] = tf.reshape(tensors[key], [params.dimOutput])
@@ -2433,12 +2437,12 @@ def parse_serialized_sequence(
         group_key = f"group{g}"
 
         spike_size = params.nChannelsPerGroup[g] * 32
-        flat_max_size = max_spikes_per_group * spike_size
+        flat_max_size = _max_spikes_per_group * spike_size
         total_entries = tf.shape(tensors[group_key].indices)[0]
         actual_spike_count = total_entries // spike_size
 
         lengths.append(actual_spike_count)  # Keep track of actual spike count per group
-        limit = tf.minimum(actual_spike_count, max_spikes_per_group)
+        limit = tf.minimum(actual_spike_count, _max_spikes_per_group)
         new_flat_len = limit * spike_size
         tensors[group_key] = tf.sparse.SparseTensor(
             indices=tensors[group_key].indices[:new_flat_len],
@@ -2446,12 +2450,12 @@ def parse_serialized_sequence(
             dense_shape=tf.cast(tf.stack([new_flat_len]), tf.int64),
         )
         tf.cond(
-            actual_spike_count > max_spikes_per_group,
+            actual_spike_count > _max_spikes_per_group,
             lambda: tf.print(
                 f"⚠️ Truncating group {g} spikes:",
                 actual_spike_count,
                 "->",
-                max_spikes_per_group,
+                _max_spikes_per_group,
             ),
             lambda: tf.no_op(),
         )
@@ -2463,7 +2467,7 @@ def parse_serialized_sequence(
         raw_flat = tf.sparse.to_dense(padded_spikes, default_value=0.0)
 
         tensors[group_key] = tf.reshape(
-            raw_flat, [max_spikes_per_group, params.nChannelsPerGroup[g], 32]
+            raw_flat, [_max_spikes_per_group, params.nChannelsPerGroup[g], 32]
         )
 
         if count_spikes:
@@ -5617,7 +5621,6 @@ class SpikeDiversityLossLayer(tf.keras.layers.Layer):
         self.diversity_metric = tf.keras.metrics.Mean(name="spike_diversity_loss")
 
     def call(self, inputs, mask=None):
-
         y_pred = inputs
         dtype = y_pred.dtype
 
@@ -6211,7 +6214,6 @@ class MultiTokenSpatialDensityHead(tf.keras.layers.Layer):
         return None
 
     def call(self, spike_tokens, mask=None, training=False):
-
         batch_size = kops.shape(spike_tokens)[0]
         queries = kops.repeat(self.temporal_queries, batch_size, axis=0)
 
