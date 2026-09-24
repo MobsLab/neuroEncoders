@@ -85,6 +85,13 @@ def manage_devices(usedDevice: str = "GPU", set_memory_growth=True) -> str:
                 except Exception as e:
                     # Memory growth must be set before GPUs have been initialized
                     print(f"Warning: Could not set memory growth for {device}: {e}")
+        try:
+            tf.config.experimental.enable_tensor_float_32_execution(
+                True
+            )  # Enable TF32 for better performance
+            print("TF32 execution enabled for better performance.")
+        except Exception as e:
+            print(f"Warning: Could not enable TF32 execution: {e}")
 
     if usedDevice_upper == "MULTI-GPU":
         device_phys = config.list_physical_devices("GPU")

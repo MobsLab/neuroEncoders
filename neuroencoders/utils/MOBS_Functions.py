@@ -6,21 +6,27 @@ Created on Wed May 27 21:28:52 2020
 @author: quarantine-charenton
 """
 
+import os
+
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import copy
 import gc
 import json
 import os
 import re
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from warnings import warn
 
 import dill as pickle
+import h5py
+import hdf5plugin  # noqa: F401
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
 import seaborn as sns
+from joblib import Parallel, delayed
 from matplotlib.cbook import boxplot_stats
 from pynapple import (
     IntervalSet,
@@ -42,7 +48,7 @@ from sklearn.metrics import (
     f1_score,
 )
 from statannotations.Annotator import Annotator
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from neuroencoders.importData.epochs_management import get_epochs_mask, inEpochsMask
 from neuroencoders.importData.gui_elements import connect_points
@@ -70,7 +76,7 @@ from neuroencoders.utils.viz_params import (
     GROUPS_PALETTE,
     RIPPLES_COLOR,
 )
-from neuroencoders.utils.wrappers import clean_mat_structure
+from neuroencoders.utils.wrappers import LazyBreathing, LazySleepScoring
 
 EXPORT_COLS = [
     "mouse",
@@ -110,6 +116,1491 @@ PHASE_MAPPING = {
 EPOCH_MAPPING = {f"{k}_epoch": i for i, k in enumerate(ZONELABELS)}
 
 plt.style.use("neuroencoders.mobs")
+
+
+class LazyMouseResult:
+    """Lightweight proxy that instantiates and loads a Mouse_Results object ON DEMAND.
+
+    Stores only string paths and configuration scalar parameters until an attribute or method
+    is accessed, keeping startup RAM near zero and initialization instantaneous.
+    """
+
+    __slots__ = ("_kwargs", "_resolved")
+
+    def __init__(self, **kwargs):
+        object.__setattr__(self, "_kwargs", kwargs)
+        object.__setattr__(self, "_resolved", None)
+
+    def _resolve(self):
+        """Instantiates Mouse_Results and loads data on first access."""
+        if self._resolved is None:
+            kwargs = self._kwargs.copy()
+            suffix = kwargs.pop("suffix", f"_{kwargs.get('phase', '')}")
+            add_training = kwargs.get("add_training", False)
+            add_full_pre = kwargs.get("add_full_pre", False)
+            load_pickle = kwargs.pop("load_pickle", False)
+            load_bayes = kwargs.pop("load_bayes", False)
+            which = kwargs.get("which", "ann")
+
+            # 1. Instantiate heavy Mouse_Results object
+            obj = Mouse_Results(**kwargs)
+
+            # 2. Perform deferred data loading
+            try:
+                obj.load_data(
+                    suffixes=[suffix],
+                    add_training=add_training,
+                    add_full_pre=add_full_pre,
+                    load_pickle=load_pickle,
+                )
+                if load_bayes or which in ["both", "bayes"]:
+                    obj.load_bayes(
+                        suffixes=[suffix],
+                        add_training=add_training,
+                        add_full_pre=add_full_pre,
+                        **kwargs,
+                    )
+            except FileNotFoundError:
+                obj.load_data(
+                    suffixes=[suffix],
+                    add_training=False,
+                    add_full_pre=False,
+                    load_pickle=load_pickle,
+                )
+                if load_bayes or which in ["both", "bayes"]:
+                    obj.load_bayes(
+                        suffixes=[suffix],
+                        add_training=False,
+                        add_full_pre=False,
+                        **kwargs,
+                    )
+
+            object.__setattr__(self, "_resolved", obj)
+        return self._resolved
+
+    def unload(self):
+        """Explicitly release heavy Mouse_Results from memory when finished."""
+        object.__setattr__(self, "_resolved", None)
+
+    def __getattr__(self, name):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._resolve(), name, value)
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def __repr__(self):
+        if self._resolved is None:
+            m = self._kwargs.get("mouse_name", "unknown")
+            p = self._kwargs.get("phase", "unknown")
+            return f"<LazyMouseResult [Unloaded] mouse={m} phase={p}>"
+        return repr(self._resolved)
+
+    def __str__(self):
+        if self._resolved is None:
+            return repr(self)
+        return str(self._resolved)
+
+    # --- Pickling & Serialization Support ---
+
+    def __getstate__(self):
+        """Strips resolved heavy instance when pickling to keep IPC transfers < 1KB."""
+        return {"_kwargs": self._kwargs}
+
+    def __setstate__(self, state):
+        object.__setattr__(self, "_kwargs", state["_kwargs"])
+        object.__setattr__(self, "_resolved", None)
+
+    def __reduce__(self):
+        return (LazyMouseResult, (), self.__getstate__())
+
+
+class AssemblyReactivationPipeline:
+    """Unified pipeline for computing neural assembly reactivation and spatial mapping."""
+
+    # =========================================================================
+    # MAIN PIPELINE ENTRY POINT
+    # =========================================================================
+
+    def compute_assembly_reactivation(
+        self,
+        results_df: pd.DataFrame,
+        winMS: int = 100,
+        template_period: str = "cond",
+        subtask: Optional[str] = None,
+        num_templates: int = 3,
+        method: str = "pca_ica",
+        keep_mua: bool = False,
+        keep_interneurons: bool = True,
+        force: bool = False,
+        random_state: int = 42,
+        max_templates: int = 5,
+        fig: bool = False,
+        save_fig_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Compute population reactivation strength across behavioral blocks.
+
+        Parameters
+        ----------
+        winMS : int
+            Bin width in milliseconds.
+        template_period : str
+            Epoch to build assembly templates from ('cond', 'wake', 'condMov', 'condFree', 'postRip', 'condRip').
+        num_templates : int
+            Maximum number of assembly templates to extract.
+        method : str
+            Extraction paradigm:
+            - 'pca'     : Classical PCA (Peyrache et al. 2010)
+            - 'pca_ica' : Whitened FastICA bounded by Marchenko-Pastur limit (Lopes-dos-Santos et al. 2013)
+            - 'ica'     : Direct FastICA extraction
+        keep_mua : bool
+            Whether to include Multi-Unit Activity (MUA) channels.
+        keep_interneurons : bool
+            Whether to include inhibitory interneurons.
+        force : bool
+            Force re-computation of unit classifications.
+        random_state : int
+            Seed for FastICA reproducibility.
+        max_templates : int
+            Upper cap on generated plots per session.
+        fig : bool
+            If True, generates assembly weight stem plots, epoch bars, and spatial maps.
+        save_fig_path : str, optional
+            Output folder path for saving figures.
+        """
+        bin_size_sec = winMS / 1000.0
+        all_session_data: Dict[str, Any] = {}
+
+        for (mouse_name, manipe), df in results_df.groupby(by=["mouse_name", "manipe"]):
+            results = df.iloc[0].results
+            session_id = f"{mouse_name}_{manipe}"
+
+            print_sub = f" + {subtask}" if subtask else ""
+            print(
+                f"Processing {session_id} using '{method}' ({template_period}{print_sub})..."
+            )
+
+            def get_sub_intervals(sub_name):
+                """Helper to retrieve sub-intervals cleanly with '+' intersection support."""
+                sub_name = sub_name.lower()
+                components = [comp.strip() for comp in sub_name.split("+")]
+                combined_intervals = None
+
+                for comp in components:
+                    if "ripple" in comp:
+                        current_intervals = results.DataHelper.get_ripples_epochs()
+                    elif "freeze" in comp:
+                        current_intervals = results.DataHelper.get_freeze_epochs()
+                    elif "mov" in comp:
+                        current_intervals = results.DataHelper.get_mov_epochs()
+                    elif "sws" in comp or "nrem" in comp:
+                        current_intervals = results.DataHelper.get_sws_epochs(
+                            network_path=results.network_path
+                        )
+                    elif "rem" in comp:
+                        current_intervals = results.DataHelper.get_rem_epochs(
+                            network_path=results.network_path
+                        )
+                    else:
+                        raise ValueError(f"Unknown subtask component: {comp}")
+
+                    if combined_intervals is None:
+                        combined_intervals = current_intervals
+                    else:
+                        combined_intervals = combined_intervals.intersect(
+                            current_intervals
+                        )
+
+                return combined_intervals
+
+            # ------------------------------------------------------------------
+            # 1. Spike Parsing & Cell-Type Sub-Filtering
+            # ------------------------------------------------------------------
+            spike_group = results.DataHelper.get_spike_data()
+            if len(spike_group) < 5:
+                continue
+
+            neuron_types = self._get_neuron_classifications_safe(
+                results, force=force, n_cells=len(spike_group)
+            )
+
+            valid_indices = []
+            for idx, n_type in enumerate(neuron_types):
+                n_str = str(n_type).lower()
+                if "mua" in n_str and not keep_mua:
+                    continue
+                if "interneuron" in n_str and not keep_interneurons:
+                    continue
+                valid_indices.append(idx)
+
+            if len(valid_indices) < 4:
+                continue
+
+            valid_indices = np.array(valid_indices)
+            filtered_spikes = TsGroup({i: spike_group[i] for i in valid_indices})
+            filtered_types = np.array(neuron_types)[valid_indices]
+            cell_labels = [f"Cell_{i}" for i in valid_indices]
+
+            # ------------------------------------------------------------------
+            # 2. Extract Macro Phase Epochs
+            # ------------------------------------------------------------------
+            epochs = self._extract_session_epochs(results)
+
+            # ------------------------------------------------------------------
+            # 3. Bin Full Session Spike Activity (Q-Matrix)
+            # ------------------------------------------------------------------
+            q_tsd = filtered_spikes.count(bin_size_sec)
+
+            # Map requested template interval configuration
+            template_interval = self._resolve_template_interval(template_period, epochs)
+
+            if subtask is not None:
+                try:
+                    template_interval = template_interval.intersect(
+                        get_sub_intervals(subtask)
+                    )
+                except Exception as e:
+                    print(
+                        f"Warning: Could not intersect {template_period} with {subtask}: {e}"
+                    )
+
+            # Restrict and Standardize Template
+            q_template_raw = q_tsd.restrict(template_interval).values
+            num_bins, num_neurons = q_template_raw.shape
+            if num_bins < 10 or num_neurons < 2:
+                continue
+
+            mean_t = np.mean(q_template_raw, axis=0)
+            std_t = np.std(q_template_raw, axis=0) + 1e-12
+            q_template = np.nan_to_num((q_template_raw - mean_t) / std_t)
+
+            # ------------------------------------------------------------------
+            # 4. Assembly Extraction (PCA vs PCA+ICA vs ICA)
+            # ------------------------------------------------------------------
+            method_clean = str(method).lower()
+            if method_clean == "pca":
+                assemblies, eigenvalues, lambda_max, percentile_shuff = (
+                    self._extract_pca(q_template, num_bins, num_neurons, num_templates)
+                )
+            elif method_clean == "pca_ica":
+                assemblies, eigenvalues, lambda_max, percentile_shuff = (
+                    self._extract_pca_ica(
+                        q_template, num_bins, num_neurons, num_templates, random_state
+                    )
+                )
+            elif method_clean == "ica":
+                assemblies, eigenvalues, lambda_max, percentile_shuff = (
+                    self._extract_ica(
+                        q_template, num_neurons, num_templates, random_state
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"Unknown method '{method}'. Supported: 'pca', 'pca_ica', 'ica'"
+                )
+
+            # ------------------------------------------------------------------
+            # 5. Full Session Projection & Reactivation Strength
+            # ------------------------------------------------------------------
+            q_full_norm = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
+                np.std(q_tsd.values, axis=0) + 1e-12
+            )
+            q_full_norm = np.nan_to_num(q_full_norm)
+
+            pc_scores: Dict[int, Tsd] = {}
+            rs_templates: Dict[int, Tsd] = {}
+            actual_templates = min(num_templates, assemblies.shape[1])
+
+            for idx_t in range(actual_templates):
+                v_i = assemblies[:, idx_t]
+
+                # Linear score projection
+                score_t = np.dot(q_full_norm, v_i)
+                pc_scores[idx_t] = Tsd(t=q_tsd.index, d=score_t)
+
+                # Projector Matrix with diagonal set to 0 (remove single-neuron bias)
+                single_neuron_contrib = np.dot(q_full_norm**2, v_i**2)
+                rs_vector = (score_t**2) - single_neuron_contrib
+                rs_tsd = Tsd(t=q_tsd.index, d=rs_vector)
+
+                # Automatic Sign Polarity Correction for PCA
+                if method_clean == "pca":
+                    rs_tsd = self._correct_pca_polarity(
+                        rs_tsd, epochs["pre_test"], epochs["post_test"]
+                    )
+
+                rs_templates[idx_t] = rs_tsd
+
+            # ------------------------------------------------------------------
+            # 6. Spatial Positions & Summaries
+            # ------------------------------------------------------------------
+            pos_dict = self._extract_position_data(results)
+
+            event_intervals = {
+                "cond_ripples": epochs["cond"].intersect(epochs["ripples"]),
+                "cond_no_ripples": epochs["cond"].set_diff(epochs["ripples"]),
+                "cond_freeze": epochs["cond"].intersect(epochs["freeze"]),
+                "cond_move": epochs["cond"].intersect(epochs["mov"]),
+                "cond_stim": epochs["cond"].intersect(epochs["stim"]),
+                "pre_sleep_sws": epochs["pre_sleep"].intersect(epochs["sws"]),
+                "post_sleep_sws": epochs["post_sleep"].intersect(epochs["sws"]),
+                "pre_sleep_rem": epochs["pre_sleep"].intersect(epochs["rem"]),
+                "post_sleep_rem": epochs["post_sleep"].intersect(epochs["rem"]),
+            }
+
+            template_summaries = {
+                idx_t: self._summarize_reactivation_strengths(
+                    rs_tsd, epochs, event_intervals
+                )
+                for idx_t, rs_tsd in rs_templates.items()
+            }
+
+            # ------------------------------------------------------------------
+            # 7. Visualization Sub-Module Calls
+            # ------------------------------------------------------------------
+            if fig:
+                self._plot_assembly_weights(
+                    session_id,
+                    assemblies,
+                    filtered_types,
+                    cell_labels,
+                    eigenvalues,
+                    lambda_max,
+                    max_templates,
+                    template_period,
+                    method_clean,
+                    save_fig_path,
+                )
+                self._plot_epoch_comparison(
+                    session_id, rs_templates, eigenvalues, epochs, save_fig_path
+                )
+
+                if len(pos_dict["x"]) > 0 and 0 in rs_templates:
+                    self._plot_spatial_maps(
+                        session_id,
+                        rs_templates[0],
+                        pos_dict,
+                        epochs["hab"].union(epochs["pre_test"]),
+                        epochs["cond"],
+                        save_fig_path,
+                    )
+
+            # ------------------------------------------------------------------
+            # 8. Output Dictionary Construction
+            # ------------------------------------------------------------------
+            all_session_data[session_id] = {
+                "rs": rs_templates,
+                "pc_scores": pc_scores,
+                "weights": assemblies[:, :actual_templates],
+                "eigenvectors": assemblies[:, :actual_templates],
+                "neuron_labels": cell_labels,
+                "neuron_types": filtered_types,
+                "cell_ids": list(filtered_spikes.keys()),
+                "spikes": filtered_spikes,
+                "q_tsd": q_tsd,
+                "summaries": template_summaries,
+                "method": method_clean,
+                "stats": {
+                    "eigenvalues": eigenvalues[:actual_templates],
+                    "marcenko_pastur": lambda_max,
+                    "shuffle_max": percentile_shuff,
+                },
+                "epochs": epochs,
+                "positions": pos_dict,
+                "lfp": results.DataHelper.get_lfp_data(
+                    channel_type="ripple", network_path=results.network_path
+                ),
+            }
+
+        all_session_data["winMS"] = winMS
+        all_session_data["template"] = template_period
+        all_session_data["method"] = method
+
+        return all_session_data
+
+    def compute_latent_assembly_reactivation(
+        self,
+        results_df: pd.DataFrame,
+        winMS=100,
+        template_period="cond",
+        subtask: Optional[str] = None,
+        num_templates=2,
+        method="pca_ica",
+        random_state=42,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Computes continuous latent manifold reactivation strength across behavioral blocks.
+
+        Supports PCA, PCA+ICA (Lopes-dos-Santos et al. 2013), and direct FastICA extraction
+        on Transformer hidden layer activations (e.g., 128D).
+        """
+        all_session_data = {}
+
+        for (mouse_name, manipe), df in results_df.groupby(by=["mouse_name", "manipe"]):
+            results: Mouse_Results = df.iloc[0].results
+            session_id = f"{mouse_name}_{manipe}_{winMS}"
+            idWindow = results.timeWindows.index(winMS)
+
+            print_sub = f" + {subtask}" if subtask else ""
+            print(
+                f"Processing {session_id} using '{method}' ({template_period}{print_sub})..."
+            )
+
+            def get_sub_intervals(sub_name):
+                """Helper to retrieve sub-intervals cleanly with '+' intersection support."""
+                sub_name = sub_name.lower()
+                components = [comp.strip() for comp in sub_name.split("+")]
+                combined_intervals = None
+
+                for comp in components:
+                    if "ripple" in comp:
+                        current_intervals = results.DataHelper.get_ripples_epochs()
+                    elif "freeze" in comp:
+                        current_intervals = results.DataHelper.get_freeze_epochs()
+                    elif "mov" in comp:
+                        current_intervals = results.DataHelper.get_mov_epochs()
+                    elif "sws" in comp or "nrem" in comp:
+                        current_intervals = results.DataHelper.get_sws_epochs(
+                            network_path=results.network_path
+                        )
+                    elif "rem" in comp:
+                        current_intervals = results.DataHelper.get_rem_epochs(
+                            network_path=results.network_path
+                        )
+                    else:
+                        raise ValueError(f"Unknown subtask component: {comp}")
+
+                    if combined_intervals is None:
+                        combined_intervals = current_intervals
+                    else:
+                        combined_intervals = combined_intervals.intersect(
+                            current_intervals
+                        )
+
+                return combined_intervals
+
+            base_results_path = os.path.join(
+                results.projectPath.experimentPath, "results"
+            )
+
+            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
+            pre_epoch, _ = results.get_epoch_interval("pre")
+            cond_epoch, _ = results.get_epoch_interval("cond")
+            post_epoch, _ = results.get_epoch_interval("post")
+            post_sleep, _ = results.get_epoch_interval("post_sleep")
+            hab_epoch, _ = results.get_epoch_interval("hab")
+
+            sws_epochs = results.DataHelper.get_sws_epochs(
+                network_path=results.network_path
+            )
+            rem_epochs = results.DataHelper.get_rem_epochs(
+                network_path=results.network_path
+            )
+            ripples_epochs = results.DataHelper.get_ripples_epochs()
+            mov_epochs = results.DataHelper.get_mov_epochs()
+
+            try:
+                freeze_epochs = results.DataHelper.get_freeze_epochs()
+            except AttributeError:
+                freeze_epochs = IntervalSet(start=[], end=[])
+
+            try:
+                stim_epochs = results.DataHelper.get_stim_epochs(before=0.1, after=0.1)
+            except AttributeError:
+                stim_epochs = IntervalSet(start=[], end=[])
+
+            # 2. STITCHING LAYER: Load and combine latents across all available phases
+            phases_to_load = [
+                "_pre",
+                "_cond",
+                "_post",
+                "_training",
+            ]
+
+            stitched_times = []
+            stitched_latents = []
+
+            for p_suffix in phases_to_load:
+                if (
+                    hasattr(results, "resultsNN_phase_pkl")
+                    and p_suffix in results.resultsNN_phase_pkl
+                ):
+                    pkl_data = results.resultsNN_phase_pkl[p_suffix]
+                    if (
+                        "latent_output_pooled" in pkl_data
+                        and len(pkl_data["latent_output_pooled"]) >= idWindow + 1
+                        and pkl_data["latent_output_pooled"][idWindow] is not None
+                        and "times" in results.resultsNN_phase[p_suffix]
+                    ):
+                        if pkl_data["latent_output_pooled"][idWindow].ndim == 3:
+                            warn(
+                                f"Latent output pooled for {p_suffix} at window {winMS}ms is 3D. Dont forget to flatten it by AveragePooling."
+                            )
+                        stitched_times.append(
+                            results.resultsNN_phase[p_suffix]["times"][
+                                idWindow
+                            ].flatten()
+                        )
+                        stitched_latents.append(
+                            pkl_data["latent_output_pooled"][idWindow]
+                        )
+                        continue
+                    elif (
+                        "latent_output" in pkl_data
+                        and len(pkl_data["latent_output"]) >= idWindow + 1
+                        and pkl_data["latent_output"][idWindow] is not None
+                        and "times" in results.resultsNN_phase[p_suffix]
+                    ):
+                        if pkl_data["latent_output"][idWindow].ndim == 3:
+                            warn(
+                                f"Latent output for {p_suffix} at window {winMS}ms is 3D. Dont forget to flatten it by AveragePooling."
+                            )
+                        stitched_times.append(
+                            results.resultsNN_phase[p_suffix]["times"][
+                                idWindow
+                            ].flatten()
+                        )
+                        stitched_latents.append(pkl_data["latent_output"][idWindow])
+                        continue
+
+                h5_path = os.path.join(
+                    base_results_path, str(winMS), f"decoding_results{p_suffix}.h5"
+                )
+                npz_path = os.path.join(
+                    base_results_path, str(winMS), f"decoding_results{p_suffix}.npz"
+                )
+                pkl_path = os.path.join(
+                    base_results_path, str(winMS), f"decoding_results{p_suffix}.pkl"
+                )
+                if os.path.exists(h5_path):
+                    with h5py.File(h5_path, "r") as loaded_h5:
+                        keys_to_load = [
+                            "times",
+                            "latent_output_pooled",
+                            "latent_output",
+                        ]
+                        for key in keys_to_load:
+                            if key in loaded_h5:
+                                data = loaded_h5[key]
+                                if (
+                                    key == "latent_output_pooled"
+                                    or key == "latent_output"
+                                ):
+                                    if data.ndim == 3:
+                                        warn(
+                                            "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                        )
+                                    data = np.array(data)
+                                    stitched_latents.append(data)
+                                if key == "times":
+                                    stitched_times.append(np.array(data).flatten())
+                            else:
+                                if (
+                                    key == "latent_output"
+                                    and "latent_output_pooled" in loaded_h5
+                                ):
+                                    continue
+                                if (
+                                    key == "latent_output_pooled"
+                                    and "latent_output" in loaded_h5
+                                ):
+                                    continue
+                                raise ValueError(f"Missing '{key}' in {h5_path}")
+
+                elif os.path.exists(npz_path):
+                    with np.load(npz_path, allow_pickle=True) as loaded_npz:
+                        keys_to_load = [
+                            "times",
+                            "latent_output_pooled",
+                            "latent_output",
+                        ]
+                        for key in keys_to_load:
+                            if key in loaded_npz:
+                                data = loaded_npz[key]
+                                if (
+                                    key == "latent_output_pooled"
+                                    or key == "latent_output"
+                                ) and isinstance(data, list):
+                                    data = np.array(data)
+                                    if data.ndim == 3:
+                                        warn(
+                                            "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                        )
+                                    stitched_latents.append(data)
+                                if key == "times":
+                                    stitched_times.append(np.array(data).flatten())
+                            else:
+                                if (
+                                    key == "latent_output"
+                                    and "latent_output_pooled" in loaded_npz
+                                ):
+                                    continue
+                                if (
+                                    key == "latent_output_pooled"
+                                    and "latent_output" in loaded_npz
+                                ):
+                                    continue
+                                raise ValueError(f"Missing '{key}' in {npz_path}")
+                elif os.path.exists(pkl_path):
+                    try:
+                        with open(pkl_path, "rb") as f:
+                            temp_pkl = pickle.load(f)
+                            t_steps = temp_pkl.get("times", None)
+                            if t_steps is None:
+                                raise ValueError(f"Missing 'times' key in {pkl_path}")
+
+                            l_mat = temp_pkl.get(
+                                "latent_output_pooled",
+                                temp_pkl.get("latent_output", None),
+                            )
+                            if isinstance(l_mat, list):
+                                l_mat = np.array(l_mat)
+
+                            if l_mat.ndim == 3:
+                                warn(
+                                    "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                )
+
+                            stitched_times.append(np.array(t_steps).flatten())
+                            stitched_latents.append(l_mat)
+
+                            del temp_pkl
+                            gc.collect()
+                    except Exception as e:
+                        print(f"Failed loading phase {p_suffix} for {mouse_name}: {e}")
+                else:
+                    print(
+                        f"Phase file {pkl_path} nor {npz_path} not found for {mouse_name}. Skipping this phase."
+                    )
+
+            base_results_path_sleep = os.path.join(
+                results.projectPath.experimentPath, "results_Sleep"
+            )
+            for sleep_name in results.DataHelper.fullBehavior["Times"].get(
+                "sleepNames", []
+            ):
+                h5_path = os.path.join(
+                    base_results_path_sleep,
+                    str(winMS),
+                    sleep_name,
+                    "decoding_results.h5",
+                )
+                npz_path = os.path.join(
+                    base_results_path_sleep,
+                    str(winMS),
+                    sleep_name,
+                    "decoding_results.npz",
+                )
+                pkl_path = os.path.join(
+                    base_results_path_sleep,
+                    str(winMS),
+                    sleep_name,
+                    "decoding_results.pkl",
+                )
+
+                if os.path.exists(h5_path):
+                    with h5py.File(h5_path, "r") as loaded_h5:
+                        keys_to_load = [
+                            "times",
+                            "latent_output_pooled",
+                            "latent_output",
+                        ]
+                        for key in keys_to_load:
+                            if key in loaded_h5:
+                                data = loaded_h5[key]
+                                if (
+                                    key == "latent_output_pooled"
+                                    or key == "latent_output"
+                                ):
+                                    data = np.array(data)
+                                    if data.ndim == 3:
+                                        warn(
+                                            "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                        )
+                                    stitched_latents.append(data)
+                                if key == "times":
+                                    stitched_times.append(np.array(data).flatten())
+                            else:
+                                if (
+                                    key == "latent_output"
+                                    and "latent_output_pooled" in loaded_h5
+                                ):
+                                    continue
+                                if (
+                                    key == "latent_output_pooled"
+                                    and "latent_output" in loaded_h5
+                                ):
+                                    continue
+                                raise ValueError(f"Missing '{key}' in {h5_path}")
+                elif os.path.exists(npz_path):
+                    with np.load(npz_path, allow_pickle=True) as loaded_npz:
+                        keys_to_load = [
+                            "times",
+                            "latent_output_pooled",
+                            "latent_output",
+                        ]
+                        for key in keys_to_load:
+                            if key in loaded_npz:
+                                data = loaded_npz[key]
+                                if (
+                                    key == "latent_output_pooled"
+                                    or key == "latent_output"
+                                ) and isinstance(data, list):
+                                    data = np.array(data)
+                                    if data.ndim == 3:
+                                        warn(
+                                            "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                        )
+                                    stitched_latents.append(data)
+                                if key == "times":
+                                    stitched_times.append(np.array(data).flatten())
+                            else:
+                                if (
+                                    key == "latent_output"
+                                    and "latent_output_pooled" in loaded_npz
+                                ):
+                                    continue
+                                if (
+                                    key == "latent_output_pooled"
+                                    and "latent_output" in loaded_npz
+                                ):
+                                    continue
+                                raise ValueError(f"Missing '{key}' in {npz_path}")
+                elif os.path.exists(pkl_path):
+                    try:
+                        with open(pkl_path, "rb") as f:
+                            temp_pkl = pickle.load(f)
+                            t_steps = temp_pkl.get("times", None)
+                            if t_steps is None:
+                                raise ValueError(
+                                    f"Sleep file {pkl_path} missing 'times' key."
+                                )
+
+                            l_mat = temp_pkl.get(
+                                "latent_output_pooled",
+                                temp_pkl.get("latent_output", None),
+                            )
+                            if isinstance(l_mat, list):
+                                l_mat = np.array(l_mat)
+
+                            if l_mat.ndim == 3:
+                                warn(
+                                    "Latent output is 3D. Dont forget to flatten it by AveragePooling."
+                                )
+
+                            stitched_times.append(np.array(t_steps).flatten())
+                            stitched_latents.append(l_mat)
+
+                            del temp_pkl
+                            phases_to_load.append(sleep_name)
+                            gc.collect()
+                    except Exception as e:
+                        print(
+                            f"Failed loading sleep {sleep_name} for {mouse_name}: {e}"
+                        )
+                else:
+                    print(
+                        f"Sleep file {pkl_path} nor {npz_path} not found for {mouse_name}. Skipping sleep phase."
+                    )
+
+            if not stitched_latents:
+                print(
+                    f"Skipping {mouse_name}: No latent data could be collected across phases."
+                )
+                continue
+
+            flat_times = np.concatenate(stitched_times, dtype=np.float32)
+            flat_latents = np.concatenate(stitched_latents, axis=0, dtype=np.float32)
+
+            full_latent_tsd = TsdFrame(t=flat_times, d=flat_latents)
+
+            # 5. Define template interval mapping windows
+            epochs = self._extract_session_epochs(results)
+            template_interval = self._resolve_template_interval(template_period, epochs)
+
+            if subtask is not None:
+                try:
+                    template_interval = template_interval.intersect(
+                        get_sub_intervals(subtask)
+                    )
+                except Exception as e:
+                    print(
+                        f"Warning: Could not intersect {template_period} with {subtask}: {e}"
+                    )
+
+            # 6. Extract Target Latent Template Matrix
+            lat_template = full_latent_tsd.restrict(template_interval)
+            lat_template_values = lat_template.values
+            n_bins, n_dim = lat_template_values.shape
+            print(
+                f"Will compute assembly reactivation on {n_bins} time bins (representing a duration of {lat_template.find_support(0.5).tot_length}) with dim {n_dim} for {mouse_name}."
+            )
+            if n_bins < 10 or n_dim < 2:
+                print(
+                    f"Skipping {mouse_name}: Template window has insufficient data frames."
+                )
+                continue
+
+            # Standardize latent dimensions
+            l_temp_mean = np.mean(lat_template_values, axis=0)
+            l_temp_std = np.std(lat_template_values, axis=0) + 1e-12
+            lat_template_std = np.nan_to_num(
+                (lat_template_values - l_temp_mean) / l_temp_std
+            )
+
+            # ----------------------------------------------------------------------
+            # 7. MANIFOLD TEMPLATE EXTRACTION (PCA vs PCA+ICA vs ICA)
+            # ----------------------------------------------------------------------
+            clean_method = str(method).lower()
+            if clean_method == "pca":
+                # --- Classical PCA ---
+                cov_matrix = np.cov(lat_template_std, rowvar=False, dtype=np.float32)
+                cov_matrix = np.nan_to_num(cov_matrix)
+
+                eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+                idx_sorted = np.argsort(eigenvalues)[::-1]
+                eigenvectors = eigenvectors[:, idx_sorted]
+                eigenvalues = eigenvalues[idx_sorted]
+
+                n_comp = min(num_templates, eigenvectors.shape[1])
+                assembly_weights = eigenvectors[:, :n_comp]
+
+            elif clean_method == "pca_ica":
+                # --- Lopes-dos-Santos 2013 Adaptation for Latent Spaces ---
+                cov_matrix = np.dot(lat_template_std.T, lat_template_std) / float(
+                    n_bins
+                )
+                cov_matrix = np.nan_to_num(cov_matrix).astype(np.float32)
+
+                eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+                idx_sorted = np.argsort(eigenvalues)[::-1]
+                eigenvectors = eigenvectors[:, idx_sorted]
+                eigenvalues = eigenvalues[idx_sorted]
+
+                # Marchenko-Pastur theoretical upper bound for N=n_dim, B=n_bins
+                lambda_max = (1.0 + np.sqrt(n_dim / float(n_bins))) ** 2
+                sig_mask = eigenvalues > lambda_max
+
+                if not np.any(sig_mask):
+                    sig_mask[: min(num_templates, n_dim)] = True
+
+                n_sig = min(int(np.sum(sig_mask)), num_templates)
+                v_sig = eigenvectors[:, :n_sig]
+                l_sig = eigenvalues[:n_sig]
+
+                # Project onto whitened latent subspace
+                whitened_template = np.dot(
+                    lat_template_std, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig)))
+                )
+
+                # FastICA extraction
+                ica = FastICA(
+                    n_components=n_sig,
+                    whiten="unit-variance",
+                    random_state=random_state,
+                    max_iter=1000,
+                )
+                ica.fit(whitened_template)
+
+                # Unmix vectors back to 128D latent space
+                unmixing = ica.components_
+                mix_weights = np.dot(v_sig, np.dot(np.diag(np.sqrt(l_sig)), unmixing.T))
+
+                norms = np.linalg.norm(mix_weights, axis=0, keepdims=True) + 1e-12
+                assembly_weights = mix_weights / norms
+                n_comp = assembly_weights.shape[1]
+
+            elif clean_method == "ica":
+                # --- Direct FastICA on Latent Space ---
+                n_comp = min(num_templates, n_dim)
+                ica = FastICA(
+                    n_components=n_comp, random_state=random_state, max_iter=1000
+                )
+                ica.fit(lat_template_std)
+
+                comp_weights = ica.components_.T.astype(np.float32)
+                norms = np.linalg.norm(comp_weights, axis=0, keepdims=True) + 1e-12
+                assembly_weights = comp_weights / norms
+
+            else:
+                raise ValueError(
+                    f"Unknown extraction method '{clean_method}'. Choose 'pca', 'pca_ica', or 'ica'."
+                )
+
+            # ----------------------------------------------------------------------
+            # 8. PROJECT CONTINUOUS LATENT TIMELINE & COMPUTE REACTIVATION
+            # ----------------------------------------------------------------------
+            lat_full_norm = (
+                full_latent_tsd.values - np.mean(full_latent_tsd.values, axis=0)
+            ) / (np.std(full_latent_tsd.values, axis=0) + 1e-12)
+            lat_full_norm = np.nan_to_num(lat_full_norm)
+
+            pc_scores = {}
+            rs_templates = {}
+
+            for idx_t in range(n_comp):
+                v_i = assembly_weights[:, idx_t]
+                score_t = np.dot(lat_full_norm, v_i)
+
+                pc_scores[idx_t] = Tsd(t=full_latent_tsd.index, d=score_t)
+                rs_templates[idx_t] = Tsd(t=full_latent_tsd.index, d=score_t**2)
+
+            # 9. Collect Summaries & Metadata
+            event_intervals = {
+                "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                "post_sleep_sws": post_sleep.intersect(sws_epochs),
+            }
+            template_summaries = {}
+            for idx_t, rs_tsd in rs_templates.items():
+                template_summaries[idx_t] = _summarize_reactivation_strengths(
+                    rs_tsd,
+                    {
+                        "pre_test": pre_epoch,
+                        "pre_sleep": pre_sleep,
+                        "cond": cond_epoch,
+                        "post_test": post_epoch,
+                        "post_sleep": post_sleep,
+                        "hab": hab_epoch,
+                    },
+                    event_intervals,
+                )
+
+            all_session_data[f"{mouse_name}_{manipe}"] = {
+                "rs": rs_templates,
+                "pc_scores": pc_scores,
+                "eigenvectors": assembly_weights,
+                "summaries": template_summaries,
+                "method": method,
+                "epochs": {
+                    "pre_test": pre_epoch,
+                    "pre_sleep": pre_sleep,
+                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+                    "pre": pre_epoch,
+                    "hab": hab_epoch,
+                    "cond": cond_epoch,
+                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
+                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
+                    "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+                    "cond_move": cond_epoch.intersect(mov_epochs),
+                    "cond_stim": cond_epoch.intersect(stim_epochs),
+                    "post_test": post_epoch,
+                    "post": post_epoch,
+                    "post_sleep": post_sleep,
+                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
+                    "ripples": ripples_epochs,
+                    "sws": sws_epochs,
+                    "rem": rem_epochs,
+                    "mov": mov_epochs,
+                    "freeze": freeze_epochs,
+                    "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
+                    "post_sleep_rem": post_sleep.intersect(rem_epochs),
+                },
+                "positions": {
+                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
+                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
+                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
+                    "linear": results.l_function(
+                        results.DataHelper.fullBehavior["Positions"][:, :2],
+                    )[1].flatten(),
+                },
+            }
+
+        all_session_data["winMS"] = winMS
+        all_session_data["template"] = template_period
+        all_session_data["method"] = method
+
+        return all_session_data
+
+    # =========================================================================
+    # HELPER COMPUTATIONS & SUB-METHODS
+    # =========================================================================
+
+    @staticmethod
+    def _get_neuron_classifications_safe(
+        results: Any, force: bool, n_cells: int
+    ) -> np.ndarray:
+        try:
+            try:
+                return results.DataHelper.get_neuron_classifications(force=force)
+            except FileNotFoundError:
+                return results.DataHelper.get_neuron_classifications(
+                    folder=results.network_path, force=force
+                )
+        except AttributeError:
+            warn(
+                "Neuron classification data missing. Defaulting all units to 'SUA_pyramidal'."
+            )
+            return np.array(["SUA_pyramidal"] * n_cells)
+
+    @staticmethod
+    def _extract_session_epochs(results: Any) -> Dict[str, IntervalSet]:
+        pre_epoch, _ = results.get_epoch_interval("pre_test")
+        pre_sleep, _ = results.get_epoch_interval("pre_sleep")
+        cond_epoch, _ = results.get_epoch_interval("cond")
+        post_epoch, _ = results.get_epoch_interval("post_test")
+        post_sleep, _ = results.get_epoch_interval("post_sleep")
+        hab_epoch, _ = results.get_epoch_interval("hab")
+
+        sws_epochs = results.DataHelper.get_sws_epochs(
+            network_path=results.network_path
+        )
+        rem_epochs = results.DataHelper.get_rem_epochs(
+            network_path=results.network_path
+        )
+        ripples_epochs = results.DataHelper.get_ripples_epochs()
+        mov_epochs = results.DataHelper.get_mov_epochs()
+
+        try:
+            freeze_epochs = results.DataHelper.get_freeze_epochs()
+        except AttributeError:
+            freeze_epochs = IntervalSet(start=[], end=[])
+
+        try:
+            stim_epochs = results.DataHelper.get_stim_epochs(before=0.05, after=0.05)
+        except AttributeError:
+            stim_epochs = IntervalSet(start=[], end=[])
+
+        return {
+            "pre_test": pre_epoch,
+            "pre": pre_epoch,
+            "pre_sleep": pre_sleep,
+            "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
+            "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
+            "hab": hab_epoch,
+            "cond": cond_epoch,
+            "cond_freeze": cond_epoch.intersect(freeze_epochs),
+            "cond_ripples": cond_epoch.intersect(ripples_epochs),
+            "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
+            "cond_move": cond_epoch.intersect(mov_epochs),
+            "cond_stim": cond_epoch.intersect(stim_epochs),
+            "post_test": post_epoch,
+            "post": post_epoch,
+            "post_sleep": post_sleep,
+            "post_sleep_sws": post_sleep.intersect(sws_epochs),
+            "post_sleep_rem": post_sleep.intersect(rem_epochs),
+            "sws": sws_epochs,
+            "rem": rem_epochs,
+            "ripples": ripples_epochs,
+            "mov": mov_epochs,
+            "freeze": freeze_epochs,
+            "stim": stim_epochs,
+        }
+
+    @staticmethod
+    def _resolve_template_interval(
+        template_period: str, epochs: Dict[str, IntervalSet]
+    ) -> IntervalSet:
+        if template_period == "wake":
+            return (
+                epochs["pre_test"]
+                .union(epochs["hab"])
+                .union(epochs["cond"])
+                .union(epochs["post_test"])
+            )
+        elif template_period == "cond":
+            return epochs["cond"]
+        elif template_period == "condMov":
+            return epochs["cond"].intersect(epochs["mov"])
+        elif template_period == "condFree":
+            return epochs["cond"].intersect(epochs["freeze"])
+        elif template_period == "postRip":
+            return (
+                epochs["post_test"]
+                .intersect(epochs["sws"])
+                .intersect(epochs["ripples"])
+            )
+        elif template_period == "condRip":
+            return epochs["cond"].intersect(epochs["ripples"])
+        else:
+            raise ValueError(
+                f"Unknown template window specification: {template_period}"
+            )
+
+    @staticmethod
+    def _extract_pca(
+        q_template: np.ndarray, num_bins: int, num_neurons: int, num_templates: int
+    ) -> Tuple[np.ndarray, np.ndarray, float, float]:
+        corr_matrix = np.corrcoef(q_template, rowvar=False)
+        corr_matrix = np.nan_to_num(corr_matrix)
+        np.fill_diagonal(corr_matrix, 0)
+
+        eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
+        sort_idx = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[sort_idx]
+        assemblies = eigenvectors[:, sort_idx]
+
+        lambda_max = float((1.0 + np.sqrt(num_neurons / float(num_bins))) ** 2)
+
+        # Surrogate Shuffling Benchmark
+        shuffled_q = q_template.copy()
+        for col in range(num_neurons):
+            shuffled_q[:, col] = np.random.permutation(shuffled_q[:, col])
+        shuff_corr = np.corrcoef(shuffled_q, rowvar=False)
+        np.fill_diagonal(shuff_corr, 0)
+        shuff_values, _ = np.linalg.eigh(np.nan_to_num(shuff_corr))
+        percentile_shuff = float(np.percentile(shuff_values, 100))
+
+        return assemblies[:, :num_templates], eigenvalues, lambda_max, percentile_shuff
+
+    @staticmethod
+    def _extract_pca_ica(
+        q_template: np.ndarray,
+        num_bins: int,
+        num_neurons: int,
+        num_templates: int,
+        random_state: int,
+    ) -> Tuple[np.ndarray, np.ndarray, float, float]:
+        corr_matrix = np.dot(q_template.T, q_template) / float(num_bins)
+        corr_matrix = np.nan_to_num(corr_matrix)
+
+        eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
+        idx_sorted = np.argsort(eigenvalues)[::-1]
+        eigenvectors = eigenvectors[:, idx_sorted]
+        eigenvalues = eigenvalues[idx_sorted]
+
+        lambda_max = float((1.0 + np.sqrt(num_neurons / float(num_bins))) ** 2)
+        sig_mask = eigenvalues > lambda_max
+        if not np.any(sig_mask):
+            sig_mask[: min(num_templates, num_neurons)] = True
+
+        n_sig = min(int(np.sum(sig_mask)), num_templates)
+        v_sig = eigenvectors[:, :n_sig]
+        l_sig = eigenvalues[:n_sig]
+
+        # Project onto whitened subspace
+        whitened_template = np.dot(
+            q_template, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig)))
+        )
+
+        ica = FastICA(
+            n_components=n_sig,
+            whiten="unit-variance",
+            random_state=random_state,
+            max_iter=1000,
+        )
+        ica.fit(whitened_template)
+
+        unmixing = ica.components_
+        mix_weights = np.dot(v_sig, np.dot(np.diag(np.sqrt(l_sig)), unmixing.T))
+        norms = np.linalg.norm(mix_weights, axis=0, keepdims=True) + 1e-12
+        assembly_weights = mix_weights / norms
+
+        return assembly_weights, eigenvalues, lambda_max, lambda_max
+
+    @staticmethod
+    def _extract_ica(
+        q_template: np.ndarray, num_neurons: int, num_templates: int, random_state: int
+    ) -> Tuple[np.ndarray, np.ndarray, float, float]:
+        n_comp = min(num_templates, num_neurons)
+        ica = FastICA(n_components=n_comp, random_state=random_state, max_iter=1000)
+        ica.fit(q_template)
+
+        comp_weights = ica.components_.T
+        norms = np.linalg.norm(comp_weights, axis=0, keepdims=True) + 1e-12
+        assembly_weights = comp_weights / norms
+        eigenvalues = np.ones(n_comp)
+
+        return assembly_weights, eigenvalues, np.nan, np.nan
+
+    @staticmethod
+    def _correct_pca_polarity(
+        rs_tsd: Tsd, pre_epoch: IntervalSet, post_epoch: IntervalSet
+    ) -> Tsd:
+        try:
+            mean_pre = np.mean(rs_tsd.restrict(pre_epoch).values)
+            mean_post = np.mean(rs_tsd.restrict(post_epoch).values)
+            if max(abs(mean_pre), abs(mean_post)) != max(mean_pre, mean_post):
+                return rs_tsd * -1.0
+        except Exception:
+            pass
+        return rs_tsd
+
+    @staticmethod
+    def _extract_position_data(results: Any) -> Dict[str, np.ndarray]:
+        try:
+            pos_x = results.DataHelper.fullBehavior["Positions"][:, 0]
+            pos_y = results.DataHelper.fullBehavior["Positions"][:, 1]
+            pos_t = results.DataHelper.fullBehavior["positionTime"].flatten()
+            linear_pos = results.l_function(
+                results.DataHelper.fullBehavior["Positions"][:, :2]
+            )[1].flatten()
+        except Exception:
+            pos_x, pos_y, pos_t, linear_pos = (
+                np.array([]),
+                np.array([]),
+                np.array([]),
+                np.array([]),
+            )
+
+        return {"x": pos_x, "y": pos_y, "time": pos_t, "linear": linear_pos}
+
+    @staticmethod
+    def _summarize_reactivation_strengths(
+        rs_tsd: Tsd,
+        macro_epochs: Dict[str, IntervalSet],
+        event_epochs: Dict[str, IntervalSet],
+    ) -> Dict[str, float]:
+        out = {}
+        all_epochs = {**macro_epochs, **event_epochs}
+        for name, ep in all_epochs.items():
+            if ep is None or len(ep) == 0:
+                out[name] = np.nan
+                continue
+            try:
+                vals = rs_tsd.restrict(ep).values
+                out[name] = float(np.nanmean(vals)) if vals.size > 0 else np.nan
+            except Exception:
+                out[name] = np.nan
+        return out
+
+    # =========================================================================
+    # SUB-FUNCTIONS FOR PLOTTING
+    # =========================================================================
+
+    @staticmethod
+    def _plot_assembly_weights(
+        session_id: str,
+        assemblies: np.ndarray,
+        filtered_types: np.ndarray,
+        cell_labels: List[str],
+        eigenvalues: np.ndarray,
+        lambda_max: float,
+        max_templates: int,
+        template_period: str,
+        method: str,
+        save_fig_path: Optional[str],
+    ):
+        color_map = {
+            "SUA_pyramidal": "#77AC30",
+            "SUA_interneuron": "#0072BD",
+            "SUA_unclassified": "#7F7F7F",
+            "MUA": "#D95319",
+            "unclassified": "#7F7F7F",
+        }
+
+        num_templates = min(assemblies.shape[1], max_templates)
+        for idx_t in range(num_templates):
+            if np.isfinite(lambda_max) and eigenvalues[idx_t] < 0.9 * lambda_max:
+                warn(
+                    f"Skipping plot for template {idx_t + 1}: Eigenvalue below MP threshold."
+                )
+                break
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            w = assemblies[:, idx_t]
+            mu_w, std_w = np.mean(w), np.std(w)
+
+            for n_type in np.unique(filtered_types):
+                m_idx = np.where(filtered_types == n_type)[0]
+                c = color_map.get(n_type, "#7F7F7F")
+
+                marker, stem, _ = ax.stem(
+                    m_idx, w[m_idx], linefmt=c, markerfmt="o", label=n_type
+                )
+                plt.setp(marker, markerfacecolor=c, markeredgecolor=c, markersize=5)
+                plt.setp(stem, color=c)
+
+            ax.axhline(mu_w + 2 * std_w, color="r", linestyle="--", label="±2 SD")
+            ax.axhline(mu_w - 2 * std_w, color="r", linestyle="--")
+            ax.set_xticks(np.arange(len(w)))
+            ax.set_xticklabels(cell_labels, rotation=90, fontsize=6)
+            ax.set_ylabel("Weight")
+            ax.set_title(
+                f"{session_id} | {method.upper()} Pattern #{idx_t + 1} ({template_period})"
+            )
+            ax.set_ylim([-0.55, 0.55])
+            ax.legend(loc="upper right", frameon=False)
+            plt.tight_layout()
+
+            if save_fig_path:
+                os.makedirs(save_fig_path, exist_ok=True)
+                fig.savefig(
+                    f"{save_fig_path}/{session_id}_weight_pattern_{idx_t + 1}.png",
+                    dpi=200,
+                )
+            plt.close(fig)
+
+    @staticmethod
+    def _plot_epoch_comparison(
+        session_id: str,
+        rs_templates: Dict[int, Tsd],
+        eigenvalues: np.ndarray,
+        epochs: Dict[str, IntervalSet],
+        save_fig_path: Optional[str],
+    ):
+        pre_sws_rs = [
+            np.nanmean(rs.restrict(epochs["pre_sleep_sws"]).values)
+            for rs in rs_templates.values()
+        ]
+        hab_rs = [
+            np.nanmean(rs.restrict(epochs["hab"]).values)
+            for rs in rs_templates.values()
+        ]
+        cond_rs = [
+            np.nanmean(rs.restrict(epochs["cond"]).values)
+            for rs in rs_templates.values()
+        ]
+        post_sws_rs = [
+            np.nanmean(rs.restrict(epochs["post_sleep_sws"]).values)
+            for rs in rs_templates.values()
+        ]
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+
+        # Pre vs Post Scatter
+        norm_evals = (
+            eigenvalues / np.max(eigenvalues)
+            if np.max(eigenvalues) > 0
+            else eigenvalues
+        )
+        scatter = axes[0].scatter(
+            pre_sws_rs,
+            post_sws_rs,
+            c=norm_evals[: len(pre_sws_rs)],
+            cmap="viridis",
+            alpha=0.8,
+        )
+
+        if (
+            len(pre_sws_rs) > 1
+            and np.all(np.isfinite(pre_sws_rs))
+            and np.all(np.isfinite(post_sws_rs))
+        ):
+            r_val, p_val = stats.pearsonr(pre_sws_rs, post_sws_rs)
+            axes[0].set_title(f"Pre vs Post SWS (r={r_val:.2f}, p={p_val:.3f})")
+
+        min_v = min(pre_sws_rs + post_sws_rs)
+        max_v = max(pre_sws_rs + post_sws_rs)
+        axes[0].plot([min_v, max_v], [min_v, max_v], "k:")
+        axes[0].set_xlabel("Reactivation (Pre-Sleep SWS)")
+        axes[0].set_ylabel("Reactivation (Post-Sleep SWS)")
+        fig.colorbar(scatter, ax=axes[0], label="Normalized Eigenvalue")
+
+        # Epoch Bar Chart
+        epoch_names = ["PreSleep", "Hab", "Cond", "PostSleep"]
+        means = [
+            np.nanmean(pre_sws_rs),
+            np.nanmean(hab_rs),
+            np.nanmean(cond_rs),
+            np.nanmean(post_sws_rs),
+        ]
+        sems = [
+            stats.sem(pre_sws_rs, nan_policy="omit"),
+            stats.sem(hab_rs, nan_policy="omit"),
+            stats.sem(cond_rs, nan_policy="omit"),
+            stats.sem(post_sws_rs, nan_policy="omit"),
+        ]
+
+        axes[1].bar(
+            epoch_names,
+            means,
+            yerr=sems,
+            color=["#CCCCCC", "#CAE62F", "#E60000", "#333333"],
+            edgecolor="k",
+            capsize=4,
+        )
+        axes[1].set_ylabel("Reactivation Score")
+        axes[1].set_title("Mean Reactivation Across Epochs")
+        plt.tight_layout()
+
+        if save_fig_path:
+            os.makedirs(save_fig_path, exist_ok=True)
+            fig.savefig(f"{save_fig_path}/{session_id}_epoch_comparison.png", dpi=200)
+        plt.close(fig)
+
+    @staticmethod
+    def _plot_spatial_maps(
+        session_id: str,
+        rs_tsd: Tsd,
+        pos_dict: Dict[str, np.ndarray],
+        hab_ep: IntervalSet,
+        cond_ep: IntervalSet,
+        save_fig_path: Optional[str],
+    ):
+        px = pos_dict.get("x", np.array([]))
+        py = pos_dict.get("y", np.array([]))
+        pt = pos_dict.get("time", np.array([]))
+
+        # Filter out non-finite baseline tracking coordinates
+        valid_pos = np.isfinite(px) & np.isfinite(py) & np.isfinite(pt)
+        if np.sum(valid_pos) < 10:
+            warn(
+                f"Skipping spatial map for {session_id}: insufficient valid position tracking data."
+            )
+            return
+
+        px_clean, py_clean, pt_clean = px[valid_pos], py[valid_pos], pt[valid_pos]
+
+        def _grid_bin(ep: IntervalSet) -> np.ndarray:
+            rs_sub = rs_tsd.restrict(ep)
+            if len(rs_sub) == 0:
+                return np.zeros((10, 10))
+            t_sub = rs_sub.index
+            v_sub = rs_sub.values
+
+            x_interp = np.interp(t_sub, pt_clean, px_clean, left=np.nan, right=np.nan)
+            y_interp = np.interp(t_sub, pt_clean, py_clean, left=np.nan, right=np.nan)
+
+            valid_mask = (
+                np.isfinite(x_interp) & np.isfinite(y_interp) & np.isfinite(v_sub)
+            )
+            if np.sum(valid_mask) < 10:
+                return np.zeros((10, 10))
+
+            x_valid = x_interp[valid_mask]
+            y_valid = y_interp[valid_mask]
+            v_valid = v_sub[valid_mask]
+            stat, _, _, _ = stats.binned_statistic_2d(
+                x_valid, y_valid, v_valid, statistic="mean", bins=10
+            )
+            return np.nan_to_num(stat)
+
+        grid_hab = _grid_bin(hab_ep)
+        grid_cond = _grid_bin(cond_ep)
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 3.8))
+        vmax = max(np.max(grid_hab), np.max(grid_cond))
+        vmin = min(np.min(grid_hab), np.min(grid_cond))
+
+        im0 = axes[0].imshow(
+            grid_hab.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
+        )
+        axes[0].set_title("Habituation Map")
+        fig.colorbar(im0, ax=axes[0])
+
+        im1 = axes[1].imshow(
+            grid_cond.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
+        )
+        axes[1].set_title("Conditioning Map")
+        fig.colorbar(im1, ax=axes[1])
+
+        im2 = axes[2].imshow((grid_cond - grid_hab).T, origin="lower", cmap="bwr")
+        axes[2].set_title("Cond - Hab Difference")
+        fig.colorbar(im2, ax=axes[2])
+
+        for ax in axes:
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        plt.tight_layout()
+        if save_fig_path:
+            os.makedirs(save_fig_path, exist_ok=True)
+            fig.savefig(
+                f"{save_fig_path}/{session_id}_spatial_reactivation.png", dpi=200
+            )
+        plt.close(fig)
 
 
 def _normalize_phase_name(phase: Optional[str]) -> str:
@@ -156,7 +1647,7 @@ def _parse_session_key(session_key: str) -> tuple[str, str]:
     if not isinstance(session_key, str) or "_" not in session_key:
         return session_key, ""
     mouse_name, manipe = session_key.rsplit("_", 1)
-    return mouse_name, manipe
+    return mouse_name, manipe[:1].upper() + manipe[1:]
 
 
 def _summarize_reactivation_strengths(
@@ -921,7 +2412,9 @@ def path_for_experiments_df(experiment_name: str, training_name: str) -> pd.Data
         Dir = path_for_experiments(
             experiment_name=experiment_name, training_name=training_name
         )
-        return dict_to_dataframe(Dir)
+        df = dict_to_dataframe(Dir)
+        df["nameExp"] = training_name
+        return df
     except ImportError:
         print("Original path_for_experiments_erc function not available")
         return pd.DataFrame()
@@ -963,6 +2456,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         self.projects: Dict[str, Project] = dict()
 
         for i, winMS in enumerate(self.windows):
+            print(f"Processing window {winMS} ms ({i + 1}/{len(self.windows)})")
             self._initialize_window(winMS, i, **kwargs)
 
         # Initialize PaperFigures and load trainers if requested
@@ -1001,6 +2495,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         Dir = args_list.pop(0) if args_list else kwargs.pop("Dir", None)
         mouse_name = args_list.pop(0) if args_list else kwargs.get("mouse_name", None)
         manipe = args_list.pop(0) if args_list else kwargs.get("manipe", None)
+        manipe = manipe[:1].upper() + manipe[1:] if manipe else None
 
         exp_index = kwargs.get("exp_index", None)
         full_path = kwargs.get("full_path", "")
@@ -1043,9 +2538,11 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             **kwargs,
         )
         if i == 0:
+            print(f"Initializing DataHelper for window {winMS} ms")
             self.data_helper = DataHelperClass(
                 self.xml,
                 mode="compare",
+                windowSize=int(winMS) / 1000,
                 **kwargs,
             )
             self._setup_main_window(winMS, **kwargs)
@@ -1175,7 +2672,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
 
     def _load_trainers_after_load(self):
         """
-        Static method to load trainers after loading the Mouse_Results selfect.
+        Static method to load trainers after loading the Mouse_Results pickle.
         This is necessary because the trainers are not pickled.
         """
         state = self.__getstate__()
@@ -1216,7 +2713,13 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                 manipe_in_path = self.Dir[conditions].path.str.contains(
                     self.manipe, case=False
                 )
-                if manipe_in_path.sum() == 1:
+                # also check if we can get a total match between dir.manipe and self.manipe, if so we can use that as a condition
+                exact_manipe_match = (
+                    self.Dir[conditions].manipe.str.lower() == self.manipe.lower()
+                )
+                if exact_manipe_match.sum() == 1:
+                    conditions = conditions & exact_manipe_match
+                elif manipe_in_path.sum() == 1:
                     conditions = conditions & manipe_in_path
                 else:
                     raise ValueError(
@@ -1284,6 +2787,9 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             windows = [str(window) for window in windows]
 
         if windows is None:
+            warn(
+                f"No windows specified for {self.mouse_name}. Searching for available windows in {self.folderResult}. Got kwargs {kwargs}."
+            )
             self.windows = [
                 str(d)
                 for d in os.listdir(self.folderResult)
@@ -1383,9 +2889,14 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         for i, winMS in enumerate(self.windows):
             if i == 0 and which.lower() in ["ann", "both"]:
                 if not hasattr(self, "ann") or kwargs.get("redo", False):
-                    max_nb_spikes = kwargs.pop(
-                        "max_nb_spikes", get_max_nb_spikes(winMS)
-                    )
+                    max_nb_spikes = kwargs.pop("max_nb_spikes", None)
+
+                    if max_nb_spikes is None:
+                        warn(
+                            f"max_nb_spikes is set to {get_max_nb_spikes(winMS)} for window {winMS}. You can change this by passing max_nb_spikes in kwargs."
+                        )
+                        max_nb_spikes = get_max_nb_spikes(winMS)
+
                     max_spikes_per_group = kwargs.pop("max_spikes_per_group", None)
                     self.ann = NNTrainer(
                         self.projects[winMS],
@@ -1781,41 +3292,69 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                         if phase not in self.resultsNN_phase_pkl:
                             self.resultsNN_phase_pkl[phase] = {}
                         try:
-                            with open(
-                                os.path.join(
-                                    self.projectPath.experimentPath,
-                                    "results",
-                                    str(winMS),
-                                    f"decoding_results{phase}.pkl",
-                                ),
-                                "rb",
-                            ) as f:
-                                results = pickle.load(f)
-                                for key in results.keys():
-                                    if (
-                                        not isinstance(
-                                            self.resultsNN_phase_pkl[phase][key], list
-                                        )
-                                        or key not in self.resultsNN_phase_pkl[phase]
-                                    ):
-                                        self.resultsNN_phase_pkl[phase][key] = []
-                                    if idWindow == len(
-                                        self.resultsNN_phase_pkl[phase][key]
-                                    ):
-                                        self.resultsNN_phase_pkl[phase][key].append(
-                                            results[key]
-                                        )
-                                    if (
-                                        self.resultsNN_phase_pkl[phase][key][idWindow]
-                                        is None
-                                    ):
-                                        self.resultsNN_phase_pkl[phase][key][
-                                            idWindow
-                                        ] = results[key]
+                            h5_file = os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(winMS),
+                                f"decoding_results{phase}.h5",
+                            )
+                            npz_file = os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(winMS),
+                                f"decoding_results{phase}.pkl",
+                            )
+                            pkl_file = os.path.join(
+                                self.projectPath.experimentPath,
+                                "results",
+                                str(winMS),
+                                f"decoding_results{phase}.pkl",
+                            )
+                            if os.path.exists(h5_file):
+                                with h5py.File(h5_file, "r") as f:
+                                    predicted_logits = f["logits_hw"][:]
+                            elif os.path.exists(npz_file):
+                                with np.load(npz_file, allow_pickle=True) as loaded_npz:
+                                    predicted_logits = loaded_npz["logits_hw"]
+                            elif os.path.exists(pkl_file):
+                                with open(
+                                    pkl_file,
+                                    "rb",
+                                ) as f:
+                                    results = pickle.load(f)
+                                    for key in results.keys():
+                                        if (
+                                            not isinstance(
+                                                self.resultsNN_phase_pkl[phase][key],
+                                                list,
+                                            )
+                                            or key
+                                            not in self.resultsNN_phase_pkl[phase]
+                                        ):
+                                            self.resultsNN_phase_pkl[phase][key] = []
+                                        if idWindow == len(
+                                            self.resultsNN_phase_pkl[phase][key]
+                                        ):
+                                            self.resultsNN_phase_pkl[phase][key].append(
+                                                results[key]
+                                            )
+                                        if (
+                                            self.resultsNN_phase_pkl[phase][key][
+                                                idWindow
+                                            ]
+                                            is None
+                                        ):
+                                            self.resultsNN_phase_pkl[phase][key][
+                                                idWindow
+                                            ] = results[key]
+                            else:
+                                raise FileNotFoundError(
+                                    f"No decoding_results{phase}.pkl or .npz found for window {winMS}."
+                                )
 
-                            predicted_logits = self.resultsNN_phase_pkl[phase][
-                                "logits_hw"
-                            ][idWindow]
+                                predicted_logits = self.resultsNN_phase_pkl[phase][
+                                    "logits_hw"
+                                ][idWindow]
                         except FileNotFoundError:
                             print(
                                 f"No decoding_results{phase}.pkl found for window {winMS}."
@@ -2189,7 +3728,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
             raise TypeError(f"window must be an int or str, got {type(window)}")
         return windows, windows_values
 
-    def get_epoch_interval(self, phase):
+    def get_epoch_interval(self, phase) -> Tuple[IntervalSet, np.ndarray]:
         phase_name = _normalize_phase_name(phase)
         return_dict = {
             "training": (
@@ -2433,10 +3972,16 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
                     data.append(row)
                     pbar.update(1)
 
-        self.results_df = pd.DataFrame(data)
-        self.results_df.set_index(
-            ["nameExp", "mouse", "manipe", "phase", "winMS"], inplace=True
-        )
+        try:
+            self.results_df = pd.DataFrame(data)
+            self.results_df.set_index(
+                ["nameExp", "mouse", "manipe", "phase", "winMS"], inplace=True
+            )
+        except Exception as e:
+            warn(f"Failed to create DataFrame: {e}. Returning None instead of df")
+            self.results_data = data
+            self.results_df = None
+            return None
         return self.results_df
 
     def get_tuning_curves(
@@ -2679,7 +4224,7 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
         self, which: str = "freezing", path: Optional[str] = None, **kwargs
     ):
         try:
-            respi = self.DataHelper.get_respi_data()
+            respi = self.DataHelper.get_respi_data(network_path=self.network_path)
         except FileNotFoundError:
             respi = self.DataHelper.get_respi_data(self.network_path)
 
@@ -3196,33 +4741,64 @@ class Mouse_Results(Params, PaperFigures, SpatialConstraintsMixin):
     def add_sleep_scoring(self, force: bool = False) -> Dict[str, Any]:
         if (
             hasattr(self.DataHelper, "sleep_scoring")
-            and isinstance(self.DataHelper.sleep_scoring, dict)
+            and isinstance(self.DataHelper.sleep_scoring, LazySleepScoring)
             and not force
         ):
             return self.DataHelper.sleep_scoring
 
-        from neuroencoders.utils.wrappers import loadSleepScoring
-
-        try:
-            if (
-                not os.path.exists(
-                    os.path.join(self.DataHelper.folder, "nnSleepScoring.mat")
-                )
-                and not os.path.exists(
-                    os.path.join(self.DataHelper.folder, "SleepScoring_OBGamma.mat")
-                )
-                and not os.path.exists(
-                    os.path.join(self.DataHelper.folder, "SleepScoring_Accelero.mat")
-                )
-            ):
-                raise FileNotFoundError(
-                    "Sleep scoring files not found in DataHelper folder. Attempting to load from network path."
-                )
-            self.DataHelper.sleep_scoring = loadSleepScoring(self.DataHelper.folder)
-        except FileNotFoundError:
-            self.DataHelper.sleep_scoring = loadSleepScoring(self.network_path)
-
+        self.DataHelper.add_sleep_scoring(
+            force=force,
+            folder=self.DataHelper.folder,
+            network_path=self.network_path,
+        )
         return self.DataHelper.sleep_scoring
+
+    @property
+    def sleep_scoring(self) -> Dict[str, Any]:
+        """Lazy accessor for sleep scoring."""
+        if not hasattr(self, "_sleep_scoring") or self._sleep_scoring is None:
+            self._sleep_scoring = LazySleepScoring(
+                folder_path=self.DataHelper.folder,
+                fallback_network_path=getattr(self, "network_path", None),
+            )
+        return self._sleep_scoring
+
+    def analyse_sleep_ephys(
+        self,
+        winMS: int = 108,
+        reactivation_tsd: Optional[Tsd] = None,
+        model_metric_key: str = "Hn",
+        transition_window_sec: float = 120.0,
+        bin_size_sec: float = 5.0,
+        drowsiness_window_sec: float = 180.0,
+    ) -> Dict[str, Any]:
+        """Run sleep-state analysis for a single mouse.
+
+        This analyses ripple rates, reactivation statistics (if provided),
+        model scalar outputs (e.g., Hn/maxp), and drowsiness trends before NREM.
+        """
+        if winMS not in self.timeWindows:
+            raise ValueError(
+                f"winMS {winMS} not found in available windows: {self.timeWindows}"
+            )
+        from neuroencoders.resultAnalysis.ephys_sleep_analysis import (
+            SleepAnalysisConfig,
+            SleepEphysAnalyser,
+        )
+
+        analyser = SleepEphysAnalyser(
+            SleepAnalysisConfig(
+                transition_window_sec=transition_window_sec,
+                bin_size_sec=bin_size_sec,
+                drowsiness_window_sec=drowsiness_window_sec,
+            )
+        )
+        return analyser.analyse_mouse(
+            mouse_results=self,
+            reactivation_tsd=reactivation_tsd,
+            winMS=winMS,
+            model_metric_key=model_metric_key,
+        )
 
 
 class Results_Loader(TuningCurvesPlotter):
@@ -3273,7 +4849,7 @@ class Results_Loader(TuningCurvesPlotter):
             dict (dict): Dictionary to store results, default is empty.
             df (pd.DataFrame): DataFrame to store results, default is empty.
             If both of these are provided, the dict will be used to initialize the Mouse_Results objects.
-            target (str): Target for the results, default is 'pos'. This can be 'pos', 'LinAndDirection', or any other target you want to analyze.
+            target (str): Target for the results, default is 'pos'. This can be 'pos', 'LinAndDirection', or any other target you want to analyse.
             load_trainers_at_init (bool): Whether to load trainers at initialization. Default is True.
             which (str): Type of trainer to load ('ann', 'bayes', or 'both'). Default is 'both'.
             deviceName (str): Device to use for training ('gpu' or 'cpu'). Default is 'gpu'.
@@ -3285,304 +4861,169 @@ class Results_Loader(TuningCurvesPlotter):
 
         """
         super().__init__()
-        self.all_spikes = None
-        if mice_nb is None:
-            mice_nb = dir.name.str.extract(r"(\d+)").astype(int)
-        else:
-            mice_nb = [int(m) for m in mice_nb]
-        if mice_manipes is None:
-            mice_manipes = dir.manipe.str.extract(r"(\w+)").astype(str)
-        else:
-            mice_manipes = [str(m) for m in mice_manipes]
-        if timeWindows is None:
-            warn("No timeWindows provided, using all windowSizeMS available in Dir.")
-            self.timeWindows = "all"
-        else:
-            self.timeWindows = timeWindows
-        if phases is None:
-            warn("No phase provided, using 'all' as default.")
-            self.phases = None
-        else:
-            self.phases = phases
-
-        if exp_indices is None:
-            exp_indices = np.zeros(len(dir), dtype=bool).tolist()
-        if not isinstance(self.phases, List):
-            self.phases = [self.phases]
-        if not isinstance(self.timeWindows, List):
-            if isinstance(self.timeWindows, int):
-                self.timeWindows = [self.timeWindows]
-            elif self.timeWindows == "all":
-                self.timeWindows = ["all"]
-            else:
-                raise TypeError(
-                    f"timeWindows must be a list of integers or an integer, got {type(self.timeWindows)}"
-                )
-        self.suffixes = [f"_{p}" for p in self.phases] if self.phases else [""]
-
         self.Dir = dir
-        self.mice_nb = mice_nb
-        self.mice_manipes = mice_manipes
+        self.all_spikes = None
+
+        self.init_kwargs = kwargs
+
+        assert len(dir.nameExp.unique()) == 1, (
+            "All entries in dir must have the same nameExp."
+        )
+        self.nameExp = dir.nameExp.iloc[0]
+
+        # Parse filter parameters
+        self.mice_nb = (
+            [int(m) for m in mice_nb]
+            if mice_nb is not None
+            else dir.name.str.extract(r"(\d+)").astype(int)[0].tolist()
+        )
+        self.mice_manipes = (
+            [str(m)[:1].upper() + str(m)[1:] for m in mice_manipes]
+            if mice_manipes is not None
+            else dir.manipe.str.extract(r"(\w+)").astype(str)[0].tolist()
+        )
+        self.exp_indices = (
+            exp_indices
+            if exp_indices is not None
+            else np.zeros(len(self.mice_nb), dtype=int).tolist()
+        )
+
+        self.timeWindows = timeWindows if timeWindows is not None else "all"
+        self.phases = phases if phases is not None else ["all"]
+        if not isinstance(self.phases, list):
+            self.phases = [self.phases]
+
+        self.suffixes = [f"_{p}" for p in self.phases]
         self.mice_names = [
-            f"M{nb}{manipe}" for nb, manipe in zip(mice_nb, mice_manipes)
+            f"M{nb}{manipe}" for nb, manipe in zip(self.mice_nb, self.mice_manipes)
         ]
-        self.exp_indices = exp_indices
-        if kwargs.get("dict", None) is None:
-            self.results_dict = {}
-        else:
-            self.results_dict = kwargs["dict"]
-        if kwargs.get("df", None) is None:
-            self.results_df = pd.DataFrame()
-        else:
+
+        if (
+            "df" in kwargs
+            and isinstance(kwargs["df"], pd.DataFrame)
+            and not kwargs["df"].empty
+        ):
             self.results_df = kwargs["df"]
+        else:
+            self.results_df = self.convert_to_df()
 
-        if kwargs.get("nameExp", None) is not None:
-            self.nameExp = kwargs["nameExp"]
+    def analyse_sleep_ephys(
+        self,
+        winMS: int = 108,
+        rs_source: str = "spikes",
+        template_period: str = "cond",
+        session_data: Optional[Dict[str, Any]] = None,
+        num_templates: int = 1,
+        template_idx: int = 0,
+        model_metric_key: str = "Hn",
+        transition_window_sec: float = 120.0,
+        bin_size_sec: float = 5.0,
+        drowsiness_window_sec: float = 180.0,
+    ) -> Dict[str, Any]:
+        """Run cohort-level sleep-state analysis across loaded mice.
 
-        isTransformer = kwargs.pop("isTransformer", None)
-        transform_w_log = kwargs.pop("transform_w_log", None)
-        denseweight = kwargs.pop("denseweight", True)
-        found_training = False
-
-        if kwargs.get("dict", None) is None:
-            for mouse_nb, manipe, mouse_full_name, exp_index in zip(
-                self.mice_nb, self.mice_manipes, self.mice_names, self.exp_indices
-            ):
-                mouse_nb = str(mouse_nb)
-                if exp_index is not None and exp_index != 0:
-                    exp_index = int(exp_index)
-                    mouse_full_name = f"{mouse_full_name}_exp{exp_index}"
-                conditions = (
-                    self.Dir.name.str.lower().str.contains(mouse_nb.lower())
-                ) & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
-                print(
-                    f"Loading results for mouse {mouse_full_name} with conditions: {conditions.sum()} matching entries."
-                )
-                if not conditions.any():
-                    raise ValueError(
-                        f"Mouse {mouse_nb} with manipe {manipe} not found in the directory."
-                    )
-                window_tmp = []
-                if conditions.sum() > 1:
-                    if exp_index is None or exp_index == 0:
-                        manipe_in_path = self.Dir[conditions].path.str.contains(
-                            manipe, case=False
-                        )
-                        if manipe_in_path.sum() == 1:
-                            conditions = conditions & manipe_in_path
-                        else:
-                            raise ValueError(
-                                f"Multiple entries found for mouse {mouse_nb} with manipe {manipe}. Please provide exp_index to disambiguate."
-                            )
-                    else:
-                        suppl_conditions = self.Dir.path.str.contains(f"exp{exp_index}")
-                        conditions = conditions & suppl_conditions
-                        if not conditions.any():
-                            raise ValueError(
-                                f"Mouse {mouse_nb} with manipe {manipe} and exp_index {exp_index} not found in the directory."
-                            )
-                        elif conditions.sum() > 1:
-                            raise ValueError(
-                                f"Multiple entries found for mouse {mouse_nb} with manipe {manipe} and exp_index {exp_index}. Please check the directory."
-                            )
-
-                path = self.Dir[conditions].iloc[0].path
-                nameExp = os.path.basename(
-                    self.Dir[
-                        (self.Dir.name.str.lower().str.contains(mouse_nb.lower()))
-                        & (self.Dir.manipe.str.lower().str.contains(manipe.lower()))
-                    ]
-                    .iloc[0]
-                    .results
-                )
-                if nameExp not in self.results_dict:
-                    self.results_dict[nameExp] = {}
-                if not hasattr(self, "nameExp"):
-                    self.nameExp = [nameExp]
-                if nameExp not in self.nameExp:
-                    self.nameExp.append(nameExp)
-                if mouse_full_name not in self.results_dict[nameExp]:
-                    self.results_dict[nameExp][mouse_full_name] = {}
-
-                folderResult = os.path.join(path, nameExp, "results")
-                if not os.path.exists(folderResult):
-                    print(
-                        f"Folder {folderResult} does not exist. Skipping mouse {mouse_nb} with manipulation {manipe}."
-                    )
-                    continue
-                if self.timeWindows == "all":
-                    windowSizeMS = [
-                        int(d) for d in os.listdir(folderResult) if d.isdigit()
-                    ]
-                else:
-                    windowSizeMS = self.timeWindows
-
-                for win in windowSizeMS:
-                    if os.path.exists(
-                        os.path.join(
-                            folderResult,
-                            str(win),
-                            f"errorFig_2d_NN{self.suffixes[0]}_pos.png",
-                        )
-                    ):
-                        window_tmp.append(win)
-
-                if window_tmp != windowSizeMS:
-                    warn(
-                        f"Warning: Not all windows found for mouse {mouse_nb} with manipulation {manipe}. Found: {window_tmp}, expected: {windowSizeMS}"
-                    )
-
-                for suffix, phase in zip(self.suffixes, self.phases):
-                    add_training = phase == kwargs.get("template", "pre")
-                    add_full_pre = phase == kwargs.get("template", "pre")
-                    self.results_dict[nameExp][mouse_full_name][phase] = Mouse_Results(
-                        dir,
-                        mouse_name=mouse_nb,
-                        manipe=manipe,
-                        nameExp=nameExp,
-                        phase=suffix.strip("_"),
-                        exp_index=exp_index,
-                        isTransformer=isTransformer
-                        if isTransformer is not None
-                        else "transformer" in nameExp.lower(),
-                        windows=window_tmp,
-                        transform_w_log=transform_w_log
-                        if transform_w_log is not None
-                        else "log" in nameExp.lower(),
-                        denseweight=denseweight,
-                        add_training=add_training,
-                        add_full_pre=add_full_pre,
-                        **kwargs,
-                    )
-
-                    try:
-                        self.results_dict[nameExp][mouse_full_name][phase].load_data(
-                            suffixes=[suffix],
-                            add_training=phase == kwargs.get("template", "pre"),
-                            add_full_pre=phase == kwargs.get("template", "pre"),
-                            load_pickle=kwargs.get("load_pickle", False),
-                        )
-                        found_training = True
-                        if kwargs.get("load_bayes", False) or kwargs.get(
-                            "which", "ann"
-                        ) in ["both", "bayes"]:
-                            self.results_dict[nameExp][mouse_full_name][
-                                phase
-                            ].load_bayes(
-                                suffixes=[suffix],
-                                add_training=phase == kwargs.get("template", "pre"),
-                                add_full_pre=phase == kwargs.get("template", "pre"),
-                                **kwargs,
-                            )
-                    except FileNotFoundError:
-                        self.results_dict[nameExp][mouse_full_name][phase].load_data(
-                            suffixes=[suffix],
-                            add_training=False,
-                            add_full_pre=False,
-                            load_pickle=kwargs.get("load_pickle", False),
-                        )
-                        if kwargs.get("load_bayes", False) or kwargs.get(
-                            "which", "ann"
-                        ) in ["both", "bayes"]:
-                            self.results_dict[nameExp][mouse_full_name][
-                                phase
-                            ].load_bayes(
-                                suffixes=[suffix],
-                                add_training=False,
-                                add_full_pre=False,
-                                **kwargs,
-                            )
-
-        if found_training and "training" not in self.phases:
-            self.phases.append("training")
-            self.suffixes.append("_training")
-
-            if "pre" in self.phases:
-                self.phases.append("full_pre")
-                self.suffixes.append("_full_pre")
-
-        if kwargs.get("df", None) is None:
-            try:
-                self.convert_to_df()
-            except Exception as e:
-                print(f"Issues converting to DataFrame: {e}")
-
-    def convert_to_df(self, redo=False, redo_sub=False):
+        Args:
+            winMS: Decoder window in ms.
+            rs_source: "spikes" (ephys PCA) or "latent" (model latent PCA).
+            template_period: Template period used for PCA/reactivation computation.
+            num_templates: Number of templates to compute upstream.
+            template_idx: Template index to analyse in downstream summaries.
+            model_metric_key: Scalar model metric to analyse (e.g., "Hn", "maxp").
         """
-        Convert the results_dict to a pandas DataFrame.
-        Collects row dictionaries from all windows, mice, and experiments
-        and packages them cleanly into a single MultiIndexed DataFrame.
+        from neuroencoders.resultAnalysis.ephys_sleep_analysis import (
+            SleepAnalysisConfig,
+            SleepEphysAnalyser,
+        )
+
+        if winMS not in self.timeWindows:
+            raise ValueError(
+                f"winMS {winMS} not found in available windows: {self.timeWindows}"
+            )
+
+        analyser = SleepEphysAnalyser(
+            SleepAnalysisConfig(
+                transition_window_sec=transition_window_sec,
+                bin_size_sec=bin_size_sec,
+                drowsiness_window_sec=drowsiness_window_sec,
+            )
+        )
+        return analyser.analyse_loader(
+            results_loader=self,
+            winMS=winMS,
+            rs_source=rs_source,
+            template_period=template_period,
+            session_data=session_data,
+            num_templates=num_templates,
+            template_idx=template_idx,
+            model_metric_key=model_metric_key,
+        )
+
+    def convert_to_df(
+        self, redo: bool = False, disable: bool = False, n_jobs: int = -1
+    ) -> pd.DataFrame:
+        """Aggregates all mouse experiments into a global MultiIndexed results_df in parallel.
+
+        Parallelized by mouse across CPU cores using joblib with a tqdm progress bar.
         """
         if (
             hasattr(self, "results_df")
             and not redo
             and isinstance(self.results_df, pd.DataFrame)
-            and self.results_df.shape[0] > 0
+            and not self.results_df.empty
         ):
-            print(
-                "Results DataFrame for Results_Loader already exists. Use redo=True to recreate it."
-            )
+            print("Results DataFrame already exists. Use redo=True to recreate it.")
             return self.results_df
 
-        # Calculate total iterations for progress bar
-        total_iterations = sum(
-            len([p for p in phases.keys() if p != "training" and p != "full_pre"])
-            for mice in self.results_dict.values()
-            for phases in mice.values()
+        template_phase = getattr(self, "template", "pre")
+        nameExp = getattr(self, "nameExp", "Network")
+        windows = (
+            self.timeWindows
+            if isinstance(self.timeWindows, list)
+            else [self.timeWindows]
         )
 
-        # Pre-allocate a single master list for ALL row dictionaries
-        df_list = []
+        mouse_tasks = list(
+            zip(self.mice_nb, self.mice_manipes, self.mice_names, self.exp_indices)
+        )
 
-        # Create progress bar
-        with tqdm(total=total_iterations, desc="Processing results") as pbar:
-            for nameExp, mice in self.results_dict.items():
-                for mouse_name, phases in mice.items():
-                    for phase, results in phases.items():
-                        if phase == "training" or phase == "full_pre":
-                            continue
+        # Wrap delayed generator with tqdm
+        nested_dfs = Parallel(n_jobs=n_jobs, batch_size=1)(
+            delayed(_process_single_mouse)(
+                mouse_nb=m_nb,
+                manipe=m_manipe,
+                mouse_full_name=m_full,
+                exp_index=e_idx,
+                Dir=self.Dir,
+                nameExp=nameExp,
+                suffixes=self.suffixes,
+                phases=self.phases,
+                timeWindows=windows,
+                template_phase=template_phase,
+                redo=redo,
+                disable=disable,
+                **self.init_kwargs,
+            )
+            for m_nb, m_manipe, m_full, e_idx in tqdm(
+                mouse_tasks,
+                desc="Converting Mice to DataFrame",
+                disable=disable,
+            )
+        )
 
-                        sub_df = copy.deepcopy(
-                            results.convert_to_df(redo=redo_sub, disable=True)
-                        )
-                        if (
-                            results is None
-                            or not hasattr(results, "results_df")
-                            or results.results_df is None
-                        ):
-                            print(
-                                f"Warning: No results DataFrame for {nameExp} - {mouse_name} - {phase}. Skipping."
-                            )
-                            continue
-                        if not isinstance(sub_df.index, pd.RangeIndex):
-                            sub_df = sub_df.reset_index()
+        # Flatten nested DataFrame lists
+        df_list = [df for mouse_list in nested_dfs for df in mouse_list]
 
-                        # 2. Inject the contextual loop variables as columns
-                        sub_df["nameExp"] = nameExp
-                        sub_df["mouse_name"] = mouse_name
-
-                        # Add a direct reference back to the original results object row-by-row
-                        sub_df["results"] = results
-
-                        # Accumulate the DataFrame slice
-                        df_list.append(sub_df)
-
-                        pbar.update(1)
-
-        if df_list:
-            data = pd.concat(df_list, ignore_index=True)
-            sort_keys = [
-                k for k in ["mouse", "mouse_name", "phase"] if k in data.columns
-            ]
-            if sort_keys:
-                data = data.sort_values(by=sort_keys)
-
-            index_keys = ["nameExp", "mouse_name", "manipe", "phase", "winMS"]
-            actual_index_keys = [k for k in index_keys if k in data.columns]
-            data.set_index(actual_index_keys, inplace=True)
-            self.results_df = data
-
+        if not df_list:
+            self.results_df = pd.DataFrame()
             return self.results_df
+
+        # Concatenate into master DataFrame & restore MultiIndex
+        master_df = pd.concat(df_list, ignore_index=True)
+        index_keys = ["nameExp", "mouse_name", "manipe", "phase", "winMS"]
+        actual_index_keys = [k for k in index_keys if k in master_df.columns]
+
+        self.results_df = master_df.set_index(actual_index_keys)
+        return self.results_df
 
     def __getitem__(self, key):
         """
@@ -3614,53 +5055,68 @@ class Results_Loader(TuningCurvesPlotter):
             raise KeyError(f"Results for {key} not found.")
 
     def __repr__(self):
+        """String representation of the Results_Loader object.
+
+        Returns a clean table summary and a preview of the results DataFrame
+        without triggering lazy object resolution.
         """
-        String representation of the Results_Loader object.
-        Returns a table summary of the object, including the nameExp, mice names, phases, time windows, and a preview of the results DataFrame.
-        """
-        # Create the header
         result = f"\n{self.__class__.__name__} Object\n"
         result += "=" * 50 + "\n\n"
 
-        # Create table headers
-        headers = ["NameExp", "Names", "Phases", "TimeWindows"]
+        headers = ["Names", "Phases", "TimeWindows"]
 
-        # Calculate column widths based on content
+        # Ensure all data columns are lists (prevents iterating characters of strings like "all")
+        mice_names = (
+            self.mice_names if isinstance(self.mice_names, list) else [self.mice_names]
+        )
+        phases = self.phases if isinstance(self.phases, list) else [self.phases]
+        time_windows = (
+            self.timeWindows
+            if isinstance(self.timeWindows, list)
+            else [self.timeWindows]
+        )
+
+        data_columns = [mice_names, phases, time_windows]
+
+        # Calculate column widths
         col_widths = []
-        data_columns = [self.nameExp, self.mice_names, self.phases, self.timeWindows]
-
-        for i, (header, column) in enumerate(zip(headers, data_columns)):
-            # Convert all items to strings to calculate max width
+        for header, column in zip(headers, data_columns):
             str_items = [str(item) for item in column] + [header]
             col_widths.append(max(len(item) for item in str_items))
 
-        # Create format string for rows
         row_format = " | ".join([f"{{:<{width}}}" for width in col_widths])
 
-        # Add table header
+        # Table Header
         result += row_format.format(*headers) + "\n"
         result += "-" * (sum(col_widths) + 3 * (len(headers) - 1)) + "\n"
 
-        # Add data rows
+        # Limit table preview to max 10 rows so repr doesn't flood stdout
         max_rows = max(len(col) for col in data_columns)
-        for i in range(max_rows):
+        display_rows = min(max_rows, 10)
+
+        for i in range(display_rows):
             row_data = []
             for column in data_columns:
                 if i < len(column):
                     row_data.append(str(column[i]))
                 else:
-                    row_data.append("")  # Empty cell if column is shorter
+                    row_data.append("")
             result += row_format.format(*row_data) + "\n"
 
-        # Add dataframe section
+        if max_rows > 10:
+            result += f"... ({max_rows - 10} more rows truncated)\n"
+
+        # DataFrame Section
         result += "\n" + "=" * 50 + "\n"
         result += "DataFrame Head:\n"
         result += "-" * 20 + "\n"
 
-        if hasattr(self, "results_df") and self.results_df is not None:
-            # Convert dataframe head to string with nice formatting
-            df_str = str(self.results_df.head())
-            result += df_str
+        if (
+            hasattr(self, "results_df")
+            and isinstance(self.results_df, pd.DataFrame)
+            and not self.results_df.empty
+        ):
+            result += str(self.results_df.head())
         else:
             result += "No dataframe available"
 
@@ -3687,6 +5143,8 @@ class Results_Loader(TuningCurvesPlotter):
         with open(path, "wb") as f:
             pickle.dump(self, f)
 
+        print(f"Results_Loader object saved to {path}")
+
     def __add__(self, other):
         """
         Add two Results_Loader objects together.
@@ -3698,6 +5156,11 @@ class Results_Loader(TuningCurvesPlotter):
         Returns:
             Results_Loader: A new Results_Loader object with combined results.
         """
+
+        if self.results_df is None or len(self.results_df) == 0:
+            self.convert_to_df()
+        if other.results_df is None or len(other.results_df) == 0:
+            other.convert_to_df()
 
         combined_results_dict = self.results_dict.copy()
         for nameExp, mice in other.results_dict.items():
@@ -3747,6 +5210,11 @@ class Results_Loader(TuningCurvesPlotter):
         Returns:
             Results_Loader: The current Results_Loader object with combined results.
         """
+        if self.results_df is None or len(self.results_df) == 0:
+            self.convert_to_df()
+        if other.results_df is None or len(other.results_df) == 0:
+            other.convert_to_df()
+
         self.results_dict.update(other.results_dict)
         self.results_df = pd.concat(
             [self.results_df, other.results_df], ignore_index=True
@@ -3768,167 +5236,82 @@ class Results_Loader(TuningCurvesPlotter):
             dir=self.Dir,
             mice_nb=self.mice_nb + other.mice_nb,
             mice_manipes=self.mice_manipes + other.mice_manipes,
-            dict=self.results_dict,
             df=self.results_df,
             nameExp=nameExp,
             timeWindows=timeWindows,
             phases=phases,
         )
 
-    def apply_analysis(self, redo=False):
-        """
-        Apply common analysis metrics to the results DataFrame.
-        Optimized for global MultiIndex datasets using parallel core execution.
-        """
+    def apply_analysis(self, redo: bool = False, n_jobs: int = -1):
+        """Apply common analysis metrics to the results DataFrame."""
+        import os
+
+        os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
         current_index_names = list(self.results_df.index.names)
+
         if "mean_error" in self.results_df.columns and not redo:
             print("Analysis already applied to the DataFrame.")
             return self.results_df
 
         flat_df = self.results_df.reset_index()
-        # if we redo, drop all columns we will create
+
         columns_to_drop = [
             "error",
             "mean_error",
             "lin_error",
             "mean_lin_error",
-            "predLossThresholderror_selected",
+            "predLossThreshold",
+            "error_selected",
             "mean_error_selected",
             "lin_error_selected",
             "mean_lin_error_selected",
-            "asymmetry_index_on_predictedtrue_binary_direction",
+            "asymmetry_index_on_selected_predicted",
+            "asymmetry_index_on_predicted",
+            "true_binary_direction",
             "predicted_binary_direction",
             "training_scalar_index",
             "training_asymmetry_index",
-            "real_asymmetry_ratiopredicted_asymmetry_ratio",
+            "real_asymmetry_ratio",
+            "predicted_asymmetry_ratio",
             "predicted_asymmetry_ratio_on_selected",
             "predicted_asymmetry_ratio_normalized",
             "selected_predicted_asymmetry_ratio_normalized",
         ]
+
         if redo:
             flat_df = flat_df.drop(columns=columns_to_drop, errors="ignore")
 
-        def process_row(row):
-            res = {}
+        def _process_mouse_group(
+            mouse_rows: List[Dict[str, Any]],
+        ) -> List[Dict[str, Any]]:
+            return [_process_row_dict(rec) for rec in mouse_rows]
 
-            # Base validation flags
-            has_pred = row["featurePred"] is not None and row["featureTrue"] is not None
-            has_lin = row["linearPred"] is not None and row["linearTrue"] is not None
-            has_loss = row["predLoss"] is not None
+        mouse_groups = [
+            group.to_dict("records")
+            for _, group in flat_df.groupby("mouse_name", sort=False)
+        ]
+        nested_results = Parallel(n_jobs=n_jobs, batch_size=1)(
+            delayed(_process_mouse_group)(group) for group in mouse_groups
+        )
+        computed_rows = [row for group_res in nested_results for row in group_res]
 
-            # 1. Base Errors and Speed
-            if has_pred:
-                errors = np.linalg.norm(
-                    row["featurePred"] - row["featureTrue"], axis=1
-                ).astype(np.float32)
-                res["error"] = errors
-                res["mean_error"] = (
-                    np.nanmean(errors, dtype=np.float32) * np.ones_like(errors)
-                ).astype(np.float32)
+        # Single-batch DataFrame construction
+        analysis_df = pd.DataFrame(computed_rows)
+        flat_df = pd.concat([flat_df, analysis_df], axis=1)
 
-            if has_lin:
-                lin_errors = np.abs(row["linearPred"] - row["linearTrue"]).astype(
-                    np.float32
-                )
-                res["lin_error"] = lin_errors
-                res["mean_lin_error"] = (
-                    np.nanmean(lin_errors, dtype=np.float32) * np.ones_like(lin_errors)
-                ).astype(np.float32)
-
-            # 2. Selected metrics (lowest 20% loss window evaluation)
-            if has_loss:
-                threshold = np.quantile(row["predLoss"], 0.2).astype(np.float32)
-                res["predLossThreshold"] = (
-                    threshold * np.ones_like(row["predLoss"])
-                ).astype(np.float32)
-                mask = (row["predLoss"] <= threshold).astype(bool)
-
-                if has_pred:
-                    errors_selected = copy.deepcopy(errors)
-                    errors_selected[~mask] = np.nan
-                    res["error_selected"] = errors_selected
-                    res["mean_error_selected"] = (
-                        np.nanmean(errors_selected, dtype=np.float32)
-                        * np.ones_like(errors_selected)
-                    ).astype(np.float32)
-
-                    # Fetch custom object pointer mapping safely from row values
-                    res["asymmetry_index_on_selected_predicted"] = (
-                        np.array(
-                            row["results"].get_training_imbalance(
-                                positions=row["featurePred"][mask]
-                            ),
-                            dtype=np.float32,
-                        )
-                        * np.ones_like(errors_selected)
-                    ).astype(np.float32)
-
-                if has_lin:
-                    lin_errors_select = copy.deepcopy(lin_errors)
-                    lin_errors_select[~mask] = np.nan
-                    res["lin_error_selected"] = lin_errors_select
-                    res["mean_lin_error_selected"] = (
-                        np.nanmean(lin_errors_select, dtype=np.float32)
-                        * np.ones_like(lin_errors_select)
-                    ).astype(np.float32)
-
-            # 3. Indices and Directions
-            if has_pred:
-                res["asymmetry_index_on_predicted"] = (
-                    np.array(
-                        row["results"].get_training_imbalance(
-                            positions=row["featurePred"]
-                        ),
-                        dtype=np.float32,
-                    )
-                    * np.ones(row["featurePred"].shape[0], dtype=np.float32)
-                ).astype(np.float32)
-
-            if has_lin:
-                res["true_binary_direction"] = (
-                    np.array(
-                        row["results"].data_helper._get_traveling_direction(
-                            row["linearTrue"]
-                        ),
-                        dtype=np.float32,
-                    )
-                    * np.ones_like(row["linearTrue"])
-                ).astype(np.float32)
-
-                res["predicted_binary_direction"] = (
-                    np.array(
-                        row["results"].data_helper._get_traveling_direction(
-                            row["linearPred"]
-                        ),
-                        dtype=np.float32,
-                    )
-                    * np.ones_like(row["linearPred"])
-                ).astype(np.float32)
-
-            return pd.Series(res)
-
-        analysis_columns = flat_df.apply(process_row, axis=1)
-
-        # Join the evaluated metrics back into our working flat DataFrame
-        for col in analysis_columns.columns:
-            flat_df[col] = analysis_columns[col]
-        # --- 4. FIXED VECTORIZED RATIO CALCULATIONS ---
+        # 2. VECTORIZED RATIO CALCULATIONS
         group_keys = ["nameExp", "mouse_name", "manipe", "winMS"]
         group_keys = [k if k in flat_df.columns else "mouse" for k in group_keys]
 
-        # Isolate training rows cleanly
         training_df = flat_df[flat_df["phase"] == "training"].copy()
 
-        if not training_df.empty:
-            # Extract the true scalar value out of the array cell
-            # Since it's an array of repeated values, we grab the very first element [0]
-            training_df["training_scalar_index"] = training_df["asymmetry_index"].apply(
-                lambda x: (
-                    x.flatten()[0] if isinstance(x, np.ndarray) and x.size > 0 else x
-                )
-            )
+        if not training_df.empty and "asymmetry_index" in training_df.columns:
+            # Extract scalar value from array cell via fast list comprehension
+            training_df["training_scalar_index"] = [
+                x.flatten()[0] if isinstance(x, np.ndarray) and x.size > 0 else x
+                for x in training_df["asymmetry_index"]
+            ]
 
-            # Group by and extract the scalar baseline profiles
             training_values = (
                 training_df.groupby(group_keys)["training_scalar_index"]
                 .first()
@@ -3936,64 +5319,63 @@ class Results_Loader(TuningCurvesPlotter):
                 .rename(columns={"training_scalar_index": "training_asymmetry_index"})
             )
 
-            # Merge the single numeric baseline value back into your master flat DataFrame
             flat_df = flat_df.merge(training_values, on=group_keys, how="left")
         else:
-            # Fallback if no training records exist in this tracking block
             flat_df["training_asymmetry_index"] = np.nan
 
-        # Now train_idx becomes a simple scalar column (or NaN), which broadcasts
-        # beautifully across your target data columns containing arrays!
         train_idx = flat_df["training_asymmetry_index"].replace(0, np.nan)
 
-        # Convert train_idx into a pandas Series alignment value for seamless row broadcasting
-        # This allows array / scalar division to work natively element-by-element across every row!
-        flat_df["real_asymmetry_ratio"] = flat_df["asymmetry_index"] / train_idx
-        flat_df["predicted_asymmetry_ratio"] = (
-            flat_df["asymmetry_index_on_predicted"] / train_idx
-        )
-        flat_df["predicted_asymmetry_ratio_on_selected"] = (
-            flat_df["asymmetry_index_on_selected_predicted"] / train_idx
-        )
+        # Column/Scalar Array Divisions
+        if "asymmetry_index" in flat_df.columns:
+            flat_df["real_asymmetry_ratio"] = flat_df["asymmetry_index"] / train_idx
+        if "asymmetry_index_on_predicted" in flat_df.columns:
+            flat_df["predicted_asymmetry_ratio"] = (
+                flat_df["asymmetry_index_on_predicted"] / train_idx
+            )
+        if "asymmetry_index_on_selected_predicted" in flat_df.columns:
+            flat_df["predicted_asymmetry_ratio_on_selected"] = (
+                flat_df["asymmetry_index_on_selected_predicted"] / train_idx
+            )
 
-        # To handle dividing an array column by an array column, use element-wise custom operations
-        def divide_array_columns(row, num_col, denom_col):
-            num = row[num_col]
-            denom = row[denom_col]
-            if isinstance(num, np.ndarray) and isinstance(denom, np.ndarray):
-                # Safe division: mask out denominators that are equal to 0
-                safe_denom = np.where(denom == 0, np.nan, denom)
-                return num / safe_denom
-            return np.nan
-
+        # 3. FAST LIST COMPREHENSION NORMALIZATIONS (Replaces .apply)
         print("Normalizing ratio profiles across nested array channels...")
-        flat_df["predicted_asymmetry_ratio_normalized"] = flat_df.apply(
-            divide_array_columns,
-            axis=1,
-            args=("asymmetry_index_on_predicted", "real_asymmetry_ratio"),
-        )
-        flat_df["selected_predicted_asymmetry_ratio_normalized"] = flat_df.apply(
-            divide_array_columns,
-            axis=1,
-            args=("asymmetry_index_on_selected_predicted", "real_asymmetry_ratio"),
-        )
+        if (
+            "asymmetry_index_on_predicted" in flat_df.columns
+            and "real_asymmetry_ratio" in flat_df.columns
+        ):
+            flat_df["predicted_asymmetry_ratio_normalized"] = _divide_array_series(
+                flat_df["asymmetry_index_on_predicted"], flat_df["real_asymmetry_ratio"]
+            )
 
-        # go back to full dim for training_asymmetry_index
-        flat_df["training_asymmetry_index"] = flat_df.apply(
-            lambda row: (
-                row["training_asymmetry_index"] * np.ones_like(row["timeNN"])
-                if isinstance(row["training_asymmetry_index"], (int, float))
-                else row["training_asymmetry_index"]
-            ),
-            axis=1,
-        )
+        if (
+            "asymmetry_index_on_selected_predicted" in flat_df.columns
+            and "real_asymmetry_ratio" in flat_df.columns
+        ):
+            flat_df["selected_predicted_asymmetry_ratio_normalized"] = (
+                _divide_array_series(
+                    flat_df["asymmetry_index_on_selected_predicted"],
+                    flat_df["real_asymmetry_ratio"],
+                )
+            )
 
+        # Expand training_asymmetry_index scalar back to array using fast zip loop
+        if "timeNN" in flat_df.columns:
+            flat_df["training_asymmetry_index"] = [
+                val * np.ones_like(time_arr)
+                if isinstance(val, (int, float, np.number))
+                and isinstance(time_arr, np.ndarray)
+                else val
+                for val, time_arr in zip(
+                    flat_df["training_asymmetry_index"], flat_df["timeNN"]
+                )
+            ]
+
+        # Remove duplicate columns and restore MultiIndex
         flat_df = flat_df.loc[:, ~flat_df.columns.duplicated()].copy()
 
         if current_index_names and not all(x is None for x in current_index_names):
             flat_df.set_index(current_index_names, inplace=True)
         else:
-            # Fallback default array index configuration matching your description
             default_keys = [
                 "nameExp",
                 "mouse_name",
@@ -4008,105 +5390,41 @@ class Results_Loader(TuningCurvesPlotter):
         self.results_df = flat_df
         return self.results_df
 
-    def add_breathing(self, redo=False):
-        """
-        Add breathing-related metrics to the results DataFrame.
-        This method computes breathing rate and amplitude from the raw breathing signal,
-        and adds these as new columns to the results DataFrame. It also handles any necessary data cleaning and normalization steps.
-
-        If found, it will also add the heart rate as a new column, extracted from the same raw signal if available.
-        """
+    def add_breathing(self, redo: bool = False):
+        """Add breathing-related metrics lazily to the results DataFrame."""
         if self.results_df is None:
             raise ValueError("Please run evaluate() before adding breathing data.")
+
         if "breathing_rate" in self.results_df.columns and not redo:
             print("Breathing column already exists. Set redo=True to overwrite.")
             return self.results_df
 
-        # Ensure we have the necessary columns to compute breathing
-        required_cols = ["timeNN", "results"]
+        # Direct Series iteration (avoids iterrows overhead)
+        for res in self.results_df["results"]:
+            if hasattr(res, "find_session_epochs"):
+                res.find_session_epochs()
 
-        for col in required_cols:
-            if col not in self.results_df.columns:
-                raise ValueError(
-                    f"Missing required column '{col}' to compute breathing."
-                )
-        for _, df in self.results_df.groupby(level="mouse_name"):
-            res: Mouse_Results = df.iloc[0].results
-            try:
-                respi = res.DataHelper.get_respi_data()
-            except FileNotFoundError:
-                respi = res.DataHelper.get_respi_data(folder=res.network_path)
+            # Attach lazy proxy to the Mouse_Results instance
+            res.breathing = LazyBreathing(
+                data_helper=res.DataHelper,
+                time_mask=getattr(res, "time_mask", None),
+                network_path=getattr(res, "network_path", None),
+            )
 
-            spectro, power = res.DataHelper.compute_breathing_rate(spectro_tsd=respi)
-            res.find_path()
-            found_ekg = False
+        # Attach property proxies to DataFrame columns dynamically if needed
+        self.results_df["breathing_rate"] = [
+            r.breathing.breathing_rate for r in self.results_df["results"]
+        ]
+        self.results_df["breathing_power"] = [
+            r.breathing.breathing_power for r in self.results_df["results"]
+        ]
+        self.results_df["lfp_bulb"] = [
+            r.breathing.lfp_bulb for r in self.results_df["results"]
+        ]
+        self.results_df["heart_rate"] = [
+            r.breathing.heart_rate for r in self.results_df["results"]
+        ]
 
-            if os.path.exists(
-                os.path.join(res.DataHelper.folder, "HeartBeatInfo.mat")
-            ) or os.path.exists(os.path.join(res.network_path, "HeartBeatInfo.mat")):
-                folder = (
-                    res.DataHelper.folder
-                    if os.path.exists(
-                        os.path.join(res.DataHelper.folder, "HeartBeatInfo.mat")
-                    )
-                    else res.network_path
-                )
-                heart_file = loadmat(os.path.join(folder, "HeartBeatInfo.mat"))
-                if "EKG" not in heart_file:
-                    raise KeyError(
-                        f"EKG data not found in HeartBeatInfo.mat for {res.mouse_name}. Skipping EKG analysis."
-                    )
-                if (
-                    "HBRate" not in heart_file["EKG"].dtype.names
-                    or "LFP" not in heart_file["EKG"].dtype.names
-                ):
-                    raise KeyError(
-                        f"EKG data missing 'HBRate' or 'LFP' in HeartBeatInfo.mat for {res.mouse_name}. Skipping EKG analysis."
-                    )
-
-                hb_rate = clean_mat_structure(heart_file["EKG"]["HBRate"])
-                hb_lfp = clean_mat_structure(heart_file["EKG"]["LFP"])
-
-                hb_rate_tsd = Tsd(
-                    t=np.array(hb_rate["t"]) / 1e4, d=np.array(hb_rate["data"])
-                )
-                hb_lfp_tsd = Tsd(
-                    t=np.array(hb_lfp["t"]) / 1e4, d=np.array(hb_lfp["data"])
-                )
-
-                found_ekg = True
-
-            for phase, sub in df.groupby("phase"):
-                if phase == "training" or phase == "full_pre":
-                    continue
-                subres = sub.iloc[0].results
-                subres.find_session_epochs()
-
-                updated_subsubs = []
-
-                for subphase, subsub in subres.results_df.groupby("phase"):
-                    time_mask = getattr(subres, subphase)
-                    subsub["lfp_bulb"] = respi.restrict(time_mask)
-                    subsub["breathing_rate"] = spectro.restrict(time_mask)
-                    subsub["breathing_power"] = power.restrict(time_mask)
-
-                    if found_ekg:
-                        subsub["lfp_ekg"] = hb_lfp_tsd.restrict(time_mask)
-                        subsub["heart_rate"] = hb_rate_tsd.restrict(time_mask)
-
-                    updated_subsubs.append(subsub)
-
-                if updated_subsubs:
-                    subres.results_df = pd.concat(updated_subsubs)
-
-                self.results_df.loc[sub.index, "results"] = subres
-
-        # now that each subres has the new columns, we need to extract them back to the main results_df
-        base_df = self.results_df.copy()
-
-        concat_results_df = self.convert_to_df(True)
-        cols_to_add = base_df.columns.difference(concat_results_df.columns)
-        self.results_df = pd.concat([concat_results_df, base_df[cols_to_add]], axis=1)
         return self.results_df
 
     def add_zone_epoch(self, redo=False):
@@ -4277,6 +5595,9 @@ class Results_Loader(TuningCurvesPlotter):
                 df[col] = df.index.get_level_values(col)
             if col in epoch_configs and col not in df.columns:
                 cfg = epoch_configs[col]
+                print(
+                    f"Computing epoch mask for '{col}' using {cfg['fetch_method']} and {cfg['attr_name']}..."
+                )
                 df[col] = self._compute_epoch_mask(
                     df, col, cfg["fetch_method"], cfg["attr_name"]
                 )
@@ -4528,9 +5849,9 @@ class Results_Loader(TuningCurvesPlotter):
         mice_manipes: List[str],
         dict: dict,
         df: pd.DataFrame,
-        nameExp: List[str] = None,
-        timeWindows: List[int] = None,
-        phases: List[str] = None,
+        nameExp: Optional[List[str]] = None,
+        timeWindows: Optional[List[int]] = None,
+        phases: Optional[List[str]] = None,
         **kwargs,
     ):
         """
@@ -9093,7 +10414,6 @@ class Results_Loader(TuningCurvesPlotter):
 
         total_frame_df = pd.concat(all_frames, ignore_index=True)
 
-        # Define bins for the distance to boundary (max distance possible is max |x - threshold|)
         max_dist = total_frame_df["distance_to_boundary"].max()
         bin_edges = np.linspace(0, max_dist, n_bins + 1)
         bin_labels = [
@@ -9801,19 +11121,39 @@ class Results_Loader(TuningCurvesPlotter):
         task_phase: str = "cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
+        pre_phase: str = "pre_sleep",
+        post_phase: str = "post_sleep",
+        subpre: Optional[str] = None,
+        subpost: Optional[str] = None,
     ):
         """Computes Explained Variance (EV) and Reverse Explained Variance (REV)
-
         based on the Kudrimoti et al. 1999 pairwise correlation design.
         """
         rows = []
         bin_size_sec = winMS / 1000.0
 
+        # Fallback mechanism to ensure default behavior remains unchanged
+        eff_subpre = subpre if subpre is not None else subsleep
+        eff_subpost = subpost if subpost is not None else subsleep
+        if pre_phase != "pre_sleep" or post_phase != "post_sleep":
+            print(
+                f"Warning: 'pre_phase' is set to '{pre_phase}' and 'post_phase' is set to '{post_phase}'. Ensure these match your DataHelper epoch definitions."
+            )
+
+        if subpre is not None:
+            print(
+                f"Warning: 'subpre' is explicitly set to '{subpre}'. This will override 'subsleep' for the pre-sleep phase."
+            )
+        if subpost is not None:
+            print(
+                f"Warning: 'subpost' is explicitly set to '{subpost}'. This will override 'subsleep' for the post-sleep phase."
+            )
+
         # Grouping sessions via your dataframe loop architecture
         for (mouse_name, manipe), df in self.results_df.groupby(
             by=["mouse_name", "manipe"]
         ):
-            results: Mouse_Results = df.iloc[0].results
+            results = df.iloc[0].results
 
             # 1. Fetch Spike trains (TsGroup)
             spike_group = results.DataHelper.get_spike_data()
@@ -9822,10 +11162,10 @@ class Results_Loader(TuningCurvesPlotter):
 
             try:
                 pre_test, _ = results.get_epoch_interval("pre_test")
-                pre_sleep, _ = results.get_epoch_interval("pre_sleep")
+                pre_epoch, _ = results.get_epoch_interval(pre_phase)
                 task_epoch, _ = results.get_epoch_interval(task_phase)
                 post_test, _ = results.get_epoch_interval("post_test")
-                post_sleep, _ = results.get_epoch_interval("post_sleep")
+                post_epoch, _ = results.get_epoch_interval(post_phase)
             except Exception as e:
                 # Fallback wrapper if explicitly designated within your helper setup
                 print(
@@ -9833,69 +11173,67 @@ class Results_Loader(TuningCurvesPlotter):
                 )
                 continue
 
-            if subtask is not None:
-                subtask = subtask.lower()
-                try:
-                    if "ripple" in subtask:
-                        sub_intervals = results.DataHelper.get_ripples_epochs()
-                    elif "freeze" in subtask:
-                        sub_intervals = results.DataHelper.get_freeze_epochs()
-                    elif "mov" in subtask:
-                        sub_intervals = results.DataHelper.get_mov_epochs()
-                    elif "sws" in subtask or "nrem" in subtask:
-                        try:
-                            sub_intervals = results.DataHelper.get_sws_epochs()
-                        except FileNotFoundError:
-                            sub_intervals = results.DataHelper.get_sws_epochs(
-                                folder=results.network_path
-                            )
-                    elif "rem" in subtask:
-                        try:
-                            sub_intervals = results.DataHelper.get_rem_epochs()
-                        except FileNotFoundError:
-                            sub_intervals = results.DataHelper.get_rem_epochs(
-                                folder=results.network_path
-                            )
-                    else:
-                        raise ValueError(f"Unknown subtask: {subtask}")
+            def get_sub_intervals(sub_name):
+                """Helper to retrieve sub-intervals cleanly.
+                Supports intersecting multiple sub-states separated by '+' (e.g., 'mov+ripples').
+                """
+                sub_name = sub_name.lower()
 
-                    task_epoch = task_epoch.intersect(sub_intervals)
+                # Split by '+' to handle combinations like "mov+ripples"
+                components = [comp.strip() for comp in sub_name.split("+")]
+
+                combined_intervals = None
+
+                for comp in components:
+                    if "ripple" in comp:
+                        current_intervals = results.DataHelper.get_ripples_epochs()
+                    elif "freeze" in comp:
+                        current_intervals = results.DataHelper.get_freeze_epochs()
+                    elif "mov" in comp:
+                        current_intervals = results.DataHelper.get_mov_epochs()
+                    elif "sws" in comp or "nrem" in comp:
+                        current_intervals = results.DataHelper.get_sws_epochs(
+                            network_path=results.network_path
+                        )
+                    elif "rem" in comp:
+                        current_intervals = results.DataHelper.get_rem_epochs(
+                            network_path=results.network_path
+                        )
+                    else:
+                        raise ValueError(f"Unknown subtask/subsleep component: {comp}")
+
+                    # Intersect sequentially if multiple components exist
+                    if combined_intervals is None:
+                        combined_intervals = current_intervals
+                    else:
+                        combined_intervals = combined_intervals.intersect(
+                            current_intervals
+                        )
+
+                return combined_intervals
+
+            if subtask is not None:
+                try:
+                    task_epoch = task_epoch.intersect(get_sub_intervals(subtask))
                 except AttributeError as e:
                     print(
                         f"Warning: DataHelper missing sub-epoch generator for '{subtask}': {e}. Using raw phase."
                     )
 
-            if subsleep is not None:
-                subsleep = subsleep.lower()
+            if eff_subpre is not None:
                 try:
-                    if "ripple" in subsleep:
-                        subsleep_intervals = results.DataHelper.get_ripples_epochs()
-                    elif "freeze" in subsleep:
-                        subsleep_intervals = results.DataHelper.get_freeze_epochs()
-                    elif "mov" in subsleep:
-                        subsleep_intervals = results.DataHelper.get_mov_epochs()
-                    elif "sws" in subsleep or "nrem" in subsleep:
-                        try:
-                            subsleep_intervals = results.DataHelper.get_sws_epochs()
-                        except FileNotFoundError:
-                            subsleep_intervals = results.DataHelper.get_sws_epochs(
-                                folder=results.network_path
-                            )
-                    elif "rem" in subsleep:
-                        try:
-                            subsleep_intervals = results.DataHelper.get_rem_epochs()
-                        except FileNotFoundError:
-                            subsleep_intervals = results.DataHelper.get_rem_epochs(
-                                folder=results.network_path
-                            )
-                    else:
-                        raise ValueError(f"Unknown subsleep: {subsleep}")
-
-                    pre_sleep = pre_sleep.intersect(subsleep_intervals)
-                    post_sleep = post_sleep.intersect(subsleep_intervals)
+                    pre_epoch = pre_epoch.intersect(get_sub_intervals(eff_subpre))
                 except AttributeError as e:
                     print(
-                        f"Warning: DataHelper missing sub-epoch generator for '{subsleep}': {e}. Using raw phase."
+                        f"Warning: DataHelper missing sub-epoch generator for '{eff_subpre}': {e}. Using raw phase."
+                    )
+
+            if eff_subpost is not None:
+                try:
+                    post_epoch = post_epoch.intersect(get_sub_intervals(eff_subpost))
+                except AttributeError as e:
+                    print(
+                        f"Warning: DataHelper missing sub-epoch generator for '{eff_subpost}': {e}. Using raw phase."
                     )
 
             # 3. Bin spike data across the entire session to ensure shared structural alignments
@@ -9904,33 +11242,33 @@ class Results_Loader(TuningCurvesPlotter):
 
             # 4. Restrict Q-matrices to their respective behavioral phases
             q_pre_test = q_matrix.restrict(pre_test).values
-            q_pre_sleep = q_matrix.restrict(pre_sleep).values
+            q_pre = q_matrix.restrict(pre_epoch).values
             q_task = q_matrix.restrict(task_epoch).values
             q_post_test = q_matrix.restrict(post_test).values
-            q_post_sleep = q_matrix.restrict(post_sleep).values
+            q_post = q_matrix.restrict(post_epoch).values
 
             # Filter out completely silent cells within these segments to avoid NaN covariances
             active_cells = (
                 (np.std(q_pre_test, axis=0) > 0)
-                & (np.std(q_pre_sleep, axis=0) > 0)
+                & (np.std(q_pre, axis=0) > 0)
                 & (np.std(q_task, axis=0) > 0)
                 & (np.std(q_post_test, axis=0) > 0)
-                & (np.std(q_post_sleep, axis=0) > 0)
+                & (np.std(q_post, axis=0) > 0)
             )
 
             if np.sum(active_cells) < 4:
                 continue
 
             q_pre_test = q_pre_test[:, active_cells]
-            q_pre_sleep = q_pre_sleep[:, active_cells]
+            q_pre = q_pre[:, active_cells]
             q_task = q_task[:, active_cells]
             q_post_test = q_post_test[:, active_cells]
-            q_post_sleep = q_post_sleep[:, active_cells]
+            q_post = q_post[:, active_cells]
 
             # 5. Compute Cell-by-Cell Pearson Correlation Matrices
-            corr_pre = np.corrcoef(q_pre_sleep, rowvar=False)
+            corr_pre = np.corrcoef(q_pre, rowvar=False)
             corr_task = np.corrcoef(q_task, rowvar=False)
-            corr_post = np.corrcoef(q_post_sleep, rowvar=False)
+            corr_post = np.corrcoef(q_post, rowvar=False)
 
             # 6. Extract Upper Triangular Indices (excluding the identity self-correlation diagonal)
             iu = np.triu_indices(corr_pre.shape[0], k=1)
@@ -9976,11 +11314,19 @@ class Results_Loader(TuningCurvesPlotter):
                     "MeanRate_PostTest": float(np.mean(q_post_test))
                     if q_post_test.size
                     else np.nan,
-                    "MeanRate_PreSleep": float(np.mean(q_pre_sleep))
-                    if q_pre_sleep.size
+                    # Maintain backwards compatible keys for plotting/saving scripts:
+                    "MeanRate_PreSleep": float(np.mean(q_pre))
+                    if q_pre.size
                     else np.nan,
-                    "MeanRate_PostSleep": float(np.mean(q_post_sleep))
-                    if q_post_sleep.size
+                    "MeanRate_PostSleep": float(np.mean(q_post))
+                    if q_post.size
+                    else np.nan,
+                    # Add explicit phase keys in case you want to pull them properly:
+                    "MeanRate_PrePhase": float(np.mean(q_pre))
+                    if q_pre.size
+                    else np.nan,
+                    "MeanRate_PostPhase": float(np.mean(q_post))
+                    if q_post.size
                     else np.nan,
                     "N_ActiveCells": int(np.sum(active_cells)),
                 }
@@ -9994,11 +11340,22 @@ class Results_Loader(TuningCurvesPlotter):
         task_phase="cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
+        pre_phase: str = "pre_sleep",
+        post_phase: str = "post_sleep",
+        subpre: Optional[str] = None,
+        subpost: Optional[str] = None,
         save_path: Optional[str] = None,
     ):
         # Run the core computation
         df_results = self.compute_kudrimoti_variance(
-            winMS=winMS, task_phase=task_phase, subtask=subtask, subsleep=subsleep
+            winMS=winMS,
+            task_phase=task_phase,
+            subtask=subtask,
+            subsleep=subsleep,
+            pre_phase=pre_phase,
+            post_phase=post_phase,
+            subpre=subpre,
+            subpost=subpost,
         )
 
         # Convert to long-form for seaborn grouping by Metric type (EV vs REV)
@@ -10057,16 +11414,28 @@ class Results_Loader(TuningCurvesPlotter):
             else:
                 ax.set_ylabel("% Variance Explained")
 
+        # Resolve sub-states for title and saving
+        eff_subpre = subpre if subpre is not None else subsleep
+        eff_subpost = subpost if subpost is not None else subsleep
+
         plt.suptitle(
-            f"Pairwise Coupling Reactivation ({task_phase.upper()} {subtask or ''} {subsleep or ''})\nWindow Size: {winMS} ms",
+            f"Pairwise Coupling Reactivation\n"
+            f"({pre_phase.upper()} {eff_subpre or ''} -> {task_phase.upper()} {subtask or ''} -> {post_phase.upper()} {eff_subpost or ''})\n"
+            f"Window Size: {winMS} ms",
             fontsize=14,
-            y=1.02,
+            y=1.05,
         )
         sns.despine()
         plt.tight_layout()
+
         if save_path:
             os.makedirs(save_path, exist_ok=True)
-            filename = f"kudrimoti_reactivation_{task_phase}_{subtask or 'all'}_{subsleep or 'all'}_{winMS}ms"
+            filename = (
+                f"kudrimoti_reactivation_"
+                f"pre_{pre_phase}_{eff_subpre or 'all'}_"
+                f"task_{task_phase}_{subtask or 'all'}_"
+                f"post_{post_phase}_{eff_subpost or 'all'}_{winMS}ms"
+            )
             plt.savefig(
                 os.path.join(save_path, filename + ".png"),
                 bbox_inches="tight",
@@ -10083,11 +11452,14 @@ class Results_Loader(TuningCurvesPlotter):
         task_phase="cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
+        pre_phase: str = "pre_sleep",
+        post_phase: str = "post_sleep",
+        subpre: Optional[str] = None,
+        subpost: Optional[str] = None,
         zone: str = "Shock",
         compute_type: str = "relative",
     ):
         """Extracts Kudrimoti EV metrics and correlates them with differences
-
         in Shock Zone (SZ) occupancy and first entry latency between Pre and Post tests.
         """
 
@@ -10095,7 +11467,14 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 1. Reuse our previously defined Kudrimoti function to collect raw EV metrics per session
         df_ev = self.compute_kudrimoti_variance(
-            winMS=winMS, task_phase=task_phase, subtask=subtask, subsleep=subsleep
+            winMS=winMS,
+            task_phase=task_phase,
+            subtask=subtask,
+            subsleep=subsleep,
+            pre_phase=pre_phase,
+            post_phase=post_phase,
+            subpre=subpre,
+            subpost=subpost,
         )
 
         # 2. Gather behavioral parameters alongside neural metrics per session
@@ -10114,7 +11493,7 @@ class Results_Loader(TuningCurvesPlotter):
             if df_session.empty:
                 continue
 
-            results: Mouse_Results = df_session.iloc[0].results
+            results = df_session.iloc[0].results
 
             try:
                 occup_pre = results.DataHelper.get_zone_occupancy(
@@ -10630,7 +12009,7 @@ class Results_Loader(TuningCurvesPlotter):
 
         if save_path:
             os.makedirs(save_path, exist_ok=True)
-            filename = f"EV_behavior_group_corr_{task_phase}{'_' + subtask if subtask else ''}{'_' + subsleep if subsleep else ''}"
+            filename = f"EV_behavior_group_corr_{task_phase}{'_' + subtask if subtask else ''}{'_' + subsleep if subsleep else ''}_{winMS}ms_{compute_type}_{model_name}"
             fig.savefig(
                 os.path.join(save_path, filename + ".png"),
                 dpi=300,
@@ -10640,184 +12019,6 @@ class Results_Loader(TuningCurvesPlotter):
                 os.path.join(save_path, filename + ".svg"),
             )
         plt.show()
-
-    def compute_pca_reactivation(
-        self, winMS=100, template_period="cond", num_templates=2
-    ):
-        """Computes population reactivation strength (Peyrache et al. 2010 style)
-
-        using PCA template projection across behavioral blocks.
-        """
-        bin_size_sec = winMS / 1000.0
-        all_session_data = {}
-
-        for (mouse_name, manipe), df in self.results_df.groupby(
-            by=["mouse_name", "manipe"]
-        ):
-            results: Mouse_Results = df.iloc[0].results
-
-            # 1. Fetch Spike Trains
-            spike_group = results.DataHelper.get_spike_data()
-            if len(spike_group) < 5:
-                continue
-
-            # 2. Extract Macro Phase Intervals
-            pre_epoch, _ = results.get_epoch_interval("pre_test")
-            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
-            cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post_test")
-            post_sleep, _ = results.get_epoch_interval("post_sleep")
-            hab_epoch, _ = results.get_epoch_interval("hab")
-
-            # Secondary physiological sub-epoch layers
-            sws_epochs = results.DataHelper.get_sws_epochs()
-            rem_epochs = results.DataHelper.get_rem_epochs()
-            ripples_epochs = results.DataHelper.get_ripples_epochs()
-            mov_epochs = results.DataHelper.get_mov_epochs()
-
-            try:
-                freeze_epochs = results.DataHelper.get_freeze_epochs()
-            except AttributeError:
-                freeze_epochs = IntervalSet(start=[], end=[])
-
-            try:
-                stim_epochs = results.DataHelper.get_stim_epochs(before=0.1, after=0.1)
-            except AttributeError:
-                stim_epochs = IntervalSet(start=[], end=[])
-
-            # 3. Bin full session spike activity (Q-Matrix)
-            q_tsd = spike_group.count(bin_size_sec)
-
-            # 4. Map the requested Template Interval Configuration
-            if template_period == "wake":
-                template_interval = (
-                    pre_epoch.union(hab_epoch).union(cond_epoch).union(post_epoch)
-                )  # Full task / conditioning wake block
-            elif template_period == "cond":
-                template_interval = cond_epoch
-            elif template_period == "condMov":
-                template_interval = cond_epoch.intersect(mov_epochs)
-            elif template_period == "condFree":
-                template_interval = cond_epoch.intersect(freeze_epochs)
-            elif template_period == "postRip":
-                template_interval = post_epoch.intersect(sws_epochs).intersect(
-                    ripples_epochs
-                )
-            elif template_period == "condRip":
-                template_interval = cond_epoch.intersect(ripples_epochs)
-            else:
-                raise ValueError(f"Unknown template period paradigm: {template_period}")
-
-            # 5. Build PCA Template via Covariance Matrix
-            q_template = q_tsd.restrict(template_interval).values
-            if q_template.shape[0] < 10:
-                continue
-
-            # Compute Pearson Correlation Matrix of the population template
-            corr_matrix = np.corrcoef(q_template, rowvar=False)
-            corr_matrix = np.nan_to_num(corr_matrix)
-            np.fill_diagonal(corr_matrix, 0)  # Clear out self-correlation diagonals
-
-            # Singular Value Decomposition / Eigendecomposition wrapper
-            eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
-
-            # Sort in descending order to match MATLAB's pcacov outputs
-            idx_sorted = np.argsort(eigenvalues)[::-1]
-            eigenvectors = eigenvectors[:, idx_sorted]
-            eigenvalues = eigenvalues[idx_sorted]
-
-            # 6. Project templates onto full session frames to calculate Reactivation Strength (RS)
-            q_full_normalized = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
-                np.std(q_tsd.values, axis=0) + 1e-12
-            )
-            q_full_normalized = np.nan_to_num(q_full_normalized)
-
-            pc_scores = {}
-            rs_templates = {}
-            n_comp = min(num_templates, eigenvectors.shape[1])
-
-            for idx_t in range(n_comp):
-                v_i = eigenvectors[:, idx_t]
-
-                # Peyrache Formulation: Score^2 minus single neuron contributions
-                score_t = np.dot(q_full_normalized, v_i)
-                pc_scores[idx_t] = Tsd(t=q_tsd.index, d=score_t)
-
-                single_neuron_contribution = np.dot(q_full_normalized**2, v_i**2)
-                rs_vector = (score_t**2) - single_neuron_contribution
-                rs_templates[idx_t] = Tsd(t=q_tsd.index, d=rs_vector)
-
-            # 7. Collect structural metadata dictionary package for this session slice
-            event_intervals = {
-                "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                "cond_move": cond_epoch.intersect(mov_epochs),
-                "cond_stim": cond_epoch.intersect(stim_epochs),
-                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                "post_sleep_sws": post_sleep.intersect(sws_epochs),
-                "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
-                "post_sleep_rem": post_sleep.intersect(rem_epochs),
-            }
-            template_summaries = {}
-            for t_idx, rs_tsd in rs_templates.items():
-                template_summaries[t_idx] = _summarize_reactivation_strengths(
-                    rs_tsd,
-                    {
-                        "pre_test": pre_epoch,
-                        "pre_sleep": pre_sleep,
-                        "cond": cond_epoch,
-                        "post_test": post_epoch,
-                        "post_sleep": post_sleep,
-                        "hab": hab_epoch,
-                    },
-                    event_intervals,
-                )
-
-            all_session_data[f"{mouse_name}_{manipe}"] = {
-                "rs": rs_templates,
-                "pc_scores": pc_scores,
-                "eigenvectors": eigenvectors[:, :n_comp],
-                "eigenvalues": eigenvalues[:n_comp],
-                "cell_ids": list(spike_group.keys()),
-                "q_tsd": q_tsd,
-                "summaries": template_summaries,
-                "epochs": {
-                    "pre_test": pre_epoch,
-                    "pre_sleep": pre_sleep,
-                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                    "pre": pre_epoch,
-                    "hab": hab_epoch,
-                    "cond": cond_epoch,
-                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                    "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                    "cond_move": cond_epoch.intersect(mov_epochs),
-                    "cond_stim": cond_epoch.intersect(stim_epochs),
-                    "post_test": post_epoch,
-                    "post": post_epoch,
-                    "post_sleep": post_sleep,
-                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
-                    "ripples": ripples_epochs,
-                    "sws": sws_epochs,
-                    "rem": rem_epochs,
-                    "mov": mov_epochs,
-                    "freeze": freeze_epochs,
-                    "pre_sleep_rem": pre_sleep.intersect(rem_epochs),
-                    "post_sleep_rem": post_sleep.intersect(rem_epochs),
-                },
-                "positions": {
-                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
-                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
-                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
-                    "linear": results.l_function(
-                        results.DataHelper.fullBehavior["Positions"][:, :2],
-                    )[1].flatten(),
-                },
-                "results": results,
-            }
-
-        return all_session_data
 
     def map_reactivation_space(self, session_dict, template_idx=0, bins=10):
         """Bins continuous 2D position space to map mean reactivation distribution profiles."""
@@ -10882,18 +12083,25 @@ class Results_Loader(TuningCurvesPlotter):
         """Executes computation loops and draws macro bar plots alongside 2D tracking matrices."""
 
         if session_data is None:
+            pipe = AssemblyReactivationPipeline()
             if spike_data:
-                session_data = self.compute_pca_reactivation(
+                session_data = pipe.compute_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
             else:
-                session_data = self.compute_latent_pca_reactivation(
+                session_data = pipe.compute_latent_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
+        else:
+            print("Using provided session_data for plotting.")
+            winMS = session_data["winMS"]
+            template_period = session_data["template"]
 
         if not session_data:
             print("No valid session matrices computed.")
@@ -10908,6 +12116,9 @@ class Results_Loader(TuningCurvesPlotter):
             # Filter data for the current manipe
             # Loop to parse scalar summary statistics for category comparisons
             for s_key, data in session_data.items():
+                if len(s_key.split("_")) < 2:
+                    print(f"Skipping session key {s_key} due to unexpected format.")
+                    continue
                 if manipe.lower() not in s_key.lower():
                     continue
 
@@ -11022,9 +12233,14 @@ class Results_Loader(TuningCurvesPlotter):
                 ("Learning", "PostSleep"),
                 ("PreSleep", "PostSleep"),
             ]
-            annotator = Annotator(ax0, pairs, data=df_bars, x="Epoch", y="Score")
-            annotator.configure(test="t-test_paired", text_format="star", loc="inside")
-            annotator.apply_and_annotate()
+            try:
+                annotator = Annotator(ax0, pairs, data=df_bars, x="Epoch", y="Score")
+                annotator.configure(
+                    test="t-test_paired", text_format="star", loc="inside"
+                )
+                annotator.apply_and_annotate()
+            except Exception as e:
+                warn(f"Annotation failed: {e}. Continuing without annotations.")
 
             # Compute averaged matrices for 2D spatial layouts
             mean_hab_spatial = np.nanmean(np.array(spatial_hab_list), axis=0)
@@ -11056,7 +12272,7 @@ class Results_Loader(TuningCurvesPlotter):
             )
             ax3.set_title(r"$\Delta$ Topology (Cond - Hab)")
             fig.suptitle(
-                f"PCA reactivations for {manipe} (n = {len(spatial_hab_list) / num_templates:.0f} sessions, {num_templates} templates)",
+                f"PCA reactivations for {manipe} (n = {len(spatial_hab_list) / num_templates:.0f} sessions, {num_templates} templates, {winMS=}ms, {template_period})",
             )
             plt.colorbar(im3, ax=ax3, shrink=0.7)
 
@@ -11064,7 +12280,7 @@ class Results_Loader(TuningCurvesPlotter):
             plt.tight_layout()
             if save_path:
                 os.makedirs(save_path, exist_ok=True)
-                filename = f"pca_reactivation_summary_{template_period}_{winMS}ms_{'wLSpikeData' if spike_data else 'wLatentData'}_{manipe}"
+                filename = f"pca_reactivation_summary_{template_period}_{winMS}ms_{'wLSpikeData' if spike_data else 'wLatentData'}_{manipe}_{winMS}ms"
                 plt.savefig(
                     os.path.join(save_path, filename + ".png"),
                     dpi=300,
@@ -11085,21 +12301,30 @@ class Results_Loader(TuningCurvesPlotter):
     ) -> pd.DataFrame:
         """Return a compact dataframe comparing reactivation across groups and event windows."""
         if session_data is None:
+            pipe = AssemblyReactivationPipeline()
             if spike_data:
-                session_data = self.compute_pca_reactivation(
+                session_data = pipe.compute_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
             else:
-                session_data = self.compute_latent_pca_reactivation(
+                session_data = pipe.compute_latent_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
+        else:
+            winMS = session_data["winMS"]
+            template_period = session_data["template"]
 
         rows = []
         for session_key, data in session_data.items():
+            if len(session_key.split("_")) < 2:
+                print(f"Skipping session key {session_key} due to unexpected format.")
+                continue
             mouse_name, manipe = _parse_session_key(session_key)
             for t_idx in range(num_templates):
                 summary = data.get("summaries", {}).get(t_idx, {})
@@ -11206,7 +12431,7 @@ class Results_Loader(TuningCurvesPlotter):
             fig.savefig(
                 os.path.join(
                     save_path,
-                    f"reactivation_condition_comparison_{template_period}.png",
+                    f"reactivation_condition_comparison_{template_period}_{winMS}ms.png",
                 ),
                 dpi=300,
                 bbox_inches="tight",
@@ -11323,14 +12548,20 @@ class Results_Loader(TuningCurvesPlotter):
         """
 
         # 1. Compute the raw PCA continuous traces using our previous method
-        session_data = self.compute_pca_reactivation(
-            winMS=winMS, template_period=template_period, num_templates=num_templates
+        pipe = AssemblyReactivationPipeline()
+        session_data = pipe.compute_assembly_reactivation(
+            results_df=self.results_df,
+            winMS=winMS,
+            template_period=template_period,
+            num_templates=num_templates,
         )
 
         migration_rows = []
 
         for s_key, data in session_data.items():
-            # Deconstruct session keys back to metadata parameters
+            if len(s_key.split("_")) < 2:
+                print(f"Skipping session key {s_key} due to unexpected format.")
+                continue
             try:
                 mouse_name, group_label = s_key.split("_")
             except ValueError:
@@ -11400,12 +12631,15 @@ class Results_Loader(TuningCurvesPlotter):
 
         return pd.DataFrame(migration_rows)
 
-    def plot_assembly_migration(self, winMS=100, template_period="cond"):
+    def plot_assembly_migration(
+        self, winMS=100, template_period="cond", df_mig: Optional[pd.DataFrame] = None
+    ):
         """Plots a comparison of assembly expression during Habituation vs Conditioning
 
         broken down by your physical ZONEDEF boundaries.
         """
 
+        pipe = AssemblyReactivationPipeline()
         df_mig = self.compute_assembly_zone_migration(
             winMS=winMS, template_period=template_period
         )
@@ -11458,44 +12692,83 @@ class Results_Loader(TuningCurvesPlotter):
         )
         plt.show()
 
-    def plot_comprehensive_summary_matrix(self, winMS=100, save_path=None):
+    def plot_comprehensive_summary_matrix(
+        self,
+        winMS=100,
+        row_configs: Optional[list] = None,
+        save_path: Optional[str] = None,
+    ):
         """Generates a multi-panel production figure matching the complete
-        3x4 macro dashboard of group-specific boxplots and robust behavior regressions.
+        macro dashboard of group-specific boxplots and robust behavior regressions.
         """
         from scipy.stats import spearmanr, wilcoxon
         from sklearn.linear_model import TheilSenRegressor
 
-        # Initialize a 3 rows by 4 columns figure layout
-        fig, axs = plt.subplots(3, 4, figsize=(24, 15), sharex=False, sharey=False)
+        # Default configurations if none are provided
+        if row_configs is None:
+            row_configs = [
+                {
+                    "task_phase": "pre",
+                    "subtask": "mov",
+                    "pre_phase": "pre_sleep",
+                    "post_phase": "post_sleep",
+                    "subpre": None,
+                    "subpost": None,
+                    "label": "Free exploration\nbefore learning",
+                },
+                {
+                    "task_phase": "cond",
+                    "subtask": "mov",
+                    "pre_phase": "pre_sleep",
+                    "post_phase": "post_sleep",
+                    "subpre": None,
+                    "subpost": None,
+                    "label": "Moving periods\nduring conditioning",
+                },
+                {
+                    "task_phase": "cond",
+                    "subtask": "ripples",
+                    "pre_phase": "pre_sleep",
+                    "post_phase": "post_sleep",
+                    "subpre": None,
+                    "subpost": None,
+                    "label": "Ripples\nduring conditioning",
+                },
+            ]
 
-        # Grid parameter dictionary setup
-        row_configs = [
-            {
-                "phase": "pre",
-                "subtask": "mov",
-                "label": "Free exploration\nbefore learning",
-            },
-            {
-                "phase": "cond",
-                "subtask": "mov",
-                "label": "Moving periods\nduring conditioning",
-            },
-            {
-                "phase": "cond",
-                "subtask": "ripples",
-                "label": "Ripples\nduring conditioning",
-            },
-        ]
+        num_rows = len(row_configs)
+        # Initialize figure layout dynamically based on the number of configs passed
+        # squeeze=False ensures axs is always a 2D array, even if num_rows == 1
+        fig, axs = plt.subplots(
+            num_rows,
+            4,
+            figsize=(24, 5 * num_rows),
+            sharex=False,
+            sharey=False,
+            squeeze=False,
+        )
 
         for row_idx, cfg in enumerate(row_configs):
-            phase = cfg["phase"]
-            subtask = cfg["subtask"]
+            # Fallback to "phase" key for backward compatibility with old hardcoded configs
+            task_phase = cfg.get("task_phase", cfg.get("phase", "cond"))
+            subtask = cfg.get("subtask", None)
+            pre_phase = cfg.get("pre_phase", "pre_sleep")
+            post_phase = cfg.get("post_phase", "post_sleep")
+            subpre = cfg.get("subpre", None)
+            subpost = cfg.get("subpost", None)
+            label = cfg.get("label", f"{task_phase} {subtask or ''}")
 
             # ==========================================
             # COLUMNS 1 & 2: EV vs REV BOXPLOTS PER GROUP
             # ==========================================
             df_ev = self.compute_kudrimoti_variance(
-                winMS=winMS, task_phase=phase, subtask=subtask
+                winMS=winMS,
+                task_phase=task_phase,
+                subtask=subtask,
+                pre_phase=pre_phase,
+                post_phase=post_phase,
+                subpre=subpre,
+                subpost=subpost,
             )
 
             if not df_ev.empty:
@@ -11572,7 +12845,7 @@ class Results_Loader(TuningCurvesPlotter):
                             )
 
                     ax_box.set_title(
-                        f"{cfg['label']}\n({group_name})", fontsize=10, weight="bold"
+                        f"{label}\n({group_name})", fontsize=10, weight="bold"
                     )
                     ax_box.set_ylabel("% explained" if g_col_idx == 0 else "")
                     ax_box.set_xlabel("")
@@ -11582,7 +12855,13 @@ class Results_Loader(TuningCurvesPlotter):
             # COLUMNS 3 & 4: GROUP-SPECIFIC CORRELATIONS
             # ==========================================
             df_corr = self.compute_ev_behavior_correlation(
-                winMS=winMS, task_phase=phase, subtask=subtask
+                winMS=winMS,
+                task_phase=task_phase,
+                subtask=subtask,
+                pre_phase=pre_phase,
+                post_phase=post_phase,
+                subpre=subpre,
+                subpost=subpost,
             )
 
             if not df_corr.empty and len(df_corr) >= 3:
@@ -11668,7 +12947,10 @@ class Results_Loader(TuningCurvesPlotter):
                     )
 
                     ax_scat.set_ylabel(y_labels[m_idx], fontweight="bold")
-                    ax_scat.set_xlabel(f"EV ({subtask} epoch %)")
+
+                    # Dynamically label X axis based on task config mapping
+                    epoch_str = f"{task_phase.upper()} {subtask or ''}".strip()
+                    ax_scat.set_xlabel(f"EV ({epoch_str} epoch %)")
 
         # Legend styling adjustments
         if axs[0, 2].get_legend() is not None:
@@ -11678,10 +12960,27 @@ class Results_Loader(TuningCurvesPlotter):
         plt.tight_layout()
 
         if save_path:
-            os.makedirs(save_path, exist_ok=True)
+            # Determine if save_path is a full filename or just a directory
+            root, ext = os.path.splitext(save_path)
+
+            if ext.lower() in [".png", ".svg", ".pdf", ".jpg", ".jpeg"]:
+                # It's a file path
+                out_dir = os.path.dirname(save_path) or "."
+                base_filename = os.path.basename(root)
+            else:
+                # It's a directory
+                out_dir = save_path
+                base_filename = f"comprehensive_summary_matrix_{winMS}ms"
+
+            os.makedirs(out_dir, exist_ok=True)
+
             plt.savefig(
-                os.path.join(save_path, "comprehensive_summary_matrix.png"),
+                os.path.join(out_dir, f"{base_filename}.png"),
                 dpi=300,
+                bbox_inches="tight",
+            )
+            plt.savefig(
+                os.path.join(out_dir, f"{base_filename}.svg"),
                 bbox_inches="tight",
             )
 
@@ -11704,18 +13003,24 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 1. Compute the raw PCA continuous traces using your existing method
         if session_data is None:
+            pipe = AssemblyReactivationPipeline()
             if spike_data:
-                session_data = self.compute_pca_reactivation(
+                session_data = pipe.compute_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
             else:
-                session_data = self.compute_latent_pca_reactivation(
+                session_data = pipe.compute_latent_assembly_reactivation(
+                    results_df=self.results_df,
                     winMS=winMS,
                     template_period=template_period,
                     num_templates=num_templates,
                 )
+        else:
+            winMS = session_data["winMS"]
+            template_period = session_data["template"]
 
         if not session_data:
             print("No valid session matrices computed.")
@@ -11734,6 +13039,9 @@ class Results_Loader(TuningCurvesPlotter):
 
         # 2. Iterate through sessions and group maps by manipulation type
         for s_key, data in session_data.items():
+            if len(s_key.split("_")) < 2:
+                print(f"Skipping session key {s_key} due to unexpected format.")
+                continue
             try:
                 mouse_name, group_label = s_key.split("_")
             except ValueError:
@@ -11959,786 +13267,251 @@ class Results_Loader(TuningCurvesPlotter):
 
         plt.show()
 
-    def compute_latent_pca_reactivation(
-        self, winMS=100, template_period="cond", num_templates=2
-    ):
-        """Smarter full-session latent manager. Dynamically stitches together latent spaces
-        from all behavioral phases (pre, hab, cond, post) to ensure continuous monitoring
-        across sleep and active exploration.
-        """
-        all_session_data = {}
-
-        for (mouse_name, manipe), df in self.results_df.groupby(
-            by=["mouse_name", "manipe"]
-        ):
-            results: Mouse_Results = df.iloc[0].results
-            idWindow = results.timeWindows.index(winMS)
-            base_results_path = os.path.join(
-                results.projectPath.experimentPath, "results"
-            )
-
-            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
-            pre_epoch, _ = results.get_epoch_interval("pre")
-            cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post")
-            post_sleep, _ = results.get_epoch_interval("post_sleep")
-            hab_epoch, _ = results.get_epoch_interval("hab")
-
-            sws_epochs = results.DataHelper.get_sws_epochs()
-            ripples_epochs = results.DataHelper.get_ripples_epochs()
-
-            try:
-                freeze_epochs = results.DataHelper.get_freeze_epochs()
-            except AttributeError:
-                freeze_epochs = IntervalSet(start=[], end=[])
-
-            # 2. STITCHING LAYER: Load and combine latents across all available phases
-            # This ensures we have coverage for Pre-Sleep, Hab, Cond, and Post-Sleep
-            phases_to_load = [
-                "_pre",
-                "_cond",
-                "_post",
-                "_training",
-            ]
-
-            stitched_times = []
-            stitched_latents = []
-
-            for p_suffix in phases_to_load:
-                # Check if it's already in memory first
-                if (
-                    hasattr(results, "resultsNN_phase_pkl")
-                    and p_suffix in results.resultsNN_phase_pkl
-                ):
-                    pkl_data = results.resultsNN_phase_pkl[p_suffix]
-                    if (
-                        "latent_output" in pkl_data
-                        and len(pkl_data["latent_output"]) >= idWindow + 1
-                        and pkl_data["latent_output"][idWindow] is not None
-                        and "times" in results.resultsNN_phase[p_suffix]
-                    ):
-                        stitched_times.append(
-                            results.resultsNN_phase[p_suffix]["times"][
-                                idWindow
-                            ].flatten()
-                        )
-                        stitched_latents.append(pkl_data["latent_output"][idWindow])
-                        continue
-
-                # Fallback: Read file dynamically from disk folder
-                pkl_path = os.path.join(
-                    base_results_path, str(winMS), f"decoding_results{p_suffix}.pkl"
-                )
-                if os.path.exists(pkl_path):
-                    try:
-                        with open(pkl_path, "rb") as f:
-                            temp_pkl = pickle.load(f)
-                            if "times" in temp_pkl:
-                                t_steps = temp_pkl["times"]
-                            else:
-                                raise ValueError(f"Missing 'times' key in {pkl_path}")
-
-                            l_mat = temp_pkl.get("latent_output", None)
-                            if isinstance(l_mat, list):
-                                l_mat = np.array(l_mat)
-
-                            stitched_times.append(t_steps.flatten())
-                            stitched_latents.append(l_mat)
-
-                            del temp_pkl
-                            gc.collect()
-                    except Exception as e:
-                        print(f"Failed loading phase {p_suffix} for {mouse_name}: {e}")
-                else:
-                    print(
-                        f"Phase file {pkl_path} not found for {mouse_name}. Skipping this phase."
-                    )
-
-            base_results_path_sleep = os.path.join(
-                results.projectPath.experimentPath, "results_Sleep"
-            )
-            for sleep_name in results.DataHelper.fullBehavior["Times"].get(
-                "sleepNames", []
-            ):
-                pkl_path = os.path.join(
-                    base_results_path_sleep,
-                    str(winMS),
-                    sleep_name,
-                    "decoding_results.pkl",
-                )
-
-                if os.path.exists(pkl_path):
-                    try:
-                        with open(pkl_path, "rb") as f:
-                            temp_pkl = pickle.load(f)
-                            if "times" in temp_pkl:
-                                t_steps = temp_pkl["times"]
-                            else:
-                                raise ValueError(
-                                    f"Sleep file {pkl_path} missing 'times' key."
-                                )
-
-                            l_mat = temp_pkl.get("latent_output", None)
-                            if isinstance(l_mat, list):
-                                l_mat = np.array(l_mat)
-
-                            stitched_times.append(t_steps.flatten())
-                            stitched_latents.append(l_mat)
-
-                            del temp_pkl
-                            phases_to_load.append(sleep_name)
-                            gc.collect()
-                    except Exception as e:
-                        print(
-                            f"Failed loading sleep {sleep_name} for {mouse_name}: {e}"
-                        )
-                else:
-                    print(
-                        f"Sleep file {pkl_path} not found for {mouse_name}. Skipping this sleep phase."
-                    )
-
-            if not stitched_latents:
-                print(
-                    f"Skipping {mouse_name}: No latent data could be collected across phases."
-                )
-                continue
-
-            flat_times = np.concatenate(stitched_times)
-            flat_latents = np.concatenate(stitched_latents, axis=0)
-
-            full_latent_tsd = TsdFrame(t=flat_times, d=flat_latents)
-
-            # 5. Define template interval mapping windows
-            if template_period == "wake":
-                template_interval = cond_epoch
-            elif template_period == "cond":
-                template_interval = cond_epoch
-            elif template_period == "condFree":
-                template_interval = cond_epoch.intersect(freeze_epochs)
-            elif template_period == "postRip":
-                template_interval = post_sleep.intersect(sws_epochs).intersect(
-                    ripples_epochs
-                )
-            elif template_period == "condRip":
-                template_interval = cond_epoch.intersect(ripples_epochs)
-            else:
-                raise ValueError(f"Unknown template period paradigm: {template_period}")
-
-            # 6. Build Eigenvectors from the Conditioning/Target template window
-            lat_template = full_latent_tsd.restrict(template_interval).values
-            if lat_template.shape[0] < 10:
-                print(
-                    f"Skipping {mouse_name}: Template window has insufficient data frames."
-                )
-                continue
-
-            cov_matrix = np.cov(lat_template, rowvar=False)
-            cov_matrix = np.nan_to_num(cov_matrix)
-
-            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
-            idx_sorted = np.argsort(eigenvalues)[::-1]
-            eigenvectors = eigenvectors[:, idx_sorted]
-
-            # 7. Project full continuous session timeline onto the learning manifold
-            lat_full_norm = (
-                full_latent_tsd.values - np.mean(full_latent_tsd.values, axis=0)
-            ) / (np.std(full_latent_tsd.values, axis=0) + 1e-12)
-            lat_full_norm = np.nan_to_num(lat_full_norm)
-
-            rs_templates = {}
-            num_templates = min(num_templates, eigenvectors.shape[1])
-            for idx_t in range(num_templates):
-                v_i = eigenvectors[:, idx_t]
-                score_t = np.dot(lat_full_norm, v_i)
-                rs_templates[idx_t] = Tsd(t=full_latent_tsd.index, d=score_t**2)
-
-            # 8. Return structured metadata package
-            event_intervals = {
-                "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                "post_sleep_sws": post_sleep.intersect(sws_epochs),
-            }
-            template_summaries = {}
-            for idx_t, rs_tsd in rs_templates.items():
-                template_summaries[idx_t] = _summarize_reactivation_strengths(
-                    rs_tsd,
-                    {
-                        "pre_test": pre_epoch,
-                        "pre_sleep": pre_sleep,
-                        "cond": cond_epoch,
-                        "post_test": post_epoch,
-                        "post_sleep": post_sleep,
-                        "hab": hab_epoch,
-                    },
-                    event_intervals,
-                )
-
-            all_session_data[f"{mouse_name}_{manipe}"] = {
-                "rs": rs_templates,
-                "summaries": template_summaries,
-                "epochs": {
-                    "pre_test": pre_epoch,
-                    "pre_sleep": pre_sleep,
-                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                    "pre": pre_epoch,
-                    "hab": hab_epoch,
-                    "cond": cond_epoch,
-                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                    "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                    "post_test": post_epoch,
-                    "post": post_epoch,
-                    "post_sleep": post_sleep,
-                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
-                    "ripples": ripples_epochs,
-                },
-                "positions": {
-                    "x": results.DataHelper.fullBehavior["Positions"][:, 0],
-                    "y": results.DataHelper.fullBehavior["Positions"][:, 1],
-                    "time": results.DataHelper.fullBehavior["positionTime"].flatten(),
-                    "linear": results.l_function(
-                        results.DataHelper.fullBehavior["Positions"][:, :2],
-                    )[1].flatten(),
-                },
-            }
-
-        return all_session_data
-
-    def compute_assembly_reactivation_advanced(
+    def plot_advanced_diagnostics(
         self,
-        winMS=100,
-        template_period="cond",
-        num_templates=3,
-        calc_type="PCA",  # "PCA" or "ICA"
-        keep_mua=False,
-        keep_interneurons=True,
-        force=False,
-        fig=False,
-        max_templates=5,
-        save_fig_path=None,
+        all_session_data: Optional[Dict[str, Any]] = None,
+        session_key: Optional[str] = None,
+        calc_type: Optional[str] = None,
+        max_templates_to_plot: int = 5,
+        save_fig_path: Optional[str] = None,
+        show: bool = True,
     ):
-        """Advanced assembly reactivation tracker replicating react_pca_ica_AG.py.
+        """Plot scree/dimensional diagnostics and cell-type assembly loading weights.
 
-        Supports PCA/ICA forks, neuron layer sub-filtering, shuffling controls,
-        Marčenko-Pastur limits, and automated figure generation matching MATLAB output.
+        Parameters
+        ----------
+        all_session_data : dict, optional
+            Output dictionary from AssemblyReactivationPipeline.
+            If None, calls the pipeline on self.
+        session_key : str, optional
+            Specific session key (e.g. 'M1117MFB_MFB'). Defaults to the first session.
+        calc_type : str, optional
+            Extraction method override ('PCA', 'PCA_ICA', or 'ICA'). If None,
+            reads the method directly from session metadata.
+        max_templates_to_plot : int, default=5
+            Maximum number of component weight stem plots to display per session.
+        save_fig_path : str, optional
+            Directory path to export generated figures.
+        show : bool, default=True
+            Whether to display figures interactively using plt.show().
         """
-        bin_size_sec = winMS / 1000.0
-        all_session_data = {}
+        import os
 
-        for (mouse_name, manipe), df in self.results_df.groupby(
-            by=["mouse_name", "manipe"]
-        ):
-            results: Mouse_Results = df.iloc[0].results
-            print(
-                f"Processing {mouse_name} ({manipe}) for {calc_type} reactivation analysis..."
-            )
-
-            # 1. Fetch Spike trains and corresponding cell layer classifications
-            spike_group = results.DataHelper.get_spike_data()
-            if len(spike_group) < 5:
-                continue
-
-            try:
-                try:
-                    neuron_types = results.DataHelper.get_neuron_classifications(
-                        force=force
-                    )
-                except FileNotFoundError:
-                    neuron_types = results.DataHelper.get_neuron_classifications(
-                        folder=results.network_path, force=force
-                    )
-            except AttributeError:
-                warn(
-                    f"Neuron classification data missing for {mouse_name}. Defaulting to 'Pyramidal'."
-                )
-                neuron_types = np.array(["Pyramidal"] * len(spike_group))
-
-            # 2. Filter neuron vectors based on multiU and interN parameters
-            valid_indices = []
-            for idx, n_type in enumerate(neuron_types):
-                if "mua" in str(n_type).lower() and not keep_mua:
-                    continue
-                if "interneuron" in str(n_type).lower() and not keep_interneurons:
-                    continue
-                valid_indices.append(idx)
-
-            if len(valid_indices) < 4:
-                continue
-
-            valid_indices = np.array(valid_indices)
-            filtered_spikes = TsGroup({i: spike_group[i] for i in valid_indices})
-            filtered_types = np.array(neuron_types)[valid_indices]
-            cell_labels = [f"Cell_{i}" for i in valid_indices]
-
-            # 3. Extract behavioral intervals
-            pre_sleep, _ = results.get_epoch_interval("pre_sleep")
-            pre_epoch, _ = results.get_epoch_interval("pre_test")
-            cond_epoch, _ = results.get_epoch_interval("cond")
-            post_epoch, _ = results.get_epoch_interval("post_test")
-            post_sleep, _ = results.get_epoch_interval("post_sleep")
-            hab_epoch, _ = results.get_epoch_interval("hab")
-
-            sws_epochs = results.DataHelper.get_sws_epochs()
-            ripples_epochs = results.DataHelper.get_ripples_epochs()
-
-            try:
-                freeze_epochs = results.DataHelper.get_freeze_epochs()
-            except AttributeError:
-                freeze_epochs = IntervalSet(start=[], end=[])
-
-            # 4. Generate the main binned matrix (Q-Matrix)
-            q_tsd = filtered_spikes.count(bin_size_sec)
-
-            if template_period == "wake":
-                template_interval = pre_epoch.union(cond_epoch).union(post_epoch)
-            elif template_period == "cond":
-                template_interval = cond_epoch
-            elif template_period == "condFree":
-                template_interval = cond_epoch.intersect(freeze_epochs)
-            elif template_period == "postRip":
-                template_interval = post_epoch.intersect(sws_epochs).intersect(
-                    ripples_epochs
-                )
-            elif template_period == "condRip":
-                template_interval = cond_epoch.intersect(ripples_epochs)
-            else:
-                raise ValueError(f"Unknown template window: {template_period}")
-
-            # 5. Extract template frames and compute Z-scores
-            q_template_raw = q_tsd.restrict(template_interval).values
-            if q_template_raw.shape[0] < 10:
-                continue
-
-            mean_t = np.mean(q_template_raw, axis=0)
-            std_t = np.std(q_template_raw, axis=0) + 1e-12
-            q_template = (q_template_raw - mean_t) / std_t
-
-            num_bins, num_neurons = q_template.shape
-
-            # PCA vs ICA Fork
-            if calc_type.upper() == "PCA":
-                corr_matrix = np.corrcoef(q_template, rowvar=False)
-                corr_matrix = np.nan_to_num(corr_matrix)
-                np.fill_diagonal(corr_matrix, 0)
-
-                eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
-                sort_idx = np.argsort(eigenvalues)[::-1]
-                eigenvalues = eigenvalues[sort_idx]
-                assemblies = eigenvectors[:, sort_idx]
-
-                lambda_max = (1 + np.sqrt(num_neurons / num_bins)) ** 2
-
-                shuffled_q = q_template.copy()
-                for col in range(num_neurons):
-                    shuffled_q[:, col] = np.random.permutation(shuffled_q[:, col])
-
-                shuff_corr = np.corrcoef(shuffled_q, rowvar=False)
-                np.fill_diagonal(shuff_corr, 0)
-                shuff_values, _ = np.linalg.eigh(np.nan_to_num(shuff_corr))
-                percentile_shuff = np.percentile(shuff_values, 100)
-
-            elif calc_type.upper() == "ICA":
-                ica = FastICA(n_components=num_templates, random_state=42, max_iter=500)
-                ica.fit(q_template)
-                assemblies = ica.components_.T
-                eigenvalues = np.ones(num_templates)
-                lambda_max, percentile_shuff = np.nan, np.nan
-            else:
-                raise ValueError("calc_type must be either 'PCA' or 'ICA'")
-
-            # 6. Projection onto session timeline
-            q_full_normalized = (q_tsd.values - np.mean(q_tsd.values, axis=0)) / (
-                np.std(q_tsd.values, axis=0) + 1e-12
-            )
-            q_full_normalized = np.nan_to_num(q_full_normalized)
-
-            rs_templates = {}
-            num_templates = min(num_templates, assemblies.shape[1])
-            for idx_t in range(num_templates):
-                v_i = assemblies[:, idx_t]
-                outer_product = np.outer(v_i, v_i)
-                np.fill_diagonal(outer_product, 0)
-
-                react_matrix = np.dot(q_full_normalized, outer_product)
-                rs_vector = np.sum(react_matrix * q_full_normalized, axis=1)
-                rs_tsd = Tsd(t=q_tsd.times(), d=rs_vector)
-
-                mean_pre = np.mean(
-                    rs_tsd.restrict(
-                        IntervalSet(q_tsd.time_support).intersect(pre_epoch)
-                    ).values
-                )
-                mean_post = np.mean(
-                    rs_tsd.restrict(
-                        IntervalSet(q_tsd.time_support).intersect(post_epoch)
-                    ).values
-                )
-
-                if (
-                    max(abs(mean_pre), abs(mean_post)) != max(mean_pre, mean_post)
-                    and calc_type.upper() == "PCA"
-                ):
-                    rs_tsd = rs_tsd * -1.0
-
-                rs_templates[idx_t] = rs_tsd
-
-            # Position tracking data
-            pos_x = results.DataHelper.fullBehavior["Positions"][:, 0]
-            pos_y = results.DataHelper.fullBehavior["Positions"][:, 1]
-            pos_t = results.DataHelper.fullBehavior["positionTime"].flatten()
-
-            # 7. Automated Figure Generation
-            if fig:
-                session_id = f"{mouse_name}_{manipe}"
-
-                # FIG 1: Stem Plot for Assembly Weights
-                for idx_t in range(num_templates):
-                    if lambda_max is not None and eigenvalues[idx_t] < 0.9 * lambda_max:
-                        warn(
-                            f"Skipping template {idx_t + 1} for {mouse_name}: Eigenvalue below Marčenko-Pastur threshold."
-                        )
-                        break
-                    if idx_t >= max_templates:
-                        warn(
-                            f"Skipping template {idx_t + 1} for {mouse_name}: Exceeds max_templates limit of {max_templates}."
-                        )
-                        break
-                    fig1, ax1 = plt.subplots(figsize=(10, 4))
-                    w = assemblies[:, idx_t]
-                    x_axis = np.arange(len(w))
-                    mu_w, std_w = np.mean(w), np.std(w)
-
-                    colors = {
-                        "SUA_pyramidal": "#77AC30",
-                        "SUA_interneuron": "#0072BD",
-                        "MUA": "#D95319",
-                        "unclassified": "#7F7F7F",
-                    }
-                    for n_type in np.unique(filtered_types):
-                        m_idx = np.where(filtered_types == n_type)[0]
-                        c = colors.get(n_type, None)
-                        if c is None:
-                            for key in colors.keys():
-                                if n_type in key:
-                                    c = colors[key]
-                                    break
-
-                        marker, stem, base = ax1.stem(
-                            m_idx,
-                            w[m_idx],
-                            linefmt=c,
-                            markerfmt="o",
-                            label=n_type,
-                        )
-                        plt.setp(
-                            marker, markerfacecolor=c, markeredgecolor=c, markersize=5
-                        )
-                        plt.setp(stem, color=c)
-
-                    ax1.axhline(
-                        mu_w + 2 * std_w, color="r", linestyle="--", label="±2 SD"
-                    )
-                    ax1.axhline(mu_w - 2 * std_w, color="r", linestyle="--")
-                    ax1.set_xticks(x_axis)
-                    ax1.set_xticklabels(cell_labels, rotation=90, fontsize=6)
-                    ax1.set_ylabel("Weight")
-                    ax1.set_title(
-                        f"{session_id} | {calc_type} Template #{idx_t + 1} ({template_period})"
-                    )
-                    ax1.set_ylim([-0.55, 0.55])
-                    ax1.legend(loc="upper right")
-                    plt.tight_layout()
-                    if save_fig_path:
-                        fig1.savefig(
-                            f"{save_fig_path}/{session_id}_weight_PC{idx_t + 1}.png"
-                        )
-
-                # FIG 2 & 3: Epoch Comparison & Ripple-Triggered PETH
-                print(f"Generating epoch comparison plots for {session_id}...")
-                pre_sws_rs = [
-                    np.mean(rs.restrict(pre_sleep.intersect(sws_epochs)).values)
-                    for rs in rs_templates.values()
-                ]
-                hab_rs = [
-                    np.mean(rs.restrict(hab_epoch.union(pre_epoch)).values)
-                    for rs in rs_templates.values()
-                ]
-                cond_rs = [
-                    np.mean(rs.restrict(cond_epoch).values)
-                    for rs in rs_templates.values()
-                ]
-                post_sws_rs = [
-                    np.mean(rs.restrict(post_sleep.intersect(sws_epochs)).values)
-                    for rs in rs_templates.values()
-                ]
-                normalized_eigenvalues = eigenvalues / np.max(eigenvalues)
-
-                fig2, axes2 = plt.subplots(1, 2, figsize=(11, 4.5))
-
-                # Scatter Pre vs Post
-                scatter = axes2[0].scatter(
-                    pre_sws_rs,
-                    post_sws_rs,
-                    c=normalized_eigenvalues[:num_templates],
-                    alpha=0.8,
-                )
-                if len(pre_sws_rs) > 1:
-                    r_val, p_val = stats.pearsonr(pre_sws_rs, post_sws_rs)
-                    axes2[0].set_title(
-                        f"Pre vs Post SWS (r={r_val:.2f}, p={p_val:.3f})"
-                    )
-                axes2[0].plot(
-                    [
-                        min(pre_sws_rs + post_sws_rs),
-                        max(pre_sws_rs + post_sws_rs),
-                    ],
-                    [
-                        min(pre_sws_rs + post_sws_rs),
-                        max(pre_sws_rs + post_sws_rs),
-                    ],
-                    "k:",
-                )
-                axes2[0].set_xlabel("Reactivation (Pre-Sleep SWS)")
-                axes2[0].set_ylabel("Reactivation (Post-Sleep SWS)")
-                plt.colorbar(scatter, ax=axes2[0], label="Normalized Eigenvalue")
-
-                # Bar chart over epochs
-                epoch_names = ["PreSleep", "FreeExplo", "Learning", "PostSleep"]
-                means = [
-                    np.mean(pre_sws_rs),
-                    np.mean(hab_rs),
-                    np.mean(cond_rs),
-                    np.mean(post_sws_rs),
-                ]
-                sems = [
-                    stats.sem(pre_sws_rs) if len(pre_sws_rs) > 1 else 0,
-                    stats.sem(hab_rs) if len(hab_rs) > 1 else 0,
-                    stats.sem(cond_rs) if len(cond_rs) > 1 else 0,
-                    stats.sem(post_sws_rs) if len(post_sws_rs) > 1 else 0,
-                ]
-                axes2[1].bar(
-                    epoch_names,
-                    means,
-                    yerr=sems,
-                    color=["white", "#CAE62F", "#E60000", "black"],
-                    edgecolor="k",
-                    alpha=0.7,
-                    capsize=4,
-                )
-                axes2[1].set_ylabel("Reactivation Score")
-                axes2[1].set_title("Mean Reactivation Across Epochs")
-                plt.tight_layout()
-
-                if save_fig_path:
-                    fig2.savefig(f"{save_fig_path}/{session_id}_epoch_comparison.png")
-
-                # FIG 4: Spatial Maps (10x10 Maze Spatial Binning)
-                grid_hab = _compute_2d_spatial_reactivation(
-                    rs_templates[0], pos_x, pos_y, pos_t, hab_epoch.union(pre_epoch)
-                )
-                grid_cond = _compute_2d_spatial_reactivation(
-                    rs_templates[0], pos_x, pos_y, pos_t, cond_epoch
-                )
-
-                fig3, axes3 = plt.subplots(1, 3, figsize=(12, 3.8))
-                vmax = max(np.nanmax(grid_hab), np.nanmax(grid_cond))
-                vmin = min(np.nanmin(grid_hab), np.nanmin(grid_cond))
-
-                im0 = axes3[0].imshow(
-                    grid_hab.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
-                )
-                axes3[0].set_title("Habituation Map")
-                fig3.colorbar(im0, ax=axes3[0])
-
-                im1 = axes3[1].imshow(
-                    grid_cond.T, origin="lower", cmap="hot", vmin=vmin, vmax=vmax
-                )
-                axes3[1].set_title("Conditioning Map")
-                fig3.colorbar(im1, ax=axes3[1])
-
-                diff_map = grid_cond - grid_hab
-                im2 = axes3[2].imshow(diff_map.T, origin="lower", cmap="bwr")
-                axes3[2].set_title("Cond - Hab Difference")
-                fig3.colorbar(im2, ax=axes3[2])
-
-                for ax in axes3:
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-
-                plt.tight_layout()
-                if save_fig_path:
-                    fig3.savefig(
-                        f"{save_fig_path}/{session_id}_spatial_reactivation.png"
-                    )
-
-            # 8. Store output dictionary
-            event_intervals = {
-                "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                "cond_no_ripples": cond_epoch.set_diff(ripples_epochs),
-                "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                "post_sleep_sws": post_sleep.intersect(sws_epochs),
-            }
-            template_summaries = {}
-            for idx_t, rs_tsd in rs_templates.items():
-                template_summaries[idx_t] = _summarize_reactivation_strengths(
-                    rs_tsd,
-                    {
-                        "pre_test": pre_epoch,
-                        "pre_sleep": pre_sleep,
-                        "cond": cond_epoch,
-                        "post_test": post_epoch,
-                        "post_sleep": post_sleep,
-                        "hab": hab_epoch,
-                    },
-                    event_intervals,
-                )
-
-            all_session_data[f"{mouse_name}_{manipe}"] = {
-                "rs": rs_templates,
-                "weights": assemblies[:, :num_templates],
-                "neuron_labels": cell_labels,
-                "neuron_types": filtered_types,
-                "spikes": filtered_spikes,
-                "lfp": results.DataHelper.get_lfp_data(
-                    channel_type="ripple", network_path=results.network_path
-                ),
-                "summaries": template_summaries,
-                "stats": {
-                    "eigenvalues": eigenvalues[:num_templates],
-                    "marcenko_pastur": lambda_max,
-                    "shuffle_max": percentile_shuff,
-                },
-                "epochs": {
-                    "pre_test": pre_epoch,
-                    "pre_sleep": pre_sleep,
-                    "pre_sleep_sws": pre_sleep.intersect(sws_epochs),
-                    "pre": pre_epoch,
-                    "hab": hab_epoch,
-                    "cond": cond_epoch,
-                    "cond_freeze": cond_epoch.intersect(freeze_epochs),
-                    "cond_ripples": cond_epoch.intersect(ripples_epochs),
-                    "post_test": post_epoch,
-                    "post": post_epoch,
-                    "post_sleep": post_sleep,
-                    "post_sleep_sws": post_sleep.intersect(sws_epochs),
-                    "ripples": ripples_epochs,
-                },
-                "positions": {
-                    "x": pos_x,
-                    "y": pos_y,
-                    "time": pos_t,
-                },
-            }
-
-        return all_session_data
-
-    def plot_advanced_diagnostics(self, all_session_data, session_key, calc_type="PCA"):
-        """Plots the eigenvalues against Marčenko-Pastur lines and renders stem
-
-        diagrams mapping unit contribution weights across single assemblies.
-        """
         import matplotlib.pyplot as plt
+        import numpy as np
         import seaborn as sns
 
+        # ----------------------------------------------------------------------
+        # 1. Fallback & Session Validation
+        # ----------------------------------------------------------------------
+        if all_session_data is None:
+            pipeline = AssemblyReactivationPipeline()
+            all_session_data = pipeline.compute_assembly_reactivation(
+                results_df=self.results_df
+            )
+
+        valid_keys = [
+            k
+            for k in all_session_data.keys()
+            if k not in {"winMS", "template", "method"}
+        ]
+        if not valid_keys:
+            print("No valid session data available for plotting.")
+            return
+
+        if session_key is None:
+            session_key = valid_keys[0]
+            print(f"No session key provided; using '{session_key}' as default.")
+
         if session_key not in all_session_data:
-            print(f"Session '{session_key}' not found.")
+            print(f"Session '{session_key}' not found in provided data dictionary.")
             return
 
         data = all_session_data[session_key]
-        weights = data["weights"]
-        n_labels = data["neuron_labels"]
-        n_types = data["neuron_types"]
-        stats = data["stats"]
-        num_templates = weights.shape[1]
+        weights = data.get("weights", np.array([]))
+        n_labels = data.get("neuron_labels", [])
+        n_types = data.get("neuron_types", np.array([]))
+        stats = data.get("stats", {})
 
-        # Plot 1: Scree Plot / Marčenko-Pastur law checking (Only applicable for PCA mode)
-        if calc_type.upper() == "PCA":
-            plt.figure(figsize=(6, 4))
-            plt.plot(stats["eigenvalues"], "o-", color="red", label="Eigenvalues")
-            plt.axhline(
-                stats["marcenko_pastur"],
-                color="orange",
-                linestyle="--",
-                label="Marcenko-Pastur Limit",
-            )
-            plt.axhline(
-                stats["shuffle_max"],
-                color="blue",
-                linestyle=":",
-                label="Shuffle Max Limit",
-            )
-            plt.xlabel("Component Index")
-            plt.ylabel("Eigenvalue Magnitude")
-            plt.title(f"Manifold Dimensionality check ({session_key})")
-            plt.legend()
-            sns.despine()
-            plt.show()
+        # Determine extraction method automatically if not specified
+        if calc_type is None:
+            calc_type = data.get(
+                "method", all_session_data.get("method", "PCA_ICA")
+            ).upper()
+        else:
+            calc_type = calc_type.upper()
 
-        # Plot 2: Neuron Component Contribution Weights Diagrams
+        if weights.ndim < 2 or weights.shape[1] == 0:
+            print(
+                f"No assembly weight components available for session '{session_key}'."
+            )
+            return
+
+        num_templates = min(weights.shape[1], max_templates_to_plot)
+
+        # ----------------------------------------------------------------------
+        # 2. Plot 1: Scree Plot & Marchenko-Pastur Law Check (PCA / PCA_ICA)
+        # ----------------------------------------------------------------------
+        eigenvalues = stats.get("eigenvalues", np.array([]))
+        if calc_type in {"PCA", "PCA_ICA"} and len(eigenvalues) > 0:
+            fig1, ax1 = plt.subplots(figsize=(6, 4))
+            x_idx = np.arange(1, len(eigenvalues) + 1)
+
+            ax1.plot(
+                x_idx,
+                eigenvalues,
+                "o-",
+                color="#D95319",
+                linewidth=1.5,
+                label="Eigenvalues",
+            )
+
+            mp_lim = stats.get("marcenko_pastur", np.nan)
+            if np.isfinite(mp_lim):
+                ax1.axhline(
+                    mp_lim,
+                    color="#EDB119",
+                    linestyle="--",
+                    linewidth=1.5,
+                    label="Marčenko-Pastur Bound",
+                )
+
+            shuff_lim = stats.get("shuffle_max", np.nan)
+            if np.isfinite(shuff_lim) and shuff_lim != mp_lim:
+                ax1.axhline(
+                    shuff_lim,
+                    color="#0072BD",
+                    linestyle=":",
+                    linewidth=1.5,
+                    label="Surrogate Shuffle Max",
+                )
+
+            ax1.set_xlabel("Component Index", fontsize=10)
+            ax1.set_ylabel("Eigenvalue Magnitude", fontsize=10)
+            ax1.set_title(
+                f"Manifold Dimensionality Diagnostic ({session_key} | {calc_type})",
+                fontsize=11,
+            )
+            ax1.legend(frameon=False, fontsize=9)
+            sns.despine(ax=ax1)
+            plt.tight_layout()
+
+            if save_fig_path:
+                os.makedirs(save_fig_path, exist_ok=True)
+                fig1.savefig(
+                    f"{save_fig_path}/{session_key}_scree_diagnostic.png",
+                    dpi=200,
+                    bbox_inches="tight",
+                )
+
+            if show:
+                plt.show()
+            else:
+                plt.close(fig1)
+
+        # ----------------------------------------------------------------------
+        # 3. Plot 2: Neuron Loading Weight Stem Diagrams
+        # ----------------------------------------------------------------------
         color_map = {
-            "Pyramidal": "#76A92F",
-            "interNeuron": "#0072BA",
-            "MultiUnit": "#EDB119",
+            "pyramidal": "#76A92F",
+            "interneuron": "#0072BA",
+            "mua": "#D95319",
+            "multiunit": "#D95319",
+            "unclassified": "#7F7F7F",
         }
 
         for t_idx in range(num_templates):
-            _, ax = plt.subplots(figsize=(12, 4))
             w_vector = weights[:, t_idx]
             x_indices = np.arange(len(w_vector))
 
-            # Compute threshold bounds (+/- 2 Standard Deviations)
-            th_upper = np.mean(w_vector) + 2 * np.std(w_vector)
-            th_lower = np.mean(w_vector) - 2 * np.std(w_vector)
+            fig2, ax2 = plt.subplots(figsize=(12, 4))
 
-            # Draw stem lines color-coded by cell subcategory
+            # Compute outlier threshold bounds (+/- 2 Standard Deviations)
+            mu_w = np.nanmean(w_vector)
+            std_w = np.nanstd(w_vector)
+            th_upper = mu_w + 2 * std_w
+            th_lower = mu_w - 2 * std_w
+
+            # Group stems by cell type to produce a clean, non-duplicated legend
+            legend_handles = {}
             for idx, cell_type in enumerate(n_types):
-                if "pyramidal" in cell_type.lower():
-                    color = color_map["Pyramidal"]
-                elif "interneuron" in cell_type.lower():
-                    color = color_map["interNeuron"]
-                elif "multiunit" in cell_type.lower() or "mua" in cell_type.lower():
-                    color = color_map["MultiUnit"]
-                else:
-                    color = "gray"  # Default color for unclassified types
+                c_type_str = str(cell_type).lower()
 
-                markerline, _, _ = ax.stem(
+                color = "#7F7F7F"  # Default gray
+                category_name = "Unclassified"
+
+                for key, c_val in color_map.items():
+                    if key in c_type_str:
+                        color = c_val
+                        category_name = key.capitalize()
+                        break
+
+                markerline, stemlines, _ = ax2.stem(
                     [x_indices[idx]],
                     [w_vector[idx]],
                     linefmt=color,
                     basefmt="gray",
                 )
                 plt.setp(markerline, color=color, markersize=5)
+                plt.setp(stemlines, color=color, linewidth=1.2)
 
-            # Draw upper/lower outlier limits
-            ax.axhline(
+                if category_name not in legend_handles:
+                    legend_handles[category_name] = markerline
+
+            # Plot threshold limits
+            ax2.axhline(
                 th_upper,
                 color="red",
                 linestyle="--",
                 alpha=0.7,
-                label=r"2$\sigma$ Threshold",
+                label=r"$\pm 2\sigma$ Bound",
             )
-            ax.axhline(th_lower, color="red", linestyle="--", alpha=0.7)
+            ax2.axhline(th_lower, color="red", linestyle="--", alpha=0.7)
 
-            ax.set_xticks(x_indices)
-            ax.set_xticklabels(n_labels, rotation=90, fontsize=7)
+            ax2.set_xticks(x_indices)
+            ax2.set_xticklabels(n_labels, rotation=90, fontsize=6)
 
-            # Highlight cells crossing the significance boundaries in red
+            # Highlight significant loading neurons on the X-axis in bold red
+            xtick_labels = ax2.get_xticklabels()
             for idx, val in enumerate(w_vector):
-                if val >= th_upper or val <= th_lower:
-                    ax.get_xticklabels()[idx].set_color("red")
-                    ax.get_xticklabels()[idx].set_weight("bold")
+                if np.isfinite(val) and (val >= th_upper or val <= th_lower):
+                    xtick_labels[idx].set_color("red")
+                    xtick_labels[idx].set_weight("bold")
 
-            ax.set_ylabel("Assembly Loading Weight")
-            ax.set_title(
-                f"{calc_type} Component Assembly Matrix Element #{t_idx + 1} ({session_key})"
+            ax2.set_ylabel("Assembly Loading Weight", fontsize=10)
+            ax2.set_title(
+                f"{calc_type} Pattern #{t_idx + 1} Loading Weights ({session_key})",
+                fontsize=11,
             )
-            ax.set_ylim(-0.6, 0.6)
-            sns.despine()
+
+            # Dynamic Y-Limits based on max weight values
+            max_abs_w = np.nanmax(np.abs(w_vector)) if len(w_vector) > 0 else 0.5
+            y_lim = max(0.55, max_abs_w * 1.15)
+            ax2.set_ylim(-y_lim, y_lim)
+
+            ax2.legend(
+                handles=list(legend_handles.values()) + [ax2.get_lines()[0]],
+                labels=list(legend_handles.keys()) + [r"$\pm 2\sigma$ Bound"],
+                loc="upper right",
+                frameon=False,
+                fontsize=8,
+            )
+
+            sns.despine(ax=ax2)
             plt.tight_layout()
-            plt.show()
+
+            if save_fig_path:
+                os.makedirs(save_fig_path, exist_ok=True)
+                fig2.savefig(
+                    f"{save_fig_path}/{session_key}_{calc_type}_weights_comp_{t_idx + 1}.png",
+                    dpi=200,
+                    bbox_inches="tight",
+                )
+
+            if show:
+                plt.show()
+            else:
+                plt.close(fig2)
 
     def plot_full_session_trace(
         self,
@@ -12755,7 +13528,7 @@ class Results_Loader(TuningCurvesPlotter):
         Parameters
         ----------
         all_session_data : dict
-            Output dictionary from compute_pca_reactivation.
+            Output dictionary from compute_assembly_reactivation.
         session_key : str
             Session identifier key.
         template_idx : int
@@ -12788,6 +13561,9 @@ class Results_Loader(TuningCurvesPlotter):
             smoothed_rs = gaussian_filter1d(rs_tsd.values, sigma=sigma_bins)
         else:
             smoothed_rs = rs_tsd.values
+
+        if time_window is not None:
+            t_start, t_end = time_window
 
         if q_tsd is not None:
             # Compute Firing Rates (Hz)
@@ -12988,131 +13764,14 @@ class Results_Loader(TuningCurvesPlotter):
             )
         plt.show()
 
-    def plot_cell_activity_around_ripples_by_pc(
-        self,
-        all_session_data,
-        session_key,
-        num_pcs=3,
-        peth_window=(-1.0, 1.0),
-        top_n_cells=5,
-        figsize=(10, 8),
-    ):
-        from matplotlib import gridspec
-
-        if session_key not in all_session_data:
-            print(f"Session {session_key} not found in provided data.")
-            return
-
-        session_data = all_session_data[session_key]
-
-        # 1. Reverse-engineer mouse_name and manipe to fetch raw spike data
-        # Assuming session_key format is "MouseName_Manipe"
-        mouse_name, manipe = session_key.rsplit("_", 1)
-        df = self.results_df.xs(mouse_name, level="mouse_name").xs(
-            manipe, level="manipe"
-        )
-        if df.empty:
-            print(f"Raw data for {session_key} not found in results_df.")
-            return
-
-        results: Mouse_Results = df.iloc[0].results
-        spike_group = results.DataHelper.get_spike_data()
-        lfp_data = results.DataHelper.get_lfp_data(
-            channel_type="ripple", network_path=results.network_path
-        )
-
-        # 2. Extract session metadata
-        ripples_epoch = session_data["epochs"]["ripples"]
-        valid_cell_ids = spike_group.keys()
-
-        for pc_idx in range(min(num_pcs, len(list(session_data["rs"].keys())))):
-            rs_tsd = session_data["rs"][pc_idx]
-            weights = session_data["eigenvectors"][:, pc_idx]
-
-            # 3. Find the exact ripple with the maximum Reactivation Strength
-            rs_during_ripples = rs_tsd.restrict(ripples_epoch)
-            if len(rs_during_ripples) == 0:
-                print(f"No reactivation during ripples for PC {pc_idx + 1}.")
-                continue
-
-            peak_time = rs_during_ripples.times()[np.argmax(rs_during_ripples.values)]
-            window_ep = IntervalSet(
-                start=peak_time + peth_window[0], end=peak_time + peth_window[1]
-            )
-
-            # 4. Sort cells by absolute weight contribution
-            sort_order = np.argsort(np.abs(weights))[::-1]
-            sorted_cell_ids = np.array(valid_cell_ids)[sort_order]
-            sorted_weights = weights[sort_order]
-
-            # 5. Extract data for the localized window
-            rs_window = rs_tsd.restrict(window_ep)
-            t_rs = rs_window.times() - peak_time
-            val_rs = rs_window.values
-
-            # 6. Build the Figure layout
-            fig = plt.figure(figsize=figsize)
-            gs = gridspec.GridSpec(2, 1, height_ratios=[1, 2.5], hspace=0.1)
-
-            # Panel A: Reactivation Strength Trace
-            ax_rs = fig.add_subplot(gs[0])
-            ax_rs.plot(t_rs, val_rs, color="#0072BD", linewidth=1.5)
-            ax_rs.axvline(
-                0, color="red", linestyle="--", alpha=0.7, label="Ripple Peak"
-            )
-            ax_rs.set_ylabel("Reactivation\nStrength")
-            ax_rs.set_title(
-                f"{session_key} | PC {pc_idx + 1} Reactivation at Peak Ripple"
-            )
-            ax_rs.set_xlim(peth_window)
-            ax_rs.set_xticks([])  # Hide x-ticks for top panel
-            ax_rs.legend(loc="upper right")
-            ax_rs.spines["top"].set_visible(False)
-            ax_rs.spines["right"].set_visible(False)
-            ax_rs.spines["bottom"].set_visible(False)
-
-            # Panel B: Sorted Spike Raster
-            ax_raster = fig.add_subplot(gs[1])
-
-            # Plot each cell's spikes
-            for y_pos, cell_id in enumerate(sorted_cell_ids):
-                spikes = spike_group[cell_id].restrict(window_ep).times() - peak_time
-
-                # Highlight top N contributing cells in red, others in black
-                color = "#D95319" if y_pos < top_n_cells else "black"
-                lw = 1.2 if y_pos < top_n_cells else 0.8
-
-                if len(spikes) > 0:
-                    ax_raster.vlines(
-                        spikes,
-                        ymin=y_pos - 0.4,
-                        ymax=y_pos + 0.4,
-                        color=color,
-                        linewidth=lw,
-                    )
-
-            ax_raster.axvline(0, color="red", linestyle="--", alpha=0.3)
-            ax_raster.set_xlim(peth_window)
-            ax_raster.set_ylim(-1, len(sorted_cell_ids))
-            ax_raster.set_xlabel("Time from ripple peak (s)")
-            ax_raster.set_ylabel("Cell # (Sorted by PC Weight)")
-
-            # Invert Y-axis so top contributors are at the top of the raster plot
-            ax_raster.invert_yaxis()
-
-            ax_raster.spines["top"].set_visible(False)
-            ax_raster.spines["right"].set_visible(False)
-
-            plt.tight_layout()
-            plt.show()
-
     def plot_cell_activity_around_events(
         self,
         all_session_data,
         session_key,
         event_type="ripples",  # "ripples", "delta", or "spindles"
         epoch="cond",  # e.g., "cond", "pre_sleep_sws", "post_sleep_sws", or IntervalSet
-        max_events=3,  # Maximum number of top events to display
+        max_events=4,  # Maximum number of top events to display
+        max_to_load=100,  # Maximum number of events to consider for selection
         num_pcs=2,  # Number of PCs to overlay
         top_cells_per_pc=10,  # Top N cells highlighted per PC
         peth_window=(-0.25, 0.25),  # Temporal window around event center (seconds)
@@ -13131,7 +13790,10 @@ class Results_Loader(TuningCurvesPlotter):
             print(f"Session '{session_key}' not found in all_session_data.")
             return
 
-        # 1. Reverse-engineer session key to fetch raw Mouse_Results from results_df
+        winMS = all_session_data["winMS"]
+        template = all_session_data["template"]
+        method = all_session_data["method"]
+
         mouse_name, manipe = session_key.rsplit("_", 1)
         try:
             df = self.results_df.xs(mouse_name, level="mouse_name").xs(
@@ -13163,12 +13825,21 @@ class Results_Loader(TuningCurvesPlotter):
                 lfp = results.DataHelper.get_lfp_data(
                     channel_type="delta", network_path=results.network_path
                 )
-                events_epoch = results.DataHelper.get_delta_epochs()
+                events_epoch = results.DataHelper.get_delta_epochs(
+                    network_path=results.network_path
+                )
             elif event_type.lower() == "spindles":
                 lfp = results.DataHelper.get_lfp_data(
                     channel_type="spindle", network_path=results.network_path
                 )
-                events_epoch = results.DataHelper.get_spindle_epochs()
+                events_epoch = results.DataHelper.get_spindle_epochs(
+                    network_path=results.network_path
+                )
+            elif event_type.lower() == "stim":
+                lfp = results.DataHelper.get_lfp_data(
+                    channel_type="ripple", network_path=results.network_path
+                )
+                events_epoch = results.DataHelper.get_stim_epochs()
             else:
                 raise ValueError("event_type must be 'ripples', 'delta', or 'spindles'")
         except Exception as e:
@@ -13177,6 +13848,7 @@ class Results_Loader(TuningCurvesPlotter):
             )
             lfp = results.DataHelper.get_lfp_data(channel_type="ripple")
             events_epoch = session_data["epochs"]["ripples"]
+            event_type = "ripples"
 
         # 3. Restrict events to target epoch
         if epoch is not None:
@@ -13202,7 +13874,9 @@ class Results_Loader(TuningCurvesPlotter):
         event_amplitudes = []
         event_centers = []
 
-        for start, end in zip(events_epoch.start, events_epoch.end):
+        for i, (start, end) in enumerate(zip(events_epoch.start, events_epoch.end)):
+            if i >= max_to_load:
+                break
             center = (start + end) / 2.0
             window = IntervalSet(
                 start=center + peth_window[0], end=center + peth_window[1]
@@ -13334,20 +14008,23 @@ class Results_Loader(TuningCurvesPlotter):
             ax_raster.spines["right"].set_visible(False)
 
         plt.suptitle(
-            f"{session_key} | Multi-PC Activity Aligned to {event_type.capitalize()} ({epoch})",
+            f"{session_key} | Multi-PC Activity Aligned to {event_type.capitalize()} ({epoch}, {template=}, {method=}, {winMS}ms)",
             fontsize=12,
             y=0.98,
         )
         plt.tight_layout()
         plt.show()
 
-    def plot_component_stim_figure(
+    def plot_component_event_figure(
         self,
         all_session_data,
         session_key,
+        event_type="ripples",  # "stim", "ripples", "delta", or "spindles"
+        epoch="cond",  # e.g., "cond", "pre_sleep_sws", "post_sleep_sws", or IntervalSet
         peth_window=(-3.0, 6.0),
         bin_size=0.05,
         figsize=(14, 10),
+        save_path=None,
     ):
         """Generates a publication-style multi-panel figure for EACH principal component (PC)
 
@@ -13366,19 +14043,57 @@ class Results_Loader(TuningCurvesPlotter):
         data = all_session_data[session_key]
         q_tsd = data["q_tsd"]
         eigenvectors = data["eigenvectors"]  # shape (N_cells, N_components)
-        eigenvalues = data["eigenvalues"]  # shape (N_components,)
+        eigenvalues = data["stats"]["eigenvalues"]  # shape (N_components,)
         pc_scores = data["pc_scores"]  # dict: {pc_idx: Tsd}
+        winMS = all_session_data["winMS"]
 
         # 1. Fetch Stimulus Onset Timestamps
         results = data.get("results", None)
+        if results is None:
+            name_mouse = session_key.rsplit("_", 1)[0]
+            manipe = session_key.rsplit("_", 1)[1]
+            results = (
+                self.results_df.xs(name_mouse, level="mouse_name")
+                .xs(manipe, level="manipe")
+                .iloc[0]
+                .results
+            )
         try:
-            stim_epochs = results.DataHelper.get_stim_epochs(before=0.1, after=0.1)
-            stim_starts = np.array(stim_epochs.start)
-        except Exception:
-            print(f"Could not retrieve stim_epochs for {session_key}.")
-            return
+            if event_type.lower() == "ripples":
+                events_epoch = data["epochs"]["ripples"]
+            elif event_type.lower() == "delta":
+                events_epoch = results.DataHelper.get_delta_epochs(
+                    network_path=results.network_path
+                )
+            elif event_type.lower() == "spindles":
+                events_epoch = results.DataHelper.get_spindle_epochs(
+                    network_path=results.network_path
+                )
+            elif event_type.lower() == "stim":
+                events_epoch = results.DataHelper.get_stim_epochs()
+            else:
+                raise ValueError("event_type must be 'ripples', 'delta', or 'spindles'")
+        except Exception as e:
+            print(
+                f"Could not load LFP/Epochs for event type '{event_type}': {e}. Defaulting to ripples."
+            )
+            events_epoch = data["epochs"]["ripples"]
+            event_type = "ripples"
 
-        if len(stim_starts) == 0:
+        if isinstance(epoch, str):
+            if epoch in data["epochs"]:
+                target_ep = data["epochs"][epoch]
+            else:
+                target_ep, _ = results.get_epoch_interval(epoch)
+            events_epoch = events_epoch.intersect(target_ep)
+        elif isinstance(epoch, IntervalSet):
+            events_epoch = events_epoch.intersect(epoch)
+        else:
+            raise ValueError("epoch must be a string key or IntervalSet")
+
+        events_start = np.array(events_epoch.start)
+
+        if len(events_start) == 0:
             print(f"No stim events found in {session_key}.")
             return
 
@@ -13400,13 +14115,13 @@ class Results_Loader(TuningCurvesPlotter):
 
         cell_peths = np.zeros((n_cells, n_peth_bins))
 
-        for k, t_stim in enumerate(stim_starts):
-            t_target = t_stim + time_rel
+        for k, t_event in enumerate(events_start):
+            t_target = t_event + time_rel
             idx_bins = np.searchsorted(tsd_times, t_target)
             idx_bins = np.clip(idx_bins, 0, n_bins_total - 1)
             cell_peths += spikes_hz[idx_bins, :].T
 
-        cell_peths /= len(stim_starts)  # Average across trials (N_cells, N_peth_bins)
+        cell_peths /= len(events_start)  # Average across trials (N_cells, N_peth_bins)
 
         # 4. Generate Figure for EACH Principal Component
         for pc_idx in range(n_components):
@@ -13424,9 +14139,9 @@ class Results_Loader(TuningCurvesPlotter):
             score_times = score_tsd.index
 
             # Build Trial-by-Trial PC Score Matrix: (N_trials, N_peth_bins)
-            trial_scores = np.zeros((len(stim_starts), n_peth_bins))
-            for k, t_stim in enumerate(stim_starts):
-                t_target = t_stim + time_rel
+            trial_scores = np.zeros((len(events_start), n_peth_bins))
+            for k, t_event in enumerate(events_start):
+                t_target = t_event + time_rel
                 idx_bins = np.searchsorted(score_times, t_target)
                 idx_bins = np.clip(idx_bins, 0, len(score_vals) - 1)
                 trial_scores[k, :] = score_vals[idx_bins]
@@ -13480,7 +14195,9 @@ class Results_Loader(TuningCurvesPlotter):
                 y_offset += y_step
 
             ax_a.axvline(0, color="black", linestyle="--", linewidth=1.2, alpha=0.8)
-            ax_a.set_xlabel("Time from Stim Onset (s)", fontsize=10)
+            ax_a.set_xlabel(
+                f"Time from {event_type.capitalize()} Onset (s)", fontsize=10
+            )
             ax_a.set_ylabel("Cells (Sorted by PC Weight)", fontsize=10)
             ax_a.set_title(
                 f"a  Cell PETHs (PC {pc_idx + 1} Weights)",
@@ -13528,7 +14245,7 @@ class Results_Loader(TuningCurvesPlotter):
                 color="gray",
                 linestyle="--",
                 linewidth=1,
-                label=r"$\lambda_{max}$ (Noise Threshold)",
+                label=r"$\lambda_{max}$ (Noise Threshold)" + f" = {lambda_max:.2f}",
             )
 
             ax_b.set_xlabel("PC Number", fontsize=9)
@@ -13545,7 +14262,7 @@ class Results_Loader(TuningCurvesPlotter):
                 extent=[
                     peth_window[0],
                     peth_window[1],
-                    len(stim_starts),
+                    len(events_start),
                     1,
                 ],
                 cmap="RdBu_r",
@@ -13573,6 +14290,9 @@ class Results_Loader(TuningCurvesPlotter):
                 fontweight="bold",
                 y=0.98,
             )
+            if save_path is not None:
+                os.makedirs(save_path, exist_ok=True)
+                fig_name = f"component_event_figure_{session_key}_PC{pc_idx + 1}_{event_type}_{epoch}_{winMS}ms.png"
 
             plt.show()
 
@@ -13631,6 +14351,9 @@ class Results_Loader(TuningCurvesPlotter):
         q_tsd = neuron_session_data[session_key]["q_tsd"]
         eigenvectors = neuron_session_data[session_key].get("eigenvectors", None)
         epochs = neuron_session_data[session_key]["epochs"]
+
+        if time_window is not None:
+            t_start, t_end = time_window
 
         if eigenvectors is None:
             print(
@@ -13700,10 +14423,270 @@ class Results_Loader(TuningCurvesPlotter):
         for k, v in to_legend.items():
             ax.plot([], [], color=v, alpha=0.3, label=k.upper(), linewidth=6)
 
-        ax.legend(frameon=False, fontsize=8, loc="upper right")
+        ax.legend(frameon=True, fontsize=8, loc="upper right")
 
         plt.tight_layout()
         plt.show()
+
+    def compute_reactivation(self, **kwargs) -> Dict[str, Any]:
+        pipeline = AssemblyReactivationPipeline()
+        return pipeline.compute_assembly_reactivation(
+            results_df=self.results_df, **kwargs
+        )
+
+    def compute_latent_reactivation(self, **kwargs) -> Dict[str, Any]:
+        pipeline = AssemblyReactivationPipeline()
+        return pipeline.compute_latent_assembly_reactivation(
+            results_df=self.results_df, **kwargs
+        )
+
+    def plot_cohort_reactivation_summary(
+        self,
+        all_session_data: Dict[str, Any],
+        template_idx: int = 0,
+        save_fig_path: Optional[str] = None,
+        show: bool = True,
+    ):
+        """Plot cohort-level pooled reactivation dynamics across sleep states and epochs.
+
+        Generates a 4-panel dashboard:
+        - Panel A: Pooled Reactivation Strength across Wake, NREM, and REM.
+        - Panel B: Pre-Sleep SWS vs. Post-Sleep SWS Consolidation (Paired Scatter + Stats).
+        - Panel C: Pre vs. Post SWS Change Bar Plot with Session Overlay.
+        - Panel D: Timeline across Macro Epochs (Hab, Pre-Sleep, Cond, Post-Sleep).
+
+        Parameters
+        ----------
+        all_session_data : dict
+            The output dictionary returned by loader.compute_reactivation().
+        template_idx : int, default=0
+            Which assembly template index to pool across sessions.
+        save_fig_path : str, optional
+            Path to export the pooled summary figure.
+        show : bool, default=True
+            Whether to display the figure interactively.
+        """
+        import os
+
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pandas as pd
+        import seaborn as sns
+        from scipy import stats
+
+        # Filter valid session keys
+        session_keys = [
+            k
+            for k in all_session_data.keys()
+            if k not in {"winMS", "template", "method"}
+        ]
+        if not session_keys:
+            print("No valid session data found in all_session_data.")
+            return
+
+        rows = []
+        for s_key in session_keys:
+            s_data = all_session_data[s_key]
+            summaries = s_data.get("summaries", {})
+
+            # Extract summary dict for the requested template index
+            t_summary = summaries.get(template_idx, {})
+            if not t_summary:
+                continue
+
+            rows.append(
+                {
+                    "session": s_key,
+                    "pre_test": t_summary.get("pre_test", np.nan),
+                    "pre_sleep": t_summary.get("pre_sleep", np.nan),
+                    "pre_sleep_sws": t_summary.get("pre_sleep_sws", np.nan),
+                    "pre_sleep_rem": t_summary.get("pre_sleep_rem", np.nan),
+                    "hab": t_summary.get("hab", np.nan),
+                    "cond": t_summary.get("cond", np.nan),
+                    "cond_ripples": t_summary.get("cond_ripples", np.nan),
+                    "cond_freeze": t_summary.get("cond_freeze", np.nan),
+                    "post_test": t_summary.get("post_test", np.nan),
+                    "post_sleep": t_summary.get("post_sleep", np.nan),
+                    "post_sleep_sws": t_summary.get("post_sleep_sws", np.nan),
+                    "post_sleep_rem": t_summary.get("post_sleep_rem", np.nan),
+                }
+            )
+
+        df_cohort = pd.DataFrame(rows)
+        if df_cohort.empty:
+            print(f"No summary data found for template index #{template_idx}.")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+
+        # ----------------------------------------------------------------------
+        # PANEL A: Reactivation by Primary Sleep State (Wake vs. NREM vs. REM)
+        # ----------------------------------------------------------------------
+        ax_a = axes[0, 0]
+        wake_vals = df_cohort["cond"].dropna().to_numpy()
+        nrem_vals = df_cohort["post_sleep_sws"].dropna().to_numpy()
+        rem_vals = df_cohort["post_sleep_rem"].dropna().to_numpy()
+
+        state_data = [wake_vals, nrem_vals, rem_vals]
+        state_labels = ["Wake (Cond)", "NREM (SWS)", "REM"]
+        colors_a = ["#7F7F7F", "#2C7FB8", "#D7191C"]
+
+        means_a = [np.nanmean(v) if len(v) > 0 else np.nan for v in state_data]
+        sems_a = [
+            stats.sem(v, nan_policy="omit") if len(v) > 1 else 0.0 for v in state_data
+        ]
+
+        pos_a = np.arange(len(state_labels))
+        ax_a.bar(
+            pos_a,
+            means_a,
+            yerr=sems_a,
+            color=colors_a,
+            alpha=0.75,
+            edgecolor="black",
+            capsize=4,
+        )
+
+        # Scatter session dots with jitter
+        for i, vals in enumerate(state_data):
+            if len(vals) > 0:
+                jitter = np.random.uniform(-0.08, 0.08, size=len(vals))
+                ax_a.scatter(
+                    np.full_like(vals, pos_a[i]) + jitter,
+                    vals,
+                    color="black",
+                    alpha=0.6,
+                    s=20,
+                )
+
+        ax_a.set_xticks(pos_a)
+        ax_a.set_xticklabels(state_labels)
+        ax_a.set_ylabel("Reactivation Strength (A.U.)")
+        ax_a.set_title("A. Cohort Reactivation by State")
+        sns.despine(ax=ax_a)
+
+        # ----------------------------------------------------------------------
+        # PANEL B: Pre-Sleep SWS vs Post-Sleep SWS (Paired Scatter + Stats)
+        # ----------------------------------------------------------------------
+        ax_b = axes[0, 1]
+        valid_sws = df_cohort[["pre_sleep_sws", "post_sleep_sws"]].dropna()
+
+        if len(valid_sws) >= 2:
+            pre_sws = valid_sws["pre_sleep_sws"].to_numpy()
+            post_sws = valid_sws["post_sleep_sws"].to_numpy()
+
+            ax_b.scatter(
+                pre_sws, post_sws, color="#2C7FB8", s=40, edgecolors="black", alpha=0.8
+            )
+
+            # 1:1 Identity Line
+            min_val = min(np.min(pre_sws), np.min(post_sws))
+            max_val = max(np.max(pre_sws), np.max(post_sws))
+            ax_b.plot(
+                [min_val, max_val],
+                [min_val, max_val],
+                "k--",
+                alpha=0.6,
+                label="Identity (1:1)",
+            )
+
+            # Paired Wilcoxon / t-test
+            try:
+                stat_val, p_val = stats.wilcoxon(pre_sws, post_sws)
+                stat_name = "Wilcoxon"
+            except Exception:
+                stat_val, p_val = stats.ttest_rel(pre_sws, post_sws)
+                stat_name = "t-test"
+
+            r_val, _ = (
+                stats.pearsonr(pre_sws, post_sws)
+                if len(pre_sws) > 2
+                else (np.nan, np.nan)
+            )
+
+            ax_b.set_title(
+                f"B. SWS Consolidation ({stat_name} p={p_val:.3f}, r={r_val:.2f})"
+            )
+            ax_b.set_xlabel("Pre-Sleep SWS Reactivation")
+            ax_b.set_ylabel("Post-Sleep SWS Reactivation")
+            ax_b.legend(frameon=False, fontsize=8)
+        else:
+            ax_b.text(
+                0.5, 0.5, "Insufficient SWS Paired Samples", ha="center", va="center"
+            )
+            ax_b.set_title("B. SWS Consolidation (Pre vs Post)")
+
+        sns.despine(ax=ax_b)
+
+        # ----------------------------------------------------------------------
+        # PANEL C: Pre vs. Post Sleep SWS Paired Line Changes
+        # ----------------------------------------------------------------------
+        ax_c = axes[1, 0]
+        if len(valid_sws) >= 2:
+            for _, row in valid_sws.iterrows():
+                y_pre = row["pre_sleep_sws"]
+                y_post = row["post_sleep_sws"]
+                color = "#D7191C" if y_post > y_pre else "#7F7F7F"
+                ax_c.plot(
+                    [0, 1], [y_pre, y_post], "o-", color=color, alpha=0.6, linewidth=1.5
+                )
+
+            ax_c.set_xticks([0, 1])
+            ax_c.set_xticklabels(["Pre-Sleep SWS", "Post-Sleep SWS"])
+            ax_c.set_ylabel("Reactivation Score")
+            ax_c.set_title("C. Individual Session Trajectories (Pre -> Post)")
+        else:
+            ax_c.text(0.5, 0.5, "Insufficient SWS Data", ha="center", va="center")
+
+        sns.despine(ax=ax_c)
+
+        # ----------------------------------------------------------------------
+        # PANEL D: Full Epoch Timeline (Hab -> PreSleep -> Cond -> PostSleep)
+        # ----------------------------------------------------------------------
+        ax_d = axes[1, 1]
+        epoch_cols = ["hab", "pre_sleep_sws", "cond", "post_sleep_sws"]
+        epoch_disp = ["Hab", "Pre-Sleep SWS", "Cond", "Post-Sleep SWS"]
+        epoch_colors = ["#CCCCCC", "#CAE62F", "#E60000", "#333333"]
+
+        means_d = [df_cohort[col].mean(skipna=True) for col in epoch_cols]
+        sems_d = [
+            stats.sem(df_cohort[col].dropna())
+            if len(df_cohort[col].dropna()) > 1
+            else 0.0
+            for col in epoch_cols
+        ]
+
+        pos_d = np.arange(len(epoch_disp))
+        ax_d.bar(
+            pos_d,
+            means_d,
+            yerr=sems_d,
+            color=epoch_colors,
+            edgecolor="black",
+            alpha=0.8,
+            capsize=4,
+        )
+
+        ax_d.set_xticks(pos_d)
+        ax_d.set_xticklabels(epoch_disp, rotation=15)
+        ax_d.set_ylabel("Reactivation Score")
+        ax_d.set_title(f"D. Timeline Across Epochs (Template #{template_idx + 1})")
+        sns.despine(ax=ax_d)
+
+        plt.tight_layout()
+
+        if save_fig_path:
+            os.makedirs(save_fig_path, exist_ok=True)
+            fig.savefig(
+                f"{save_fig_path}/cohort_reactivation_summary_pattern_{template_idx + 1}.png",
+                dpi=300,
+                bbox_inches="tight",
+            )
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
 
 def _compute_2d_spatial_reactivation(
@@ -13784,6 +14767,200 @@ def get_1d_tuning_curve(positions, mask_indices, bins=50, sigma=1.5):
     # Calculate bin centers
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     return density, bin_centers
+
+
+def _process_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Pure worker function executed across CPU cores via joblib."""
+    res = {}
+
+    feat_pred = row.get("featurePred")
+    feat_true = row.get("featureTrue")
+    lin_pred = row.get("linearPred")
+    lin_true = row.get("linearTrue")
+    pred_loss = row.get("predLoss")
+    results_obj = row.get("results")
+    data_helper = getattr(results_obj, "data_helper", None)
+
+    has_pred = feat_pred is not None and feat_true is not None
+    has_lin = lin_pred is not None and lin_true is not None
+    has_loss = pred_loss is not None
+
+    # 1. Base Errors
+    if has_pred:
+        errors = np.linalg.norm(feat_pred - feat_true, axis=1).astype(np.float32)
+        res["error"] = errors
+        res["mean_error"] = (
+            np.nanmean(errors, dtype=np.float32) * np.ones_like(errors)
+        ).astype(np.float32)
+
+    if has_lin:
+        lin_errors = np.abs(lin_pred - lin_true).astype(np.float32)
+        res["lin_error"] = lin_errors
+        res["mean_lin_error"] = (
+            np.nanmean(lin_errors, dtype=np.float32) * np.ones_like(lin_errors)
+        ).astype(np.float32)
+
+    # 2. Selected Metrics (Lowest 20% loss window evaluation)
+    if has_loss:
+        threshold = np.quantile(pred_loss, 0.2).astype(np.float32)
+        res["predLossThreshold"] = (threshold * np.ones_like(pred_loss)).astype(
+            np.float32
+        )
+        mask = (pred_loss <= threshold).astype(bool)
+
+        if has_pred:
+            errors_selected = copy.deepcopy(errors)
+            errors_selected[~mask] = np.nan
+            res["error_selected"] = errors_selected
+            res["mean_error_selected"] = (
+                np.nanmean(errors_selected, dtype=np.float32)
+                * np.ones_like(errors_selected)
+            ).astype(np.float32)
+
+            if results_obj is not None and hasattr(
+                results_obj, "get_training_imbalance"
+            ):
+                imb_val = results_obj.get_training_imbalance(positions=feat_pred[mask])
+                res["asymmetry_index_on_selected_predicted"] = (
+                    np.array(imb_val, dtype=np.float32) * np.ones_like(errors_selected)
+                ).astype(np.float32)
+
+        if has_lin:
+            lin_errors_select = copy.deepcopy(lin_errors)
+            lin_errors_select[~mask] = np.nan
+            res["lin_error_selected"] = lin_errors_select
+            res["mean_lin_error_selected"] = (
+                np.nanmean(lin_errors_select, dtype=np.float32)
+                * np.ones_like(lin_errors_select)
+            ).astype(np.float32)
+
+    # 3. Indices and Directions
+    if (
+        has_pred
+        and results_obj is not None
+        and hasattr(results_obj, "get_training_imbalance")
+    ):
+        imb_val = results_obj.get_training_imbalance(positions=feat_pred)
+        res["asymmetry_index_on_predicted"] = (
+            np.array(imb_val, dtype=np.float32)
+            * np.ones(feat_pred.shape[0], dtype=np.float32)
+        ).astype(np.float32)
+
+    if (
+        has_lin
+        and data_helper is not None
+        and hasattr(data_helper, "_get_traveling_direction")
+    ):
+        true_dir = data_helper._get_traveling_direction(lin_true)
+        pred_dir = data_helper._get_traveling_direction(lin_pred)
+
+        res["true_binary_direction"] = (
+            np.array(true_dir, dtype=np.float32) * np.ones_like(lin_true)
+        ).astype(np.float32)
+        res["predicted_binary_direction"] = (
+            np.array(pred_dir, dtype=np.float32) * np.ones_like(lin_pred)
+        ).astype(np.float32)
+
+    return res
+
+
+def _divide_array_series(num_list, denom_list):
+    """Fast list comprehension for element-wise array division (10x faster than apply)."""
+    res = []
+    for num, denom in zip(num_list, denom_list):
+        if isinstance(num, np.ndarray) and isinstance(denom, np.ndarray):
+            safe_denom = np.where(denom == 0, np.nan, denom)
+            res.append(num / safe_denom)
+        else:
+            res.append(np.nan)
+    return res
+
+
+def _process_single_mouse(
+    mouse_nb: int,
+    manipe: str,
+    mouse_full_name: str,
+    exp_index: Optional[int],
+    Dir: pd.DataFrame,
+    nameExp: str,
+    suffixes: List[str],
+    phases: List[str],
+    timeWindows: List[int],
+    template_phase: str,
+    redo: bool,
+    disable: bool,
+    **kwargs,
+) -> List[pd.DataFrame]:
+    """Worker function executed in parallel for a single mouse across CPU cores.
+
+    Safely handles cases where convert_to_df() returns None or an empty DataFrame.
+    """
+    mouse_dfs = []
+    str_mouse_nb = str(mouse_nb)
+    mouse_full_name_exp = (
+        f"{mouse_full_name}_exp{exp_index}"
+        if exp_index is not None and exp_index != 0
+        else mouse_full_name
+    )
+
+    for suffix, phase in zip(suffixes, phases):
+        if phase in ["training", "full_pre"]:
+            continue
+
+        add_training = phase == template_phase
+        add_full_pre = phase == template_phase
+
+        # 1. Instantiate the lazy proxy for this specific session
+        proxy = LazyMouseResult(
+            Dir=Dir,
+            mouse_name=str_mouse_nb,
+            manipe=manipe,
+            nameExp=nameExp,
+            phase=suffix.strip("_"),
+            suffix=suffix,
+            exp_index=exp_index,
+            windows=timeWindows if isinstance(timeWindows, list) else [timeWindows],
+            add_training=add_training,
+            add_full_pre=add_full_pre,
+            **kwargs,
+        )
+
+        # 2. Safely resolve Mouse_Results and extract the data DataFrame
+        try:
+            mouse_res_obj = proxy._resolve()
+
+            # Guard against None returned by proxy resolution or missing data
+            if mouse_res_obj is None:
+                continue
+
+            # Call convert_to_df with disable=True so inner loops don't spam progress bars
+            sub_df = mouse_res_obj.convert_to_df(redo=redo, disable=True)
+
+        except (FileNotFoundError, KeyError, ValueError, AttributeError) as e:
+            # Catch file/parsing errors per session so one missing file doesn't crash the whole worker pool
+            print(f"⚠️ [Skipping] {mouse_full_name_exp} ({phase}): {e}")
+            continue
+        except Exception as e:
+            print(
+                f"❌ [Error] Unexpected error processing {mouse_full_name_exp} ({phase}): {e}"
+            )
+            continue
+
+        # 3. Explicit check for None or empty DataFrame
+        if sub_df is None or not isinstance(sub_df, pd.DataFrame) or sub_df.empty:
+            continue
+
+        # Reset index if it came back MultiIndexed from single-mouse conversion
+        sub_df = sub_df.reset_index()
+
+        # 4. Attach top-level metadata & LazyMouseResult proxy directly to row cells
+        sub_df["nameExp"] = nameExp
+        sub_df["mouse_name"] = mouse_full_name_exp
+        sub_df["results"] = proxy
+
+        mouse_dfs.append(sub_df)
+
+    return mouse_dfs
 
 
 # Example usage:

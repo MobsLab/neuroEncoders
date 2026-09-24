@@ -5,6 +5,8 @@ from typing import Callable
 os.environ.setdefault(
     "TF_CPP_MIN_LOG_LEVEL", "2"
 )  # 0=all, 1=no Info, 2=no Warnings, 3=no Errors
+from warnings import warn
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -86,7 +88,12 @@ class WaveFormComparator:
         self.suffix = f"_{phase}" if phase is not None else ""
         # The feat_desc is used by the tf.io.parse_example to parse what we previously saved
         # as tf.train.Feature in the proto format.
-        self.max_nb_spikes = kwargs.get("max_nb_spikes", 400)
+        self.max_nb_spikes = kwargs.get("max_nb_spikes", None)
+        if self.max_nb_spikes is None:
+            self.max_nb_spikes = getattr(self.params, "max_nb_spikes", 512)
+            warn(
+                f"⚠️ max_nb_spikes not provided, using params.max_nb_spikes={self.max_nb_spikes} as default."
+            )
         self.max_spikes_per_group = kwargs.get(
             "max_spikes_per_group", int(self.max_nb_spikes / self.params.nGroups)
         )

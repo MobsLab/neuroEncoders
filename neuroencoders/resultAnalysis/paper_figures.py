@@ -9,6 +9,8 @@ from typing import Callable, Dict, List, Optional, Union
 from warnings import warn
 
 import dill as pickle
+import h5py
+import hdf5plugin  # noqa: F401
 import matplotlib.axes
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
@@ -648,6 +650,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
     def load_data(self, suffixes=None, **kwargs):
         """
         Method to load the results of the neural network prediction.
+        Supports lazy loading of heavy arrays via 'keys_to_load' kwarg.
         """
 
         if not hasattr(self, "suffixes") or kwargs.get("redo", False):
@@ -674,6 +677,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 "speedMask": [],
                 "posIndex": [],
                 "spikes_count": [],
+                "entropy": [],
             } or []
             resultsNN_phase_pkl = {}
 
@@ -731,27 +735,98 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                     phase_results["lPredPos"].append(None)
 
                 # Loss / Entropy
-                loss = self._load_csv_result(base_results_path, ws, "lossPred", suffix)
+                loss = self._load_csv_result(base_results_path, ws, "maxp", suffix)
                 if loss is None:
-                    loss = self._load_csv_result(base_results_path, ws, "Hn", suffix)
+                    loss = self._load_csv_result(
+                        base_results_path, ws, "lossPred", suffix
+                    )
                 phase_results["lossPred"].append(
                     np.squeeze(loss).flatten() if loss is not None else None
                 )
 
-                # Optional Pickle and Spike Counts
-                if kwargs.get("load_pickle", False):
+                entropy = self._load_csv_result(base_results_path, ws, "Hn", suffix)
+                phase_results["entropy"].append(
+                    np.squeeze(entropy).flatten() if entropy is not None else None
+                )
+
+                if (
+                    kwargs.get("load_pickle", False)
+                    or kwargs.get("load_npz", False)
+                    or kwargs.get("load_h5", False)
+                ):
+                    h5_path = os.path.join(
+                        base_results_path, str(ws), f"decoding_results{suffix}.h5"
+                    )
+                    npz_path = os.path.join(
+                        base_results_path, str(ws), f"decoding_results{suffix}.npz"
+                    )
                     pkl_path = os.path.join(
                         base_results_path, str(ws), f"decoding_results{suffix}.pkl"
                     )
-                    if os.path.exists(pkl_path):
+
+                    if os.path.exists(h5_path):
+                        with h5py.File(h5_path, "r") as loaded_h5:
+                            keys_to_load = kwargs.get(
+                                "keys_to_load",
+                                [
+                                    k
+                                    for k in loaded_h5.keys()
+                                    if "latent" not in k and "logits" not in k
+                                ],
+                            )
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_h5:
+                                    if key not in resultsNN_phase_pkl:
+                                        resultsNN_phase_pkl[key] = []
+                                    # Slice [:] loads only this specific key into RAM
+                                    resultsNN_phase_pkl[key].append(loaded_h5[key][()])
+                                else:
+                                    warn(
+                                        f"Key {key} not found in resultsNN_phase_pkl, found {loaded_h5.keys()}."
+                                    )
+
+                    elif os.path.exists(npz_path):
+                        with np.load(npz_path, allow_pickle=True) as loaded_npz:
+                            keys_to_load = kwargs.get(
+                                "keys_to_load",
+                                [
+                                    k
+                                    for k in loaded_npz.files
+                                    if "latent" not in k and "logits" not in k
+                                ],
+                            )
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_npz:
+                                    if key not in resultsNN_phase_pkl:
+                                        resultsNN_phase_pkl[key] = []
+                                    resultsNN_phase_pkl[key].append(loaded_npz[key])
+                                else:
+                                    warn(
+                                        f"Key {key} not found in resultsNN_phase_pkl, found {loaded_npz.files}."
+                                    )
+
+                    elif os.path.exists(pkl_path):
                         with open(pkl_path, "rb") as f:
                             loaded_pkl = pickle.load(f)
-                            for key in loaded_pkl.keys():
-                                if key not in resultsNN_phase_pkl:
-                                    resultsNN_phase_pkl[key] = []
-                                resultsNN_phase_pkl[key].append(loaded_pkl[key])
+                            keys_to_load = kwargs.get("keys_to_load", loaded_pkl.keys())
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_pkl:
+                                    if key not in resultsNN_phase_pkl:
+                                        resultsNN_phase_pkl[key] = []
+                                    resultsNN_phase_pkl[key].append(loaded_pkl[key])
+                                else:
+                                    warn(
+                                        f"Key {key} not found in resultsNN_phase_pkl, found {loaded_pkl.keys()}."
+                                    )
+
                     else:
-                        if resultsNN_phase_pkl.keys() is not None:
+                        if resultsNN_phase_pkl:
                             for key in resultsNN_phase_pkl.keys():
                                 resultsNN_phase_pkl[key].append(None)
 
@@ -788,6 +863,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                     "linearTrue": phase_results["lTruePos"],
                     "predLoss": phase_results["lossPred"],
                     "posIndex": phase_results["posIndex"],
+                    "entropy": phase_results["entropy"],
                 }
 
             self.resultsNN_phase[suffix] = {
@@ -800,8 +876,14 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 "predLoss": phase_results["lossPred"],
                 "posIndex": phase_results["posIndex"],
                 "spikes_count": phase_results["spikes_count"],
+                "entropy": phase_results["entropy"],
             }
-            if kwargs.get("load_pickle", False):
+
+            if (
+                kwargs.get("load_pickle", False)
+                or kwargs.get("load_npz", False)
+                or kwargs.get("load_h5", False)
+            ):
                 self.resultsNN_phase_pkl[suffix] = resultsNN_phase_pkl
 
         self.load_ripples(**kwargs)

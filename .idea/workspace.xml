@@ -14,19 +14,19 @@
       <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/compareSpikeFiltering.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/importData/gui_elements.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/__init__.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ephys_sleep_analysis.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ephys_sleep_analysis.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/simpleBayes/decode_bayes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/transformData/linearizer.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/management.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/management.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/pyproject.toml" beforeDir="false" afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_sleep_ephys_analysis.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_sleep_ephys_analysis.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/uv.lock" beforeDir="false" afterPath="$PROJECT_DIR$/uv.lock" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -278,8 +278,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-4abd2a77f808-JavaScript-PY-262.10315.174" />
-        <option value="bundled-python-sdk-eff1e8def5f5-5bd6d13a2a75-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.10315.174" />
+        <option value="bundled-js-predefined-d6986cc7102b-4abd2a77f808-JavaScript-PY-262.10968.92" />
+        <option value="bundled-python-sdk-73a66231627c-5bd6d13a2a75-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-262.10968.92" />
       </set>
     </attachedChunks>
   </component>
@@ -387,6 +387,29 @@
       <workItem from="1788782580525" duration="14089000" />
       <workItem from="1788857352998" duration="500000" />
       <workItem from="1788857871595" duration="8894000" />
+      <workItem from="1788869485489" duration="607000" />
+      <workItem from="1788871185005" duration="982000" />
+      <workItem from="1788877933117" duration="1810000" />
+      <workItem from="1788883769823" duration="3041000" />
+      <workItem from="1788946138392" duration="817000" />
+      <workItem from="1788947404320" duration="2870000" />
+      <workItem from="1788952992964" duration="15450000" />
+      <workItem from="1788968917322" duration="668000" />
+      <workItem from="1788969762340" duration="581000" />
+      <workItem from="1788970672389" duration="363000" />
+      <workItem from="1789031539589" duration="2476000" />
+      <workItem from="1789034226728" duration="9937000" />
+      <workItem from="1789467512985" duration="13564000" />
+      <workItem from="1789551696844" duration="9999000" />
+      <workItem from="1790068427898" duration="3186000" />
+      <workItem from="1790076749002" duration="4903000" />
+      <workItem from="1790082114462" duration="2365000" />
+      <workItem from="1790084841154" duration="9941000" />
+      <workItem from="1790153388211" duration="1093000" />
+      <workItem from="1790155221089" duration="1553000" />
+      <workItem from="1790175774172" duration="2587000" />
+      <workItem from="1790240278788" duration="10694000" />
+      <workItem from="1790252418003" duration="579000" />
     </task>
     <servers />
   </component>
@@ -409,7 +432,7 @@
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py</url>
-          <line>3256</line>
+          <line>3279</line>
           <option name="timeStamp" value="10" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
@@ -454,28 +477,23 @@
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
-          <line>3803</line>
+          <line>4469</line>
           <option name="timeStamp" value="7" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/debugtest.ipynb</url>
-          <line>3774</line>
+          <line>4440</line>
           <option name="timeStamp" value="9" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/cond_pre_analysis.ipynb</url>
-          <line>33</line>
+          <line>2021</line>
           <option name="timeStamp" value="14" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
           <url>file://$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb</url>
-          <line>406</line>
+          <line>1099</line>
           <option name="timeStamp" value="31" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" suspend="THREAD" type="jupyter-line">
-          <url>file://$PROJECT_DIR$/notebooks/NotebookKarim_ResultsLoader_PAG.ipynb</url>
-          <line>441</line>
-          <option name="timeStamp" value="42" />
         </line-breakpoint>
       </breakpoints>
       <default-breakpoints>

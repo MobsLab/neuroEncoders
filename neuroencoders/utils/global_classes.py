@@ -112,6 +112,10 @@ def is_in_zone(pos, zone_def):
 
 
 def get_max_nb_spikes(windowSizeMS):
+    """
+    Based on empirical observations, this function returns the maximum number of spikes that can be expected in a given window size (in milliseconds).
+    This will be used to set the sequence length of the transformer in the ANN.
+    """
     if isinstance(windowSizeMS, str):
         windowSizeMS = int(windowSizeMS)
     if isinstance(windowSizeMS, list):
@@ -120,16 +124,17 @@ def get_max_nb_spikes(windowSizeMS):
     if not isinstance(windowSizeMS, int):
         raise ValueError("windowSizeMS must be an integer or a list of integers")
 
+    # All values are strict multiples of 32 for optimal Tensor Core VRAM alignment
     if windowSizeMS >= 504:
-        max_nb_spikes = 1300
+        max_nb_spikes = 1120  # 32 * 35
     elif windowSizeMS >= 252:
-        max_nb_spikes = 650
+        max_nb_spikes = 640  # 32 * 20
     elif windowSizeMS >= 108:
-        max_nb_spikes = 400
+        max_nb_spikes = 320  # 32 * 10
     elif windowSizeMS >= 36:
-        max_nb_spikes = 100
+        max_nb_spikes = 128  # 32 * 4
     else:
-        max_nb_spikes = None
+        raise NotImplementedError("windowSizeMS must be at least 36 ms")
 
     return max_nb_spikes
 
@@ -158,7 +163,11 @@ class Project:
             windowSize = kwargs["windowSizeMS"] / 1000.0
         else:
             # if not, we use the windowSize argument
-            windowSize = kwargs.get("windowSize", 0.036)
+            windowSize = kwargs.get("windowSize", None)
+            if windowSize is None:
+                raise ValueError(
+                    f"You must provide either windowSize or windowSizeMS as an argument. Got {args} and {kwargs} instead."
+                )
 
         # Basic names
         if xmlPath[-3:] != "xml":
@@ -903,13 +912,14 @@ class DataHelper(Project):
         return dist_to_wall
 
     def compute_distance_weighted_thigmo(
-        self, positions, max_dist: Optional[float] = None
+        self, positions, max_dist: Optional[float] = None, verbose: bool = False
     ):
         # 1. Fetch distances using your existing Shapely boundary function
         dist_to_wall = self.dist2wall(positions)
         if not max_dist:
             max_dist = max(self.lower_x, 1 - self.upper_x, 1 - self.ylim) / 2
-            print(f"max_dist not provided, using default: {max_dist}")
+            if verbose:
+                print(f"max_dist not provided, using default: {max_dist}")
 
         # Clean tracking dropouts
         valid_mask = ~np.isnan(dist_to_wall) & ~np.isinf(dist_to_wall)
@@ -1956,7 +1966,7 @@ class DataHelper(Project):
 
         return self.freeze_epochs
 
-    def get_ripples_epochs(self, before=0.0, after=0.05):
+    def get_ripples_epochs(self, before=0.0, after=0.15):
         self.tRipples = self.fullBehavior["Times"].get("tRipples", None)
         if self.tRipples is None:
             warnings.warn(
@@ -2783,6 +2793,15 @@ class Params:
                     loaded.nChannelsPerGroup = (
                         helper.numChannelsPerGroup()
                     )  # number of channels per "spiking" anatomical group
+                    for k, v in kwargs.items():
+                        setattr(loaded, k, v)
+
+                    if hasattr(loaded, "windowSizeMS") and not hasattr(
+                        loaded, "windowSize"
+                    ):
+                        loaded.windowSize = loaded.windowSize / 1000
+                        if "windowSize" not in kwargs:
+                            kwargs["windowSize"] = loaded.windowSize
                     return loaded  # Return the loaded instance
         else:
             print("Not loading Params from pickle as per user request.")
@@ -2916,22 +2935,24 @@ class Params:
         self.project_transformer = kwargs.pop("project_transformer", True)
         self.dim_factor = kwargs.pop("dim_factor", 1)
         self.sequence_output_dim = kwargs.pop("sequence_output_dim", None)
+        if self.sequence_output_dim is None:
+            self.sequence_output_dim = (
+                self.nFeatures * self.dim_factor
+                if self.project_transformer
+                else self.nFeatures * self.nGroups
+            )
+
         self.loss_type = kwargs.pop("loss_type", "wasserstein")  # or "wasserstein"
 
         default_lstm_layers = (
             2 if not self.isTransformer else 4
         )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
-        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.35)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.5)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.15
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
 
-        self.sequence_output_dim = (
-            self.nFeatures * self.dim_factor
-            if self.project_transformer
-            else self.nFeatures * self.nGroups
-        )
         # if we dont expand the feature dimension before feeding to the transformer, we need to account for the nGroups factor
         self.ff_dim1 = kwargs.pop(
             "ff_dim1", self.sequence_output_dim * 4
@@ -2946,7 +2967,7 @@ class Params:
 
         self.GaussianGridSize = kwargs.pop("GaussianGridSize", DEFAULT_GRIDSIZE)
         self.GaussianSigma = kwargs.pop(
-            "GaussianSigma", 0.05
+            "GaussianSigma", 0.03
         )  # 1/44 ~= 0.023, so it should cover ~3 bins if gris size is 45*45
         # if grid size is 30*30, then 0.05 should cover ~1.5 bins
         self.GaussianEps = kwargs.pop("GaussianEps", 1e-6)
@@ -3078,26 +3099,14 @@ class Params:
             "oversampling_stride", 3
         )  # the finesse of the grid to check maze uniformity
         self.oversampling_target_percentile = kwargs.pop(
-            "oversampling_target_percentile", 0.95
+            "oversampling_target_percentile", 95.0
         )  # target percentile for repeats
         self.oversampling_max_repeat = kwargs.pop(
-            "oversampling_max_repeat", 10
+            "oversampling_max_repeat", 3
         )  # maximum number of repeats for a given sample
-        self.oversampling_use_undersampling = kwargs.pop(
-            "oversampling_use_undersampling", True
-        )  # whether to use undersampling in addition to oversampling for the most represented samples : defaults to True
-        self.oversampling_undersampling_target_percentile = kwargs.pop(
-            "oversampling_undersampling_target_percentile", 50
-        )  # undersample bins above 50th percentile to flatten the distribution a bit more
-        self.oversampling_drop_forbidden = kwargs.pop(
-            "oversampling_drop_forbidden", False
-        )  # whether to drop samples in the forbidden zones during oversampling : defaults to False, as we might have some tracking issues that we still want to learn-ish
-        self.oversampling_use_adaptive_augmentation = kwargs.pop(
-            "oversampling_use_adaptive_augmentation", True
-        )  # whether to use adaptive augmentation based on the training imbalance, or to just apply a fixed number of repeats based on the target percentile
-        self.oversampling_augmentation_scale = kwargs.pop(
-            "oversampling_augmentation_scale", 0.8
-        )
+
+        self.use_vq_bottleneck = kwargs.pop("use_vq_bottleneck", True)
+        self.use_diversity_loss = kwargs.pop("use_diversity_loss", False)
 
     def save_params_to_json(self):
         """
@@ -3126,6 +3135,8 @@ class Params:
         for attr_name in dir(helper):
             if attr_name.startswith("_") or attr_name in ["load", "save"]:
                 continue
+            if attr_name in self.__dict__:
+                continue  # Skip attributes that already exist in self
             try:
                 setattr(self, attr_name, getattr(helper, attr_name))
             except AttributeError:
@@ -3251,7 +3262,7 @@ class SpatialConstraintsMixin:
             self.common_eps = tf.constant(1e-8, dtype=tf.float32)
             self.common_neg = tf.constant(-1e5, dtype=tf.float32)
 
-    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.06):
+    def gaussian_heatmap_targets_tf(self, pos_batch, sigma=0.05):
         """
         Generate Gaussian target heatmap for a batch of [x, y] positions.
         """
@@ -3461,6 +3472,92 @@ class SpatialConstraintsMixin:
                 0.5 / self.GRID_H, 1 - 0.5 / self.GRID_H, self.GRID_H
             )
             self.Xc_tf, self.Yc_tf = tf.meshgrid(x_cent_tf, y_cent_tf, indexing="xy")
+
+    def _setup_linear_coordinate_grids(self, l_function, num_1d_bins=40):
+        """Create coordinate grids for both numpy and tensorflow"""
+        import tensorflow as tf
+
+        self.num_1d_bins = num_1d_bins
+        grid_points_2d = np.stack([self.Xc_np.flatten(), self.Yc_np.flatten()], axis=-1)
+        _, linear_pos = l_function(grid_points_2d)
+        l_min = np.min(linear_pos)
+        l_max = np.max(linear_pos)
+
+        if l_max > l_min:
+            l_norm = (linear_pos - l_min) / (l_max - l_min)
+        else:
+            l_norm = np.zeros_like(linear_pos)
+
+        l_indices = np.floor(l_norm * self.num_1d_bins).astype(np.int32)
+        l_indices = np.clip(l_indices, 0, self.num_1d_bins - 1)
+        l_indices[np.isnan(l_indices)] = 0
+        with tf.device(self.device):
+            self.L_indices_flat = tf.constant(l_indices, dtype=tf.int32)
+
+    def _decode_1d_density(self, logits_hw):
+        import tensorflow as tf
+        from keras import ops as kops
+
+        # Static shape for rank checking during compilation
+        shape_static = logits_hw.shape
+        rank = len(shape_static)
+
+        # Dynamic shape for runtime dimension slicing
+        shape_dyn = kops.shape(logits_hw)
+        H, W = self.GRID_H, self.GRID_W
+
+        # 1. Detect multi-step K dimension and flatten into the Batch dimension
+        is_multistep = False
+        if rank == 4:
+            # Shape: (Batch, K, H, W)
+            is_multistep = True
+            B, K = shape_dyn[0], shape_dyn[1]
+            logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+        elif rank == 3 and shape_static[-1] == H * W:
+            # Shape: (Batch, K, H*W)
+            is_multistep = True
+            B, K = shape_dyn[0], shape_dyn[1]
+            logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+        elif rank == 2:
+            # Shape: (Batch, H*W)
+            B = shape_dyn[0]
+            logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
+        else:
+            # Shape: (Batch, H, W)
+            B = shape_dyn[0]
+            logits_flat_batch = logits_hw
+
+        B_eff = kops.shape(logits_flat_batch)[0]
+
+        masked_logits = kops.where(
+            self.forbid_mask_tf[None] > 0, self.common_neg, logits_flat_batch
+        )
+        probs_flat = kops.softmax(kops.reshape(masked_logits, [B_eff, H * W]), axis=-1)
+        probs = kops.reshape(probs_flat, [B_eff, H, W])
+
+        allowed_mask = self.get_allowed_mask(use_tensorflow=True)
+        probs_allowed = probs * allowed_mask
+        sum_p = kops.sum(probs_allowed, axis=[1, 2], keepdims=True)
+        probs_allowed /= sum_p + self.common_eps
+
+        # Flatten the allowed probabilities: shape (B_eff, H*W)
+        p_flat = kops.reshape(probs_allowed, [B_eff, H * W])
+
+        # Transpose to (H*W, B_eff) so segment_sum processes the spatial dimension
+        p_flat_t = tf.transpose(p_flat)
+
+        # Aggregate 2D pixels into their corresponding 1D bins
+        # Result shape: (num_1d_bins, B_eff)
+        density_1d_t = tf.math.unsorted_segment_sum(
+            data=p_flat_t,
+            segment_ids=self.L_indices_flat,
+            num_segments=self.num_1d_bins,
+        )
+
+        # Transpose back to (B_eff, num_1d_bins)
+        density_1d = tf.transpose(density_1d_t)
+
+        return density_1d
 
     def get_spatial_config(self):
         """Return spatial config for serialization"""

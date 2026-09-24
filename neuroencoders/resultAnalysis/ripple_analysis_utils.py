@@ -297,10 +297,17 @@ def plot_ripple_time_distance_vs_losspredict(
             predLoss = predloss_dict[epoch_label][i]
 
             valid_mask = np.less(timeDist, window)
-            hist, xedges, yedges = ax[i, iepoch].hist2d(
+            hist, xedges, yedges = np.histogram2d(
                 timeDist[valid_mask],
                 predLoss[valid_mask],
                 (1000, 100),
+            )
+
+            ax[i, iepoch].imshow(
+                hist.T,
+                origin="lower",
+                aspect="auto",
+                extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
                 cmap=white_viridis,
             )
 

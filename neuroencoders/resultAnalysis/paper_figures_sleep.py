@@ -1,7 +1,10 @@
 import logging
 import os
 from typing import Callable, Dict, List, Optional
+from warnings import warn
 
+import h5py
+import hdf5plugin  # noqa: F401
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -147,95 +150,11 @@ class PaperFiguresSleep:
         except Exception:
             pass
 
-    def _load_sleep_results(
-        self,
-        prefix: str = "",
-        sleepNames: Optional[List[str]] = None,
-        proxy_file: Optional[str] = "Hn",
-    ) -> Dict[str, Dict[str, List[np.ndarray]]]:
-        sleep_names = sleepNames or list(self.sleepNames)
-        results = {
-            "times": {},
-            "linPred": {},
-            "fullPred": {},
-            "featurePred": {},
-            "predLoss": {},
-            "posIndex": {},
-            "indexInDat": {},
-        }
-        if proxy_file == "Hn":
-            results["Hn"] = {}
-            results["maxp"] = {}
-
-        for sleepName in sleep_names:
-            results["times"][sleepName] = []
-            results["linPred"][sleepName] = []
-            results["fullPred"][sleepName] = []
-            results["featurePred"][sleepName] = []
-            results["predLoss"][sleepName] = []
-            results["posIndex"][sleepName] = []
-            results["indexInDat"][sleepName] = []
-            if proxy_file == "Hn":
-                results["Hn"][sleepName] = []
-                results["maxp"][sleepName] = []
-
-            for ws in self.timeWindows:
-                pathToSleep = os.path.join(self.folderResultSleep, str(ws), sleepName)
-                feature_pred = self._load_csv_result(
-                    pathToSleep, f"{prefix}featurePred"
-                )
-                linear_pred = self._load_csv_result(pathToSleep, f"{prefix}linearPred")
-                time_pred = self._load_csv_result(pathToSleep, f"{prefix}timeStepsPred")
-                pos_index = self._load_csv_result(
-                    pathToSleep, f"{prefix}posIndex", dtype=np.int64
-                )
-                index_in_dat = self._load_csv_result(
-                    pathToSleep, f"{prefix}indexInDat", dtype=np.int64
-                )
-
-                proxy_loss = None
-                if proxy_file is not None:
-                    proxy_loss = self._load_csv_result(pathToSleep, proxy_file)
-                    if proxy_loss is None and proxy_file == "Hn":
-                        proxy_loss = self._load_csv_result(pathToSleep, "lossPred")
-                    if proxy_file == "Hn":
-                        maxp = self._load_csv_result(pathToSleep, "maxp")
-                        results["Hn"][sleepName].append(
-                            np.squeeze(proxy_loss).flatten()
-                            if proxy_loss is not None
-                            else None
-                        )
-                        results["maxp"][sleepName].append(
-                            np.squeeze(maxp).flatten() if maxp is not None else None
-                        )
-
-                results["times"][sleepName].append(
-                    np.squeeze(time_pred).flatten() if time_pred is not None else None
-                )
-                results["linPred"][sleepName].append(
-                    np.squeeze(linear_pred).flatten()
-                    if linear_pred is not None
-                    else None
-                )
-                results["featurePred"][sleepName].append(feature_pred)
-                results["fullPred"][sleepName].append(feature_pred)
-                results["predLoss"][sleepName].append(
-                    np.squeeze(proxy_loss).flatten() if proxy_loss is not None else None
-                )
-                results["posIndex"][sleepName].append(
-                    np.squeeze(pos_index).flatten() if pos_index is not None else None
-                )
-                results["indexInDat"][sleepName].append(
-                    np.squeeze(index_in_dat).flatten()
-                    if index_in_dat is not None
-                    else None
-                )
-
-        return results
-
-    def load_data(self, sleepNames=None):
+    def load_data(self, sleepNames=None, **kwargs):
         """Load sleep ANN decoding results and ripple-aligned metadata."""
-        ann_results = self._load_sleep_results(prefix="", sleepNames=sleepNames)
+        ann_results = self._load_sleep_results(
+            prefix="", sleepNames=sleepNames, **kwargs
+        )
         self.resultsNN = ann_results
         self.resultsNN_phase = {
             sleepName: {
@@ -252,9 +171,18 @@ class PaperFiguresSleep:
             for sleepName in (sleepNames or self.sleepNames)
         }
 
+        # Resolved TODO: Assign pickled/npz results if loaded
+        if (
+            kwargs.get("load_pickle", False)
+            or kwargs.get("load_npz", False)
+            or kwargs.get("load_h5", False)
+        ):
+            if not hasattr(self, "resultsNN_phase_pkl"):
+                self.resultsNN_phase_pkl = {}
+            self.resultsNN_phase_pkl.update(ann_results.get("pkl", {}))
+
         # Load ripples
         # TODO: add maskSleep maskSleep = inEpochsMask(ripples[:, rippleChoice], behavior_data["Times"]["sleepEpochs"][:2])
-        # TODO: should I normalize lossPred?
         with tables.open_file(self.projectPath.folder + "nnSWR.mat", "a") as f:
             ripples = f.root.ripple[:, :].transpose()
 
@@ -307,6 +235,204 @@ class PaperFiguresSleep:
             "idCloseRipplesInSleep": idCloseRipplesInSleep,
             "timeDistToRipples": timeDistToRipples,
         }
+
+    def _load_sleep_results(
+        self,
+        prefix: str = "",
+        sleepNames: Optional[List[str]] = None,
+        proxy_file: Optional[str] = "maxp",
+        **kwargs,
+    ) -> Dict[str, Dict[str, List[np.ndarray]]]:
+        sleep_names = sleepNames or list(self.sleepNames)
+        results = {
+            "times": {},
+            "linPred": {},
+            "fullPred": {},
+            "featurePred": {},
+            "predLoss": {},
+            "posIndex": {},
+            "indexInDat": {},
+        }
+
+        load_pickle = kwargs.get("load_pickle", False)
+        load_npz = kwargs.get("load_npz", False)
+        load_h5 = kwargs.get("load_h5", False)
+        if load_pickle or load_npz or load_h5:
+            results["pkl"] = {}
+
+        if proxy_file == "Hn" or proxy_file == "maxp":
+            results["Hn"] = {}
+            results["maxp"] = {}
+
+        for sleepName in sleep_names:
+            results["times"][sleepName] = []
+            results["linPred"][sleepName] = []
+            results["fullPred"][sleepName] = []
+            results["featurePred"][sleepName] = []
+            results["predLoss"][sleepName] = []
+            results["posIndex"][sleepName] = []
+            results["indexInDat"][sleepName] = []
+
+            if proxy_file == "Hn" or proxy_file == "maxp":
+                results["Hn"][sleepName] = []
+                results["maxp"][sleepName] = []
+
+            if load_pickle or load_npz or load_h5:
+                results["pkl"][sleepName] = {}
+
+            for ws in self.timeWindows:
+                pathToSleep = os.path.join(self.folderResultSleep, str(ws), sleepName)
+
+                # Load CSV Data
+                feature_pred = self._load_csv_result(
+                    pathToSleep, f"{prefix}featurePred"
+                )
+                linear_pred = self._load_csv_result(pathToSleep, f"{prefix}linearPred")
+                time_pred = self._load_csv_result(pathToSleep, f"{prefix}timeStepsPred")
+                pos_index = self._load_csv_result(
+                    pathToSleep, f"{prefix}posIndex", dtype=np.int64
+                )
+                index_in_dat = self._load_csv_result(
+                    pathToSleep, f"{prefix}indexInDat", dtype=np.int64
+                )
+
+                proxy_loss = None
+                if proxy_file is not None:
+                    proxy_loss = self._load_csv_result(pathToSleep, proxy_file)
+                    if proxy_loss is None and proxy_file == "Hn":
+                        proxy_loss = self._load_csv_result(pathToSleep, "lossPred")
+                    if proxy_file == "Hn":
+                        maxp = self._load_csv_result(pathToSleep, "maxp")
+                        results["Hn"][sleepName].append(
+                            np.squeeze(proxy_loss).flatten()
+                            if proxy_loss is not None
+                            else None
+                        )
+                        results["maxp"][sleepName].append(
+                            np.squeeze(maxp).flatten() if maxp is not None else None
+                        )
+                    if proxy_file == "maxp":
+                        Hn = self._load_csv_result(pathToSleep, "Hn")
+                        results["Hn"][sleepName].append(
+                            np.squeeze(Hn).flatten() if Hn is not None else None
+                        )
+                        results["maxp"][sleepName].append(
+                            np.squeeze(proxy_loss).flatten()
+                            if proxy_loss is not None
+                            else None
+                        )
+
+                results["times"][sleepName].append(
+                    np.squeeze(time_pred).flatten() if time_pred is not None else None
+                )
+                results["linPred"][sleepName].append(
+                    np.squeeze(linear_pred).flatten()
+                    if linear_pred is not None
+                    else None
+                )
+                results["featurePred"][sleepName].append(feature_pred)
+                results["fullPred"][sleepName].append(feature_pred)
+
+                if proxy_file == "maxp":
+                    # rescale such that the lower the value of maxp, the better the prediction (like Hn)
+                    proxy_loss = 1 - proxy_loss if proxy_loss is not None else None
+
+                results["predLoss"][sleepName].append(
+                    np.squeeze(proxy_loss).flatten() if proxy_loss is not None else None
+                )
+                results["posIndex"][sleepName].append(
+                    np.squeeze(pos_index).flatten() if pos_index is not None else None
+                )
+                results["indexInDat"][sleepName].append(
+                    np.squeeze(index_in_dat).flatten()
+                    if index_in_dat is not None
+                    else None
+                )
+
+                # Optional NPZ / Pickle (Heavy Arrays) Loading
+                if load_pickle or load_npz or load_h5:
+                    h5_path = os.path.join(pathToSleep, f"decoding_results{prefix}.h5")
+                    npz_path = os.path.join(
+                        pathToSleep, f"decoding_results{prefix}.npz"
+                    )
+                    pkl_path = os.path.join(
+                        pathToSleep, f"decoding_results{prefix}.pkl"
+                    )
+
+                    if os.path.exists(h5_path):
+                        with h5py.File(h5_path, "r") as loaded_h5:
+                            keys_to_load = kwargs.get(
+                                "keys_to_load",
+                                [
+                                    k
+                                    for k in loaded_h5.keys()
+                                    if "latent" not in k and "logits" not in k
+                                ],
+                            )
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_h5:
+                                    if key not in results["pkl"][sleepName]:
+                                        results["pkl"][sleepName][key] = []
+                                    results["pkl"][sleepName][key].append(
+                                        loaded_h5[key][()]
+                                    )
+                                else:
+                                    warn(
+                                        f"Key {key} not found in loaded_h5, found {loaded_h5.keys()}."
+                                    )
+
+                    elif os.path.exists(npz_path):
+                        with np.load(npz_path, allow_pickle=True) as loaded_npz:
+                            keys_to_load = kwargs.get(
+                                "keys_to_load",
+                                [
+                                    k
+                                    for k in loaded_npz.files
+                                    if "latent" not in k and "logits" not in k
+                                ],
+                            )
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_npz:
+                                    if key not in results["pkl"][sleepName]:
+                                        results["pkl"][sleepName][key] = []
+                                    results["pkl"][sleepName][key].append(
+                                        loaded_npz[key]
+                                    )
+                                else:
+                                    warn(
+                                        f"Key {key} not found in loaded_npz, found {loaded_npz.files}."
+                                    )
+
+                    elif os.path.exists(pkl_path):
+                        with open(pkl_path, "rb") as f:
+                            import dill as pickle
+
+                            loaded_pkl = pickle.load(f)
+                            keys_to_load = kwargs.get("keys_to_load", loaded_pkl.keys())
+                            if not isinstance(keys_to_load, list):
+                                keys_to_load = [keys_to_load]
+                            for key in keys_to_load:
+                                if key in loaded_pkl:
+                                    if key not in results["pkl"][sleepName]:
+                                        results["pkl"][sleepName][key] = []
+                                    results["pkl"][sleepName][key].append(
+                                        loaded_pkl[key]
+                                    )
+                                else:
+                                    warn(
+                                        f"Key {key} not found in loaded_pkl, found {loaded_pkl.keys()}."
+                                    )
+                    else:
+                        # Fallback for missing files
+                        if results["pkl"][sleepName].keys():
+                            for key in results["pkl"][sleepName].keys():
+                                results["pkl"][sleepName][key].append(None)
+
+        return results
 
     def load_bayes(self, sleepNames=None):
         """Load sleep Bayes decoding results when they are present on disk."""
@@ -481,7 +607,7 @@ class PaperFiguresSleep:
             filename_prefix="lossSleepRipples",
         )
 
-    def fig_position_replay_analysis(self, loss_threshold=0.65):
+    def fig_position_replay_analysis(self, loss_threshold=0.95):
         """
         Analyze if training positions are more replayed during sleep.
         Compares NN predicted positions with loss predictions, showing
@@ -553,7 +679,7 @@ class PaperFiguresSleep:
         fig.savefig(os.path.join(self.folderFigures, "position_replay_analysis.png"))
         fig.savefig(os.path.join(self.folderFigures, "position_replay_analysis.svg"))
 
-    def fig_position_cumulative_distribution(self, nbins=30, thresh=0.65):
+    def fig_position_cumulative_distribution(self, nbins=30, thresh=0.95):
         """
         Compare cumulative distributions of sleep predicted positions
         with wake (true) positions, with optional confidence filtering.
@@ -622,7 +748,7 @@ class PaperFiguresSleep:
 
                 # High confidence filter (loss < 0.5)
                 predloss = self.resultsNN["predLoss"][sleepName][i]
-                filter_high = np.greater(np.max(predloss) - predloss, thresh)
+                filter_high = np.less_equal(predloss, thresh)
                 ax[isleep, 1].hist(
                     linearpos[filter_high],
                     bins=nbins,

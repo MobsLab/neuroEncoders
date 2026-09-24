@@ -4,7 +4,7 @@ from pynapple import IntervalSet, Tsd
 
 from neuroencoders.resultAnalysis.ephys_sleep_analysis import (
     SleepAnalysisConfig,
-    SleepEphysAnalyzer,
+    SleepEphysAnalyser,
 )
 
 
@@ -60,7 +60,7 @@ class DummyMouseResults:
         ).T
         self.resultsNN_phase_pkl = {
             "_pre": {
-                "latent_output": [latent],
+                "latent_output_pooled": [latent],
                 "maxp": [np.linspace(0.9, 0.6, phase_times.size)],
                 "Hn": [np.linspace(1.0, 2.0, phase_times.size)],
             }
@@ -78,7 +78,7 @@ class DummyMouseResults:
 
 
 def test_analyze_ripples_by_state_summary_has_expected_columns():
-    analyzer = SleepEphysAnalyzer(
+    analyzer = SleepEphysAnalyser(
         SleepAnalysisConfig(transition_window_sec=20.0, bin_size_sec=5.0)
     )
     mouse = DummyMouseResults()
@@ -94,7 +94,7 @@ def test_analyze_ripples_by_state_summary_has_expected_columns():
 
 
 def test_extract_model_metric_supports_derived_metrics():
-    analyzer = SleepEphysAnalyzer()
+    analyzer = SleepEphysAnalyser()
     mouse = DummyMouseResults()
 
     tsds = analyzer._extract_model_metric_tsd(
@@ -112,7 +112,7 @@ def test_extract_model_metric_supports_derived_metrics():
 
 
 def test_analyze_mouse_returns_multi_model_outputs_and_drowsiness():
-    analyzer = SleepEphysAnalyzer(
+    analyzer = SleepEphysAnalyser(
         SleepAnalysisConfig(drowsiness_window_sec=30.0, bin_size_sec=5.0)
     )
     mouse = DummyMouseResults()
@@ -137,7 +137,7 @@ def test_analyze_mouse_returns_multi_model_outputs_and_drowsiness():
 
 
 def test_plotting_helpers_run_without_error(tmp_path):
-    analyzer = SleepEphysAnalyzer()
+    analyzer = SleepEphysAnalyser()
     summary_df = pd.DataFrame(
         {
             "state": ["wake", "nrem", "rem", "wake", "nrem", "rem"],

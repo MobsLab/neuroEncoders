@@ -399,6 +399,15 @@ class Trainer(SpatialConstraintsMixin, TuningCurvesPlotter):
         if os.path.exists(filepath):
             with open(filepath, "rb") as f:
                 matrices = pickle.load(f)
+            if matrices is None or matrices["occupation"].shape != (
+                self.GRID_H,
+                self.GRID_W,
+            ):
+                self.logger.warning(
+                    f"Loaded matrices are invalid or have incorrect shape. Expected {(self.GRID_H, self.GRID_W)}, got {matrices['occupation'].shape if matrices is not None else 'None'}."
+                )
+                return None
+
             self.logger.info("Loaded existing Bayesian matrices.")
             return matrices
 
@@ -410,12 +419,16 @@ class Trainer(SpatialConstraintsMixin, TuningCurvesPlotter):
             if os.path.exists(fallback_path):
                 with open(fallback_path, "rb") as f:
                     matrices = pickle.load(f)
-                self.logger.info(
-                    f"Loaded Bayesian matrices from fallback: {fallback_path}. Copying to local results."
-                )
-                with open(filepath, "wb") as f:
-                    pickle.dump(matrices, f, pickle.HIGHEST_PROTOCOL)
-                return matrices
+                if matrices is not None and matrices["occupation"].shape == (
+                    self.GRID_H,
+                    self.GRID_W,
+                ):
+                    self.logger.info(
+                        f"Loaded Bayesian matrices from fallback: {fallback_path}. Copying to local results."
+                    )
+                    with open(filepath, "wb") as f:
+                        pickle.dump(matrices, f, pickle.HIGHEST_PROTOCOL)
+                    return matrices
 
         return None
 
