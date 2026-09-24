@@ -950,7 +950,7 @@ class AssemblyReactivationPipeline:
                 f"Will compute assembly reactivation on {n_bins} time bins (representing a duration of {lat_template.find_support(0.5).tot_length():.2f}s) with dim {n_dim} for {mouse_name}."
             )
             if n_bins < 10 or n_dim < 2:
-                print(
+                warn(
                     f"Skipping {mouse_name}: Template window has insufficient data frames."
                 )
                 continue
@@ -1001,20 +1001,41 @@ class AssemblyReactivationPipeline:
                 n_sig = min(int(np.sum(sig_mask)), num_templates)
                 v_sig = eigenvectors[:, :n_sig]
                 l_sig = eigenvalues[:n_sig]
+                l_sig_safe = np.clip(l_sig, a_min=1e-12, a_max=None)
 
                 # Project onto whitened latent subspace
                 whitened_template = np.dot(
-                    lat_template_std, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig)))
+                    lat_template_std, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig_safe)))
                 )
 
-                # FastICA extraction
-                ica = FastICA(
-                    n_components=n_sig,
-                    whiten="unit-variance",
-                    random_state=random_state,
-                    max_iter=1000,
-                )
-                ica.fit(whitened_template)
+                import warnings
+
+                from sklearn.exceptions import ConvergenceWarning
+
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("error", category=ConvergenceWarning)
+
+                    try:
+                        ica = FastICA(
+                            n_components=n_sig,
+                            whiten=False,
+                            random_state=random_state,
+                            max_iter=1000,
+                            tol=1e-4,
+                        )
+                        ica.fit(whitened_template)
+                    except ConvergenceWarning:
+                        print(
+                            "Warning: FastICA did not converge. Consider increasing max_iter or adjusting tol."
+                        )
+                        ica = FastICA(
+                            n_components=n_sig,
+                            whiten=False,
+                            random_state=random_state,
+                            max_iter=2000,
+                            tol=1e-3,
+                        )
+                        ica.fit(whitened_template)
 
                 # Unmix vectors back to 128D latent space
                 unmixing = ica.components_
@@ -1319,6 +1340,7 @@ class AssemblyReactivationPipeline:
                     max_iter=2000,
                     tol=1e-3,
                 )
+                ica.fit(whitened_template)
 
         unmixing = ica.components_
         mix_weights = np.dot(v_sig, np.dot(np.diag(np.sqrt(l_sig)), unmixing.T))
@@ -12691,7 +12713,7 @@ class Results_Loader(TuningCurvesPlotter):
         broken down by your physical ZONEDEF boundaries.
         """
 
-        pipe = AssemblyReactivationPipeline()
+        AssemblyReactivationPipeline()
         df_mig = self.compute_assembly_zone_migration(
             winMS=winMS, template_period=template_period
         )
@@ -14345,7 +14367,7 @@ class Results_Loader(TuningCurvesPlotter):
             )
             if save_path is not None:
                 os.makedirs(save_path, exist_ok=True)
-                fig_name = f"component_event_figure_{session_key}_PC{pc_idx + 1}_{event_type}_{epoch}_{winMS}ms.png"
+                f"component_event_figure_{session_key}_PC{pc_idx + 1}_{event_type}_{epoch}_{winMS}ms.png"
 
             plt.show()
 

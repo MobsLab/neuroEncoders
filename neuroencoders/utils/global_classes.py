@@ -3505,24 +3505,21 @@ class SpatialConstraintsMixin:
         H, W = self.GRID_H, self.GRID_W
 
         # 1. Detect multi-step K dimension and flatten into the Batch dimension
-        is_multistep = False
         if rank == 4:
             # Shape: (Batch, K, H, W)
-            is_multistep = True
-            B, K = shape_dyn[0], shape_dyn[1]
+            _B, _K = shape_dyn[0], shape_dyn[1]
             logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
         elif rank == 3 and shape_static[-1] == H * W:
             # Shape: (Batch, K, H*W)
-            is_multistep = True
-            B, K = shape_dyn[0], shape_dyn[1]
+            _B, _K = shape_dyn[0], shape_dyn[1]
             logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
         elif rank == 2:
             # Shape: (Batch, H*W)
-            B = shape_dyn[0]
+            shape_dyn[0]
             logits_flat_batch = kops.reshape(logits_hw, [-1, H, W])
         else:
             # Shape: (Batch, H, W)
-            B = shape_dyn[0]
+            shape_dyn[0]
             logits_flat_batch = logits_hw
 
         B_eff = kops.shape(logits_flat_batch)[0]

@@ -28,6 +28,7 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
+from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -72,7 +73,6 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
-from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
@@ -4305,9 +4305,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                             f"Processing window size {ws} ms with stride factor {tmp_stride_factor}..."
                         )
                         if tmp_stride_factor > 1:
-                            filename = f"dataset_stride{str(ws)}_factor{str(tmp_stride_factor)}.tfrec"
+                            f"dataset_stride{str(ws)}_factor{str(tmp_stride_factor)}.tfrec"
                         else:
-                            filename = f"dataset_stride{str(ws)}.tfrec"
+                            f"dataset_stride{str(ws)}.tfrec"
 
                         # Call your existing pipeline for each window size
                         # Note: Ensure you disable .repeat() and .batch() inside the pipeline

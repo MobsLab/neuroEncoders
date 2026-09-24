@@ -4156,10 +4156,10 @@ class GaussianHeatmapLosses(tf.keras.losses.Loss, SpatialConstraintsMixin):
 
         batch_size = kops.shape(logits_hw)[0]
         allowed_mask = kops.cast(self.allowed_mask_tf, dtype)
-        forbid_mask = kops.cast(self.forbid_mask_tf, dtype)
+        kops.cast(self.forbid_mask_tf, dtype)
         cost_matrix = kops.cast(self.cost_matrix, dtype)
         target_hw = kops.cast(target_hw, dtype)
-        NEG = kops.cast(self.NEG, dtype)
+        kops.cast(self.NEG, dtype)
         EPS = kops.cast(self.EPS, dtype)
 
         # # Mask + logits flatten

@@ -10,7 +10,6 @@
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
