@@ -1637,7 +1637,7 @@ def loadLFPData(path: str, lazy: bool = True) -> Tuple[Dict[str, Tsd], Dict[str,
 
         if not lfp_file.exists():
             print(
-                f"Warning: LFP file for channel {chan_number} not found at {lfp_file}. Skipping."
+                f"Warning: LFP file for channel {chan_number} not found at {lfp_file}. Was associated with {Path(mat_file).name}. Skipping."
             )
             continue
 

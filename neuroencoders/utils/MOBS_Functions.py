@@ -940,6 +940,11 @@ class AssemblyReactivationPipeline:
             # 6. Extract Target Latent Template Matrix
             lat_template = full_latent_tsd.restrict(template_interval)
             lat_template_values = lat_template.values
+            if len(lat_template_values) < 10 or lat_template_values.shape[1] < 2:
+                warn(
+                    f"Skipping {mouse_name}: Template window has insufficient data frames."
+                )
+                continue
             n_bins, n_dim = lat_template_values.shape
             print(
                 f"Will compute assembly reactivation on {n_bins} time bins (representing a duration of {lat_template.find_support(0.5).tot_length():.2f}s) with dim {n_dim} for {mouse_name}."
@@ -1216,14 +1221,16 @@ class AssemblyReactivationPipeline:
         elif template_period == "condFree":
             return epochs["cond"].intersect(epochs["freeze"])
         elif template_period == "postRip":
-            return (
-                epochs["post_test"]
-                .intersect(epochs["sws"])
-                .intersect(epochs["ripples"])
-            )
+            return epochs["post_test"].intersect(epochs["ripples"])
         elif template_period == "condRip":
             return epochs["cond"].intersect(epochs["ripples"])
+        elif template_period == "pre_sleep":
+            return epochs["pre_sleep"]
+        elif template_period == "post_sleep":
+            return epochs["post_sleep"]
         else:
+            if epochs.get(template_period) is not None:
+                return epochs[template_period]
             raise ValueError(
                 f"Unknown template window specification: {template_period}"
             )
@@ -1262,6 +1269,7 @@ class AssemblyReactivationPipeline:
         num_templates: int,
         random_state: int,
     ) -> Tuple[np.ndarray, np.ndarray, float, float]:
+        q_template = np.nan_to_num(q_template)
         corr_matrix = np.dot(q_template.T, q_template) / float(num_bins)
         corr_matrix = np.nan_to_num(corr_matrix)
 
@@ -1278,19 +1286,39 @@ class AssemblyReactivationPipeline:
         n_sig = min(int(np.sum(sig_mask)), num_templates)
         v_sig = eigenvectors[:, :n_sig]
         l_sig = eigenvalues[:n_sig]
+        l_sig_safe = np.clip(l_sig, a_min=1e-12, a_max=None)  # Avoid division by zero
 
         # Project onto whitened subspace
         whitened_template = np.dot(
-            q_template, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig)))
+            q_template, np.dot(v_sig, np.diag(1.0 / np.sqrt(l_sig_safe)))
         )
+        import warnings
 
-        ica = FastICA(
-            n_components=n_sig,
-            whiten="unit-variance",
-            random_state=random_state,
-            max_iter=1000,
-        )
-        ica.fit(whitened_template)
+        from sklearn.exceptions import ConvergenceWarning
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=ConvergenceWarning)
+
+            try:
+                ica = FastICA(
+                    n_components=n_sig,
+                    whiten=False,
+                    random_state=random_state,
+                    max_iter=1000,
+                    tol=1e-4,
+                )
+                ica.fit(whitened_template)
+            except ConvergenceWarning:
+                print(
+                    "Warning: FastICA did not converge. Consider increasing max_iter or adjusting tol."
+                )
+                ica = FastICA(
+                    n_components=n_sig,
+                    whiten=False,
+                    random_state=random_state,
+                    max_iter=2000,
+                    tol=1e-3,
+                )
 
         unmixing = ica.components_
         mix_weights = np.dot(v_sig, np.dot(np.diag(np.sqrt(l_sig)), unmixing.T))
@@ -11471,6 +11499,7 @@ class Results_Loader(TuningCurvesPlotter):
     def compute_ev_behavior_correlation(
         self,
         winMS=100,
+        df_ev: Optional[pd.DataFrame] = None,
         task_phase="cond",
         subtask: Optional[str] = None,
         subsleep: Optional[str] = None,
@@ -11488,16 +11517,17 @@ class Results_Loader(TuningCurvesPlotter):
         rows = []
 
         # 1. Reuse our previously defined Kudrimoti function to collect raw EV metrics per session
-        df_ev = self.compute_kudrimoti_variance(
-            winMS=winMS,
-            task_phase=task_phase,
-            subtask=subtask,
-            subsleep=subsleep,
-            pre_phase=pre_phase,
-            post_phase=post_phase,
-            subpre=subpre,
-            subpost=subpost,
-        )
+        if df_ev is None:
+            df_ev = self.compute_kudrimoti_variance(
+                winMS=winMS,
+                task_phase=task_phase,
+                subtask=subtask,
+                subsleep=subsleep,
+                pre_phase=pre_phase,
+                post_phase=post_phase,
+                subpre=subpre,
+                subpost=subpost,
+            )
 
         # 2. Gather behavioral parameters alongside neural metrics per session
         for idx, row in df_ev.iterrows():
@@ -12884,6 +12914,7 @@ class Results_Loader(TuningCurvesPlotter):
                 post_phase=post_phase,
                 subpre=subpre,
                 subpost=subpost,
+                df_ev=df_ev,
             )
 
             if not df_corr.empty and len(df_corr) >= 3:

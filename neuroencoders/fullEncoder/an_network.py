@@ -28,7 +28,6 @@ import pandas as pd
 import tensorflow as tf
 from keras import ops as kops
 from tqdm import tqdm
-from wandb.integration.keras import WandbMetricsLogger
 
 import wandb
 
@@ -73,6 +72,7 @@ from neuroencoders.utils.global_classes import (
     Project,
     SpatialConstraintsMixin,
 )
+from wandb.integration.keras import WandbMetricsLogger
 
 
 # We generate a model with the functional Model interface in tensorflow
