@@ -1966,6 +1966,44 @@ class DataHelper(Project):
 
         return self.freeze_epochs
 
+    def get_slow_breathing_freeze_epochs(
+        self, before=0.0, after=0.15, thresh=4.5, network_path=None, **kwargs
+    ):
+        freeze_epochs = self.get_freeze_epochs()
+        if freeze_epochs is None:
+            warnings.warn(
+                f"Freeze epochs could not be computed. Please check the freeze detection parameters for {os.path.basename(os.path.dirname(self.baseName))}"
+            )
+            return None
+
+        respi_spectro = self.get_respi_data(network_path=network_path)
+        breathing_rate, power = self.compute_breathing_rate(
+            spectro_tsd=respi_spectro, **kwargs
+        )
+
+        under_thresh = breathing_rate.threshold(thresh, "below").time_support
+
+        return freeze_epochs.intersect(under_thresh)
+
+    def get_fast_breathing_freeze_epochs(
+        self, before=0.0, after=0.15, thresh=4.5, network_path=None, **kwargs
+    ):
+        freeze_epochs = self.get_freeze_epochs()
+        if freeze_epochs is None:
+            warnings.warn(
+                f"Freeze epochs could not be computed. Please check the freeze detection parameters for {os.path.basename(os.path.dirname(self.baseName))}"
+            )
+            return None
+
+        respi_spectro = self.get_respi_data(network_path=network_path)
+        breathing_rate, power = self.compute_breathing_rate(
+            spectro_tsd=respi_spectro, **kwargs
+        )
+
+        above_thresh = breathing_rate.threshold(thresh, "above").time_support
+
+        return freeze_epochs.intersect(above_thresh)
+
     def get_ripples_epochs(self, before=0.0, after=0.15):
         self.tRipples = self.fullBehavior["Times"].get("tRipples", None)
         if self.tRipples is None:
@@ -1975,8 +2013,10 @@ class DataHelper(Project):
             return None
 
         self.tRipples = self.tRipples.flatten()
-        ripples_epochs = IntervalSet(
-            np.array([[t - before, t + after] for t in self.tRipples])
+        ripples_epochs = (
+            IntervalSet(np.array([[t - before, t + after] for t in self.tRipples]))
+            .drop_short_intervals(0.015)
+            .merge_close_intervals(0.005)
         )
         self.ripples_epochs = ripples_epochs
         return self.ripples_epochs
@@ -2106,6 +2146,70 @@ class DataHelper(Project):
 
         raise KeyError("SleepScoring cache does not contain 'rem_epochs'.")
 
+    def get_sleep_wake_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("sleep_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadSleepScoring
+
+            try:
+                sleep_scoring = loadSleepScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    sleep_scoring = loadSleepScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Sleep scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "wake_epochs" in sleep_scoring:
+            return sleep_scoring["wake_epochs"]
+
+        raise KeyError("SleepScoring cache does not contain 'wake_epochs'.")
+
+    def get_micro_wake_epochs(
+        self, force: bool = False, folder: Optional[str] = None, network_path=None
+    ):
+        if not hasattr(self, "_lazy_cache"):
+            self._lazy_cache = {}
+
+        cache_key = ("sleep_scoring", os.path.abspath(folder or self.folder))
+        if cache_key in self._lazy_cache and not force:
+            sleep_scoring = self._lazy_cache[cache_key]
+        else:
+            from neuroencoders.utils.wrappers import loadSleepScoring
+
+            try:
+                sleep_scoring = loadSleepScoring(
+                    self.folder if folder is None else folder
+                )
+            except FileNotFoundError:
+                if network_path is not None:
+                    sleep_scoring = loadSleepScoring(network_path)
+                else:
+                    raise FileNotFoundError(
+                        f"Sleep scoring file not found in {folder or self.folder} and no network path provided."
+                    )
+            self._lazy_cache[cache_key] = sleep_scoring
+            if len(self._lazy_cache) > 8:
+                self._lazy_cache.pop(next(iter(self._lazy_cache)))
+
+        if "microwake_epochs" in sleep_scoring:
+            return sleep_scoring["microwake_epochs"]
+
+        raise KeyError("SleepScoring cache does not contain 'microwake_epochs'.")
+
     def get_spindle_epochs(
         self, force: bool = False, folder: Optional[str] = None, network_path=None
     ):
@@ -2170,14 +2274,14 @@ class DataHelper(Project):
             if len(self._lazy_cache) > 8:
                 self._lazy_cache.pop(next(iter(self._lazy_cache)))
 
+        if "deltas_PFCx_epochs" in delta_scoring:
+            return delta_scoring["deltas_PFCx_epochs"]
+
         if "delta_epochs" in delta_scoring:
             return delta_scoring["delta_epochs"]
 
         if "alldeltas_PFCx_epochs" in delta_scoring:
             return delta_scoring["alldeltas_PFCx_epochs"]
-
-        if "deltas_PFCx_epochs" in delta_scoring:
-            return delta_scoring["deltas_PFCx_epochs"]
 
         raise KeyError(
             f"Delta Scoring cache does not contain 'delta_epochs'. Found keys: {list(delta_scoring.keys())}"
@@ -2946,7 +3050,7 @@ class Params:
             2 if not self.isTransformer else 4
         )  # changed num_layers to 1 for a test
         self.lstmLayers = kwargs.pop("lstmLayers", default_lstm_layers)
-        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.5)
+        self.dropoutCNN = kwargs.pop("dropoutCNN", 0.25)
         self.lstmSize = kwargs.pop("lstmSize", 64)
         default_dropout_lstm = 0.3 if not self.isTransformer else 0.15
         self.dropoutLSTM = kwargs.pop("dropoutLSTM", default_dropout_lstm)
@@ -3105,6 +3209,7 @@ class Params:
 
         self.use_vq_bottleneck = kwargs.pop("use_vq_bottleneck", True)
         self.use_diversity_loss = kwargs.pop("use_diversity_loss", False)
+        self.use_waveform_autoencoder = kwargs.pop("use_waveform_autoencoder", True)
 
     def save_params_to_json(self):
         """
@@ -4395,7 +4500,6 @@ class TuningCurvesPlotter:
                 smoothed_matrix = gaussian_filter1d(
                     analysis_data[key][phase], sigma=spatial_smooth_sigma, axis=1
                 )
-                # CRITICAL FIX: Replace lingering NaNs with 0
                 if np.isnan(smoothed_matrix).any():
                     smoothed_matrix = np.nan_to_num(smoothed_matrix, nan=0.0)
 
@@ -4903,7 +5007,7 @@ def _compute_tuning_curves_for_result(
         if len(features.values.shape) == 1 or features.values.shape[1] == 1:
             sigma = (0, 2)
         elif features.values.shape[1] == 2:
-            sigma = (0, 2.5, 2.5)
+            sigma = (0, 1.5, 1.5)
         else:
             sigma = 1
 

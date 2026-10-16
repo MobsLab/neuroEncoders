@@ -8,8 +8,21 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="3cfad8b9-6a73-412b-9b22-5217c669773f" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/ai_toolkit.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extractTsd.m" beforeDir="false" afterPath="$PROJECT_DIR$/extractTsd.m" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroEncoder" beforeDir="false" afterPath="$PROJECT_DIR$/neuroEncoder" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/an_network.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/fullEncoder/nnUtils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures_sleep.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/print_results.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/resultAnalysis/ripple_analysis_utils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/MOBS_Functions.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/global_classes.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" beforeDir="false" afterPath="$PROJECT_DIR$/neuroencoders/utils/wrappers.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/ResultsLoader_newMice.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/runAllMice.py" beforeDir="false" afterPath="$PROJECT_DIR$/runAllMice.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -139,6 +152,10 @@
     &quot;accountId&quot;: &quot;d903e366-364b-44d3-af2b-b92716e09995&quot;
   }
 }</component>
+  <component name="HighlightingSettingsPerFile">
+    <setting file="file://$PROJECT_DIR$/.venv/lib/python3.12/site-packages/pynapple/core/ts_group.py" root0="SKIP_INSPECTION" />
+    <setting file="file://$PROJECT_DIR$/.venv/lib/python3.12/site-packages/sklearn/decomposition/_fastica.py" root0="SKIP_INSPECTION" />
+  </component>
   <component name="ProblemsViewState">
     <option name="selectedTabId" value="CurrentFile" />
     <option name="showPreview" value="true" />
@@ -202,7 +219,7 @@
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
     &quot;python.packages.toolwindow.project.migrated.to.right.top.v2&quot;: &quot;true&quot;,
     &quot;run.code.analysis.last.selected.profile&quot;: &quot;pProject Default&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;memory.settings&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;com.intellij.pycharm.community.ide.impl.configuration.PythonContentEntriesConfigurable&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
@@ -393,11 +410,44 @@
       <workItem from="1790175774172" duration="2587000" />
       <workItem from="1790240278788" duration="10694000" />
       <workItem from="1790252418003" duration="1358000" />
+      <workItem from="1790326056951" duration="7769000" />
+      <workItem from="1790597427969" duration="7284000" />
+      <workItem from="1790605128126" duration="5131000" />
+      <workItem from="1790685344188" duration="9071000" />
+      <workItem from="1790760905313" duration="715000" />
+      <workItem from="1790763885207" duration="8390000" />
+      <workItem from="1790845209073" duration="8064000" />
+      <workItem from="1790855262821" duration="23918000" />
+      <workItem from="1790931471919" duration="1353000" />
+      <workItem from="1790933081463" duration="1687000" />
+      <workItem from="1790935024381" duration="16523000" />
+      <workItem from="1791197383727" duration="3232000" />
+      <workItem from="1791212463722" duration="2486000" />
+      <workItem from="1791276938071" duration="4768000" />
+      <workItem from="1791284562932" duration="1359000" />
+      <workItem from="1791286724275" duration="16702000" />
+      <workItem from="1791377647906" duration="606000" />
+      <workItem from="1791465579002" duration="1334000" />
+      <workItem from="1791538230685" duration="18280000" />
+      <workItem from="1791809977587" duration="49000" />
+      <workItem from="1791810061640" duration="13032000" />
+      <workItem from="1791977908030" duration="12292000" />
+      <workItem from="1791991260243" duration="7450000" />
+      <workItem from="1792054587401" duration="5373000" />
+      <workItem from="1792063365831" duration="4153000" />
+      <workItem from="1792067861518" duration="6807000" />
+      <workItem from="1792150353567" duration="7590000" />
     </task>
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+    <option name="additionalRoots">
+      <list>
+        <option value="$PROJECT_DIR$/.venv-temp/lib/python3.12/site-packages/panel/dist/dts" />
+        <option value="$PROJECT_DIR$/.venv-temp/lib64/python3.12/site-packages/panel/dist/dts" />
+      </list>
+    </option>
   </component>
   <component name="Vcs.Log.Tabs.Properties">
     <option name="TAB_STATES">
@@ -415,7 +465,7 @@
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/neuroencoders/resultAnalysis/paper_figures.py</url>
-          <line>3279</line>
+          <line>3466</line>
           <option name="timeStamp" value="10" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">

@@ -672,6 +672,16 @@ def loadNeuronClassifications(path: str) -> Tuple[dict, list]:
                 cleaned["neuroclass"] = cleaned_neuroclass
                 spikedata["BasicNeuronInfo"] = cleaned
 
+                try:
+                    cleaned_place_cells = clean_mat_structure(spikedata["PlaceCells"])
+                    cleaned_place_cells["idx"] = clean_mat_structure(
+                        cleaned_place_cells["idx"]
+                    )
+                    spikedata["PlaceCells"] = cleaned_place_cells
+                except Exception as e:
+                    print(e)
+                    spikedata["PlaceCells"] = {"idx": []}
+
             try:
                 basic_neuron_info = spikedata["BasicNeuronInfo"]
             except KeyError:
@@ -688,12 +698,20 @@ def loadNeuronClassifications(path: str) -> Tuple[dict, list]:
             neuron_classifications = basic_neuron_info["neuroclass"]
             idx_mua = basic_neuron_info["idx_MUA"]
             idx_sua = basic_neuron_info["idx_SUA"]
+            idx_PC = spikedata["PlaceCells"]["idx"]
+            if idx_PC is None:
+                idx_PC = []
+            basic_neuron_info["PlaceCells"] = spikedata["PlaceCells"]
             unit_type = [
                 "MUA"
                 if i + 1 in idx_mua
                 else "SUA"
                 if i + 1 in idx_sua
                 else "unclassified"
+                for i in range(len(neuron_classifications))
+            ]
+            is_pc = [
+                "_PC" if i + 1 in idx_PC else ""
                 for i in range(len(neuron_classifications))
             ]
             neuron_class_map = {
@@ -703,8 +721,8 @@ def loadNeuronClassifications(path: str) -> Tuple[dict, list]:
                 -0.5: "ambig_interneuron",
             }
             neuron_classifications_name = [
-                f"{unit}_{neuron_class_map.get(int(nc), 'unclassified')}"
-                for unit, nc in zip(unit_type, neuron_classifications)
+                f"{unit}_{neuron_class_map.get(int(nc), 'unclassified')}{pc}"
+                for unit, nc, pc in zip(unit_type, neuron_classifications, is_pc)
             ]
             return basic_neuron_info, neuron_classifications_name
 

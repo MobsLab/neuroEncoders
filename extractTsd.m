@@ -72,7 +72,6 @@ if strcmp(target, 'pos') || strcmp(target, 'linear') || strcmp(target, 'LinAndTh
     behavior.positions     = [X Y];
     behavior.position_time = T;
 else
-    % TODO: check if the target exists and refine the script for other targets
     disp(['Extracting ', target])
     try
         behavior.positions       = Data(Behavior.(target));

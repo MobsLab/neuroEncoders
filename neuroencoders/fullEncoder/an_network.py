@@ -34,6 +34,7 @@ import wandb
 # Get utility functions
 from neuroencoders.fullEncoder import nnUtils
 from neuroencoders.fullEncoder.nnUtils import (
+    AnatomicalEmbedding,
     ContrastiveMonitor,
     ContrastiveRegressionLoss,
     ContrastiveVisualizer,
@@ -43,6 +44,7 @@ from neuroencoders.fullEncoder.nnUtils import (
     GaussianHeatmapLayer,
     GaussianHeatmapLosses,
     GroupAttentionFusion,
+    KLAnnealingCallback,
     LearnableTemperature,
     MaskedGlobalAveragePooling1D,
     MaskedSequential,
@@ -61,6 +63,8 @@ from neuroencoders.fullEncoder.nnUtils import (
     TransformerIdentityAuditCallback,
     UMazeProjectionLayer,
     UnMaskingLayer,
+    UnsupervisedReconstructionLoss,
+    VQVisualizerCallback,
     VectorQuantizer,
     WandBErrorMapCallback,
 )
@@ -682,7 +686,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 n_features=self.params.nFeatures,
                 max_spikes_per_group=self.max_spikes_per_group,
                 max_nb_spikes=self.max_nb_spikes,
-                project_transformer=self.project_transformer,
                 dim_factor=self.dim_factor,
                 device=self.deviceName,
                 params=self.params,
@@ -692,13 +695,42 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             if getattr(self.params, "use_vq_bottleneck", False):
                 self.vq_bottleneck = VectorQuantizer(
                     num_embeddings=256,
-                    embedding_dim=self.params.nFeatures * self.dim_factor
-                    if self.project_transformer
-                    else self.params.nFeatures,
-                    commitment_cost=0.75,
+                    embedding_dim=self.params.nFeatures,
+                    commitment_cost=0.25,
                     name="vq_bottleneck",
                     device=self.deviceName,
+                    variational=False,
                 )
+                if getattr(self.params, "use_waveform_autoencoder", False):
+                    # decoder part of the VAE for waveform reconstruction
+                    self.waveform_decoder = MaskedSequential(
+                        [
+                            tf.keras.layers.Dense(
+                                self.params.sequence_output_dim,
+                                activation="silu",
+                                name="recon_dense_1",
+                            ),
+                            tf.keras.layers.Dense(
+                                max(self.params.nChannelsPerGroup) * 32,
+                                activation="linear",
+                                name="recon_out",
+                            ),
+                        ],
+                        name="waveform_decoder",
+                        no_mask_return=False,
+                    )
+            if self.project_transformer:
+                self.transformer_projection = tf.keras.layers.Dense(
+                    self.params.sequence_output_dim,
+                    activation="linear",
+                    name="transformer_projection",
+                )
+
+            self.anatomical_embedding = AnatomicalEmbedding(
+                n_groups=self.params.nGroups,
+                embed_dim=self.params.sequence_output_dim,
+                name="anatomical_embedding",
+            )
 
             if getattr(self.params, "use_group_attention_fusion", False):
                 # 2. Initialize the Group Attention Fusion layer
@@ -1015,23 +1047,51 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
 
             # Call the processor - From single spikes to features sequence
-            embedded_features, mymask, sumFeatures, raw_sequence, group_latents_raw = (
-                self.spike_sequence_processor(processor_inputs)
-            )
+            (
+                embedded_features,
+                mymask,
+                sumFeatures,
+                raw_sequence,
+                group_latents_raw,
+                gathered_raw_waveforms,
+            ) = self.spike_sequence_processor(processor_inputs)
             embedded_features._keras_mask = (
                 mymask  # Ensure the mask is set for downstream layers
             )
 
+            # VQ Bottleneck on non-embedded features (no shank ID)
             if getattr(self.params, "use_vq_bottleneck", False):
                 print("Using VQ Bottleneck for latent representation.")
                 embedded_features = self.vq_bottleneck(embedded_features, mask=mymask)
                 # Re-apply the mask just to ensure downstream Keras layers behave safely
                 embedded_features._keras_mask = mymask
 
-            allFeatures_raw = raw_sequence
+                if getattr(self.params, "use_waveform_autoencoder", False):
+                    print("Using waveform autoencoder for reconstruction.")
+                    recon_features = self.waveform_decoder(
+                        embedded_features, mask=mymask
+                    )
+                    recon_features_after_loss = UnsupervisedReconstructionLoss(
+                        loss_weight=5.0
+                    )([recon_features, gathered_raw_waveforms, mymask])
 
-            transformer_input = self.dropoutLayer(embedded_features)
+            # moved from SpikeSequenceProcessor: we apply here anatomical embedding and projection to the final sequence output dimension if needed
+            x = embedded_features
+            if self.project_transformer:
+                x = self.transformer_projection(x)
+
+            x = self.anatomical_embedding([x, self.inputGroups])
+            x._keras_mask = mymask
             # size is (NbBatch, NbTotSpikeDetected, nGroups*nFeatures/embed_dim)
+
+            # renormalize the features to have zero mean and unit variance across the sequence dimension after anatomical embedding and dropout, but before LSTM/Transformer
+            x = tf.keras.layers.LayerNormalization(
+                epsilon=1e-6, name="transformer_input_norm"
+            )(x)
+            x._keras_mask = mymask
+
+            allFeatures_raw = raw_sequence
+            transformer_input = self.dropoutLayer(x)
 
             if not self.isTransformer:
                 sequence_output, sumFeatures = self.apply_lstm_architecture(
@@ -1088,6 +1148,13 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             outputs["latent_output_pooled"] = UnMaskingLayer(
                 name="latent_output_pooled", dtype="float32"
             )(pooled_latent)
+
+            if getattr(self.params, "use_waveform_autoencoder", False) and getattr(
+                self.params, "use_vq_bottleneck", False
+            ):
+                outputs["spike_reconstruction"] = UnMaskingLayer(
+                    name="spike_reconstruction", dtype="float32"
+                )(recon_features_after_loss)
 
         return outputs
 
@@ -1383,8 +1450,9 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     with open(norm_filename, "wb") as f:
                         pickle.dump(self.normalization_stats, f)
 
-            use_pipeline_normalization = kwargs.get("normalize_in_pipeline", True)
-            self.preprocess_normalization = use_pipeline_normalization
+            use_pipeline_normalization = kwargs.get(
+                "normalize_in_pipeline", self.preprocess_normalization
+            )
 
             for g in range(self.params.nGroups):
                 spike_net = self.spikeNets[g]
@@ -1443,7 +1511,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
                 ## Get datasets
                 for ws in window_sizes:
-                    # FIX: missing logic from neuroEncoder
                     # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
                     tmp_stride_factor = strideFactor
                     windowStride = round(ws / 1000 / tmp_stride_factor, 4)
@@ -2012,6 +2079,21 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         value=0.1,
                         verbose=1,
                     )
+
+                    if self.vq_bottleneck.variational:
+                        curr_callbacks.append(
+                            KLAnnealingCallback(
+                                target_weight=0.0001,
+                                warmup_epochs=5,
+                            )
+                        )
+
+                    curr_callbacks.append(
+                        VQVisualizerCallback(
+                            log_dir=self.log_dir if is_tbcallback else None,
+                        )
+                    )
+
                     curr_callbacks.append(curr_es_callback)
                     self.model.fit(
                         datasets["train"],
@@ -2091,6 +2173,19 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
 
                 else:
+                    if self.vq_bottleneck.variational:
+                        callbacks.append(
+                            KLAnnealingCallback(
+                                target_weight=0.0001,
+                                warmup_epochs=5,
+                            )
+                        )
+
+                    callbacks.append(
+                        VQVisualizerCallback(
+                            log_dir=self.log_dir if is_tbcallback else None,
+                        )
+                    )
                     if earlyStop:
                         callbacks.append(
                             es_callback
@@ -2660,6 +2755,11 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 for g in range(self.params.nGroups):
                     targets_dict[f"outputCNN{g if g > 0 else ''}"] = vals["pos"]
 
+            if getattr(self.params, "use_vq_bottleneck", False) and getattr(
+                self.params, "use_waveform_autoencoder", False
+            ):
+                targets_dict["spike_reconstruction"] = tf.zeros([1], dtype=tf.float32)
+
             return (inputs_dict, targets_dict)
 
         def create_indices(vals):
@@ -2956,8 +3056,8 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     "Applying data augmentation only to oversampled duplicate copies in train dataset"
                 )
                 aug_config_kwargs = kwargs.copy()
-                aug_config_kwargs["channel_dropout_rate"] = 0.2
-                aug_config_kwargs["spike_dropout_rate"] = 0.3
+                aug_config_kwargs["channel_dropout_rate"] = 0.1
+                aug_config_kwargs["spike_dropout_rate"] = 0.15
 
                 oversampling_augmentation_config = NeuralDataAugmentation(
                     device=self.deviceName, **aug_config_kwargs
@@ -3420,14 +3520,18 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         results = {}
         use_heatmap = getattr(self.params, "GaussianHeatmap", False)
 
-        # 1. Handle main position head if it's a heatmap
+        # 1. Handle main position head if it's a heatmap (CHUNKING FIX)
         if use_heatmap and "pos_2d" in preds:
-            output_logits = np.asarray(preds["pos_2d"])
-            if len(output_logits.shape) == 2:
-                H, W = self.params.GaussianGridSize
-                output_logits = tf.reshape(output_logits, [-1, H, W])
+            raw_logits = preds["pos_2d"]  # Can be HDF5 dataset or numpy array
+            total_samples = raw_logits.shape[0]
 
             if fit_temperature and y_true is not None:
+                # Temperature fitting requires everything in memory
+                output_logits = np.asarray(raw_logits)
+                if len(output_logits.shape) == 2:
+                    H, W = self.params.GaussianGridSize
+                    output_logits = tf.reshape(output_logits, [-1, H, W])
+
                 start, end = self.target_structure["pos_2d"]["slice"]
                 y_pos_2d = y_true[:, start:end]
                 val_targets = self.gaussian_heatmap_targets_tf(y_pos_2d)
@@ -3436,26 +3540,45 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
                 return T_cal
 
-            if T_scaling is not None:
-                output_logits = output_logits / T_scaling
+            # Decode in chunks to prevent GPU OOM on massive sleep epochs
+            chunk_size = 10000
+            xy_list, maxp_list, Hn_list, var_list, logits_list = [], [], [], [], []
 
-            # Decode via Mixin
-            xy, maxp, Hn, var_total = self.decode_and_uncertainty_tf(output_logits)
+            for i in range(0, total_samples, chunk_size):
+                chunk = np.asarray(raw_logits[i : i + chunk_size])
 
-            # Convert safely to numpy
-            xy_np = xy.numpy() if hasattr(xy, "numpy") else np.asarray(xy)
-            maxp_np = maxp.numpy() if hasattr(maxp, "numpy") else np.asarray(maxp)
-            Hn_np = Hn.numpy() if hasattr(Hn, "numpy") else np.asarray(Hn)
-            var_np = (
-                var_total.numpy()
-                if hasattr(var_total, "numpy")
-                else np.asarray(var_total)
-            )
-            logits_np = (
-                output_logits.numpy()
-                if hasattr(output_logits, "numpy")
-                else np.asarray(output_logits)
-            )
+                if len(chunk.shape) == 2:
+                    H, W = self.params.GaussianGridSize
+                    chunk = tf.reshape(chunk, [-1, H, W])
+
+                if T_scaling is not None:
+                    chunk = chunk / T_scaling
+
+                # Decode via Mixin
+                c_xy, c_maxp, c_Hn, c_var = self.decode_and_uncertainty_tf(chunk)
+
+                xy_list.append(
+                    c_xy.numpy() if hasattr(c_xy, "numpy") else np.asarray(c_xy)
+                )
+                maxp_list.append(
+                    c_maxp.numpy() if hasattr(c_maxp, "numpy") else np.asarray(c_maxp)
+                )
+                Hn_list.append(
+                    c_Hn.numpy() if hasattr(c_Hn, "numpy") else np.asarray(c_Hn)
+                )
+                var_list.append(
+                    c_var.numpy() if hasattr(c_var, "numpy") else np.asarray(c_var)
+                )
+                logits_list.append(
+                    chunk.numpy() if hasattr(chunk, "numpy") else np.asarray(chunk)
+                )
+
+            # Concatenate chunks safely
+            xy_np = np.concatenate(xy_list, axis=0)
+            maxp_np = np.concatenate(maxp_list, axis=0)
+            Hn_np = np.concatenate(Hn_list, axis=0)
+            var_np = np.concatenate(var_list, axis=0)
+            logits_np = np.concatenate(logits_list, axis=0)
 
             # NEW: Split Multi-Token Sequences into center pred
             if len(xy_np.shape) == 3:  # (Batch, K, 2)
@@ -3535,7 +3658,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
             )
             results["latent_output_pooled"] = latent_output
 
-        # Linear projections / ID score
+        # 4. Linear projections / ID score
         if (
             l_function
             and results.get("featurePred") is not None
@@ -3718,7 +3841,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 speedMask=speedMask,
                 batch_size=kwargs.pop(
                     "batch_size", 32
-                ),  # WARNING: smaller batch size because of drop_remainder
+                ),  # NOTE: smaller batch size because of drop_remainder
                 **kwargs,
             )
 
@@ -3737,7 +3860,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                 )
                 ## Get datasets
                 for ws in window_sizes:
-                    # FIX: missing logic from neuroEncoder
                     # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
                     tmp_stride_factor = strideFactor
                     windowStride = round(ws / 1000 / tmp_stride_factor, 4)
@@ -3769,7 +3891,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         speedMask=speedMask,
                         batch_size=kwargs.pop(
                             "batch_size", 32
-                        ),  # WARNING: smaller batch size because of drop_remainder
+                        ),  # INFO: smaller batch size because of drop_remainder
                         is_interleaving_subdataset=True,
                         **kwargs,
                     )
@@ -4291,7 +4413,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                     )
                     ## Get datasets
                     for ws in window_sizes:
-                        # FIX: missing logic from neuroEncoder
                         # TODO: create helper function to generate the filename based on window size and stride factor, to avoid code duplication ?
                         tmp_stride_factor = strideFactor
                         windowStride = round(ws / 1000 / tmp_stride_factor, 4)
@@ -4631,7 +4752,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         def batched_repeat(batch_dict):
             idx = batched_map_bin_class(batch_dict["pos"])
 
-            # FIX: Prevent tf.gather from crashing on -1 by clipping to 0
+            # Prevent tf.gather from crashing on -1 by clipping to 0
             safe_idx = tf.maximum(idx, 0)
 
             # Lookup repeat factors safely
@@ -4666,7 +4787,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         dataset = dataset.map(batched_repeat, num_parallel_calls=4)
         dataset = dataset.unbatch()
 
-        # FIX: Capture the dataset for the visualizer BEFORE it gets scrambled
         dataset_after_oversampling = dataset
 
         if shuffle:
@@ -4818,8 +4938,6 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
         )
         dataset = datasets["test"]
 
-        # --- THE FIX: DYNAMICALLY ACCUMULATE BACKEND EXTRACOR BLOCK ---
-        # Instead of named layers, we trace the model to locate the processor and build a submodel
         from keras import ops as kops
 
         sequence_processor = None
@@ -5702,7 +5820,7 @@ class LSTMandSpikeNetwork(SpatialConstraintsMixin):
                         continue
 
                     # Downcast numeric types to save memory and write bandwidth
-                    if arr.dtype == np.float32:
+                    if arr.dtype == np.float32 and k not in ["times", "timeStepsPred"]:
                         arr = arr.astype(np.float16)
                     elif arr.dtype == np.int64:
                         arr = arr.astype(np.int32)

@@ -283,7 +283,7 @@ def print_results(
         raise ValueError('typeDec should be either "NN" or bayes"')
 
     if target.lower() == "posandheaddirection":
-        # FIX: temporary for this target, keep only x & y for the error calculation and plotting
+        # WARNING: temporary for this target, keep only x & y for the error calculation and plotting
         # TODO: fix this properly later by adding a dimOutput = 4 for this target, and adapt the plotting functions to be able to plot the head direction and thigmo in this case.
         pos = pos[:, :2]
         inferring = inferring[:, :2]

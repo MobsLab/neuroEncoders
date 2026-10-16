@@ -144,14 +144,18 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 PaperFiguresSleep,
             )
 
+            sleep_timeWindows = timeWindows.copy()
+            if 36 not in sleep_timeWindows:
+                sleep_timeWindows.append(36)
+
             self.sleepFigures = PaperFiguresSleep(
-                projectPath,
-                behaviorData,
-                bayes if bayes is not None else None,
-                l_function,
-                bayesMatrices=bayesMatrices if bayesMatrices is not None else {},
-                timeWindows=timeWindows,
-                sleepNames=behaviorData["Times"].get("sleepNames", None),
+                self.projectPath,
+                self.behaviorData,
+                self.bayes,
+                self.l_function,
+                bayesMatrices=self.bayesMatrices,
+                timeWindows=sleep_timeWindows,
+                sleepNames=self.behaviorData["Times"].get("sleepNames", None),
             )
 
     def find_session_epochs(self):
@@ -173,7 +177,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         )
 
         try:
-            # WARNING: "pre" is actually pre|hab, see rawdata_parser.py, get_behavior
+            # NOTE: "pre" is actually pre|hab, see rawdata_parser.py, get_behavior
             self.pre = IntervalSet(
                 np.array(self.behaviorData["Times"]["SessionEpochs"]["pre"]).reshape(
                     -1, 2
@@ -439,7 +443,9 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         self.suffixes = suffixes
         return suffixes
 
-    def _update_full_pre_dict(self, results_dict, redo=False):
+    def _update_full_pre_dict(
+        self, results_dict, redo=False, reference_times_dict=None
+    ):
         """Helper to create _full_pre results in a dictionary by concatenating _training and _pre."""
         if "_full_pre" in results_dict and not redo:
             return
@@ -447,6 +453,10 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         # We need existence of training and pre to continue
         if "_training" not in results_dict or "_pre" not in results_dict:
             return
+
+        time_source_dict = (
+            reference_times_dict if reference_times_dict is not None else results_dict
+        )
 
         results_dict["_full_pre"] = copy.deepcopy(results_dict["_pre"])
 
@@ -485,10 +495,13 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 ):
                     continue
 
-                times_train = results_dict["_training"]["times"][idWin]
-                times_pre = results_dict["_pre"]["times"][idWin]
+                times_train = time_source_dict["_training"]["times"][idWin]
+                times_pre = time_source_dict["_pre"]["times"][idWin]
 
                 if times_train is None or times_pre is None:
+                    warnings.warn(
+                        f"Times data missing for key {key} and window {idWin}. Skipping full pre update."
+                    )
                     continue
 
                 train_in_pre = (inEpochsMask(times_train, self.pre)) & (
@@ -502,19 +515,22 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 results_dict["_full_pre"][key][idWin] = np.concatenate(
                     [val_train, val_pre]
                 )[final_mask]
+        return results_dict
 
     def add_full_pre_results(self, redo=False, which="ann"):
         """
         Simply based on already loaded training and pre results, create mock full pre results by concatenating pre and training, then selecting based on test Pre mask.
         """
-        print("Creating full pre results from training and pre...")
+        print(f"Creating full pre results from training and pre with {redo=}...")
         if which in ["ann", "both"]:
             # ANN results
             if (
                 self.resultsNN_phase.get("_training", None) is not None
                 and self.resultsNN_phase.get("_pre", None) is not None
             ):
-                self._update_full_pre_dict(self.resultsNN_phase, redo=redo)
+                self.resultsNN_phase = self._update_full_pre_dict(
+                    self.resultsNN_phase, redo=redo
+                )
             else:
                 self.logger.warning(
                     "ANN training or pre results not loaded, cannot create full pre."
@@ -524,7 +540,11 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 self.resultsNN_phase_pkl.get("_training", None) is not None
                 and self.resultsNN_phase_pkl.get("_pre", None) is not None
             ):
-                self._update_full_pre_dict(self.resultsNN_phase_pkl, redo=redo)
+                self.resultsNN_phase_pkl = self._update_full_pre_dict(
+                    self.resultsNN_phase_pkl,
+                    redo=redo,
+                    reference_times_dict=self.resultsNN_phase,
+                )
 
         if which in ["bayes", "both"]:
             # Bayesian results
@@ -532,13 +552,19 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 self.resultsBayes_phase.get("_training", None) is not None
                 and self.resultsBayes_phase.get("_pre", None) is not None
             ):
-                self._update_full_pre_dict(self.resultsBayes_phase, redo=redo)
+                self.resultsBayes_phase = self._update_full_pre_dict(
+                    self.resultsBayes_phase, redo=redo
+                )
 
             if (
                 self.resultsBayes_phase_pkl.get("_training", None) is not None
                 and self.resultsBayes_phase_pkl.get("_pre", None) is not None
             ):
-                self._update_full_pre_dict(self.resultsBayes_phase_pkl, redo=redo)
+                self.resultsBayes_phase_pkl = self._update_full_pre_dict(
+                    self.resultsBayes_phase_pkl,
+                    redo=redo,
+                    reference_times_dict=self.resultsNN_phase,
+                )
 
     def _extract_bayes_spike_counts(self, times, ws):
         """Internal helper for spike count extraction in load_bayes."""
@@ -665,7 +691,9 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         for suffix in self.suffixes:
             if suffix == "_full_pre":
                 if kwargs.get("add_full_pre", False):
-                    self.add_full_pre_results(which="ann")
+                    self.add_full_pre_results(
+                        which="ann", redo=kwargs.get("redo", False)
+                    )
                 continue
             phase_results = {
                 "lPredPos": [],
@@ -678,6 +706,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 "posIndex": [],
                 "spikes_count": [],
                 "entropy": [],
+                "maxp": [],
             } or []
             resultsNN_phase_pkl = {}
 
@@ -747,6 +776,11 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 entropy = self._load_csv_result(base_results_path, ws, "Hn", suffix)
                 phase_results["entropy"].append(
                     np.squeeze(entropy).flatten() if entropy is not None else None
+                )
+
+                maxp = self._load_csv_result(base_results_path, ws, "maxp", suffix)
+                phase_results["maxp"].append(
+                    np.squeeze(maxp).flatten() if maxp is not None else None
                 )
 
                 if (
@@ -864,6 +898,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                     "predLoss": phase_results["lossPred"],
                     "posIndex": phase_results["posIndex"],
                     "entropy": phase_results["entropy"],
+                    "maxp": phase_results["maxp"],
                 }
 
             self.resultsNN_phase[suffix] = {
@@ -877,6 +912,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 "posIndex": phase_results["posIndex"],
                 "spikes_count": phase_results["spikes_count"],
                 "entropy": phase_results["entropy"],
+                "maxp": phase_results["maxp"],
             }
 
             if (
@@ -1826,6 +1862,156 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 os.path.join(self.folderFigures, "summary_behavior.svg"),
             )
 
+    def summary_freezing(
+        self,
+        DataHelper: DataHelper,
+        axs=None,
+        show: bool = True,
+        block: bool = False,
+        save: bool = True,
+        **kwargs,
+    ):
+        num_sess = sum(
+            [
+                1
+                for _, sess_time in DataHelper.fullBehavior["Times"][
+                    "SessionEpochs"
+                ].items()
+                if sum(sess_time) > 0
+            ]
+        )
+        num_cols = num_sess
+        if axs is None:
+            fig, axs = plt.subplots(
+                2,
+                num_cols,
+                figsize=(15, 6),
+                height_ratios=[3, 1],
+            )
+        else:
+            axs = np.array(axs).reshape(2, -1)
+            axs[0, 0].get_figure()
+
+        map_axs = axs[0, :].flatten()
+        hist_axs = axs[1, :].flatten()
+
+        sort_map = ["hab", "pre", "cond", "post", "extinction"]
+        DataHelper.fullBehavior["Times"]["SessionEpochs"] = dict(
+            sorted(
+                DataHelper.fullBehavior["Times"]["SessionEpochs"].items(),
+                key=lambda item: (
+                    sort_map.index(item[0]) if item[0] in sort_map else len(sort_map)
+                ),
+            )
+        )
+
+        freeze_epochs = DataHelper.get_freeze_epochs()
+        slow_breathing_epochs = DataHelper.get_slow_breathing_freeze_epochs(
+            network_path=self.network_path, smooth_fact=20
+        )
+        fast_breathing_epochs = DataHelper.get_fast_breathing_freeze_epochs(
+            network_path=self.network_path, smooth_fact=20
+        )
+
+        for i, (sess_name, sess_time) in enumerate(
+            DataHelper.fullBehavior["Times"]["SessionEpochs"].items()
+        ):
+            map_axs[i].set_xticks([])
+            map_axs[i].set_yticks([])
+            if not sess_time:
+                warnings.warn(
+                    f"Session {sess_name} has no time epochs, skipping plotting and analysis for this session."
+                )
+                map_axs[i].set_xticks([])
+                map_axs[i].set_yticks([])
+                hist_axs[i].set_xticks([])
+                hist_axs[i].set_yticks([])
+                hist_axs[i].axis("off")
+                hist_axs[i].axis("off")
+                continue  # skip empty sessions
+
+            mask = inEpochsMask(
+                DataHelper.fullBehavior["positionTime"], sess_time
+            ).flatten()
+            try:
+                pos = DataHelper.fullBehavior["old_positions"][mask, :2]
+            except KeyError:
+                pos = DataHelper.fullBehavior["Positions"][mask, :2]
+
+            nan_mask = ~np.any(np.isnan(pos), axis=1)
+            pos = pos[nan_mask]
+            total_time_points = len(pos)
+
+            pos_tsd = TsdFrame(
+                t=DataHelper.fullBehavior["positionTime"][mask][nan_mask].flatten(),
+                d=pos,
+                columns=["x", "y"],
+            )
+
+            if total_time_points <= 0:
+                warnings.warn(
+                    f"No valid position data found for session {sess_name}. Skipping occupancy calculation."
+                )
+                # remove this session from the axes to avoid empty plots
+                map_axs[i].set_xticks([])
+                map_axs[i].set_yticks([])
+                hist_axs[i].set_xticks([])
+                hist_axs[i].set_yticks([])
+                map_axs[i].axis("off")
+                hist_axs[i].axis("off")
+                continue  # skip empty sessions
+
+            sess_time = IntervalSet(
+                np.array(sess_time).reshape(-1, 2)[:, 0],
+                np.array(sess_time).reshape(-1, 2)[:, 1],
+            )
+            freeze_here = freeze_epochs.intersect(sess_time).drop_short_intervals(0.5)
+            pos_tsd_here = pos_tsd.restrict(sess_time)
+            pct_freeze = freeze_here.tot_length() / sess_time.tot_length()
+            pct_freeze_slow = (
+                slow_breathing_epochs.intersect(sess_time).tot_length()
+                / freeze_here.tot_length()
+            )
+            pct_freeze_fast = (
+                fast_breathing_epochs.intersect(sess_time).tot_length()
+                / freeze_here.tot_length()
+            )
+            freeze_map = pos_tsd_here.restrict(freeze_here).data()
+            freeze_bins, xedges, yedges = np.histogram2d(
+                freeze_map[:, 0],
+                freeze_map[:, 1],
+                bins=40,
+                range=[[0, 1], [0, 1]],
+                density=True,
+            )
+            sigma = (1.5, 1.5)
+            freeze_map_smooth = gaussian_filter_nan(freeze_bins.T, sigma=sigma)
+            freeze_map_smooth[~self.get_allowed_mask_for_bin_size(40, 40)] = np.nan
+
+            map_ax = map_axs[i]
+            map_ax.imshow(
+                freeze_map_smooth,
+                origin="lower",
+                extent=[0, 1, 0, 1],
+                cmap="cmc.batlow",
+            )
+            map_ax.plot(
+                self.Linearizer.maze_params[:, 0],
+                self.Linearizer.maze_params[:, 1],
+                color="black",
+                lw=2,
+                zorder=2,
+            )
+            map_ax.set_title(f"{sess_name}\n (freeze: {pct_freeze:.2%})")
+
+            hist_ax = hist_axs[i]
+            hist_ax.bar(
+                ["Slow", "Fast"],
+                [pct_freeze_slow, pct_freeze_fast],
+                color=[SAFE_COLOR, SHOCK_COLOR],
+            )
+            hist_ax.set_ylim(0, 1)
+
     def error_map(
         self,
         timeWindow: int,
@@ -2296,14 +2482,15 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             self.resultsNN_phase[suff]["linearPred"][idWindow]
             - self.resultsNN_phase[suff]["linearTrue"][idWindow]
         )
-        entropy = self.resultsNN_phase[suff]["predLoss"][idWindow]
-        maxp = self.resultsNN_phase_pkl[suff]["maxp"][idWindow]
+        entropy = self.resultsNN_phase[suff]["entropy"][idWindow]
+        maxp = self.resultsNN_phase[suff]["predLoss"][idWindow]
 
         saut = 40
         ax.plot(
             entropy[::saut],
             lin_err[::saut],
             "o",
+            label="Entropy",
             color="blue",
             alpha=0.6,
             markersize=3,
@@ -2312,7 +2499,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         new_ax.plot(
             maxp[::saut],
             lin_err[::saut],
-            "o",
+            label="MaxP",
             color="red",
             alpha=0.6,
             markersize=3,
@@ -3409,7 +3596,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
         ## Figure 2: we plot the histograms of errors
         fig, axes = plt.subplots(
-            np.floor(len(self.timeWindows) / 2).astype(int),
+            max(np.floor(len(self.timeWindows) / 2).astype(int), 1),
             2,
             sharex=True,
             constrained_layout=True,
@@ -4612,7 +4799,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             )
             ax[iw].scatter(
                 self.resultsNN_phase[suffix]["featurePred"][iw][mask[iw], 0],
-                self.resultsNN_phase[suffix]["featureTrue"][iw][mask[iw], 1],
+                self.resultsNN_phase[suffix]["featurePred"][iw][mask[iw], 1],
                 c="red",
                 s=3,
                 label="predicted traj",
@@ -4935,7 +5122,11 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             for iw in range(len(self.timeWindows))
         ]
         errors_filtered = []
-        filtering_func = np.less_equal if typeDec == "ann" else np.greater_equal
+        filtering_func = (
+            np.less_equal
+            if (typeDec == "ann" and "entropy" not in results_phase[suffix])
+            else np.greater_equal
+        )
         for iw in range(len(self.timeWindows)):
             errors_filtered.append(
                 [
@@ -4966,7 +5157,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             for iw in range(len(self.timeWindows))
         ]
         ax.set_xlabel(
-            f"{'Neural network' if typeDec == 'ann' else 'Bayesian decoder'} \n prediction filtering value",
+            f"{'Neural network' if typeDec == 'ann' else 'Bayesian decoder'} \n prediction filtering value {'above' if filtering_func == np.greater_equal else 'below'} which the data are kept",
             fontsize="x-large",
         )
         ax.set_ylabel("mean absolute linear error", fontsize="x-large")
@@ -5183,6 +5374,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 raise ValueError(
                     "results_df must be provided if self.results_df not set. If using Mouse_Results object, have you tried convert_to_df() yet?"
                 )
+        results_df = results_df.reset_index(drop=False)
         # for every phase, plot the whisker plot of fast_filtered_error, with a hue on winMS
         if "all_se_error" not in results_df.columns:
             results_df["all_se_error"] = results_df.apply(
@@ -5279,6 +5471,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 raise ValueError(
                     "results_df must be provided if self.results_df not set. If using Mouse_Results object, have you tried convert_to_df() yet?"
                 )
+        results_df = results_df.reset_index(drop=False)
         # for every phase, plot the whisker plot of fast_filtered_error, with a hue on winMS
         if "lin_all_se_error" not in results_df.columns:
             results_df["lin_all_se_error"] = results_df.apply(
@@ -5664,10 +5857,19 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             for iw in range(len(self.timeWindows))
         ]
 
+        filter_func = (
+            np.less_equal
+            if ("entropy" not in self.resultsNN_phase[suffix])
+            else np.greater_equal
+        )
+        actual_fprop = fprop
+        if filter_func == np.greater_equal:
+            actual_fprop = 1 - fprop
+
         thresh = [
             np.squeeze(
                 self.resultsNN_phase[suffix]["predLoss"][iw][
-                    sortedLPred[iw][int(len(sortedLPred[iw]) * fprop)]
+                    sortedLPred[iw][int(len(sortedLPred[iw]) * actual_fprop)]
                 ]
             )
             for iw in range(len(self.timeWindows))
@@ -5675,7 +5877,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         threshBayes = [
             np.squeeze(
                 self.resultsBayes_phase[suffix]["predLoss"][iw][
-                    sortedprobaBayes[iw][int(len(sortedprobaBayes[iw]) * fprop)]
+                    sortedprobaBayes[iw][int(len(sortedprobaBayes[iw]) * actual_fprop)]
                 ]
             )
             for iw in range(len(self.timeWindows))
@@ -5683,7 +5885,7 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
 
         filters_lpred = [
             np.ones(self.resultsNN_phase[suffix]["times"][iw].shape).astype(bool)
-            * np.less_equal(self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw])
+            * filter_func(self.resultsNN_phase[suffix]["predLoss"][iw], thresh[iw])
             for iw in range(len(self.timeWindows))
         ]
         [
@@ -5704,8 +5906,8 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
                 alpha=0.3,
             )
             ax[0].scatter(
-                self.resultsNN_phase[suffix]["times"][0][filters_lpred[0]],
-                self.resultsNN_phase[suffix]["linearPred"][0][filters_lpred[0]],
+                self.resultsNN_phase[suffix]["times"][0],
+                self.resultsNN_phase[suffix]["linearPred"][0],
                 c=self.cm(12 + 0),
                 alpha=0.9,
                 label=(str(self.timeWindows[0]) + " ms"),
@@ -5771,10 +5973,12 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             ax[1].set_title(
                 "Best "
                 + str(fprop * 100)
-                + "% of predicitons \n"
+                + "% of predictions \n"
                 + str(self.timeWindows[0])
                 + " ms window for phase "
-                + suffix.strip("_"),
+                + suffix.strip("_")
+                + "threshold: "
+                + str(np.round(thresh[0], 3)),
                 fontsize="xx-large",
             )
             ax[1].set_xlabel("time (s)", fontsize="xx-large")
@@ -5926,8 +6130,11 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             ]
             for i in range(len(self.timeWindows))
         ]
-        fig, _axs = plt.subplots(2, len(self.timeWindows) // 2)
-        axs = _axs.flatten()
+        fig, _axs = plt.subplots(
+            2 if max(len(self.timeWindows) // 2, 1) > 1 else 1,
+            max(len(self.timeWindows) // 2, 1),
+        )
+        axs = _axs.flatten() if len(self.timeWindows) > 1 else [_axs]
         for i, ax in enumerate(axs):
             ax.hist(
                 error_rightarm[i],
@@ -5976,8 +6183,11 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         fig.savefig(os.path.join(self.folderFigures, f"error_hist_by_arm{suffix}.svg"))
         plt.close()
 
-        fig, _axs = plt.subplots(2, len(self.timeWindows) // 2)
-        axs = _axs.flatten()
+        fig, _axs = plt.subplots(
+            2 if max(len(self.timeWindows) // 2, 1) > 1 else 1,
+            max(len(self.timeWindows) // 2, 1),
+        )
+        axs = _axs.flatten() if len(self.timeWindows) > 1 else [_axs]
         for i, ax in enumerate(axs):
             ax.scatter(
                 self.resultsNN_phase[suffix]["linearPred"][i][
@@ -6035,6 +6245,10 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
         errorsShuffleMean = []
         errorsShuffleStd = []
         predLoss = self.resultsNN_phase[suffix]["predLoss"][idWindow]
+        if "entropy" in self.resultsNN_phase[suffix]:
+            predLoss = -self.resultsNN_phase[suffix]["predLoss"][idWindow][
+                ::-1
+            ]  # rescale between -1 and 0
         probaBayes = -self.resultsBayes_phase[suffix]["predLoss"][idWindow][
             ::-1
         ]  # rescale between -1 and 0
@@ -6214,7 +6428,6 @@ class PaperFigures(TuningCurvesPlotter, SpatialConstraintsMixin):
             use_speed_filter=True,
         )
 
-        # WARNING: Calculate the tuning curve of all place cells - for TRAINING/PRE phase
         linearTuningCurves, binEdges = self.bayes.calculate_linear_tuning_curve(
             l_function=self.l_function,
             behaviorData=self.behaviorData,

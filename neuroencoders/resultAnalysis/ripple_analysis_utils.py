@@ -6,7 +6,7 @@ relative to ripple events, used by both PaperFigures and PaperFiguresSleep class
 """
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -87,8 +87,10 @@ def plot_ripple_losspredict_distribution(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, f"{filename_prefix}.png"))
-    fig.savefig(os.path.join(folder_figures, f"{filename_prefix}.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(os.path.join(folder_figures, f"{filename_prefix}.png"))
+        fig.savefig(os.path.join(folder_figures, f"{filename_prefix}.svg"))
 
 
 def plot_ripple_linear_pred_distribution(
@@ -144,8 +146,10 @@ def plot_ripple_linear_pred_distribution(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, f"{filename}.png"))
-    fig.savefig(os.path.join(folder_figures, f"{filename}.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(os.path.join(folder_figures, f"{filename}.png"))
+        fig.savefig(os.path.join(folder_figures, f"{filename}.svg"))
 
 
 def plot_ripple_position_vs_losspredict(
@@ -198,8 +202,14 @@ def plot_ripple_position_vs_losspredict(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, "predLoss_position_during_ripples.png"))
-    fig.savefig(os.path.join(folder_figures, "predLoss_position_during_ripples.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(
+            os.path.join(folder_figures, "predLoss_position_during_ripples.png")
+        )
+        fig.savefig(
+            os.path.join(folder_figures, "predLoss_position_during_ripples.svg")
+        )
 
 
 def plot_ripple_time_vs_losspredict(
@@ -252,8 +262,10 @@ def plot_ripple_time_vs_losspredict(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, "predLoss_time_during_ripples.png"))
-    fig.savefig(os.path.join(folder_figures, "predLoss_time_during_ripples.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(os.path.join(folder_figures, "predLoss_time_during_ripples.png"))
+        fig.savefig(os.path.join(folder_figures, "predLoss_time_during_ripples.svg"))
 
 
 def plot_ripple_time_distance_vs_losspredict(
@@ -355,8 +367,10 @@ def plot_ripple_time_distance_vs_losspredict(
 
     fig.tight_layout()
     fig.show()
-    plt.savefig(os.path.join(folder_figures, f"{filename_prefix}.png"))
-    plt.savefig(os.path.join(folder_figures, f"{filename_prefix}.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        plt.savefig(os.path.join(folder_figures, f"{filename_prefix}.png"))
+        plt.savefig(os.path.join(folder_figures, f"{filename_prefix}.svg"))
 
 
 def plot_ripple_density_vs_confidence(
@@ -364,7 +378,7 @@ def plot_ripple_density_vs_confidence(
     ripple_indicators_dict: Dict[str, List],
     time_windows: List,
     epoch_labels: List,
-    folder_figures: str,
+    folder_figures: Optional[str] = None,
     gaussian_sigma: float = 30,
 ) -> None:
     """
@@ -441,8 +455,10 @@ def plot_ripple_density_vs_confidence(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, "ripple_density_vs_confidence.png"))
-    fig.savefig(os.path.join(folder_figures, "ripple_density_vs_confidence.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(os.path.join(folder_figures, "ripple_density_vs_confidence.png"))
+        fig.savefig(os.path.join(folder_figures, "ripple_density_vs_confidence.svg"))
 
 
 def plot_ripple_density_log_vs_confidence(
@@ -450,7 +466,7 @@ def plot_ripple_density_log_vs_confidence(
     ripple_indicators_dict: Dict[str, List],
     time_windows: List,
     epoch_labels: List,
-    folder_figures: str,
+    folder_figures: Optional[str],
     gaussian_sigma: float = 30,
 ) -> None:
     """
@@ -571,5 +587,11 @@ def plot_ripple_density_log_vs_confidence(
 
     fig.tight_layout()
     fig.show()
-    fig.savefig(os.path.join(folder_figures, "ripple_density_log_vs_confidence.png"))
-    fig.savefig(os.path.join(folder_figures, "ripple_density_log_vs_confidence.svg"))
+    if folder_figures is not None:
+        os.makedirs(folder_figures, exist_ok=True)
+        fig.savefig(
+            os.path.join(folder_figures, "ripple_density_log_vs_confidence.png")
+        )
+        fig.savefig(
+            os.path.join(folder_figures, "ripple_density_log_vs_confidence.svg")
+        )

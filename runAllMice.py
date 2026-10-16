@@ -12,19 +12,20 @@ import psutil
 from neuroencoders.utils.MOBS_Functions import path_for_experiments_df
 
 win_values = [
-    # [0.036],
-    [0.108],
-    [0.252],
-    # [0.036, 0.108, 0.252, 0.504],
-]  # only kept for new dataset
-
-win_values = [
     [0.036, 0.108],
     [0.036, 0.108, 0.252],
     [0.504],
     # [0.036],
     # [0.036, 0.108, 0.252, 0.504],
 ]
+
+win_values = [
+    # [0.036],
+    [0.108],
+    # [0.252],
+    # [0.504],
+    # [0.036, 0.108, 0.252, 0.504],
+]  # only kept for new dataset
 
 # Mice name
 mice_nb = [
@@ -71,7 +72,8 @@ nameExp = "more_windows_loweri_speed_multi_token_high_dim_factor_high_embedding"
 nameExp = (
     "random_padding_more_windows_lower_speed_multi_token_high_dim_factor_high_embedding"
 )
-nameExp = "VQ_random_padding_more_windows_lower_dim_multi_token"
+nameExp = "leaking_VQ_random_padding_more_windows_lower_dim_multi_token"
+nameExp = "VAE_leaking_VQ_random_padding_more_windows_lower_dim_multi_token"
 nbEpochs = str(30)
 run_ann = True
 target = "PosAndHeadDirection"
@@ -212,7 +214,8 @@ def process_directory(dir, win, force, redo, lstmAndTransfo=False):
                 target,
                 "--early_stop",
                 "--n_features",
-                "16",
+                # "16",
+                "32",
                 "--dim_factor",
                 "4",
                 "--n_transformers",

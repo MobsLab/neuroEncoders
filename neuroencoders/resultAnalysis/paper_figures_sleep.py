@@ -91,7 +91,7 @@ class PaperFiguresSleep:
             "fullPred": {},
             "featurePred": {},
             "predLoss": {},
-            "Hn": {},
+            "entropy": {},
             "maxp": {},
             "posIndex": {},
             "indexInDat": {},
@@ -155,6 +155,16 @@ class PaperFiguresSleep:
         ann_results = self._load_sleep_results(
             prefix="", sleepNames=sleepNames, **kwargs
         )
+        sleepName = sleepNames[0] if sleepNames is not None else self.sleepNames[0]
+        if (
+            ann_results.get("times", None) is None
+            or sleepName not in ann_results["times"]
+        ):
+            self.logger.warning(
+                "No ANN sleep decoding results found. Please ensure the results exist."
+            )
+            return
+
         self.resultsNN = ann_results
         self.resultsNN_phase = {
             sleepName: {
@@ -163,7 +173,7 @@ class PaperFiguresSleep:
                 "featurePred": ann_results["featurePred"][sleepName],
                 "fullPred": ann_results["fullPred"][sleepName],
                 "predLoss": ann_results["predLoss"][sleepName],
-                "Hn": ann_results.get("Hn", {}).get(sleepName, []),
+                "entropy": ann_results.get("entropy", {}).get(sleepName, []),
                 "maxp": ann_results.get("maxp", {}).get(sleepName, []),
                 "posIndex": ann_results["posIndex"][sleepName],
                 "indexInDat": ann_results["indexInDat"][sleepName],
@@ -205,9 +215,15 @@ class PaperFiguresSleep:
                 # Calculating ids of timesteps that are closest to ripple times
                 timesRipples[sleepName].append(ripples[:, self.ripCol])
                 sleep_times = self.resultsNN["times"][sleepName][i]
-                predTime = pykeops.numpy.Vi(
-                    sleep_times.astype(dtype=np.float64)[:, None]
-                )
+                try:
+                    predTime = pykeops.numpy.Vi(
+                        sleep_times.astype(dtype=np.float64)[:, None]
+                    )
+                except Exception as e:
+                    print(
+                        f"Could not create Vj for {self} sleep_times in {self.timeWindows[i]}: {e}"
+                    )
+                    continue
                 idCloseRipples[sleepName].append(
                     ((predTime - rippleTimeJ).abs().argmin(axis=0))[:, 0]
                 )
@@ -260,8 +276,8 @@ class PaperFiguresSleep:
         if load_pickle or load_npz or load_h5:
             results["pkl"] = {}
 
-        if proxy_file == "Hn" or proxy_file == "maxp":
-            results["Hn"] = {}
+        if proxy_file == "entropy" or proxy_file == "maxp":
+            results["entropy"] = {}
             results["maxp"] = {}
 
         for sleepName in sleep_names:
@@ -273,8 +289,8 @@ class PaperFiguresSleep:
             results["posIndex"][sleepName] = []
             results["indexInDat"][sleepName] = []
 
-            if proxy_file == "Hn" or proxy_file == "maxp":
-                results["Hn"][sleepName] = []
+            if proxy_file == "entropy" or proxy_file == "maxp":
+                results["entropy"][sleepName] = []
                 results["maxp"][sleepName] = []
 
             if load_pickle or load_npz or load_h5:
@@ -299,11 +315,11 @@ class PaperFiguresSleep:
                 proxy_loss = None
                 if proxy_file is not None:
                     proxy_loss = self._load_csv_result(pathToSleep, proxy_file)
-                    if proxy_loss is None and proxy_file == "Hn":
-                        proxy_loss = self._load_csv_result(pathToSleep, "lossPred")
-                    if proxy_file == "Hn":
+                    if proxy_loss is None and proxy_file == "entropy":
+                        proxy_loss = self._load_csv_result(pathToSleep, "Hn")
+                    if proxy_file == "entropy":
                         maxp = self._load_csv_result(pathToSleep, "maxp")
-                        results["Hn"][sleepName].append(
+                        results["entropy"][sleepName].append(
                             np.squeeze(proxy_loss).flatten()
                             if proxy_loss is not None
                             else None
@@ -313,7 +329,7 @@ class PaperFiguresSleep:
                         )
                     if proxy_file == "maxp":
                         Hn = self._load_csv_result(pathToSleep, "Hn")
-                        results["Hn"][sleepName].append(
+                        results["entropy"][sleepName].append(
                             np.squeeze(Hn).flatten() if Hn is not None else None
                         )
                         results["maxp"][sleepName].append(
